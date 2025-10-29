@@ -7,9 +7,12 @@
     "compile": "npx hardhat compile"
   },
   "devDependencies": {
+    "@nomicfoundation/hardhat-chai-matchers": "^2.1.0",
     "@nomicfoundation/hardhat-ethers": "^3.0.0",
-    "chai": "^4.3.10",
-    "ethers": "^6.11.1",
-    "hardhat": "^2.22.5"
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "chai": "^4.5.0",
+    "dotenv": "^16.6.1",
+    "ethers": "^6.15.0",
+    "hardhat": "^2.26.3"
   }
 }

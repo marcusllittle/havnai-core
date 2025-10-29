@@ -1,0 +1,2 @@
+await HAI.mint("0x7110347e2bcd02F5F3485Dc6bEc5e0b5f9Eb9262", ethers.parseUnits("1000000", 18));
+const HAI = await ethers.getContractAt("HAI", "0x8aaa7f1075de91b2103542379BFD3B889c89105f");

@@ -1,0 +1,15 @@
+{
+  "name": "havnai-core",
+  "version": "0.1.0",
+  "description": "HavnAI core protocol smart contracts",
+  "scripts": {
+    "test": "npx hardhat test",
+    "compile": "npx hardhat compile"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-ethers": "^3.0.0",
+    "chai": "^4.3.10",
+    "ethers": "^6.11.1",
+    "hardhat": "^2.22.5"
+  }
+}

@@ -32,6 +32,7 @@ OUTPUTS_DIR = Path(os.getenv("HAVNAI_OUTPUTS_DIR", STATIC_DIR / "outputs"))
 REGISTRY_FILE = BASE_DIR / "nodes.json"
 DB_PATH = BASE_DIR / "db" / "ledger.db"
 CLIENT_PATH = BASE_DIR / "client" / "client.py"
+CLIENT_REGISTRY = BASE_DIR / "client" / "registry.py"
 CLIENT_REQUIREMENTS = BASE_DIR / "client" / "requirements-node.txt"
 VERSION_FILE = BASE_DIR / "VERSION"
 
@@ -799,6 +800,13 @@ def leaderboard() -> Any:
 @app.route("/client/download")
 def client_download() -> Any:
     return send_file(CLIENT_PATH, as_attachment=True, download_name="havnai_client.py")
+
+
+@app.route("/client/registry.py")
+def client_registry_module() -> Any:
+    if not CLIENT_REGISTRY.exists():
+        return jsonify({"error": "registry module not available"}), 404
+    return send_file(CLIENT_REGISTRY, as_attachment=True, download_name="registry.py")
 
 
 @app.route("/client/requirements")

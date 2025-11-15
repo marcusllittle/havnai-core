@@ -110,8 +110,9 @@ pip install --upgrade pip
 curl -fsSL "$SERVER_URL/client/requirements" -o "$REQUIREMENTS_PATH"
 pip install --no-cache-dir -r "$REQUIREMENTS_PATH"
 
-# Download client + version
+# Download client modules + version
 curl -fsSL "$SERVER_URL/client/download" -o "$CLIENT_PATH"
+curl -fsSL "$SERVER_URL/client/registry.py" -o "$HAVNAI_HOME/registry.py"
 chmod +x "$CLIENT_PATH"
 curl -fsSL "$SERVER_URL/client/version" -o "$HAVNAI_HOME/VERSION"
 

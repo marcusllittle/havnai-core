@@ -803,6 +803,8 @@ def client_download() -> Any:
 
 @app.route("/client/requirements")
 def client_requirements() -> Any:
+    if not CLIENT_REQUIREMENTS.exists():
+        return jsonify({"error": "requirements not available"}), 404
     return send_file(CLIENT_REQUIREMENTS, as_attachment=True, download_name="requirements-node.txt")
 
 

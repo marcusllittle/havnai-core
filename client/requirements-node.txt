@@ -1,0 +1,18 @@
+requests
+numpy
+onnxruntime
+psutil
+
+# Core AI/creator deps
+torch
+diffusers>=0.30
+transformers>=4.36
+accelerate>=0.24
+safetensors
+pillow
+scipy
+huggingface-hub
+
+# Optional (VRAM optimizations; install if wheels available)
+# xformers
+pillow

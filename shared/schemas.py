@@ -25,7 +25,7 @@ class ModelEntry:
     pipeline: str
     type: str
     tags: List[str] = field(default_factory=list)
-    weight: float = 0.0
+    reward_weight: float = 0.0
     task_type: str = "IMAGE_GEN"
 
 

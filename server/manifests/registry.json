@@ -7,7 +7,7 @@
       "type": "checkpoint",
       "tags": ["nsfw"],
       "task_type": "IMAGE_GEN",
-      "weight": 12.0
+      "reward_weight": 12.0
     },
     {
       "name": "unstablePornhwa_beta",
@@ -16,7 +16,7 @@
       "type": "checkpoint",
       "tags": ["nsfw"],
       "task_type": "IMAGE_GEN",
-      "weight": 12.0
+      "reward_weight": 12.0
     },
     {
       "name": "kizukiAnimeHentai_animeHentaiV4",

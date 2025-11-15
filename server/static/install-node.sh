@@ -235,47 +235,51 @@ fi
 
 deactivate || true
 
-# Download default creator models on GPU nodes
+# Download all manifest creator models on GPU nodes
 if [[ "$CREATOR_MODE" == "true" ]]; then
-  echo "[INFO] Ensuring default creator models exist locally..."
+  echo "[INFO] Ensuring creator manifest models exist locally..."
   mkdir -p "$HAVNAI_HOME/models/creator"
-  while IFS= read -r model; do
-    [[ -z "$model" ]] && continue
-    manifest_url="$SERVER_URL/models/list"
-    if command -v curl >/dev/null 2>&1; then
-      manifest_json=$(curl -fsSL "$manifest_url" || true)
-    else
-      echo "[WARN] curl not available; skipping manifest fetch."
-      break
-    fi
-    model_path=$(printf '%s\n' "$manifest_json" | python3 -c "
+  manifest_json=""
+  if command -v curl >/dev/null 2>&1; then
+    manifest_json=$(curl -fsSL "$SERVER_URL/models/list" || true)
+  fi
+  if [[ -z "$manifest_json" ]]; then
+    echo "[WARN] Unable to fetch manifest; skipping auto-copy."
+  else
+    mapfile -t MODEL_MAP < <(printf '%s\n' "$manifest_json" | python3 <<'PY' 2>/dev/null
 import json,sys
-data=json.load(sys.stdin)
-target='$model'.lower()
-for entry in data.get('models', []):
-    if entry.get('name','').lower()==target:
-        print(entry.get('path',''))
-        break
-" 2>/dev/null)
-    if [[ -z "$model_path" ]]; then
-      echo "[WARN] $model missing in manifest; please copy manually."
-      continue
-    fi
-    local_path="$HAVNAI_HOME/models/creator/${model}.safetensors"
-    if [[ -f "$local_path" ]]; then
-      echo "[INFO] $model already present."
-      continue
-    fi
-    if command -v rsync >/dev/null 2>&1 && [[ -f "$model_path" ]]; then
-      echo "[INFO] Copying $model from $model_path"
-      rsync -av "$model_path" "$local_path" || echo "[WARN] Failed to copy $model"
-    else
-      echo "[WARN] No direct access to $model_path; skipping."
-    fi
-  done <<EOF
-triomerge_v10
-unstablePornhwa_beta
-EOF
+try:
+    data=json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for entry in data.get("models", []):
+    name=(entry.get("name") or "").strip()
+    path=(entry.get("path") or "").strip()
+    if name and path:
+        print(f"{name}|{path}")
+PY
+)
+    for pair in "${MODEL_MAP[@]}"; do
+      name=${pair%%|*}
+      path=${pair#*|}
+      [[ -z "$name" || -z "$path" ]] && continue
+      local_path="$HAVNAI_HOME/models/creator/${name}.safetensors"
+      if [[ -f "$local_path" ]]; then
+        echo "[INFO] $name already present."
+        continue
+      fi
+      if [[ -f "$path" ]]; then
+        if command -v rsync >/dev/null 2>&1; then
+          echo "[INFO] Copying $name from $path"
+          rsync -av "$path" "$local_path" || echo "[WARN] Failed to copy $name"
+        else
+          cp "$path" "$local_path" || echo "[WARN] Failed to copy $name"
+        fi
+      else
+        echo "[WARN] Source not found for $name ($path); please copy manually."
+      fi
+    done
+  fi
 fi
 
 AUTO_START="false"

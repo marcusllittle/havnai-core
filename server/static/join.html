@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Join HavnAI Grid</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: Arial, sans-serif; background:#03121b; color:#e6f6ff; padding:2.5rem; }
+    code, pre { background:#07202d; padding:0.5rem 0.75rem; border-radius:6px; }
+    a { color:#5fe4ff; }
+    h1 { color:#5fe4ff; }
+  </style>
+</head>
+<body>
+  <h1>Join the HavnAI GPU Grid</h1>
+  <p>Run this installer on your GPU machine. Replace <code>&lt;server&gt;</code> with your coordinator address if different.</p>
+  <pre>curl -fsSL http://&lt;server&gt;:5001/static/install-node.sh | bash -s -- --server http://&lt;server&gt;:5001</pre>
+  <p>If you have a join token, append <code>--token &lt;TOKEN&gt;</code>.</p>
+  <p>To disconnect later:</p>
+  <pre>curl -X DELETE http://&lt;server&gt;:5001/unregister -H 'Content-Type: application/json' -d '{"node_id":"&lt;your-hostname&gt;"}'</pre>
+</body>
+</html>

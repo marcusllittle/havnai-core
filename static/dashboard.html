@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HavnAI Grid · Stage 5A</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/normalize/8.0.1/normalize.min.css" integrity="sha512-oHDEc8XedS+d2cN2B3d9kM0C5s1Y+sLuRfCp6HIMi7Q5x0sF4XKQ4uvo9Z3p2dg5p3u5l5pX5ho2BZHmOj5rkg==" crossorigin="anonymous" referrerpolicy="no-referrer" />
+  <style>
+    @import url("https://fonts.googleapis.com/css2?family=Exo+2:wght@400;600;700&display=swap");
+
+    :root {
+      --bg: #000913;
+      --panel: rgba(0, 25, 36, 0.85);
+      --accent: #5fe4ff;
+      --accent-soft: rgba(95, 228, 255, 0.18);
+      --text: #d2f3ff;
+      --text-muted: #88bcd4;
+      --error: #ff9b6a;
+      --success: #7dffb0;
+    }
+
+    body {
+      font-family: "Exo 2", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: radial-gradient(circle at top, #001423 0%, var(--bg) 70%);
+      min-height: 100vh;
+      margin: 0;
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 3rem 1.5rem 4rem;
+    }
+
+    header.hero {
+      text-align: center;
+      margin-bottom: 2rem;
+    }
+
+    header.hero h1 {
+      font-size: 2.9rem;
+      margin: 0;
+      color: var(--accent);
+    }
+
+    header.hero p {
+      margin: 0.4rem 0 0;
+      color: var(--text-muted);
+      font-size: 1rem;
+      letter-spacing: 0.3px;
+    }
+
+    p.links {
+      margin-top: 0.75rem;
+    }
+
+    p.links a {
+      color: #5fe4ff;
+      margin-right: 1rem;
+      text-decoration: none;
+    }
+
+    p.links a:hover {
+      text-decoration: underline;
+    }
+
+    .health-summary {
+      width: 100%;
+      max-width: 1080px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 1rem;
+    }
+
+    .summary-card {
+      background: var(--panel);
+      border: 1px solid var(--accent-soft);
+      border-radius: 16px;
+      padding: 1rem 1.25rem;
+      box-shadow: 0 18px 50px rgba(0, 190, 255, 0.15);
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+    }
+
+    .summary-card span.label {
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      letter-spacing: 0.12em;
+    }
+
+    .summary-card strong {
+      font-size: 1.45rem;
+      color: #ffffff;
+    }
+
+    .grid {
+      width: 100%;
+      max-width: 1080px;
+      background: var(--panel);
+      border: 1px solid var(--accent-soft);
+      border-radius: 22px;
+      padding: 2rem;
+      margin-top: 2.5rem;
+      box-shadow: 0 35px 80px rgba(0, 190, 255, 0.18);
+      overflow-x: auto;
+      backdrop-filter: blur(12px);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+      min-width: 820px;
+    }
+
+    .badge {
+      display: inline-flex;
+      padding: 0.2rem 0.7rem;
+      border-radius: 999px;
+      background: rgba(95, 228, 255, 0.18);
+      color: var(--accent);
+      font-size: 0.82rem;
+      letter-spacing: 0.04em;
+    }
+
+    .badge.creator {
+      background: rgba(177, 134, 255, 0.24);
+      color: #ba8bff;
+    }
+
+    .job-feed {
+      width: 100%;
+      max-width: 1080px;
+      margin-top: 2.5rem;
+      background: rgba(0, 24, 38, 0.9);
+      border: 1px solid rgba(95, 228, 255, 0.15);
+      border-radius: 22px;
+      padding: 1.8rem 2rem;
+      box-shadow: 0 30px 70px rgba(0, 200, 255, 0.15);
+      overflow-x: auto;
+    }
+
+    .job-feed h2 {
+      margin: 0 0 1rem;
+      color: var(--accent);
+      font-size: 1.2rem;
+    }
+
+    .job-feed table {
+      min-width: 780px;
+      font-size: 0.88rem;
+    }
+
+    thead {
+      background: rgba(95, 228, 255, 0.12);
+    }
+
+    th, td {
+      padding: 0.75rem 1rem;
+      text-align: left;
+      border-bottom: 1px solid rgba(95, 228, 255, 0.06);
+      white-space: nowrap;
+    }
+
+    th {
+      font-weight: 600;
+      color: var(--accent);
+      text-transform: uppercase;
+      font-size: 0.75rem;
+      letter-spacing: 0.08em;
+    }
+
+    .status {
+      margin-bottom: 1.2rem;
+      font-size: 0.85rem;
+      min-height: 1.1rem;
+      color: var(--text-muted);
+    }
+
+    .logs-panel {
+      width: 100%;
+      max-width: 1080px;
+      margin-top: 2.5rem;
+      background: rgba(0, 25, 38, 0.9);
+      border: 1px solid rgba(95, 228, 255, 0.12);
+      border-radius: 20px;
+      padding: 1.6rem 1.9rem;
+      box-shadow: 0 24px 70px rgba(0, 190, 255, 0.15);
+    }
+
+    .logs-panel h2 {
+      margin: 0 0 1rem;
+      color: var(--accent);
+      font-size: 1.2rem;
+    }
+
+    .logs-panel ul {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 0.65rem;
+    }
+
+    .logs-panel li {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      border-left: 2px solid rgba(95, 228, 255, 0.25);
+      padding-left: 0.75rem;
+    }
+
+    .logs-panel li span.time {
+      font-size: 0.75rem;
+      color: rgba(255, 255, 255, 0.65);
+      margin-right: 0.45rem;
+    }
+
+    .util {
+      font-weight: 600;
+      color: var(--accent);
+    }
+
+    .reward {
+      font-weight: 600;
+      color: var(--success);
+    }
+
+    tr.job-type-creator {
+      background: rgba(186, 139, 255, 0.07);
+    }
+
+    .analytics-grid {
+      width: 100%;
+      max-width: 1080px;
+      margin: 2.5rem 0 1rem;
+      display: grid;
+      gap: 1rem;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    }
+
+    .analytics-card {
+      background: linear-gradient(135deg, rgba(95, 228, 255, 0.18), rgba(0, 35, 53, 0.8));
+      border: 1px solid rgba(95, 228, 255, 0.25);
+      border-radius: 18px;
+      padding: 1rem 1.3rem;
+      box-shadow: 0 20px 60px rgba(0, 170, 255, 0.15);
+    }
+
+    .analytics-card span.label {
+      display: block;
+      text-transform: uppercase;
+      font-size: 0.72rem;
+      color: rgba(210, 243, 255, 0.65);
+      letter-spacing: 0.16em;
+    }
+
+    .analytics-card strong {
+      display: block;
+      margin-top: 0.45rem;
+      font-size: 1.6rem;
+      color: #fff;
+    }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      font-size: 0.85rem;
+      font-weight: 600;
+    }
+
+    .status-badge.completed { color: #0f0; }
+    .status-badge.running { color: #0ff; }
+    .status-badge.queued { color: #ff0; }
+    .status-badge.failed { color: #ff5a5a; }
+
+    .job-card img {
+      border: 1px solid #0ff;
+      border-radius: 6px;
+      max-width: 96px;
+    }
+
+    .models-panel {
+      width: 100%;
+      max-width: 1080px;
+      margin-top: 2.5rem;
+      background: rgba(0, 20, 32, 0.9);
+      border: 1px solid rgba(95, 228, 255, 0.12);
+      border-radius: 20px;
+      padding: 1.8rem 2rem;
+      box-shadow: 0 26px 70px rgba(0, 190, 255, 0.15);
+      overflow-x: auto;
+    }
+
+    .models-panel h2 {
+      margin: 0 0 1rem;
+      color: var(--accent);
+      font-size: 1.2rem;
+    }
+
+    .models-panel table {
+      width: 100%;
+      min-width: 640px;
+      font-size: 0.88rem;
+    }
+
+    @media (max-width: 768px) {
+      header.hero h1 { font-size: 2.2rem; }
+      .grid { padding: 1.6rem; }
+      th, td { padding: 0.6rem 0.75rem; }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <h1>HavnAI Grid Telemetry</h1>
+    <p>Stage 5A · Creator Mode & Public Jobs · Powered by $HAI</p>
+    <p class="links"><a href="/join">Join the Grid</a> · <a href="/network/leaderboard">Leaderboard</a></p>
+  </header>
+
+  <section class="analytics-grid">
+    <div class="analytics-card">
+      <span class="label">Total Nodes Online</span>
+      <strong id="metricNodesOnline">0</strong>
+    </div>
+    <div class="analytics-card">
+      <span class="label">Jobs Completed Today</span>
+      <strong id="metricJobsToday">0</strong>
+    </div>
+    <div class="analytics-card">
+      <span class="label">Total HAI Rewarded</span>
+      <strong id="metricTotalHai">0</strong>
+    </div>
+  </section>
+
+  <section class="health-summary">
+    <div class="summary-card">
+      <span class="label">Total Nodes</span>
+      <strong id="summaryTotal">0</strong>
+    </div>
+    <div class="summary-card">
+      <span class="label">Online</span>
+      <strong id="summaryOnline">0</strong>
+    </div>
+    <div class="summary-card">
+      <span class="label">Avg Utilization</span>
+      <strong id="summaryUtil">0%</strong>
+    </div>
+    <div class="summary-card">
+      <span class="label">Active Jobs</span>
+      <strong id="summaryActive">0</strong>
+    </div>
+    <div class="summary-card">
+      <span class="label">Queued Jobs</span>
+      <strong id="summaryBacklog">0</strong>
+    </div>
+    <div class="summary-card">
+      <span class="label">$HAI Distributed</span>
+      <strong id="summaryRewards">0 HAI</strong>
+    </div>
+    <div class="summary-card">
+      <span class="label">Last Sync</span>
+      <strong id="summarySync">—</strong>
+    </div>
+  </section>
+
+  <section class="grid">
+    <div class="status" id="status">Syncing…</div>
+    <table>
+      <thead>
+        <tr>
+          <th>Node</th>
+          <th>Creator Mode</th>
+          <th>GPU Util %</th>
+          <th>Total HAI</th>
+        </tr>
+      </thead>
+      <tbody id="nodeTable">
+        <tr>
+          <td colspan="4" style="text-align:center; padding: 1.6rem; color: var(--text-muted);">
+            Awaiting telemetry…
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="job-feed">
+    <h2>Recent Job Feed</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Job ID</th>
+          <th>Model</th>
+          <th>Wallet</th>
+          <th>Status</th>
+          <th>Reward (HAI)</th>
+          <th>Preview</th>
+          <th>Completed</th>
+        </tr>
+      </thead>
+      <tbody id="jobFeed">
+        <tr>
+          <td colspan="7" style="text-align:center; padding: 1.4rem; color: var(--text-muted);">
+            Waiting for public jobs…
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="models-panel">
+    <h2>Model Catalog</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Model</th>
+          <th>Weight</th>
+          <th>Source</th>
+          <th>Nodes</th>
+          <th>Tags</th>
+          <th>Size</th>
+        </tr>
+      </thead>
+      <tbody id="modelCatalog">
+        <tr>
+          <td colspan="6" style="text-align:center; padding: 1.2rem; color: var(--text-muted);">
+            Gathering catalog…
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="logs-panel">
+    <h2>Recent Activity</h2>
+    <ul id="logList">
+      <li><span class="time">—</span>Boot sequence initiated…</li>
+    </ul>
+  </section>
+
+  <script src="/static/dashboard.js" type="module"></script>
+</body>
+</html>

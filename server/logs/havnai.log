@@ -1,0 +1,844 @@
+{"time": "2025-10-31T16:50:42.550381Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-10-31T17:07:09.074831Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-10-31T17:07:35.627555Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-10-31T17:08:54.993343Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-10-31T17:09:49.905727Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-10-31T17:26:15.509833Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-10-31T17:26:49.379848Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-10-31T18:51:44.603436Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-10-31T18:53:21.517416Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-01T13:42:54.619523Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-01T13:50:02.768350Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-01T14:06:53.748290Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-01T14:10:02.102833Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-01T14:55:56.325655Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-01T14:58:58.035399Z", "level": "INFO", "message": "Telemetry online with 2 cached node(s)."}
+{"time": "2025-11-01T14:59:54.088484Z", "level": "INFO", "message": "Telemetry online with 2 cached node(s)."}
+{"time": "2025-11-01T15:03:31.767448Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-01T15:08:55.194036Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-01T16:22:01.118606Z", "level": "INFO", "message": "Telemetry online with 2 cached node(s)."}
+{"time": "2025-11-01T16:24:03.241578Z", "level": "INFO", "message": "Telemetry online with 2 cached node(s)."}
+{"time": "2025-11-01T16:57:58.863368Z", "level": "INFO", "message": "Telemetry online with 2 cached node(s)."}
+{"time": "2025-11-01T17:01:50.536109Z", "level": "INFO", "message": "Telemetry online with 2 cached node(s)."}
+{"time": "2025-11-01T17:38:46.321350Z", "level": "INFO", "message": "Telemetry online with 2 cached node(s)."}
+{"time": "2025-11-01T17:40:52.675765Z", "level": "INFO", "message": "Telemetry online with 2 cached node(s)."}
+{"time": "2025-11-01T17:41:10.013806Z", "level": "INFO", "message": "Telemetry online with 2 cached node(s)."}
+{"time": "2025-11-01T17:52:43.286168Z", "level": "INFO", "message": "Telemetry online with 2 cached node(s)."}
+{"time": "2025-11-01T17:53:19.561968Z", "level": "INFO", "message": "Telemetry online with 2 cached node(s)."}
+{"time": "2025-11-01T17:53:41.240488Z", "level": "INFO", "message": "Telemetry online with 2 cached node(s)."}
+{"time": "2025-11-01T17:56:31.540122Z", "level": "INFO", "message": "Telemetry online with 2 cached node(s)."}
+{"time": "2025-11-01T17:56:31.565140Z", "level": "INFO", "message": "Startup reset: cleared DB and memory state"}
+{"time": "2025-11-01T17:57:20.450495Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-01T18:05:37.855349Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-01T18:05:37.877837Z", "level": "INFO", "message": "Startup reset: cleared DB and memory state"}
+{"time": "2025-11-01T18:05:39.767937Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-01T18:13:31.706959Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-01T18:13:31.726986Z", "level": "INFO", "message": "Startup reset: cleared DB and memory state"}
+{"time": "2025-11-01T18:13:54.514054Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-01T18:13:54.540025Z", "level": "INFO", "message": "Startup reset: cleared DB and memory state"}
+{"time": "2025-11-01T18:35:30.482908Z", "level": "INFO", "message": "Admin reset: cleared DB and memory state"}
+{"time": "2025-11-01T19:30:02.929324Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-02T02:09:09.646005Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-02T02:10:46.500920Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-02T02:41:38.873827Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-02T03:05:08.885158Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-02T03:05:47.202251Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-02T03:33:30.580455Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-02T03:34:08.183624Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-02T03:44:17.393823Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-02T03:44:17.414978Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-02T03:59:04.116143Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-02T03:59:04.134151Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-02T04:01:04.465626Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-02T04:01:04.483400Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-02T04:01:04.717170Z", "level": "INFO", "message": "Task completed"}
+{"time": "2025-11-02T04:24:08.664248Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-02T04:26:08.690539Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-02T04:26:08.708592Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-02T04:27:23.620346Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-02T04:33:08.794858Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-02T04:33:38.213853Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-02T04:33:43.547760Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-02T04:33:43.565978Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-02T04:34:02.642947Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-02T15:45:33.832427Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-02T17:56:36.118626Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-02T17:56:36.136744Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-02T17:59:46.819702Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-02T17:59:55.946033Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-02T18:08:14.636490Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-02T18:08:14.750031Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-02T18:37:05.884510Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-02T19:08:03.270957Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-02T19:08:23.826124Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-08T00:19:50.370505Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-08T00:24:07.286431Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T00:46:49.132716Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-08T00:55:23.157307Z", "level": "INFO", "message": "Admin reset: cleared DB and memory state"}
+{"time": "2025-11-08T01:23:33.088145Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-08T01:23:59.444390Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-08T01:30:03.050009Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-08T01:32:47.575517Z", "level": "INFO", "message": "Admin reset: cleared DB and memory state"}
+{"time": "2025-11-08T01:33:32.571211Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-08T01:33:32.591211Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-08T01:36:55.999468Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T01:45:29.680750Z", "level": "INFO", "message": "Admin reset: cleared DB and memory state"}
+{"time": "2025-11-08T01:45:38.738353Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-08T01:50:08.309341Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T01:50:42.878785Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T02:01:58.099338Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-08T02:01:58.109762Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-08T02:02:21.538247Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-08T02:04:14.871108Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-08T02:04:14.890943Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-08T02:04:34.351888Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T02:06:40.077075Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T02:12:49.753418Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T02:23:18.952865Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T02:24:26.538669Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T02:26:27.618741Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T02:30:25.342868Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T02:31:25.776660Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T02:31:47.533960Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T02:32:20.898420Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T02:38:46.293639Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T02:38:46.326572Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T02:38:46.361271Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T02:38:46.395682Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T04:06:27.426335Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T04:08:37.571142Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T04:09:28.251726Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T04:10:22.309908Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T04:12:03.714032Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T04:12:36.381948Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T05:43:16.257768Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-08T05:43:16.268013Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-08T05:43:42.201407Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-08T05:45:58.929068Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-08T05:47:18.426716Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-08T05:47:18.445445Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-08T05:48:10.615188Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T05:49:43.855733Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T13:44:12.858040Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-08T13:46:06.100191Z", "level": "INFO", "message": "Admin reset: cleared DB and memory state"}
+{"time": "2025-11-08T13:46:48.574677Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-08T13:46:48.596024Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-08T13:50:26.561669Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T13:50:26.596563Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T13:50:26.629908Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T13:50:26.660924Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T13:50:26.694810Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T14:07:25.676468Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T14:07:25.709747Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T14:07:25.744999Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T14:07:25.780461Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T14:07:25.815744Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T14:15:07.416485Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-08T14:15:07.425846Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-08T14:15:30.601151Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-08T14:26:56.018157Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-08T14:26:56.036447Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-08T14:28:03.750858Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T14:28:03.780986Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T14:28:03.812235Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T14:34:01.598414Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-08T14:34:01.606487Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-08T14:34:29.350265Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-08T14:39:04.463649Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T14:39:52.531827Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-08T14:39:52.549978Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-08T15:05:57.641158Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-08T15:06:03.531851Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-08T15:08:27.606067Z", "level": "INFO", "message": "Admin reset: cleared DB and memory state"}
+{"time": "2025-11-08T15:09:19.401775Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T15:09:32.879209Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-08T15:09:32.896801Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-08T15:21:21.666284Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-08T15:21:38.076432Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-08T15:23:51.944946Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T15:24:17.660061Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-08T15:24:17.677833Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-08T15:27:43.510607Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-08T15:27:49.345650Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-08T15:29:41.852775Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T15:30:39.981268Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-08T15:30:39.999186Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-08T15:36:19.025337Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-08T15:36:42.688795Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-08T15:41:05.673582Z", "level": "INFO", "message": "Admin reset: cleared DB and memory state"}
+{"time": "2025-11-08T15:41:10.135678Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T15:42:13.649884Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-08T15:42:13.668172Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-08T15:46:25.544214Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-08T15:46:45.741218Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-08T15:48:18.900367Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T15:48:18.978281Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-08T15:48:18.997320Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-08T15:49:21.285450Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T15:58:06.594914Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T16:00:40.113721Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T16:23:31.827781Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-08T16:23:33.708121Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-08T16:25:22.006077Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-08T16:25:22.024305Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-08T16:29:16.753092Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T16:34:25.408139Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T16:55:32.684728Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T16:56:27.356258Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T16:57:18.618273Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T16:59:41.711812Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T17:02:02.356912Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T17:02:57.098536Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T17:03:53.302791Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T17:05:02.010325Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T17:06:12.704232Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T17:17:48.915099Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T17:17:48.947750Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T17:17:48.979217Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T17:27:38.075854Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T17:27:46.114857Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T17:27:54.154686Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T17:28:10.202541Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T17:28:18.239067Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T17:28:26.277870Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T17:28:34.318322Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T17:28:42.358447Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T17:28:50.398164Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T17:59:15.415763Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T17:59:23.458935Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T17:59:31.509655Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T17:59:47.558132Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T17:59:55.598904Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T18:00:03.660658Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T18:00:11.706166Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T18:00:19.746268Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T18:00:27.786134Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T18:09:34.192772Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-08T18:14:45.331658Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-08T18:14:45.350767Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-08T18:15:19.996120Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T18:15:28.038001Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T18:15:36.183375Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T18:15:52.237539Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T18:16:00.277757Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T18:16:08.317581Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T18:16:16.352036Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T18:16:24.388743Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T18:16:32.428093Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T18:32:23.083213Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-08T18:32:23.101127Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-08T18:32:37.083845Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-08T18:32:41.719786Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-08T18:32:42.492890Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-08T18:32:42.962734Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-08T18:33:39.290499Z", "level": "INFO", "message": "Telemetry online with 0 cached node(s)."}
+{"time": "2025-11-08T18:36:18.241758Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-08T18:36:18.259869Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-08T18:58:57.953989Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-08T18:58:57.963183Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-08T18:59:27.985678Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-08T19:00:48.204355Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-08T19:00:48.223010Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-08T19:01:04.061424Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T19:01:12.116451Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T19:01:20.167224Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T19:01:28.217157Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T19:01:44.282704Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T19:01:52.331801Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T19:02:00.383080Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T19:02:08.435945Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T19:02:16.487570Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T19:10:24.608980Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-08T19:10:24.617568Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-08T19:10:52.571830Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-08T19:12:14.334586Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-08T19:12:14.352489Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-08T19:16:14.579969Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-08T19:16:14.589783Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-08T19:16:16.566408Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-08T19:18:01.802120Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-08T19:18:01.819981Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-08T19:34:12.607538Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-08T19:34:12.618125Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-08T19:34:38.857878Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-08T19:36:01.287059Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-08T19:36:01.304786Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-08T20:08:37.217133Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-08T20:09:30.101321Z", "level": "INFO", "message": "Admin reset: cleared DB and memory state"}
+{"time": "2025-11-08T20:55:10.533666Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-08T20:55:10.552543Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-08T20:55:11.935093Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-08T20:55:11.952469Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-08T20:58:15.480987Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-08T20:58:15.489348Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-08T20:58:43.606694Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-08T21:00:00.295706Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-08T21:00:00.314170Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-08T21:00:55.501879Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T21:01:03.553836Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T21:01:11.605347Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T21:04:18.186441Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T21:04:26.232022Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T21:04:34.282970Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T21:04:42.334906Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T21:04:58.402583Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T21:05:06.453440Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T21:05:14.511104Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T21:05:22.559660Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T21:05:30.605257Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T21:19:44.410228Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-08T21:19:44.419587Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-08T21:20:08.780043Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-08T21:21:29.523470Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-08T21:21:29.542504Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-08T21:22:02.859387Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T21:28:07.331991Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-08T21:41:28.699387Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-08T21:41:28.708584Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-08T21:41:40.595331Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-08T21:43:34.765705Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-08T21:43:34.784984Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-09T00:23:02.928198Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-09T01:43:56.572221Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-09T01:51:11.263460Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-09T01:51:26.836272Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-09T01:57:37.319379Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-09T02:29:47.227097Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-09T02:30:26.190402Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-09T02:30:43.307591Z", "level": "INFO", "message": "Admin reset: cleared DB and memory state"}
+{"time": "2025-11-09T02:30:59.053357Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-09T02:33:56.245112Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T02:33:56.277888Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T02:33:56.312296Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T02:33:56.344072Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T02:52:39.084717Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-09T02:53:34.849080Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-09T02:53:34.856879Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-09T02:53:52.746558Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-09T02:54:33.705373Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T02:54:33.738841Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T02:54:33.771843Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T02:54:33.806045Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T02:55:12.077736Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-09T02:58:17.933213Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T03:00:39.985465Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T03:00:40.020292Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T03:00:40.058696Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T03:00:40.092945Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T03:02:29.511572Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T03:02:29.544795Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T03:02:29.577219Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T03:02:29.610497Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T03:06:23.529023Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T03:13:58.410264Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-09T03:13:58.420067Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-09T03:14:29.259392Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-09T03:15:36.835349Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-09T03:17:17.620671Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T03:17:17.654299Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T03:17:17.685819Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T03:17:17.718938Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T03:17:17.751043Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T03:17:17.786200Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T03:17:17.823387Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T03:17:17.855783Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T03:17:17.887900Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T03:17:17.920080Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T03:17:17.952576Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T03:17:17.984667Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T03:29:02.072758Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-09T03:29:02.082610Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-09T03:29:28.077099Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-09T03:30:38.895098Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-09T03:56:02.647765Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-09T03:56:02.659155Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-09T03:56:24.845981Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-09T03:58:01.796056Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-09T03:58:01.816125Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-09T04:01:25.916972Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:04:24.857810Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:07:30.314647Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:07:34.692365Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:10:16.487223Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-09T04:10:44.781464Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-09T04:11:02.868160Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:11:15.031666Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-09T04:11:15.050173Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-09T04:20:47.310461Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-09T04:20:47.322163Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-09T04:20:59.553939Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-09T04:22:41.407276Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:22:41.455519Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:22:41.501095Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:22:41.540725Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:22:41.585678Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:22:41.626735Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:22:41.675819Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:22:41.719723Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:22:41.760288Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:22:41.806106Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:22:41.846051Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:22:41.889762Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:22:52.883322Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-09T04:22:52.902916Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-09T04:28:24.401708Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-09T04:28:24.412901Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-09T04:28:29.005056Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-09T04:30:12.601399Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:30:12.635304Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:30:12.672788Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:30:12.709612Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:30:12.747706Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:30:12.782851Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:30:12.817130Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:30:12.850487Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:30:12.885096Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:30:12.919175Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:30:12.952405Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:30:12.992921Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:30:20.461957Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-09T04:30:20.480347Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-09T04:42:34.566517Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-09T04:42:34.576993Z", "level": "INFO", "message": "Node disconnected"}
+{"time": "2025-11-09T04:42:42.134470Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-09T04:44:40.458847Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-09T04:44:40.477666Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-09T04:53:55.719610Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:53:55.772876Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:53:55.814007Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:53:55.858184Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:53:55.898061Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:53:55.937564Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:53:55.978953Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:53:56.025575Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:53:56.073017Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:53:56.118704Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:53:56.158642Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T04:53:56.202202Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:00:32.125344Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:00:32.177774Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:00:32.223996Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:00:32.271214Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:00:32.319641Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:00:32.368917Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:00:32.416253Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:00:32.463090Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:00:32.511293Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:00:32.558505Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:00:32.609592Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:00:32.661147Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:00:43.630573Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-09T05:00:43.650584Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-09T05:09:02.137785Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:09:02.185107Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:09:02.232868Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:09:02.272038Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:09:02.313351Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:09:02.357781Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:09:02.398307Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:09:02.441656Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:09:02.481469Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:09:02.521475Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:09:02.564551Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:09:02.604500Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:09:12.621964Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-09T05:09:12.641756Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-09T05:12:50.079667Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-09T05:12:50.101491Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-09T05:16:50.633166Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:16:50.680079Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:16:50.721034Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:16:50.763060Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:16:50.805318Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:16:50.857088Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:16:50.903456Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:16:50.944243Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:16:50.987779Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:16:51.026723Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:16:51.068383Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:16:51.109483Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:25:26.416007Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-09T05:27:06.682477Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:27:06.723848Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:27:06.766295Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:27:06.806560Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:27:06.839523Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-09T05:27:06.857153Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:27:06.873611Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-09T05:27:06.921895Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:27:06.964874Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:27:07.008109Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:27:07.049978Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:27:07.090540Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:27:07.136876Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:27:07.178294Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:31:22.362045Z", "level": "INFO", "message": "Admin reset: cleared DB and memory state"}
+{"time": "2025-11-09T05:31:24.410833Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-09T05:33:04.331278Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-09T05:33:04.349610Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-09T05:33:14.756455Z", "level": "INFO", "message": "Admin reset: cleared DB and memory state"}
+{"time": "2025-11-09T05:33:21.631254Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:33:21.676376Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:33:21.719133Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:33:21.762148Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:33:21.806083Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:33:21.847618Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:33:21.889319Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:33:21.931534Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:33:21.973647Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:33:22.017039Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:33:22.062729Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:33:22.108797Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:33:25.252472Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-09T05:40:50.672547Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-09T05:42:39.468900Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-09T05:42:39.489428Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-09T05:42:48.172674Z", "level": "INFO", "message": "Admin reset: cleared DB and memory state"}
+{"time": "2025-11-09T05:42:51.111800Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:42:51.150131Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:42:51.197064Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:42:51.239669Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:42:51.281885Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:42:51.325150Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:42:51.365770Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:42:51.409070Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:42:51.451684Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:42:51.492645Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:42:51.533327Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:42:51.575410Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:42:59.281212Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-09T05:45:03.767250Z", "level": "INFO", "message": "Admin reset: cleared DB and memory state"}
+{"time": "2025-11-09T05:45:09.781545Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-09T05:45:11.364831Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:45:11.405738Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:45:11.448508Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:45:11.488505Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:45:11.536494Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:45:11.581594Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:45:11.632573Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:45:11.675230Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:45:11.718341Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:45:11.759224Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:45:11.799609Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:45:11.843234Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:45:38.098888Z", "level": "INFO", "message": "Admin reset: cleared DB and memory state"}
+{"time": "2025-11-09T05:45:39.822022Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-09T05:50:49.684301Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-09T05:54:27.768053Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-09T05:54:27.785261Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-09T05:54:52.340677Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:54:52.379359Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:54:52.418401Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:54:52.460512Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:54:52.504453Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:54:52.544579Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:54:52.586973Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:54:52.626171Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:54:52.664516Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:54:52.707446Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:54:52.745821Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T05:54:52.783832Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:01:37.550040Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-09T06:02:04.076439Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:02:04.117849Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:02:04.164544Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:02:04.206967Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:02:04.249505Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:02:04.295650Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:02:04.339999Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:02:04.383362Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:02:04.428690Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:02:04.472814Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:02:04.514479Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:02:04.556073Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:02:29.776148Z", "level": "WARNING", "message": "Recovered task after coordinator restart"}
+{"time": "2025-11-09T06:03:25.048482Z", "level": "WARNING", "message": "Recovered task after coordinator restart"}
+{"time": "2025-11-09T06:03:54.440097Z", "level": "WARNING", "message": "Recovered task after coordinator restart"}
+{"time": "2025-11-09T06:05:17.664697Z", "level": "WARNING", "message": "Recovered task after coordinator restart"}
+{"time": "2025-11-09T06:05:43.770453Z", "level": "WARNING", "message": "Recovered task after coordinator restart"}
+{"time": "2025-11-09T06:17:26.569487Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-09T06:17:57.384095Z", "level": "INFO", "message": "Admin reset: cleared DB and memory state"}
+{"time": "2025-11-09T06:17:59.543575Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-09T06:18:45.832881Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-09T06:18:45.875415Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-09T06:18:45.903645Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:18:45.937213Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:18:45.959723Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:18:45.981787Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:19:01.634100Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-09T06:19:01.662746Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-09T06:19:01.696668Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:19:01.784528Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:19:01.874145Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:19:01.965280Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:19:18.770337Z", "level": "INFO", "message": "Telemetry online with 2 cached node(s)."}
+{"time": "2025-11-09T06:19:18.829860Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:19:18.870211Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:19:18.895981Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:19:18.921053Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:19:20.567632Z", "level": "WARNING", "message": "Recovered task after coordinator restart"}
+{"time": "2025-11-09T06:19:34.697630Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-09T06:19:34.742254Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-09T06:19:34.777644Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:19:34.845757Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:19:34.910315Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:19:34.973713Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:23:22.265152Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:23:22.304793Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:23:22.341447Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:23:22.377757Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:23:49.043016Z", "level": "WARNING", "message": "Recovered task after coordinator restart"}
+{"time": "2025-11-09T06:24:23.739910Z", "level": "WARNING", "message": "Recovered task after coordinator restart"}
+{"time": "2025-11-09T06:25:01.410926Z", "level": "WARNING", "message": "Recovered task after coordinator restart"}
+{"time": "2025-11-09T06:26:11.950365Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:26:11.990873Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:26:12.035107Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:26:12.079480Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:26:12.120151Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:26:12.164169Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:26:12.205624Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:26:12.246994Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:26:12.292036Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:26:12.332657Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:26:12.375004Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:26:12.416717Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-09T06:26:32.012370Z", "level": "WARNING", "message": "Recovered task after coordinator restart"}
+{"time": "2025-11-09T06:26:58.175548Z", "level": "WARNING", "message": "Recovered task after coordinator restart"}
+{"time": "2025-11-09T06:28:19.896157Z", "level": "WARNING", "message": "Recovered task after coordinator restart"}
+{"time": "2025-11-09T06:29:13.557045Z", "level": "WARNING", "message": "Recovered task after coordinator restart"}
+{"time": "2025-11-09T06:29:43.502065Z", "level": "WARNING", "message": "Recovered task after coordinator restart"}
+{"time": "2025-11-09T06:30:33.649971Z", "level": "WARNING", "message": "Recovered task after coordinator restart"}
+{"time": "2025-11-10T20:40:15.938116Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-10T20:46:22.191463Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-10T20:46:22.209315Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-10T20:55:00.946081Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T20:56:51.869283Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T20:57:16.697084Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:01:50.937005Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:07:44.867280Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:07:46.912255Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:07:48.964951Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:07:51.006260Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:07:53.053130Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:07:55.088938Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:07:57.128583Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:07:59.175848Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:08:01.212176Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:08:03.250325Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:08:05.288408Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:08:07.328029Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:08:09.368222Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:08:11.409687Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:08:13.448528Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:08:15.487276Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:16:29.230415Z", "level": "INFO", "message": "Admin reset: cleared DB and memory state"}
+{"time": "2025-11-10T21:16:34.907501Z", "level": "INFO", "message": "Node registered"}
+{"time": "2025-11-10T21:21:52.362656Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:21:54.403552Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:21:56.443575Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:21:58.481395Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:22:00.518068Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:22:02.551823Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:22:04.591327Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:22:06.625899Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:22:08.665343Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:22:10.706392Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:22:12.743925Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:22:14.781715Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:22:16.821826Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:22:18.860059Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:22:20.902586Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:22:22.942550Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:22:24.983289Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:22:27.022187Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:22:29.061019Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T21:22:31.100356Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T22:58:02.266147Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T22:58:04.310601Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T22:58:06.349985Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T22:58:08.389258Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-10T23:08:34.041601Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:13:44.317175Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-11T05:14:12.717871Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-11T05:14:12.738078Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-11T05:16:00.883182Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:17:33.875601Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:17:35.917730Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:17:37.956635Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:31:35.294488Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-11T05:32:14.506010Z", "level": "INFO", "message": "Models registered"}
+{"time": "2025-11-11T05:32:14.529377Z", "level": "INFO", "message": "Wallet linked"}
+{"time": "2025-11-11T05:34:59.454723Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:35:01.492875Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:35:03.532697Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:35:05.570432Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:35:07.612652Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:35:09.648882Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:35:11.690988Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:35:13.732028Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:35:15.779590Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:35:17.820298Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:35:19.859886Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:35:21.895311Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:35:23.939880Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:35:25.982280Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:35:28.028390Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:35:30.070482Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:35:32.123223Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:35:34.158431Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:35:36.197856Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:35:38.239185Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:35:40.279293Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:35:42.319257Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:35:44.361479Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:35:46.422335Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:35:48.462212Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:35:50.502076Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:35:52.541472Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:35:54.580589Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:35:56.623230Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:35:58.667318Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:36:00.707051Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:36:02.751763Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:36:04.794847Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:36:06.829457Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:36:08.868926Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:36:10.908345Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:36:12.955142Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:36:14.997143Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:36:17.044947Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:36:19.085551Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:36:21.123630Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:36:23.163956Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:36:25.204415Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:36:27.249185Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:36:29.289680Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:36:31.332060Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:36:33.374157Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:36:35.415160Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:36:37.454385Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:36:39.493190Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:59:27.586391Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:59:29.630011Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:59:31.670004Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:59:33.711110Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:59:35.749688Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:59:37.802038Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:59:39.842068Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:59:41.881883Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:59:43.921671Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:59:45.961550Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:59:48.001086Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:59:50.041549Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:59:52.081666Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:59:54.123321Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:59:56.166024Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T05:59:58.213480Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:00:00.253660Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:00:02.294824Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:00:04.334039Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:00:06.375519Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:00:08.416307Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:00:10.459709Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:00:12.499455Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:00:14.535229Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:00:16.577133Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:00:18.617439Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:00:20.662829Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:00:22.704158Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:00:24.744510Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:00:26.780571Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:00:28.816273Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:00:30.852942Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:00:32.893712Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:00:34.929019Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:00:36.969363Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:00:39.004967Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:00:41.049283Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:00:43.092590Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:00:45.133617Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:00:47.175314Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:00:49.215679Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:00:51.257437Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:00:53.296844Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:00:55.339494Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:00:57.382842Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:00:59.429762Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:01:01.478223Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:01:03.530790Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:01:05.571495Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T06:01:07.611701Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T07:04:28.949391Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-11T07:09:16.230398Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T07:09:17.272093Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T07:09:18.312353Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T07:09:19.352617Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T07:09:20.393486Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T07:09:21.426778Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T07:09:22.464638Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T07:09:23.507910Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T07:09:24.547001Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T07:09:25.587458Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T07:09:26.628774Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T07:09:27.667166Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T07:09:28.706561Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T07:09:29.746271Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T07:09:30.782113Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T07:09:31.823907Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T07:09:32.862815Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T07:09:33.906777Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T07:09:34.946516Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T07:09:35.985069Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T07:09:37.026423Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T07:09:38.078171Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T07:09:39.118180Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T07:09:40.158436Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T07:09:41.203512Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T07:09:42.238683Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T07:09:43.276942Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T07:09:44.317318Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T07:09:45.359283Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T07:09:46.400707Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:10:13.520941Z", "level": "INFO", "message": "Telemetry online with 1 cached node(s)."}
+{"time": "2025-11-11T13:17:03.282357Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:17:05.321826Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:17:07.358378Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:17:09.402348Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:17:11.446358Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:17:13.488255Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:17:15.524187Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:17:17.567762Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:17:19.613097Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:17:21.670210Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:17:23.715636Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:17:25.759781Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:17:27.800894Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:17:29.845053Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:17:31.888171Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:17:33.927801Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:17:35.972092Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:17:38.018237Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:17:40.060722Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:17:42.101648Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:17:44.144423Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:17:46.184042Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:17:48.225460Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:17:50.266035Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:17:52.306109Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:17:54.346712Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:17:56.386246Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:17:58.423695Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:18:00.466260Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:18:02.505912Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:18:04.546583Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:18:06.583251Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:18:08.628057Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:18:10.670110Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:18:12.710290Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:18:14.753139Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:18:16.793171Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:18:18.832987Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:18:20.872989Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:18:22.912232Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2025-11-11T13:53:09.991779Z", "level": "INFO", "message": "Admin reset: cleared DB and memory state"}
+{"time": "2025-11-11T13:53:39.213952Z", "level": "INFO", "message": "Node registered"}

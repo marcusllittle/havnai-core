@@ -23,12 +23,12 @@ from flask_cors import CORS
 # ---------------------------------------------------------------------------
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
-LEGACY_STATIC_DIR = Path(__file__).resolve().parent / "static"
-MANIFESTS_DIR = Path(__file__).resolve().parent / "manifests"
-MANIFEST_FILE = MANIFESTS_DIR / "registry.json"
-LOGS_DIR = Path(__file__).resolve().parent / "logs"
-OUTPUTS_DIR = STATIC_DIR / "outputs"
+STATIC_DIR = Path(os.getenv("HAVNAI_STATIC_DIR", Path(__file__).resolve().parent.parent / "static"))
+LEGACY_STATIC_DIR = Path(os.getenv("HAVNAI_INSTALLER_DIR", Path(__file__).resolve().parent / "static"))
+MANIFESTS_DIR = Path(os.getenv("HAVNAI_MANIFEST_DIR", Path(__file__).resolve().parent / "manifests"))
+MANIFEST_FILE = Path(os.getenv("HAVNAI_MANIFEST_FILE", MANIFESTS_DIR / "registry.json"))
+LOGS_DIR = Path(os.getenv("HAVNAI_LOG_DIR", Path(__file__).resolve().parent / "logs"))
+OUTPUTS_DIR = Path(os.getenv("HAVNAI_OUTPUTS_DIR", STATIC_DIR / "outputs"))
 REGISTRY_FILE = BASE_DIR / "nodes.json"
 DB_PATH = BASE_DIR / "db" / "ledger.db"
 CLIENT_PATH = BASE_DIR / "client" / "client.py"
@@ -208,7 +208,7 @@ def rate_limit(key: str, limit: int, per_seconds: int = 60) -> bool:
 
 
 def ensure_directories() -> None:
-    for directory in (STATIC_DIR, MANIFESTS_DIR, LOGS_DIR, OUTPUTS_DIR, BASE_DIR / "db"):
+    for directory in (STATIC_DIR, LEGACY_STATIC_DIR, MANIFESTS_DIR, LOGS_DIR, OUTPUTS_DIR, BASE_DIR / "db"):
         directory.mkdir(parents=True, exist_ok=True)
 
 
@@ -811,6 +811,15 @@ def client_version() -> Any:
     return APP_VERSION, 200, {"Content-Type": "text/plain"}
 
 
+@app.route("/favicon.ico")
+def favicon() -> Any:
+    """Serve favicon if present; otherwise return empty 204 to avoid 404 spam."""
+    icon_path = STATIC_DIR / "favicon.ico"
+    if icon_path.exists():
+        return send_from_directory(STATIC_DIR, "favicon.ico", mimetype="image/x-icon")
+    return ("", 204)
+
+
 # ---------------------------------------------------------------------------
 # API routes – manifest catalog only
 # ---------------------------------------------------------------------------
@@ -1390,4 +1399,6 @@ def root() -> Any:
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5001)
+    host = os.getenv("SERVER_BIND", "0.0.0.0")
+    port = int(os.getenv("SERVER_PORT", "5001"))
+    app.run(host=host, port=port)

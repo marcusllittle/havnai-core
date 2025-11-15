@@ -24,7 +24,8 @@
       "path": "/mnt/d/havnai-storage/models/creator/kizukiAnimeHentai_animeHentaiV4.safetensors",
       "type": "checkpoint",
       "tags": ["nsfw"],
-      "task_type": "IMAGE_GEN"
+      "task_type": "IMAGE_GEN",
+      "reward_weight": 10.0
     },
     {
       "name": "uberRealisticPornMerge_v23Final",
@@ -32,7 +33,8 @@
       "path": "/mnt/d/havnai-storage/models/creator/uberRealisticPornMerge_v23Final.safetensors",
       "type": "checkpoint",
       "tags": ["nsfw"],
-      "task_type": "IMAGE_GEN"
+      "task_type": "IMAGE_GEN",
+      "reward_weight": 10.0
     },
     {
       "name": "perfectdeliberate_v5SD15",
@@ -40,7 +42,8 @@
       "path": "/mnt/d/havnai-storage/models/creator/perfectdeliberate_v5SD15.safetensors",
       "type": "checkpoint",
       "tags": [],
-      "task_type": "IMAGE_GEN"
+      "task_type": "IMAGE_GEN",
+      "reward_weight": 10.0
     },
     {
       "name": "lazymixRealAmateur_v40",
@@ -48,7 +51,8 @@
       "path": "/mnt/d/havnai-storage/models/creator/lazymixRealAmateur_v40.safetensors",
       "type": "checkpoint",
       "tags": [],
-      "task_type": "IMAGE_GEN"
+      "task_type": "IMAGE_GEN",
+      "reward_weight": 10.0
     },
     {
       "name": "disneyPixarCartoon_v10",
@@ -56,7 +60,44 @@
       "path": "/mnt/d/havnai-storage/models/creator/disneyPixarCartoon_v10.safetensors",
       "type": "checkpoint",
       "tags": [],
-      "task_type": "IMAGE_GEN"
+      "task_type": "IMAGE_GEN",
+      "reward_weight": 10.0
+    },
+    {
+      "name": "wan_t2v_a14b",
+      "pipeline": "wan",
+      "path": "/mnt/d/havnai-storage/models/video/wan-2.2/T2V-A14B",
+      "type": "diffusers",
+      "tags": ["video", "text2video"],
+      "task_type": "VIDEO_GEN",
+      "reward_weight": 20.0
+    },
+    {
+      "name": "wan_ti2v_5b_diffusers",
+      "pipeline": "wan",
+      "path": "/mnt/d/havnai-storage/models/video/wan-2.2/TI2V-5B-Diffusers",
+      "type": "diffusers",
+      "tags": ["video", "text2video"],
+      "task_type": "VIDEO_GEN",
+      "reward_weight": 20.0
+    },
+    {
+      "name": "wan22_ti2v_5b",
+      "pipeline": "wan",
+      "path": "/mnt/d/havnai-storage/models/video/wan-2.2/Wan2.2-TI2V-5B",
+      "type": "diffusers",
+      "tags": ["video", "text2video"],
+      "task_type": "VIDEO_GEN",
+      "reward_weight": 22.0
+    },
+    {
+      "name": "wan22_enhanced_camera_prompt",
+      "pipeline": "wan",
+      "path": "/mnt/d/havnai-storage/models/video/wan-2.2/wan22EnhancedCameraPrompt_t2vHIGH.safetensors",
+      "type": "checkpoint",
+      "tags": ["video", "prompt"],
+      "task_type": "VIDEO_GEN",
+      "reward_weight": 5.0
     }
   ]
 }

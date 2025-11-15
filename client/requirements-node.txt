@@ -1,18 +1,30 @@
+# System utils
 requests
 numpy
-onnxruntime
 psutil
 
-# Core AI/creator deps
+# ONNX for classifier paths
+onnxruntime
+
+# Core AI stack
 torch
-diffusers>=0.30
-transformers>=4.36
-accelerate>=0.24
+diffusers>=0.30.0
+transformers>=4.36.0
+accelerate>=0.24.0
 safetensors
 pillow
 scipy
 huggingface-hub
 
-# Optional (VRAM optimizations; install if wheels available)
-# xformers
-pillow
+# For our manual checkpoint → pipeline code
+einops
+
+# For local filesystem hashing + registry comparisons
+filelock
+
+# For image saving
+opencv-python
+
+# Optional / GPU optimization (pip will skip if not available)
+xformers
+triton

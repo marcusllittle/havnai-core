@@ -1081,7 +1081,17 @@ def submit_results() -> Any:
     with LOCK:
         task = TASKS.get(task_id)
         if not task:
-            return jsonify({"error": "task not found"}), 404
+            job = get_job(task_id)
+            if not job:
+                return jsonify({"error": "task not found"}), 404
+            task = {
+                "task_id": job["id"],
+                "task_type": job.get("task_type", CREATOR_TASK_TYPE),
+                "model_name": job["model"],
+                "reward_weight": job.get("weight", resolve_weight(job["model"], 10.0)),
+                "wallet": job.get("wallet"),
+                "prompt": job.get("data"),
+            }
 
         task["status"] = status
         task["completed_at"] = unix_now()

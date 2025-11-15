@@ -96,10 +96,19 @@ class ModelRegistry:
     @staticmethod
     def _parse_manifest(payload: Dict[str, object]) -> Manifest:
         try:
-            models = [ModelEntry(**model) for model in payload.get("models", [])]  # type: ignore[arg-type]
+            models_data = payload.get("models", [])  # type: ignore[assignment]
+            if not isinstance(models_data, list):
+                raise TypeError("models field must be a list")
+            allowed = ModelEntry.__dataclass_fields__.keys()  # type: ignore[attr-defined]
+            normalized = []
+            for model in models_data:
+                if not isinstance(model, dict):
+                    continue
+                filtered = {key: value for key, value in model.items() if key in allowed}
+                normalized.append(ModelEntry(**filtered))  # type: ignore[arg-type]
         except Exception as exc:  # pragma: no cover
             raise ManifestError(f"Invalid manifest structure: {exc}") from exc
-        return Manifest(models=models)
+        return Manifest(models=normalized)
 
 
 REGISTRY = ModelRegistry()

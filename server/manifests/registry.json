@@ -4,6 +4,7 @@
       "name": "triomerge_v10",
       "pipeline": "sd15",
       "path": "/mnt/d/havnai-storage/models/creator/triomerge_v10.safetensors",
+      "vae": "stabilityai/sd-vae-ft-ema",
       "type": "checkpoint",
       "tags": ["nsfw"],
       "task_type": "IMAGE_GEN",
@@ -13,6 +14,7 @@
       "name": "unstablePornhwa_beta",
       "pipeline": "sd15",
       "path": "/mnt/d/havnai-storage/models/creator/unstablePornhwa_beta.safetensors",
+      "vae": "stabilityai/sd-vae-ft-ema",
       "type": "checkpoint",
       "tags": ["nsfw"],
       "task_type": "IMAGE_GEN",
@@ -22,6 +24,7 @@
       "name": "kizukiAnimeHentai_animeHentaiV4",
       "pipeline": "sd15",
       "path": "/mnt/d/havnai-storage/models/creator/kizukiAnimeHentai_animeHentaiV4.safetensors",
+      "vae": "stabilityai/sd-vae-ft-ema",
       "type": "checkpoint",
       "tags": ["nsfw"],
       "task_type": "IMAGE_GEN"
@@ -30,6 +33,7 @@
       "name": "uberRealisticPornMerge_v23Final",
       "pipeline": "sd15",
       "path": "/mnt/d/havnai-storage/models/creator/uberRealisticPornMerge_v23Final.safetensors",
+      "vae": "stabilityai/sd-vae-ft-ema",
       "type": "checkpoint",
       "tags": ["nsfw"],
       "task_type": "IMAGE_GEN"
@@ -38,6 +42,7 @@
       "name": "perfectdeliberate_v5SD15",
       "pipeline": "sd15",
       "path": "/mnt/d/havnai-storage/models/creator/perfectdeliberate_v5SD15.safetensors",
+      "vae": "stabilityai/sd-vae-ft-ema",
       "type": "checkpoint",
       "tags": [],
       "task_type": "IMAGE_GEN"
@@ -46,6 +51,7 @@
       "name": "lazymixRealAmateur_v40",
       "pipeline": "sd15",
       "path": "/mnt/d/havnai-storage/models/creator/lazymixRealAmateur_v40.safetensors",
+      "vae": "stabilityai/sd-vae-ft-ema",
       "type": "checkpoint",
       "tags": [],
       "task_type": "IMAGE_GEN"
@@ -54,6 +60,7 @@
       "name": "disneyPixarCartoon_v10",
       "pipeline": "sd15",
       "path": "/mnt/d/havnai-storage/models/creator/disneyPixarCartoon_v10.safetensors",
+      "vae": "stabilityai/sd-vae-ft-ema",
       "type": "checkpoint",
       "tags": [],
       "task_type": "IMAGE_GEN"

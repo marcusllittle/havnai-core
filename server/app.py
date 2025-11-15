@@ -1190,7 +1190,6 @@ def disconnect_node() -> Any:
             # Release any running jobs back to queue
             conn.execute("UPDATE jobs SET status='queued', node_id=NULL, assigned_at=NULL WHERE node_id=? AND status='running'", (node_id,))
             # Remove node-specific metadata
-            conn.execute("DELETE FROM node_models WHERE node_id=?", (node_id,))
             conn.execute("DELETE FROM node_wallets WHERE node_id=?", (node_id,))
             conn.commit()
         except Exception:
@@ -1229,7 +1228,6 @@ def _reset_db_and_memory() -> None:
     try:
         conn.execute("DELETE FROM rewards")
         conn.execute("DELETE FROM jobs")
-        conn.execute("DELETE FROM node_models")
         conn.execute("DELETE FROM node_wallets")
         conn.commit()
     except Exception:

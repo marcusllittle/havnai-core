@@ -342,7 +342,6 @@ def load_manifest() -> None:
             "tags": entry.get("tags", []),
             "reward_weight": weight,
             "task_type": entry.get("task_type", CREATOR_TASK_TYPE),
-            "vae": entry.get("vae"),
         }
         MANIFEST_MODELS[key] = entry_data
         MODEL_STATS.setdefault(key, {"count": 0.0, "total_time": 0.0})

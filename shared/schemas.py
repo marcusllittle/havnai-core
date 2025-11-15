@@ -27,7 +27,6 @@ class ModelEntry:
     tags: List[str] = field(default_factory=list)
     reward_weight: float = 0.0
     task_type: str = "IMAGE_GEN"
-    vae: str | None = None
 
 
 @dataclass

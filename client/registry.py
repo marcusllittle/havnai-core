@@ -20,7 +20,6 @@ except Exception:  # pragma: no cover
         tags: List[str] = field(default_factory=list)
         reward_weight: float = 0.0
         task_type: str = "IMAGE_GEN"
-        vae: Optional[str] = None
 
     @dataclass
     class Manifest:  # type: ignore

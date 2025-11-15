@@ -236,12 +236,45 @@ deactivate || true
 
 # Download default creator models on GPU nodes
 if [[ "$CREATOR_MODE" == "true" ]]; then
-  echo "[INFO] Downloading default creator models..."
+  echo "[INFO] Ensuring default creator models exist locally..."
   mkdir -p "$HAVNAI_HOME/models/creator"
-  curl -fSL "$SERVER_URL/static/models/triomerge_v10.safetensors" \
-       -o "$HAVNAI_HOME/models/creator/triomerge_v10.safetensors" || echo "[WARN] triomerge_v10 missing on server."
-  curl -fSL "$SERVER_URL/static/models/unstablePornhwa_beta.safetensors" \
-       -o "$HAVNAI_HOME/models/creator/unstablePornhwa_beta.safetensors" || echo "[WARN] unstablePornhwa_beta missing on server."
+  while IFS= read -r model; do
+    [[ -z "$model" ]] && continue
+    manifest_url="$SERVER_URL/models/list"
+    if command -v curl >/dev/null 2>&1; then
+      manifest_json=$(curl -fsSL "$manifest_url" || true)
+    else
+      echo "[WARN] curl not available; skipping manifest fetch."
+      break
+    fi
+    model_path=$(printf '%s\n' "$manifest_json" | python3 -c "
+import json,sys
+data=json.load(sys.stdin)
+target='$model'.lower()
+for entry in data.get('models', []):
+    if entry.get('name','').lower()==target:
+        print(entry.get('path',''))
+        break
+" 2>/dev/null)
+    if [[ -z "$model_path" ]]; then
+      echo "[WARN] $model missing in manifest; please copy manually."
+      continue
+    fi
+    local_path="$HAVNAI_HOME/models/creator/${model}.safetensors"
+    if [[ -f "$local_path" ]]; then
+      echo "[INFO] $model already present."
+      continue
+    fi
+    if command -v rsync >/dev/null 2>&1 && [[ -f "$model_path" ]]; then
+      echo "[INFO] Copying $model from $model_path"
+      rsync -av "$model_path" "$local_path" || echo "[WARN] Failed to copy $model"
+    else
+      echo "[WARN] No direct access to $model_path; skipping."
+    fi
+  done <<EOF
+triomerge_v10
+unstablePornhwa_beta
+EOF
 fi
 
 AUTO_START="false"

@@ -60,13 +60,6 @@ SERVER_JOIN_TOKEN = os.getenv("SERVER_JOIN_TOKEN", "").strip()
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "").strip()
 RESET_ON_STARTUP = os.getenv("RESET_ON_STARTUP", "").strip()
 
-WAN_DEFAULT_SETTINGS: Dict[str, int] = {
-    "num_frames": 24,
-    "fps": 24,
-    "height": 720,
-    "width": 512,
-}
-
 # ---------------------------------------------------------------------------
 # Version helpers
 # ---------------------------------------------------------------------------
@@ -1057,13 +1050,6 @@ def get_creator_tasks() -> Any:
                 "wallet": task.get("wallet"),
                 "prompt": task.get("prompt") or task.get("data", ""),
             }
-            if pipeline in {"wan", "wan_gguf"}:
-                task_payload.update(
-                    num_frames=WAN_DEFAULT_SETTINGS["num_frames"],
-                    fps=WAN_DEFAULT_SETTINGS["fps"],
-                    height=WAN_DEFAULT_SETTINGS["height"],
-                    width=WAN_DEFAULT_SETTINGS["width"],
-                )
             response_tasks.append(task_payload)
     return jsonify({"tasks": response_tasks}), 200
 
@@ -1088,7 +1074,6 @@ def submit_results() -> Any:
     metrics = data.get("metrics", {})
     utilization = data.get("utilization")
     image_b64 = data.get("image_b64")
-    video_b64 = data.get("video_b64")
 
     if not node_id or not task_id:
         return jsonify({"error": "missing node_id or task_id"}), 400
@@ -1131,9 +1116,8 @@ def submit_results() -> Any:
                 history.pop(0)
             node["last_seen"] = iso_now()
             node["last_seen_unix"] = unix_now()
-            # If an image or video was uploaded, persist to outputs dir
+            # If an image was uploaded, persist to outputs dir
             image_url = None
-            video_url = None
             if image_b64:
                 try:
                     import base64
@@ -1143,18 +1127,6 @@ def submit_results() -> Any:
                     with out_path.open("wb") as fh:
                         fh.write(img_bytes)
                     image_url = f"/static/outputs/{task_id}.png"
-                except Exception:
-                    pass
-            if video_b64:
-                try:
-                    import base64
-                    video_bytes = base64.b64decode(video_b64)
-                    videos_dir = OUTPUTS_DIR / "videos"
-                    videos_dir.mkdir(parents=True, exist_ok=True)
-                    video_path = videos_dir / f"{task_id}.mp4"
-                    with video_path.open("wb") as fh:
-                        fh.write(video_bytes)
-                    video_url = f"/static/outputs/videos/{task_id}.mp4"
                 except Exception:
                     pass
 
@@ -1167,7 +1139,6 @@ def submit_results() -> Any:
                 "wallet": wallet,
                 "task_type": task_type,
                 "image_url": image_url,
-                "video_url": video_url,
             }
             if status == "success":
                 node["tasks_completed"] = node.get("tasks_completed", 0) + 1
@@ -1204,9 +1175,6 @@ def submit_results() -> Any:
     resp_payload = {"status": "ok", "task_id": task_id, "reward": reward}
     if (OUTPUTS_DIR / f"{task_id}.png").exists():
         resp_payload["image_url"] = f"/static/outputs/{task_id}.png"
-    videos_dir = OUTPUTS_DIR / "videos"
-    if (videos_dir / f"{task_id}.mp4").exists():
-        resp_payload["video_url"] = f"/static/outputs/videos/{task_id}.mp4"
     return jsonify(resp_payload), 200
 
 

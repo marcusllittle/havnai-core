@@ -23,11 +23,6 @@ import requests
 from registry import REGISTRY, ModelEntry, ManifestError
 
 try:
-    from pipelines.wan_gguf_pipeline import WANVideoGGUF  # type: ignore
-except Exception:  # pragma: no cover
-    WANVideoGGUF = None  # type: ignore
-
-try:
     import numpy as np  # type: ignore
 except ImportError:  # pragma: no cover
     np = None
@@ -117,14 +112,6 @@ LOGGER = setup_logging()
 
 def log(message: str, prefix: str = "ℹ️", **extra: Any) -> None:
     LOGGER.info(f"{prefix} {message}", extra={"node": socket.gethostname(), **extra})
-
-
-WAN_DEFAULT_SETTINGS: Dict[str, Any] = {
-    "num_frames": 24,
-    "fps": 24,
-    "height": 720,
-    "width": 512,
-}
 
 
 # ---------------------------------------------------------------------------
@@ -372,7 +359,6 @@ def execute_task(task: Dict[str, Any]) -> None:
     log(f"Executing {task_type} task {task_id[:8]} · {model_name}", prefix="🚀")
 
     image_b64: Optional[str] = None
-    video_b64: Optional[str] = None
     try:
         entry = ensure_model_entry(model_name)
         model_path = ensure_model_path(entry)
@@ -380,12 +366,7 @@ def execute_task(task: Dict[str, Any]) -> None:
         log(f"Model resolution failed: {exc}", prefix="🚫")
         return
     if task_type == "image_gen":
-        pipeline = (entry.pipeline or "").lower()
-        entry_type = (entry.type or "").lower()
-        if pipeline in {"wan", "wan_gguf"} and entry_type == "gguf":
-            metrics, util, video_b64 = run_wan_video_generation(task_id, task, entry, model_path, reward_weight, prompt)
-        else:
-            metrics, util, image_b64 = run_image_generation(task_id, entry, model_path, reward_weight, prompt)
+        metrics, util, image_b64 = run_image_generation(task_id, entry, model_path, reward_weight, prompt)
     else:
         metrics, util = run_ai_inference(entry, model_path, input_shape, reward_weight)
 
@@ -402,8 +383,6 @@ def execute_task(task: Dict[str, Any]) -> None:
     }
     if image_b64:
         payload["image_b64"] = image_b64
-    if video_b64:
-        payload["video_b64"] = video_b64
 
     try:
         resp = SESSION.post(endpoint("/results"), data=json.dumps(payload), timeout=15)
@@ -453,7 +432,6 @@ def run_ai_inference(entry: ModelEntry, model_path: Path, input_shape: List[int]
     return metrics, int(util)
 
 
-def run_image_generation(task_id: str, entry: ModelEntry, model_path: Path, reward_weight: float, prompt: str) -> (Dict[str, Any], int, Optional[str]):
 
     start_stats = read_gpu_stats()
     started = time.time()
@@ -539,92 +517,6 @@ def run_image_generation(task_id: str, entry: ModelEntry, model_path: Path, rewa
     if status == "failed":
         metrics["error"] = error_msg or "image generation error"
     return metrics, util, image_b64
-
-
-def _resolve_video_settings(task: Dict[str, Any]) -> Dict[str, int]:
-    settings = dict(WAN_DEFAULT_SETTINGS)
-    for key in ("num_frames", "fps", "height", "width"):
-        if key in task and task[key] is not None:
-            try:
-                settings[key] = int(task[key])
-            except (TypeError, ValueError):
-                continue
-    return {
-        "num_frames": max(1, int(settings["num_frames"])),
-        "fps": max(1, int(settings["fps"])),
-        "height": max(64, int(settings["height"])),
-        "width": max(64, int(settings["width"])),
-    }
-
-
-def run_wan_video_generation(
-    task_id: str,
-    task: Dict[str, Any],
-    entry: ModelEntry,
-    model_path: Path,
-    reward_weight: float,
-    prompt: str,
-) -> (Dict[str, Any], int, Optional[str]):
-
-    start_stats = read_gpu_stats()
-    started = time.time()
-    status = "success"
-    error_msg = ""
-
-    video_b64: Optional[str] = None
-    metrics: Dict[str, Any] = {}
-
-    try:
-        if WANVideoGGUF is None:
-            raise RuntimeError("WAN GGUF pipeline unavailable (diffusers experimental missing?)")
-        device = "cuda" if torch is not None and torch.cuda.is_available() else "cpu"
-        settings = _resolve_video_settings(task)
-        log(
-            "Loading WAN GGUF video pipeline…",
-            prefix="ℹ️",
-            device=device,
-            num_frames=settings["num_frames"],
-            fps=settings["fps"],
-        )
-        pipeline = WANVideoGGUF(model_dir=model_path, device=device)
-        result = pipeline.generate_video(
-            job_id=task_id,
-            prompt=prompt,
-            num_frames=settings["num_frames"],
-            fps=settings["fps"],
-            height=settings["height"],
-            width=settings["width"],
-        )
-        video_path_str = result.get("video_path")
-        if not video_path_str:
-            raise RuntimeError("WAN pipeline did not return video_path")
-        video_path = Path(video_path_str)
-        if not video_path.exists():
-            raise RuntimeError(f"WAN video file missing at {video_path}")
-        with video_path.open("rb") as fh:
-            video_b64 = base64.b64encode(fh.read()).decode("utf-8")
-    except Exception as exc:
-        status = "failed"
-        error_msg = str(exc)
-        log(f"WAN video generation failed: {error_msg}", prefix="🚫")
-
-    duration = time.time() - started
-    end_stats = read_gpu_stats()
-    util = max(start_stats.get("utilization", 0), end_stats.get("utilization", 0), utilization_hint)
-    util = int(max(util, 70 if ROLE == "creator" else util))
-    metrics = {
-        "status": status,
-        "model_name": entry.name,
-        "model_path": str(model_path),
-        "reward_weight": reward_weight,
-        "task_type": "video_gen",
-        "inference_time_ms": round(duration * 1000, 3),
-    }
-    if status == "failed":
-        metrics["error"] = error_msg or "WAN video generation error"
-    else:
-        metrics["type"] = "video"
-    return metrics, util, video_b64
 
 
 # ---------------------------------------------------------------------------

@@ -104,3 +104,17 @@ systemctl --user enable --now havnai-node.service
 
 echo "[6/6] Done. Logs: journalctl --user -u havnai-node -f"
 
+cat <<'NOTE'
+
+WAN I2V (optional, for video jobs):
+  - Ensure ffmpeg is installed and available on PATH.
+    On Debian/Ubuntu, for example:
+        sudo apt-get update && sudo apt-get install -y ffmpeg
+  - Download any WAN I2V .safetensors checkpoints to the exact paths
+    referenced by your coordinator's manifest entry.
+    A common layout is:
+        /mnt/d/havnai-storage/models/video/wan-i2v/wan_2.2_lightning.safetensors
+  - Keep CREATOR_MODE=true in ~/.havnai/.env if you want this node to
+    accept WAN video generation tasks.
+
+NOTE

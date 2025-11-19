@@ -457,7 +457,8 @@ def fetch_next_job_for_node(node_id: str) -> Optional[Dict[str, Any]]:
     role = node.get("role", "worker")
     for row in rows:
         task_type = (row["task_type"] or CREATOR_TASK_TYPE).upper()
-        if task_type != CREATOR_TASK_TYPE:
+        # Support both standard IMAGE_GEN and WAN video jobs
+        if task_type not in {CREATOR_TASK_TYPE, "VIDEO_GEN"}:
             continue
         if role != "creator":
             continue
@@ -739,6 +740,12 @@ def join_page() -> Any:
         <li>Python 3.10 or newer, curl, and a GPU driver/runtime</li>
         <li>$HAI wallet address (EVM compatible)</li>
       </ul>
+      <h2>Optional – WAN I2V Video Support</h2>
+      <ul>
+        <li><code>ffmpeg</code> installed and on <code>PATH</code> (e.g. <code>sudo apt-get install -y ffmpeg</code> on Debian/Ubuntu)</li>
+        <li>WAN I2V safetensor checkpoint(s) downloaded to the paths referenced by the coordinator manifest (for example <code>/mnt/d/havnai-storage/models/video/wan-i2v/wan_2.2_lightning.safetensors</code>)</li>
+        <li><code>CREATOR_MODE=true</code> in <code>~/.havnai/.env</code> if you want this node to accept WAN video jobs</li>
+      </ul>
       <h2>What happens next?</h2>
       <ol>
         <li>Installer prepares <code>~/.havnai</code>, Python venv, and the node binary</li>
@@ -867,7 +874,6 @@ def submit_job() -> Any:
     wallet = str(payload.get("wallet", "")).strip()
     model_name_raw = str(payload.get("model", "")).strip()
     model_name = model_name_raw.lower()
-    job_data = str(payload.get("prompt") or payload.get("data") or "")
     weight = payload.get("weight")
 
     if not wallet or not WALLET_REGEX.match(wallet):
@@ -880,7 +886,27 @@ def submit_job() -> Any:
 
     if weight is None:
         weight = cfg.get("reward_weight", resolve_weight(model_name, 10.0))
-    task_type = CREATOR_TASK_TYPE
+    # Special-case WAN I2V video jobs so we preserve structured settings
+    is_wan_i2v = model_name == "wan-i2v" or str(cfg.get("pipeline", "")).lower() == "wan-i2v"
+    if is_wan_i2v:
+        # Persist all WAN-specific controls inside the job data blob as JSON
+        prompt_text = str(payload.get("prompt") or "")
+        settings: Dict[str, Any] = {
+            "prompt": prompt_text,
+            "init_image": payload.get("init_image") or None,
+            "steps_high": int(payload.get("steps_high", 2)),
+            "steps_low": int(payload.get("steps_low", 2)),
+            "sampler": str(payload.get("sampler") or "euler"),
+            "cfg": float(payload.get("cfg", 1.0)),
+            "num_frames": int(payload.get("num_frames", 32)),
+            "fps": int(payload.get("fps", 24)),
+            "resolution": str(payload.get("resolution") or "720x512"),
+        }
+        job_data = json.dumps(settings)
+        task_type = "VIDEO_GEN"
+    else:
+        job_data = str(payload.get("prompt") or payload.get("data") or "")
+        task_type = CREATOR_TASK_TYPE
 
     with LOCK:
         job_id = enqueue_job(wallet, cfg.get("name", model_name), task_type, job_data, float(weight))
@@ -1004,10 +1030,11 @@ def get_creator_tasks() -> Any:
                 if cfg:
                     assign_job_to_node(job["id"], node_id)
                     reward_weight = float(job["weight"] or cfg.get("reward_weight", resolve_weight(job["model"], 10.0)))
+                    job_task_type = (job.get("task_type") or CREATOR_TASK_TYPE).upper()
                     pending = [
                         {
                             "task_id": job["id"],
-                            "task_type": CREATOR_TASK_TYPE,
+                            "task_type": job_task_type,
                             "model_name": job["model"],
                             "model_path": cfg.get("path", ""),
                             "pipeline": cfg.get("pipeline", "sd15"),
@@ -1050,6 +1077,17 @@ def get_creator_tasks() -> Any:
                 "wallet": task.get("wallet"),
                 "prompt": task.get("prompt") or task.get("data", ""),
             }
+            # If this is a WAN I2V video job, attempt to expose structured settings to the node
+            if task_payload["type"].upper() == "VIDEO_GEN":
+                try:
+                    raw = task.get("data") or ""
+                    settings = json.loads(raw) if isinstance(raw, str) else {}
+                except Exception:
+                    settings = {}
+                if isinstance(settings, dict):
+                    for key in ("num_frames", "fps", "steps_high", "steps_low", "cfg", "sampler", "resolution", "init_image"):
+                        if key in settings:
+                            task_payload[key] = settings[key]
             response_tasks.append(task_payload)
     return jsonify({"tasks": response_tasks}), 200
 
@@ -1074,6 +1112,7 @@ def submit_results() -> Any:
     metrics = data.get("metrics", {})
     utilization = data.get("utilization")
     image_b64 = data.get("image_b64")
+    video_b64 = data.get("video_b64")
 
     if not node_id or not task_id:
         return jsonify({"error": "missing node_id or task_id"}), 400
@@ -1116,8 +1155,9 @@ def submit_results() -> Any:
                 history.pop(0)
             node["last_seen"] = iso_now()
             node["last_seen_unix"] = unix_now()
-            # If an image was uploaded, persist to outputs dir
+            # If an image or video was uploaded, persist to outputs dir
             image_url = None
+            video_url = None
             if image_b64:
                 try:
                     import base64
@@ -1127,6 +1167,18 @@ def submit_results() -> Any:
                     with out_path.open("wb") as fh:
                         fh.write(img_bytes)
                     image_url = f"/static/outputs/{task_id}.png"
+                except Exception:
+                    pass
+            if video_b64:
+                try:
+                    import base64
+                    video_bytes = base64.b64decode(video_b64)
+                    videos_dir = OUTPUTS_DIR / "videos"
+                    videos_dir.mkdir(parents=True, exist_ok=True)
+                    video_path = videos_dir / f"{task_id}.mp4"
+                    with video_path.open("wb") as fh:
+                        fh.write(video_bytes)
+                    video_url = f"/static/outputs/videos/{task_id}.mp4"
                 except Exception:
                     pass
 
@@ -1139,6 +1191,7 @@ def submit_results() -> Any:
                 "wallet": wallet,
                 "task_type": task_type,
                 "image_url": image_url,
+                "video_url": video_url,
             }
             if status == "success":
                 node["tasks_completed"] = node.get("tasks_completed", 0) + 1
@@ -1171,10 +1224,13 @@ def submit_results() -> Any:
                 stats["total_time"] += inference_time
 
         TASKS.pop(task_id, None)
-    # Return a small payload including image URL if saved
+    # Return a small payload including image and video URLs if saved
     resp_payload = {"status": "ok", "task_id": task_id, "reward": reward}
     if (OUTPUTS_DIR / f"{task_id}.png").exists():
         resp_payload["image_url"] = f"/static/outputs/{task_id}.png"
+    videos_dir = OUTPUTS_DIR / "videos"
+    if (videos_dir / f"{task_id}.mp4").exists():
+        resp_payload["video_url"] = f"/static/outputs/videos/{task_id}.mp4"
     return jsonify(resp_payload), 200
 
 

@@ -98,6 +98,15 @@
       "tags": ["video", "prompt"],
       "task_type": "VIDEO_GEN",
       "reward_weight": 5.0
+    },
+    {
+      "name": "wan-i2v",
+      "pipeline": "wan-i2v",
+      "path": "/mnt/d/havnai-storage/models/video/wan-i2v/wan_2.2_lightning.safetensors",
+      "type": "checkpoint",
+      "tags": ["video", "i2v", "t2v"],
+      "task_type": "VIDEO_GEN",
+      "reward_weight": 22.0
     }
   ]
 }

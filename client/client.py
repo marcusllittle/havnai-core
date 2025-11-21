@@ -23,12 +23,6 @@ import requests
 from registry import REGISTRY, ModelEntry, ManifestError
 
 try:
-    from server.pipelines.wan_safetensor_i2v import WANLightningI2VPipeline, WANI2VSettings  # type: ignore
-except Exception:  # pragma: no cover
-    WANLightningI2VPipeline = None  # type: ignore
-    WANI2VSettings = None  # type: ignore
-
-try:
     import numpy as np  # type: ignore
 except ImportError:  # pragma: no cover
     np = None
@@ -370,23 +364,20 @@ def execute_task(task: Dict[str, Any]) -> None:
     input_shape = task.get("input_shape") or []
     prompt = task.get("prompt") or ""
 
-    if task_type in {"image_gen", "video_gen"} and ROLE != "creator":
+    if task_type == "image_gen" and ROLE != "creator":
         log(f"Skipping creator task {task_id[:8]} — node not in creator mode", prefix="⚠️")
         return
 
     log(f"Executing {task_type} task {task_id[:8]} · {model_name}", prefix="🚀")
 
     image_b64: Optional[str] = None
-    video_b64: Optional[str] = None
     try:
         entry = ensure_model_entry(model_name)
         model_path = ensure_model_path(entry)
     except Exception as exc:
         log(f"Model resolution failed: {exc}", prefix="🚫")
         return
-    if task_type == "video_gen" or model_name.startswith("wan-i2v"):
-        metrics, util, video_b64 = run_wan_i2v_video_generation(task_id, task, entry, model_path, reward_weight, prompt)
-    elif task_type == "image_gen":
+    if task_type == "image_gen":
         metrics, util, image_b64 = run_image_generation(task_id, entry, model_path, reward_weight, prompt)
     else:
         metrics, util = run_ai_inference(entry, model_path, input_shape, reward_weight)
@@ -404,8 +395,6 @@ def execute_task(task: Dict[str, Any]) -> None:
     }
     if image_b64:
         payload["image_b64"] = image_b64
-    if video_b64:
-        payload["video_b64"] = video_b64
 
     try:
         resp = SESSION.post(endpoint("/results"), data=json.dumps(payload), timeout=15)

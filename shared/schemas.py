@@ -12,6 +12,20 @@ class JobSpec:
     wallet: str
     model: str
     prompt: str
+    # Optional structured fields for richer job types such as WAN video
+    # and AnimateDiff video generation. Coordinators and nodes may choose
+    # to use these directly or pass them through inside ``settings``.
+    negative_prompt: str = ""
+    frames: int = 0
+    fps: int = 0
+    motion: str = ""
+    base_model: str = ""
+    width: int = 0
+    height: int = 0
+    seed: int | None = None
+    lora_strength: float | None = None
+    init_image: str | None = None
+    scheduler: str = ""
     settings: Dict[str, Any] = field(default_factory=dict)
     task_type: str = "IMAGE_GEN"
 

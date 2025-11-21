@@ -455,12 +455,18 @@ def fetch_next_job_for_node(node_id: str) -> Optional[Dict[str, Any]]:
     rows = conn.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY timestamp ASC").fetchall()
     node = NODES.get(node_id, {})
     role = node.get("role", "worker")
+    node_supports = {s.lower() for s in node.get("supports", []) if isinstance(s, str)}
     for row in rows:
         task_type = (row["task_type"] or CREATOR_TASK_TYPE).upper()
-        # Support both standard IMAGE_GEN and WAN video jobs
-        if task_type not in {CREATOR_TASK_TYPE, "VIDEO_GEN"}:
+        # Support standard IMAGE_GEN, WAN video jobs, and AnimateDiff video jobs.
+        if task_type not in {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF"}:
             continue
         if role != "creator":
+            continue
+        required_support = "image"
+        if task_type in {"VIDEO_GEN", "ANIMATEDIFF"}:
+            required_support = "animatediff" if task_type == "ANIMATEDIFF" else "image"
+        if node_supports and required_support not in node_supports:
             continue
         model_name = row["model"].lower()
         cfg = get_model_config(model_name)
@@ -630,7 +636,8 @@ def pending_tasks_for_node(node_id: str) -> List[Dict[str, Any]]:
             continue
         if task.get("status") not in relevant_status:
             continue
-        if (task.get("task_type") or "").upper() != CREATOR_TASK_TYPE:
+        task_type = (task.get("task_type") or CREATOR_TASK_TYPE).upper()
+        if task_type not in {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF"}:
             continue
         tasks.append(task)
     return tasks
@@ -886,8 +893,13 @@ def submit_job() -> Any:
 
     if weight is None:
         weight = cfg.get("reward_weight", resolve_weight(model_name, 10.0))
+
     # Special-case WAN I2V video jobs so we preserve structured settings
     is_wan_i2v = model_name == "wan-i2v" or str(cfg.get("pipeline", "")).lower() == "wan-i2v"
+
+    # Special-case AnimateDiff video jobs with rich structured payload
+    is_animatediff = model_name == "animatediff" or str(cfg.get("pipeline", "")).lower() == "animatediff"
+
     if is_wan_i2v:
         # Persist all WAN-specific controls inside the job data blob as JSON
         prompt_text = str(payload.get("prompt") or "")
@@ -904,6 +916,62 @@ def submit_job() -> Any:
         }
         job_data = json.dumps(settings)
         task_type = "VIDEO_GEN"
+    elif is_animatediff:
+        prompt_text = str(payload.get("prompt") or "")
+        negative_prompt = str(payload.get("negative_prompt") or "")
+        # Core AnimateDiff controls – validated/coerced into safe ranges
+        try:
+            frames = int(payload.get("frames", 16))
+        except (TypeError, ValueError):
+            frames = 16
+        try:
+            fps = int(payload.get("fps", 8))
+        except (TypeError, ValueError):
+            fps = 8
+        frames = max(1, min(frames, 64))
+        fps = max(1, min(fps, 60))
+
+        motion = str(payload.get("motion") or "").strip().lower() or "zoom-in"
+        base_model = str(payload.get("base_model") or "realisticVision")
+        width = int(payload.get("width", 512) or 512)
+        height = int(payload.get("height", 512) or 512)
+        # Clamp to supported grid
+        if width not in {512, 768}:
+            width = 512
+        if height not in {512, 768}:
+            height = 512
+
+        seed = payload.get("seed")
+        try:
+            seed = int(seed) if seed is not None else None
+        except (TypeError, ValueError):
+            seed = None
+        lora_strength = payload.get("lora_strength")
+        try:
+            lora_strength = float(lora_strength) if lora_strength is not None else None
+        except (TypeError, ValueError):
+            lora_strength = None
+        init_image = payload.get("init_image") or None
+        scheduler = str(payload.get("scheduler") or "DDIM").upper()
+        if scheduler not in {"DDIM", "EULER", "HEUN"}:
+            scheduler = "DDIM"
+
+        settings = {
+            "prompt": prompt_text,
+            "negative_prompt": negative_prompt,
+            "frames": frames,
+            "fps": fps,
+            "motion": motion,
+            "base_model": base_model,
+            "width": width,
+            "height": height,
+            "seed": seed,
+            "lora_strength": lora_strength,
+            "init_image": init_image,
+            "scheduler": scheduler,
+        }
+        job_data = json.dumps(settings)
+        task_type = "ANIMATEDIFF"
     else:
         job_data = str(payload.get("prompt") or payload.get("data") or "")
         task_type = CREATOR_TASK_TYPE
@@ -954,6 +1022,7 @@ def register() -> Any:
         node["version"] = data.get("version", "dev")
         node["pipelines"] = data.get("pipelines", node.get("pipelines", []))
         node["models"] = data.get("models", node.get("models", []))
+        node["supports"] = data.get("supports", node.get("supports", []))
         util = data.get("gpu", {}).get("utilization") if isinstance(data.get("gpu"), dict) else data.get("utilization")
         util = float(util or node.get("utilization", 0.0))
         node["utilization"] = util
@@ -1088,6 +1157,30 @@ def get_creator_tasks() -> Any:
                     for key in ("num_frames", "fps", "steps_high", "steps_low", "cfg", "sampler", "resolution", "init_image"):
                         if key in settings:
                             task_payload[key] = settings[key]
+            # If this is an AnimateDiff job, surface rich controls directly on the task payload
+            if task_payload["type"].upper() == "ANIMATEDIFF":
+                try:
+                    raw_ad = task.get("data") or ""
+                    ad_settings = json.loads(raw_ad) if isinstance(raw_ad, str) else {}
+                except Exception:
+                    ad_settings = {}
+                if isinstance(ad_settings, dict):
+                    for key in (
+                        "prompt",
+                        "negative_prompt",
+                        "frames",
+                        "fps",
+                        "motion",
+                        "base_model",
+                        "width",
+                        "height",
+                        "seed",
+                        "lora_strength",
+                        "init_image",
+                        "scheduler",
+                    ):
+                        if key in ad_settings and ad_settings[key] is not None:
+                            task_payload[key] = ad_settings[key]
             response_tasks.append(task_payload)
     return jsonify({"tasks": response_tasks}), 200
 
@@ -1178,6 +1271,7 @@ def submit_results() -> Any:
                     video_path = videos_dir / f"{task_id}.mp4"
                     with video_path.open("wb") as fh:
                         fh.write(video_bytes)
+                    # Stored at: STATIC_DIR / outputs / videos / <job_id>.mp4
                     video_url = f"/static/outputs/videos/{task_id}.mp4"
                 except Exception:
                     pass
@@ -1380,6 +1474,32 @@ def logs_endpoint() -> Any:
 @app.route("/feed", methods=["GET"])
 def feed_catalog() -> Any:
     return jsonify({"models": build_models_catalog()})
+
+
+@app.route("/result/<job_id>", methods=["GET"])
+def get_result(job_id: str) -> Any:
+    """
+    Return a simple JSON payload describing where the result artifact lives.
+
+    For video jobs (WAN I2V or AnimateDiff), this exposes the MP4 download URL
+    under ``/static/outputs/videos/<job_id>.mp4`` if it exists.
+    """
+    if not job_id:
+        return jsonify({"error": "missing job_id"}), 400
+
+    image_path = OUTPUTS_DIR / f"{job_id}.png"
+    videos_dir = OUTPUTS_DIR / "videos"
+    video_path = videos_dir / f"{job_id}.mp4"
+
+    payload: Dict[str, Any] = {"job_id": job_id}
+    if image_path.exists():
+        payload["image_url"] = f"/static/outputs/{job_id}.png"
+    if video_path.exists():
+        payload["video_url"] = f"/static/outputs/videos/{job_id}.mp4"
+
+    if "image_url" not in payload and "video_url" not in payload:
+        return jsonify({"error": "result_not_found", "job_id": job_id}), 404
+    return jsonify(payload), 200
 
 
 @app.route("/nodes", methods=["GET"])

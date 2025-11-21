@@ -107,6 +107,15 @@
       "tags": ["video", "i2v", "t2v"],
       "task_type": "VIDEO_GEN",
       "reward_weight": 22.0
+    },
+    {
+      "name": "animatediff",
+      "pipeline": "animatediff",
+      "path": "/mnt/d/havnai-storage/models/creator/realisticVisionV60B1_v51HyperVAE.safetensors",
+      "type": "checkpoint",
+      "tags": ["video", "animatediff", "sd15"],
+      "task_type": "ANIMATEDIFF",
+      "reward_weight": 15.0
     }
   ]
 }

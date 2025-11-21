@@ -7,16 +7,20 @@ import os
 import re
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 import uuid
 from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from flask import abort, Flask, jsonify, request, send_file, send_from_directory, g, has_app_context
 from flask_cors import CORS
+
+from havnai.video_engine.gguf_wan2_2 import VideoEngine, VideoJobRequest
 
 # ---------------------------------------------------------------------------
 # Paths & constants
@@ -37,6 +41,10 @@ CLIENT_REQUIREMENTS = BASE_DIR / "client" / "requirements-node.txt"
 VERSION_FILE = BASE_DIR / "VERSION"
 
 CREATOR_TASK_TYPE = "IMAGE_GEN"
+
+# Ensure local packages (e.g., havnai.video_engine) are importable when running server/app.py directly
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
 
 # Reward weights bootstrap – enriched at runtime via registration
 MODEL_WEIGHTS: Dict[str, float] = {
@@ -214,6 +222,64 @@ def ensure_directories() -> None:
 
 
 ensure_directories()
+
+# ---------------------------------------------------------------------------
+# WAN 2.2 GGUF video worker
+# ---------------------------------------------------------------------------
+
+VIDEO_ENGINE = VideoEngine()
+VIDEO_EXECUTOR = ThreadPoolExecutor(max_workers=int(os.getenv("WAN_W2V_WORKERS", "1")) or 1)
+VIDEO_JOBS: Dict[str, Dict[str, Any]] = {}
+VIDEO_JOB_LOCK = threading.Lock()
+
+
+def submit_video_job(job_request: VideoJobRequest) -> str:
+    """Queue a WAN GGUF video generation job."""
+
+    job_id = job_request.job_id or f"wan-video-{uuid.uuid4().hex[:8]}"
+    job_request.job_id = job_id
+    mode = "i2v" if job_request.init_image_b64 else "t2v"
+    record = {
+        "job_id": job_id,
+        "status": "queued",
+        "prompt": job_request.prompt,
+        "negative_prompt": job_request.negative_prompt,
+        "mode": mode,
+        "loras": job_request.lora_list,
+        "motion_type": job_request.motion_type,
+        "duration": job_request.duration,
+        "fps": job_request.fps,
+        "created_at": iso_now(),
+        "frames_dir": str(VIDEO_ENGINE.registry.paths.frames_dir),
+        "videos_dir": str(VIDEO_ENGINE.registry.paths.videos_dir),
+    }
+    with VIDEO_JOB_LOCK:
+        VIDEO_JOBS[job_id] = record
+    VIDEO_EXECUTOR.submit(_run_video_job, job_id, job_request)
+    return job_id
+
+
+def _run_video_job(job_id: str, job_request: VideoJobRequest) -> None:
+    with VIDEO_JOB_LOCK:
+        if job_id in VIDEO_JOBS:
+            VIDEO_JOBS[job_id]["status"] = "running"
+            VIDEO_JOBS[job_id]["started_at"] = iso_now()
+    result = VIDEO_ENGINE.generate(job_request)
+    with VIDEO_JOB_LOCK:
+        payload = VIDEO_JOBS.get(job_id, {})
+        payload["status"] = result.status
+        payload["completed_at"] = iso_now()
+        payload["video_path"] = result.video_path
+        payload["frame_paths"] = result.frame_paths
+        payload["error"] = result.error
+        payload["metadata"] = result.metadata
+        VIDEO_JOBS[job_id] = payload
+
+
+def get_video_job(job_id: str) -> Optional[Dict[str, Any]]:
+    with VIDEO_JOB_LOCK:
+        job = VIDEO_JOBS.get(job_id)
+        return dict(job) if job else None
 
 # ---------------------------------------------------------------------------
 # Database helpers
@@ -980,6 +1046,61 @@ def submit_job() -> Any:
         job_id = enqueue_job(wallet, cfg.get("name", model_name), task_type, job_data, float(weight))
     log_event("Public job queued", wallet=wallet, model=model_name, job_id=job_id)
     return jsonify({"status": "queued", "job_id": job_id}), 200
+
+
+@app.route("/generate-video", methods=["POST"])
+def generate_video() -> Any:
+    """Trigger a WAN 2.2 GGUF T2V/I2V job via background worker."""
+
+    data = request.get_json() or {}
+    prompt = str(data.get("prompt", "")).strip()
+    if not prompt:
+        return jsonify({"error": "prompt is required"}), 400
+
+    negative_prompt = str(data.get("negative_prompt", "")).strip()
+    motion_type = str(data.get("motion_type", "high")).strip().lower() or "high"
+    lora_list = data.get("lora_list") or []
+    if not isinstance(lora_list, list):
+        return jsonify({"error": "lora_list must be an array"}), 400
+
+    duration = float(data.get("duration", 4.0) or 4.0)
+    fps = int(data.get("fps", 24) or 24)
+    fps = max(1, min(fps, 60))
+    width = int(data.get("width", 720) or 720)
+    height = int(data.get("height", 512) or 512)
+
+    job_request = VideoJobRequest(
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        motion_type=motion_type,
+        lora_list=[str(item) for item in lora_list],
+        init_image_b64=data.get("init_image"),
+        duration=duration,
+        fps=fps,
+        width=width,
+        height=height,
+    )
+    job_id = submit_video_job(job_request)
+    job = get_video_job(job_id) or {}
+    response = {
+        "job_id": job_id,
+        "status": job.get("status", "queued"),
+        "mode": job.get("mode"),
+        "fps": fps,
+        "duration": duration,
+        "frames_dir": job.get("frames_dir"),
+        "videos_dir": job.get("videos_dir"),
+        "engine": VIDEO_ENGINE.describe(),
+    }
+    return jsonify(response), 202
+
+
+@app.route("/generate-video/<job_id>", methods=["GET"])
+def video_job_status(job_id: str) -> Any:
+    job = get_video_job(job_id)
+    if not job:
+        return jsonify({"error": "job not found"}), 404
+    return jsonify(job), 200
 
 
 @app.route("/register", methods=["POST"])

@@ -20,8 +20,6 @@ from typing import Any, Dict, List, Optional
 from flask import abort, Flask, jsonify, request, send_file, send_from_directory, g, has_app_context
 from flask_cors import CORS
 
-from havnai.video_engine.gguf_wan2_2 import VideoEngine, VideoJobRequest
-
 # ---------------------------------------------------------------------------
 # Paths & constants
 # ---------------------------------------------------------------------------
@@ -45,6 +43,8 @@ CREATOR_TASK_TYPE = "IMAGE_GEN"
 # Ensure local packages (e.g., havnai.video_engine) are importable when running server/app.py directly
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
+
+from havnai.video_engine.gguf_wan2_2 import VideoEngine, VideoJobRequest
 
 # Reward weights bootstrap – enriched at runtime via registration
 MODEL_WEIGHTS: Dict[str, float] = {

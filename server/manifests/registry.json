@@ -1,94 +1,124 @@
 {
   "models": [
     {
-      "name": "triomerge_v10",
+      "name": "majicmixRealistic_v7",
       "pipeline": "sd15",
-      "path": "/mnt/d/havnai-storage/models/creator/triomerge_v10.safetensors",
+      "path": "/mnt/d/havnai-storage/models/creator/majicmixRealistic_v7.safetensors",
       "type": "checkpoint",
-      "tags": ["nsfw"],
+      "tags": ["realism", "all_rounder", "low_light", "daylight", "hands_strong", "fabric_detail"],
       "task_type": "IMAGE_GEN",
-      "reward_weight": 12.0
-    },
-    {
-      "name": "unstablePornhwa_beta",
-      "pipeline": "sd15",
-      "path": "/mnt/d/havnai-storage/models/creator/unstablePornhwa_beta.safetensors",
-      "type": "checkpoint",
-      "tags": ["nsfw"],
-      "task_type": "IMAGE_GEN",
-      "reward_weight": 12.0
-    },
-    {
-      "name": "kizukiAnimeHentai_animeHentaiV4",
-      "pipeline": "sd15",
-      "path": "/mnt/d/havnai-storage/models/creator/kizukiAnimeHentai_animeHentaiV4.safetensors",
-      "type": "checkpoint",
-      "tags": ["nsfw"],
-      "task_type": "IMAGE_GEN",
-      "reward_weight": 10.0
-    },
-    {
-      "name": "uberRealisticPornMerge_v23Final",
-      "pipeline": "sd15",
-      "path": "/mnt/d/havnai-storage/models/creator/uberRealisticPornMerge_v23Final.safetensors",
-      "type": "checkpoint",
-      "tags": ["nsfw"],
-      "task_type": "IMAGE_GEN",
-      "reward_weight": 10.0
-    },
-    {
-      "name": "perfectdeliberate_v5SD15",
-      "pipeline": "sd15",
-      "path": "/mnt/d/havnai-storage/models/creator/perfectdeliberate_v5SD15.safetensors",
-      "type": "checkpoint",
-      "tags": [],
-      "task_type": "IMAGE_GEN",
-      "reward_weight": 10.0
+      "weight": 25,
+      "reward_weight": 25,
+      "strengths": "Best all-around realistic model. Extremely consistent. Excellent low-light and daylight performance.",
+      "weaknesses": "Sometimes too clean/perfect under bright lighting."
     },
     {
       "name": "lazymixRealAmateur_v40",
       "pipeline": "sd15",
       "path": "/mnt/d/havnai-storage/models/creator/lazymixRealAmateur_v40.safetensors",
       "type": "checkpoint",
-      "tags": [],
+      "tags": ["realism", "phone_photo_style", "selfie", "natural_light"],
       "task_type": "IMAGE_GEN",
-      "reward_weight": 10.0
-    },
-    {
-      "name": "disneyPixarCartoon_v10",
-      "pipeline": "sd15",
-      "path": "/mnt/d/havnai-storage/models/creator/disneyPixarCartoon_v10.safetensors",
-      "type": "checkpoint",
-      "tags": [],
-      "task_type": "IMAGE_GEN",
-      "reward_weight": 10.0
-    },
-    {
-      "name": "majicmixRealistic_v7",
-      "pipeline": "sd15",
-      "path": "/mnt/d/havnai-storage/models/creator/majicmixRealistic_v7.safetensors",
-      "type": "checkpoint",
-      "tags": [],
-      "task_type": "IMAGE_GEN",
-      "reward_weight": 10.0
-    },
-    {
-      "name": "epicrealismXL_vxviiCrystalclear",
-      "pipeline": "sdxl",
-      "path": "/mnt/d/havnai-storage/models/creator/epicrealismXL_vxviiCrystalclear.safetensors",
-      "type": "checkpoint",
-      "tags": [],
-      "task_type": "IMAGE_GEN",
-      "reward_weight": 12.0
+      "weight": 25,
+      "reward_weight": 25,
+      "strengths": "Most authentic phone-photo style realism. Very strong across lighting scenarios.",
+      "weaknesses": "Slightly less fabric/metallic pop compared to majicmix."
     },
     {
       "name": "juggernautXL_ragnarokBy",
       "pipeline": "sdxl",
       "path": "/mnt/d/havnai-storage/models/creator/juggernautXL_ragnarokBy.safetensors",
       "type": "checkpoint",
-      "tags": [],
+      "tags": ["realism", "flash", "studio_light", "smooth_skin"],
       "task_type": "IMAGE_GEN",
-      "reward_weight": 12.0
+      "weight": 20,
+      "reward_weight": 20,
+      "strengths": "Elite realism and very strong flash/daylight skin performance.",
+      "weaknesses": "Backgrounds and hands can occasionally look too stiff or polished."
+    },
+    {
+      "name": "epicrealismXL_vxviiCrystalclear",
+      "pipeline": "sdxl",
+      "path": "/mnt/d/havnai-storage/models/creator/epicrealismXL_vxviiCrystalclear.safetensors",
+      "type": "checkpoint",
+      "tags": ["realism", "daylight", "sharp_detail"],
+      "task_type": "IMAGE_GEN",
+      "weight": 20,
+      "reward_weight": 20,
+      "strengths": "Very crisp detail and strong daylight realism.",
+      "weaknesses": "Backgrounds sometimes too symmetrical or flat."
+    },
+    {
+      "name": "perfectdeliberate_v5SD15",
+      "pipeline": "sd15",
+      "path": "/mnt/d/havnai-storage/models/creator/perfectdeliberate_v5SD15.safetensors",
+      "type": "checkpoint",
+      "tags": ["realism", "portrait"],
+      "task_type": "IMAGE_GEN",
+      "weight": 10,
+      "reward_weight": 10,
+      "strengths": "Solid realism when hands are not visible.",
+      "weaknesses": "Hands deform frequently (SD1.5 weakness)."
+    },
+    {
+      "name": "uberRealisticPornMerge_v23Final",
+      "pipeline": "sd15",
+      "path": "/mnt/d/havnai-storage/models/creator/uberRealisticPornMerge_v23Final.safetensors",
+      "type": "checkpoint",
+      "tags": ["studio_light", "glossy_skin"],
+      "task_type": "IMAGE_GEN",
+      "weight": 8,
+      "reward_weight": 8,
+      "strengths": "Strong glossy skin aesthetic in bright studio lighting.",
+      "weaknesses": "Can produce overexposed skin and accessory artifacts."
+    },
+    {
+      "name": "triomerge_v10",
+      "pipeline": "sd15",
+      "path": "/mnt/d/havnai-storage/models/creator/triomerge_v10.safetensors",
+      "type": "checkpoint",
+      "tags": ["fantasy", "stylized"],
+      "task_type": "IMAGE_GEN",
+      "weight": 8,
+      "reward_weight": 8,
+      "strengths": "Great stylized fantasy art.",
+      "weaknesses": "Adds jewelry/headpieces automatically and cannot stay realistic."
+    },
+    {
+      "name": "unstablePornhwa_beta",
+      "pipeline": "sd15",
+      "path": "/mnt/d/havnai-storage/models/creator/unstablePornhwa_beta.safetensors",
+      "type": "checkpoint",
+      "tags": ["manhwa", "webtoon"],
+      "task_type": "IMAGE_GEN",
+      "weight": 8,
+      "reward_weight": 8,
+      "strengths": "High-quality manhwa-style outputs.",
+      "weaknesses": "Flat shading, fantasy proportions, not realistic."
+    },
+    {
+      "name": "disneyPixarCartoon_v10",
+      "pipeline": "sd15",
+      "path": "/mnt/d/havnai-storage/models/creator/disneyPixarCartoon_v10.safetensors",
+      "type": "checkpoint",
+      "tags": ["cartoon", "pixar"],
+      "task_type": "IMAGE_GEN",
+      "weight": 5,
+      "reward_weight": 5,
+      "strengths": "Excellent Pixar-style cartoon rendering.",
+      "weaknesses": "No realism. Typical 3D cartoon limitations."
+    },
+    {
+      "name": "kizukiAnimeHentai_animeHentaiV4",
+      "pipeline": "sd15",
+      "path": "/mnt/d/havnai-storage/models/creator/kizukiAnimeHentai_animeHentaiV4.safetensors",
+      "type": "checkpoint",
+      "tags": ["anime", "stylized"],
+      "task_type": "IMAGE_GEN",
+      "weight": 5,
+      "reward_weight": 5,
+      "strengths": "Great anime/hentai-style rendering.",
+      "weaknesses": "Not realistic. Exaggerated eyes and proportions."
     },
     {
       "name": "wan_t2v_a14b",

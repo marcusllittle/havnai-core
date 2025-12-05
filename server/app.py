@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import uuid
+import random
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -408,6 +409,8 @@ def load_manifest() -> None:
             "tags": entry.get("tags", []),
             "reward_weight": weight,
             "task_type": entry.get("task_type", CREATOR_TASK_TYPE),
+            "strengths": entry.get("strengths"),
+            "weaknesses": entry.get("weaknesses"),
         }
         MANIFEST_MODELS[key] = entry_data
         MODEL_STATS.setdefault(key, {"count": 0.0, "total_time": 0.0})
@@ -951,8 +954,26 @@ def submit_job() -> Any:
 
     if not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid wallet"}), 400
+    # Allow "auto" model selection based on manifest weights
+    if not model_name or model_name in {"auto", "auto_image", "auto-image"}:
+        load_manifest()
+        # Candidate models: creator IMAGE_GEN only
+        candidates = [
+            meta
+            for key, meta in MANIFEST_MODELS.items()
+            if (meta.get("task_type") or CREATOR_TASK_TYPE).upper() == CREATOR_TASK_TYPE
+        ]
+        if not candidates:
+            return jsonify({"error": "no_creator_models"}), 400
+        names = [meta["name"] for meta in candidates]
+        weights = [resolve_weight(meta["name"].lower(), meta.get("reward_weight", 10.0)) for meta in candidates]
+        chosen = random.choices(names, weights=weights, k=1)[0]
+        model_name_raw = chosen
+        model_name = chosen.lower()
+
     if not model_name:
         return jsonify({"error": "missing model"}), 400
+
     cfg = get_model_config(model_name)
     if not cfg:
         return jsonify({"error": "unknown model"}), 400

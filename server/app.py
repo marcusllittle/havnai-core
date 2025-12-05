@@ -594,9 +594,17 @@ def get_job_summary(limit: int = 12) -> Dict[str, Any]:
     ).fetchone()[0]
     total_distributed = conn.execute("SELECT COALESCE(SUM(reward_hai),0) FROM rewards").fetchone()[0]
     today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    # Count jobs that have finished today (either legacy 'completed' or
+    # newer 'success' status values).
     completed_today = conn.execute(
-        "SELECT COUNT(*) FROM jobs WHERE status='completed' AND completed_at IS NOT NULL AND completed_at >= ?",
-        (today_start,),
+        """
+        SELECT COUNT(*) FROM jobs
+        WHERE status IN ('completed', 'success')
+          AND completed_at IS NOT NULL
+          AND completed_at >= ?
+          AND UPPER(task_type)=?
+        """,
+        (today_start, CREATOR_TASK_TYPE),
     ).fetchone()[0]
     # Avoid binding LIMIT to sidestep driver quirks under concurrency; limit is internal and cast to int.
     limit_int = int(limit)
@@ -1568,12 +1576,22 @@ def models_stats() -> Any:
 
     # Success rate: completed / total for creator jobs.
     conn = get_db()
+    # Total finished jobs (exclude queued/running)
     total_row = conn.execute(
-        "SELECT COUNT(*) FROM jobs WHERE UPPER(task_type)=?",
+        """
+        SELECT COUNT(*) FROM jobs
+        WHERE UPPER(task_type)=?
+          AND status NOT IN ('queued', 'running')
+        """,
         (CREATOR_TASK_TYPE,),
     ).fetchone()
+    # Successful jobs (legacy 'completed' or newer 'success')
     ok_row = conn.execute(
-        "SELECT COUNT(*) FROM jobs WHERE status='completed' AND UPPER(task_type)=?",
+        """
+        SELECT COUNT(*) FROM jobs
+        WHERE UPPER(task_type)=?
+          AND status IN ('completed', 'success')
+        """,
         (CREATOR_TASK_TYPE,),
     ).fetchone()
     total_jobs = int(total_row[0]) if total_row else 0

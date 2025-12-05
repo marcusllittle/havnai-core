@@ -1576,6 +1576,13 @@ def models_stats() -> Any:
     )
 
 
+@app.route("/models/stats", methods=["GET"])
+def models_stats_legacy() -> Any:
+    """Backward-compatible alias used by older frontends."""
+
+    return models_stats()
+
+
 # ---------------------------------------------------------------------------
 # Health and admin utilities
 # ---------------------------------------------------------------------------

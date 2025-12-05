@@ -47,10 +47,15 @@ try:
         from diffusers import StableDiffusionPipeline as _SDPipe  # type: ignore
     except Exception:  # pragma: no cover
         _SDPipe = None  # type: ignore
+    try:
+        from diffusers import DPMSolverMultistepScheduler as _DPMSolver  # type: ignore
+    except Exception:  # pragma: no cover
+        _DPMSolver = None  # type: ignore
 except ImportError:  # pragma: no cover
     diffusers = None
     _AutoPipe = None  # type: ignore
     _SDPipe = None  # type: ignore
+    _DPMSolver = None  # type: ignore
 try:
     from PIL import Image  # type: ignore
 except Exception:  # pragma: no cover
@@ -194,6 +199,11 @@ TASK_POLL_INTERVAL = 15
 BACKOFF_BASE = 5
 MAX_BACKOFF = 60
 START_TIME = time.time()
+
+IMAGE_STEPS = int(os.environ.get("HAI_STEPS", "20"))
+IMAGE_GUIDANCE = float(os.environ.get("HAI_GUIDANCE", "7.5"))
+IMAGE_WIDTH = int(os.environ.get("HAI_WIDTH", "512"))
+IMAGE_HEIGHT = int(os.environ.get("HAI_HEIGHT", "512"))
 
 utilization_hint = random.randint(10, 25 if ROLE == "creator" else 15)
 
@@ -363,6 +373,7 @@ def execute_task(task: Dict[str, Any]) -> None:
     reward_weight = float(task.get("reward_weight", 1.0))
     input_shape = task.get("input_shape") or []
     prompt = task.get("prompt") or ""
+    negative_prompt = task.get("negative_prompt") or ""
 
     if task_type == "image_gen" and ROLE != "creator":
         log(f"Skipping creator task {task_id[:8]} — node not in creator mode", prefix="⚠️")
@@ -378,7 +389,7 @@ def execute_task(task: Dict[str, Any]) -> None:
         log(f"Model resolution failed: {exc}", prefix="🚫")
         return
     if task_type == "image_gen":
-        metrics, util, image_b64 = run_image_generation(task_id, entry, model_path, reward_weight, prompt)
+        metrics, util, image_b64 = run_image_generation(task_id, entry, model_path, reward_weight, prompt, negative_prompt)
     else:
         metrics, util = run_ai_inference(entry, model_path, input_shape, reward_weight)
 
@@ -444,7 +455,7 @@ def run_ai_inference(entry: ModelEntry, model_path: Path, input_shape: List[int]
     return metrics, int(util)
 
 
-def run_image_generation(task_id: str, entry: ModelEntry, model_path: Path, reward_weight: float, prompt: str) -> (Dict[str, Any], int, Optional[str]):
+def run_image_generation(task_id: str, entry: ModelEntry, model_path: Path, reward_weight: float, prompt: str, negative_prompt: str) -> (Dict[str, Any], int, Optional[str]):
 
     start_stats = read_gpu_stats()
     started = time.time()
@@ -460,8 +471,10 @@ def run_image_generation(task_id: str, entry: ModelEntry, model_path: Path, rewa
             log("Loading text2image pipeline…", prefix="ℹ️", device=device)
             load_t0 = time.time()
             pipe = None
-            # Prefer AutoPipeline for broader checkpoint support
-            if _AutoPipe is not None:
+            # For SD1.5-style checkpoints (triomerge, etc.) use StableDiffusionPipeline
+            # to match direct test behavior; reserve AutoPipeline for SDXL/other future types.
+            pipeline_name = (getattr(entry, "pipeline", "") or "sd15").lower()
+            if pipeline_name in {"sdxl"} and _AutoPipe is not None:
                 try:
                     pipe = _AutoPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
                 except Exception as exc:  # fallback to SD1.5 pipe
@@ -472,16 +485,54 @@ def run_image_generation(task_id: str, entry: ModelEntry, model_path: Path, rewa
                 pipe.enable_attention_slicing("max")
             if hasattr(pipe, "set_progress_bar_config"):
                 pipe.set_progress_bar_config(disable=True)
+            if "_DPMSolver" in globals() and _DPMSolver is not None and hasattr(pipe, "scheduler"):
+                try:
+                    pipe.scheduler = _DPMSolver.from_config(pipe.scheduler.config)
+                except Exception as exc:
+                    log(f"DPM scheduler setup failed: {exc}", prefix="⚠️")
             pipe = pipe.to(device)
             load_ms = int((time.time() - load_t0) * 1000)
             log(f"Pipeline ready in {load_ms}ms", prefix="✅")
 
             seed = int(time.time()) & 0x7FFFFFFF
             generator = torch.Generator(device=device).manual_seed(seed)
-            text = prompt or "a high quality photo of a golden retriever on a beach at sunset"
+            pos_text = prompt or "a high quality photo of a golden retriever on a beach at sunset"
+            neg_text = negative_prompt or ""
+            # Proactively truncate to CLIP token limit to avoid noisy warnings
+            if hasattr(pipe, "tokenizer") and hasattr(pipe.tokenizer, "model_max_length"):
+                try:
+                    encoded = pipe.tokenizer(
+                        pos_text,
+                        max_length=pipe.tokenizer.model_max_length,
+                        truncation=True,
+                        return_tensors="pt",
+                    )
+                    pos_text = pipe.tokenizer.batch_decode(
+                        encoded.input_ids, skip_special_tokens=True
+                    )[0]
+                    if neg_text:
+                        encoded_neg = pipe.tokenizer(
+                            neg_text,
+                            max_length=pipe.tokenizer.model_max_length,
+                            truncation=True,
+                            return_tensors="pt",
+                        )
+                        neg_text = pipe.tokenizer.batch_decode(
+                            encoded_neg.input_ids, skip_special_tokens=True
+                        )[0]
+                except Exception as exc:
+                    log(f"Prompt truncation failed: {exc}", prefix="⚠️")
             gen_t0 = time.time()
             with torch.inference_mode():
-                result = pipe(text, num_inference_steps=10, guidance_scale=7.5, generator=generator, height=512, width=512)
+                result = pipe(
+                    pos_text,
+                    negative_prompt=neg_text or None,
+                    num_inference_steps=IMAGE_STEPS,
+                    guidance_scale=IMAGE_GUIDANCE,
+                    generator=generator,
+                    height=IMAGE_HEIGHT,
+                    width=IMAGE_WIDTH,
+                )
             gen_ms = int((time.time() - gen_t0) * 1000)
             log(f"Generated in {gen_ms}ms", prefix="✅")
             img = result.images[0]

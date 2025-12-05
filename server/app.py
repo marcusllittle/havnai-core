@@ -1039,7 +1039,12 @@ def submit_job() -> Any:
         job_data = json.dumps(settings)
         task_type = "ANIMATEDIFF"
     else:
-        job_data = str(payload.get("prompt") or payload.get("data") or "")
+        prompt_text = str(payload.get("prompt") or payload.get("data") or "")
+        negative_prompt = str(payload.get("negative_prompt") or "")
+        if negative_prompt:
+            job_data = json.dumps({"prompt": prompt_text, "negative_prompt": negative_prompt})
+        else:
+            job_data = prompt_text
         task_type = CREATOR_TASK_TYPE
 
     with LOCK:
@@ -1218,6 +1223,18 @@ def get_creator_tasks() -> Any:
             if job:
                 cfg = get_model_config(job["model"])
                 if cfg:
+                    # Decode prompt/negative_prompt for standard IMAGE_GEN jobs stored as JSON
+                    raw_data = job.get("data")
+                    prompt_text = raw_data or ""
+                    negative_prompt = ""
+                    try:
+                        parsed = json.loads(raw_data) if isinstance(raw_data, str) else None
+                    except Exception:
+                        parsed = None
+                    if isinstance(parsed, dict):
+                        prompt_text = str(parsed.get("prompt") or "")
+                        negative_prompt = str(parsed.get("negative_prompt") or "")
+
                     assign_job_to_node(job["id"], node_id)
                     reward_weight = float(job["weight"] or cfg.get("reward_weight", resolve_weight(job["model"], 10.0)))
                     job_task_type = (job.get("task_type") or CREATOR_TASK_TYPE).upper()
@@ -1234,8 +1251,9 @@ def get_creator_tasks() -> Any:
                             "wallet": job["wallet"],
                             "assigned_to": node_id,
                             "job_id": job["id"],
-                            "data": job.get("data"),
-                            "prompt": job.get("data", ""),
+                            "data": raw_data,
+                            "prompt": prompt_text,
+                            "negative_prompt": negative_prompt,
                         }
                     ]
                     node_info["current_task"] = {
@@ -1266,6 +1284,7 @@ def get_creator_tasks() -> Any:
                 "reward_weight": task.get("reward_weight", 1.0),
                 "wallet": task.get("wallet"),
                 "prompt": task.get("prompt") or task.get("data", ""),
+                "negative_prompt": task.get("negative_prompt") or "",
             }
             # If this is a WAN I2V video job, attempt to expose structured settings to the node
             if task_payload["type"].upper() == "VIDEO_GEN":

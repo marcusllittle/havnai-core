@@ -7,10 +7,12 @@ import os
 import re
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 import uuid
 from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -37,6 +39,12 @@ CLIENT_REQUIREMENTS = BASE_DIR / "client" / "requirements-node.txt"
 VERSION_FILE = BASE_DIR / "VERSION"
 
 CREATOR_TASK_TYPE = "IMAGE_GEN"
+
+# Ensure local packages (e.g., havnai.video_engine) are importable when running server/app.py directly
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+from havnai.video_engine.gguf_wan2_2 import VideoEngine, VideoJobRequest
 
 # Reward weights bootstrap – enriched at runtime via registration
 MODEL_WEIGHTS: Dict[str, float] = {
@@ -214,6 +222,64 @@ def ensure_directories() -> None:
 
 
 ensure_directories()
+
+# ---------------------------------------------------------------------------
+# WAN 2.2 GGUF video worker
+# ---------------------------------------------------------------------------
+
+VIDEO_ENGINE = VideoEngine()
+VIDEO_EXECUTOR = ThreadPoolExecutor(max_workers=int(os.getenv("WAN_W2V_WORKERS", "1")) or 1)
+VIDEO_JOBS: Dict[str, Dict[str, Any]] = {}
+VIDEO_JOB_LOCK = threading.Lock()
+
+
+def submit_video_job(job_request: VideoJobRequest) -> str:
+    """Queue a WAN GGUF video generation job."""
+
+    job_id = job_request.job_id or f"wan-video-{uuid.uuid4().hex[:8]}"
+    job_request.job_id = job_id
+    mode = "i2v" if job_request.init_image_b64 else "t2v"
+    record = {
+        "job_id": job_id,
+        "status": "queued",
+        "prompt": job_request.prompt,
+        "negative_prompt": job_request.negative_prompt,
+        "mode": mode,
+        "loras": job_request.lora_list,
+        "motion_type": job_request.motion_type,
+        "duration": job_request.duration,
+        "fps": job_request.fps,
+        "created_at": iso_now(),
+        "frames_dir": str(VIDEO_ENGINE.registry.paths.frames_dir),
+        "videos_dir": str(VIDEO_ENGINE.registry.paths.videos_dir),
+    }
+    with VIDEO_JOB_LOCK:
+        VIDEO_JOBS[job_id] = record
+    VIDEO_EXECUTOR.submit(_run_video_job, job_id, job_request)
+    return job_id
+
+
+def _run_video_job(job_id: str, job_request: VideoJobRequest) -> None:
+    with VIDEO_JOB_LOCK:
+        if job_id in VIDEO_JOBS:
+            VIDEO_JOBS[job_id]["status"] = "running"
+            VIDEO_JOBS[job_id]["started_at"] = iso_now()
+    result = VIDEO_ENGINE.generate(job_request)
+    with VIDEO_JOB_LOCK:
+        payload = VIDEO_JOBS.get(job_id, {})
+        payload["status"] = result.status
+        payload["completed_at"] = iso_now()
+        payload["video_path"] = result.video_path
+        payload["frame_paths"] = result.frame_paths
+        payload["error"] = result.error
+        payload["metadata"] = result.metadata
+        VIDEO_JOBS[job_id] = payload
+
+
+def get_video_job(job_id: str) -> Optional[Dict[str, Any]]:
+    with VIDEO_JOB_LOCK:
+        job = VIDEO_JOBS.get(job_id)
+        return dict(job) if job else None
 
 # ---------------------------------------------------------------------------
 # Database helpers
@@ -455,12 +521,18 @@ def fetch_next_job_for_node(node_id: str) -> Optional[Dict[str, Any]]:
     rows = conn.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY timestamp ASC").fetchall()
     node = NODES.get(node_id, {})
     role = node.get("role", "worker")
+    node_supports = {s.lower() for s in node.get("supports", []) if isinstance(s, str)}
     for row in rows:
         task_type = (row["task_type"] or CREATOR_TASK_TYPE).upper()
-        # Support both standard IMAGE_GEN and WAN video jobs
-        if task_type not in {CREATOR_TASK_TYPE, "VIDEO_GEN"}:
+        # Support standard IMAGE_GEN, WAN video jobs, and AnimateDiff video jobs.
+        if task_type not in {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF"}:
             continue
         if role != "creator":
+            continue
+        required_support = "image"
+        if task_type in {"VIDEO_GEN", "ANIMATEDIFF"}:
+            required_support = "animatediff" if task_type == "ANIMATEDIFF" else "image"
+        if node_supports and required_support not in node_supports:
             continue
         model_name = row["model"].lower()
         cfg = get_model_config(model_name)
@@ -630,7 +702,8 @@ def pending_tasks_for_node(node_id: str) -> List[Dict[str, Any]]:
             continue
         if task.get("status") not in relevant_status:
             continue
-        if (task.get("task_type") or "").upper() != CREATOR_TASK_TYPE:
+        task_type = (task.get("task_type") or CREATOR_TASK_TYPE).upper()
+        if task_type not in {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF"}:
             continue
         tasks.append(task)
     return tasks
@@ -886,8 +959,13 @@ def submit_job() -> Any:
 
     if weight is None:
         weight = cfg.get("reward_weight", resolve_weight(model_name, 10.0))
+
     # Special-case WAN I2V video jobs so we preserve structured settings
     is_wan_i2v = model_name == "wan-i2v" or str(cfg.get("pipeline", "")).lower() == "wan-i2v"
+
+    # Special-case AnimateDiff video jobs with rich structured payload
+    is_animatediff = model_name == "animatediff" or str(cfg.get("pipeline", "")).lower() == "animatediff"
+
     if is_wan_i2v:
         # Persist all WAN-specific controls inside the job data blob as JSON
         prompt_text = str(payload.get("prompt") or "")
@@ -904,14 +982,130 @@ def submit_job() -> Any:
         }
         job_data = json.dumps(settings)
         task_type = "VIDEO_GEN"
+    elif is_animatediff:
+        prompt_text = str(payload.get("prompt") or "")
+        negative_prompt = str(payload.get("negative_prompt") or "")
+        # Core AnimateDiff controls – validated/coerced into safe ranges
+        try:
+            frames = int(payload.get("frames", 16))
+        except (TypeError, ValueError):
+            frames = 16
+        try:
+            fps = int(payload.get("fps", 8))
+        except (TypeError, ValueError):
+            fps = 8
+        frames = max(1, min(frames, 64))
+        fps = max(1, min(fps, 60))
+
+        motion = str(payload.get("motion") or "").strip().lower() or "zoom-in"
+        base_model = str(payload.get("base_model") or "realisticVision")
+        width = int(payload.get("width", 512) or 512)
+        height = int(payload.get("height", 512) or 512)
+        # Clamp to supported grid
+        if width not in {512, 768}:
+            width = 512
+        if height not in {512, 768}:
+            height = 512
+
+        seed = payload.get("seed")
+        try:
+            seed = int(seed) if seed is not None else None
+        except (TypeError, ValueError):
+            seed = None
+        lora_strength = payload.get("lora_strength")
+        try:
+            lora_strength = float(lora_strength) if lora_strength is not None else None
+        except (TypeError, ValueError):
+            lora_strength = None
+        init_image = payload.get("init_image") or None
+        scheduler = str(payload.get("scheduler") or "DDIM").upper()
+        if scheduler not in {"DDIM", "EULER", "HEUN"}:
+            scheduler = "DDIM"
+
+        settings = {
+            "prompt": prompt_text,
+            "negative_prompt": negative_prompt,
+            "frames": frames,
+            "fps": fps,
+            "motion": motion,
+            "base_model": base_model,
+            "width": width,
+            "height": height,
+            "seed": seed,
+            "lora_strength": lora_strength,
+            "init_image": init_image,
+            "scheduler": scheduler,
+        }
+        job_data = json.dumps(settings)
+        task_type = "ANIMATEDIFF"
     else:
-        job_data = str(payload.get("prompt") or payload.get("data") or "")
+        prompt_text = str(payload.get("prompt") or payload.get("data") or "")
+        negative_prompt = str(payload.get("negative_prompt") or "")
+        if negative_prompt:
+            job_data = json.dumps({"prompt": prompt_text, "negative_prompt": negative_prompt})
+        else:
+            job_data = prompt_text
         task_type = CREATOR_TASK_TYPE
 
     with LOCK:
         job_id = enqueue_job(wallet, cfg.get("name", model_name), task_type, job_data, float(weight))
     log_event("Public job queued", wallet=wallet, model=model_name, job_id=job_id)
     return jsonify({"status": "queued", "job_id": job_id}), 200
+
+
+@app.route("/generate-video", methods=["POST"])
+def generate_video() -> Any:
+    """Trigger a WAN 2.2 GGUF T2V/I2V job via background worker."""
+
+    data = request.get_json() or {}
+    prompt = str(data.get("prompt", "")).strip()
+    if not prompt:
+        return jsonify({"error": "prompt is required"}), 400
+
+    negative_prompt = str(data.get("negative_prompt", "")).strip()
+    motion_type = str(data.get("motion_type", "high")).strip().lower() or "high"
+    lora_list = data.get("lora_list") or []
+    if not isinstance(lora_list, list):
+        return jsonify({"error": "lora_list must be an array"}), 400
+
+    duration = float(data.get("duration", 4.0) or 4.0)
+    fps = int(data.get("fps", 24) or 24)
+    fps = max(1, min(fps, 60))
+    width = int(data.get("width", 720) or 720)
+    height = int(data.get("height", 512) or 512)
+
+    job_request = VideoJobRequest(
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        motion_type=motion_type,
+        lora_list=[str(item) for item in lora_list],
+        init_image_b64=data.get("init_image"),
+        duration=duration,
+        fps=fps,
+        width=width,
+        height=height,
+    )
+    job_id = submit_video_job(job_request)
+    job = get_video_job(job_id) or {}
+    response = {
+        "job_id": job_id,
+        "status": job.get("status", "queued"),
+        "mode": job.get("mode"),
+        "fps": fps,
+        "duration": duration,
+        "frames_dir": job.get("frames_dir"),
+        "videos_dir": job.get("videos_dir"),
+        "engine": VIDEO_ENGINE.describe(),
+    }
+    return jsonify(response), 202
+
+
+@app.route("/generate-video/<job_id>", methods=["GET"])
+def video_job_status(job_id: str) -> Any:
+    job = get_video_job(job_id)
+    if not job:
+        return jsonify({"error": "job not found"}), 404
+    return jsonify(job), 200
 
 
 @app.route("/register", methods=["POST"])
@@ -954,6 +1148,7 @@ def register() -> Any:
         node["version"] = data.get("version", "dev")
         node["pipelines"] = data.get("pipelines", node.get("pipelines", []))
         node["models"] = data.get("models", node.get("models", []))
+        node["supports"] = data.get("supports", node.get("supports", []))
         util = data.get("gpu", {}).get("utilization") if isinstance(data.get("gpu"), dict) else data.get("utilization")
         util = float(util or node.get("utilization", 0.0))
         node["utilization"] = util
@@ -1028,6 +1223,18 @@ def get_creator_tasks() -> Any:
             if job:
                 cfg = get_model_config(job["model"])
                 if cfg:
+                    # Decode prompt/negative_prompt for standard IMAGE_GEN jobs stored as JSON
+                    raw_data = job.get("data")
+                    prompt_text = raw_data or ""
+                    negative_prompt = ""
+                    try:
+                        parsed = json.loads(raw_data) if isinstance(raw_data, str) else None
+                    except Exception:
+                        parsed = None
+                    if isinstance(parsed, dict):
+                        prompt_text = str(parsed.get("prompt") or "")
+                        negative_prompt = str(parsed.get("negative_prompt") or "")
+
                     assign_job_to_node(job["id"], node_id)
                     reward_weight = float(job["weight"] or cfg.get("reward_weight", resolve_weight(job["model"], 10.0)))
                     job_task_type = (job.get("task_type") or CREATOR_TASK_TYPE).upper()
@@ -1044,8 +1251,9 @@ def get_creator_tasks() -> Any:
                             "wallet": job["wallet"],
                             "assigned_to": node_id,
                             "job_id": job["id"],
-                            "data": job.get("data"),
-                            "prompt": job.get("data", ""),
+                            "data": raw_data,
+                            "prompt": prompt_text,
+                            "negative_prompt": negative_prompt,
                         }
                     ]
                     node_info["current_task"] = {
@@ -1076,6 +1284,7 @@ def get_creator_tasks() -> Any:
                 "reward_weight": task.get("reward_weight", 1.0),
                 "wallet": task.get("wallet"),
                 "prompt": task.get("prompt") or task.get("data", ""),
+                "negative_prompt": task.get("negative_prompt") or "",
             }
             # If this is a WAN I2V video job, attempt to expose structured settings to the node
             if task_payload["type"].upper() == "VIDEO_GEN":
@@ -1088,6 +1297,30 @@ def get_creator_tasks() -> Any:
                     for key in ("num_frames", "fps", "steps_high", "steps_low", "cfg", "sampler", "resolution", "init_image"):
                         if key in settings:
                             task_payload[key] = settings[key]
+            # If this is an AnimateDiff job, surface rich controls directly on the task payload
+            if task_payload["type"].upper() == "ANIMATEDIFF":
+                try:
+                    raw_ad = task.get("data") or ""
+                    ad_settings = json.loads(raw_ad) if isinstance(raw_ad, str) else {}
+                except Exception:
+                    ad_settings = {}
+                if isinstance(ad_settings, dict):
+                    for key in (
+                        "prompt",
+                        "negative_prompt",
+                        "frames",
+                        "fps",
+                        "motion",
+                        "base_model",
+                        "width",
+                        "height",
+                        "seed",
+                        "lora_strength",
+                        "init_image",
+                        "scheduler",
+                    ):
+                        if key in ad_settings and ad_settings[key] is not None:
+                            task_payload[key] = ad_settings[key]
             response_tasks.append(task_payload)
     return jsonify({"tasks": response_tasks}), 200
 
@@ -1178,6 +1411,7 @@ def submit_results() -> Any:
                     video_path = videos_dir / f"{task_id}.mp4"
                     with video_path.open("wb") as fh:
                         fh.write(video_bytes)
+                    # Stored at: STATIC_DIR / outputs / videos / <job_id>.mp4
                     video_url = f"/static/outputs/videos/{task_id}.mp4"
                 except Exception:
                     pass
@@ -1284,6 +1518,71 @@ def rewards_endpoint() -> Any:
     return jsonify({"rewards": rewards, "total": job_summary["total_distributed"]})
 
 
+@app.route("/api/models/stats", methods=["GET"])
+def models_stats() -> Any:
+    """
+    Lightweight stats endpoint used by the public landing page.
+
+    Returns:
+        {
+          "active_nodes": int,
+          "jobs_completed_24h": int,
+          "success_rate": float,  # 0-100
+          "top_model": str | null
+        }
+    """
+
+    # Active nodes = nodes seen within ONLINE_THRESHOLD seconds
+    with LOCK:
+        now = unix_now()
+        active_nodes = 0
+        for info in NODES.values():
+            last_seen_unix = info.get("last_seen_unix", parse_timestamp(info.get("last_seen")))
+            if (now - last_seen_unix) <= ONLINE_THRESHOLD:
+                active_nodes += 1
+
+    # Creator jobs + rewards summary
+    job_summary = get_job_summary()
+    jobs_24h = int(job_summary.get("jobs_completed_today", 0) or 0)
+
+    # Success rate: completed / total for creator jobs.
+    conn = get_db()
+    total_row = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE UPPER(task_type)=?",
+        (CREATOR_TASK_TYPE,),
+    ).fetchone()
+    ok_row = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE status='completed' AND UPPER(task_type)=?",
+        (CREATOR_TASK_TYPE,),
+    ).fetchone()
+    total_jobs = int(total_row[0]) if total_row else 0
+    ok_jobs = int(ok_row[0]) if ok_row else 0
+    success_rate = round(100.0 * ok_jobs / total_jobs, 1) if total_jobs else 0.0
+
+    # Top model by count of successful completions
+    with LOCK:
+        if MODEL_STATS:
+            top_model = max(MODEL_STATS.items(), key=lambda kv: kv[1].get("count", 0.0))[0]
+        else:
+            top_model = None
+
+    return jsonify(
+        {
+            "active_nodes": active_nodes,
+            "jobs_completed_24h": jobs_24h,
+            "success_rate": success_rate,
+            "top_model": top_model,
+        }
+    )
+
+
+@app.route("/models/stats", methods=["GET"])
+def models_stats_legacy() -> Any:
+    """Backward-compatible alias used by older frontends."""
+
+    return models_stats()
+
+
 # ---------------------------------------------------------------------------
 # Health and admin utilities
 # ---------------------------------------------------------------------------
@@ -1380,6 +1679,32 @@ def logs_endpoint() -> Any:
 @app.route("/feed", methods=["GET"])
 def feed_catalog() -> Any:
     return jsonify({"models": build_models_catalog()})
+
+
+@app.route("/result/<job_id>", methods=["GET"])
+def get_result(job_id: str) -> Any:
+    """
+    Return a simple JSON payload describing where the result artifact lives.
+
+    For video jobs (WAN I2V or AnimateDiff), this exposes the MP4 download URL
+    under ``/static/outputs/videos/<job_id>.mp4`` if it exists.
+    """
+    if not job_id:
+        return jsonify({"error": "missing job_id"}), 400
+
+    image_path = OUTPUTS_DIR / f"{job_id}.png"
+    videos_dir = OUTPUTS_DIR / "videos"
+    video_path = videos_dir / f"{job_id}.mp4"
+
+    payload: Dict[str, Any] = {"job_id": job_id}
+    if image_path.exists():
+        payload["image_url"] = f"/static/outputs/{job_id}.png"
+    if video_path.exists():
+        payload["video_url"] = f"/static/outputs/videos/{job_id}.mp4"
+
+    if "image_url" not in payload and "video_url" not in payload:
+        return jsonify({"error": "result_not_found", "job_id": job_id}), 404
+    return jsonify(payload), 200
 
 
 @app.route("/nodes", methods=["GET"])

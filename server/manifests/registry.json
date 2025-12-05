@@ -64,6 +64,33 @@
       "reward_weight": 10.0
     },
     {
+      "name": "majicmixRealistic_v7",
+      "pipeline": "sd15",
+      "path": "/mnt/d/havnai-storage/models/creator/majicmixRealistic_v7.safetensors",
+      "type": "checkpoint",
+      "tags": [],
+      "task_type": "IMAGE_GEN",
+      "reward_weight": 10.0
+    },
+    {
+      "name": "epicrealismXL_vxviiCrystalclear",
+      "pipeline": "sdxl",
+      "path": "/mnt/d/havnai-storage/models/creator/epicrealismXL_vxviiCrystalclear.safetensors",
+      "type": "checkpoint",
+      "tags": [],
+      "task_type": "IMAGE_GEN",
+      "reward_weight": 12.0
+    },
+    {
+      "name": "juggernautXL_ragnarokBy",
+      "pipeline": "sdxl",
+      "path": "/mnt/d/havnai-storage/models/creator/juggernautXL_ragnarokBy.safetensors",
+      "type": "checkpoint",
+      "tags": [],
+      "task_type": "IMAGE_GEN",
+      "reward_weight": 12.0
+    },
+    {
       "name": "wan_t2v_a14b",
       "pipeline": "wan",
       "path": "/mnt/d/havnai-storage/models/video/wan-2.2/T2V-A14B",
@@ -107,6 +134,15 @@
       "tags": ["video", "i2v", "t2v"],
       "task_type": "VIDEO_GEN",
       "reward_weight": 22.0
+    },
+    {
+      "name": "animatediff",
+      "pipeline": "animatediff",
+      "path": "/mnt/d/havnai-storage/models/creator/realisticVisionV60B1_v51HyperVAE.safetensors",
+      "type": "checkpoint",
+      "tags": ["video", "animatediff", "sd15"],
+      "task_type": "ANIMATEDIFF",
+      "reward_weight": 15.0
     }
   ]
 }

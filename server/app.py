@@ -1518,6 +1518,64 @@ def rewards_endpoint() -> Any:
     return jsonify({"rewards": rewards, "total": job_summary["total_distributed"]})
 
 
+@app.route("/api/models/stats", methods=["GET"])
+def models_stats() -> Any:
+    """
+    Lightweight stats endpoint used by the public landing page.
+
+    Returns:
+        {
+          "active_nodes": int,
+          "jobs_completed_24h": int,
+          "success_rate": float,  # 0-100
+          "top_model": str | null
+        }
+    """
+
+    # Active nodes = nodes seen within ONLINE_THRESHOLD seconds
+    with LOCK:
+        now = unix_now()
+        active_nodes = 0
+        for info in NODES.values():
+            last_seen_unix = info.get("last_seen_unix", parse_timestamp(info.get("last_seen")))
+            if (now - last_seen_unix) <= ONLINE_THRESHOLD:
+                active_nodes += 1
+
+    # Creator jobs + rewards summary
+    job_summary = get_job_summary()
+    jobs_24h = int(job_summary.get("jobs_completed_today", 0) or 0)
+
+    # Success rate: completed / total for creator jobs.
+    conn = get_db()
+    total_row = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE UPPER(task_type)=?",
+        (CREATOR_TASK_TYPE,),
+    ).fetchone()
+    ok_row = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE status='completed' AND UPPER(task_type)=?",
+        (CREATOR_TASK_TYPE,),
+    ).fetchone()
+    total_jobs = int(total_row[0]) if total_row else 0
+    ok_jobs = int(ok_row[0]) if ok_row else 0
+    success_rate = round(100.0 * ok_jobs / total_jobs, 1) if total_jobs else 0.0
+
+    # Top model by count of successful completions
+    with LOCK:
+        if MODEL_STATS:
+            top_model = max(MODEL_STATS.items(), key=lambda kv: kv[1].get("count", 0.0))[0]
+        else:
+            top_model = None
+
+    return jsonify(
+        {
+            "active_nodes": active_nodes,
+            "jobs_completed_24h": jobs_24h,
+            "success_rate": success_rate,
+            "top_model": top_model,
+        }
+    )
+
+
 # ---------------------------------------------------------------------------
 # Health and admin utilities
 # ---------------------------------------------------------------------------

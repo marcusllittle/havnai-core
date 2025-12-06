@@ -69,6 +69,15 @@ SERVER_JOIN_TOKEN = os.getenv("SERVER_JOIN_TOKEN", "").strip()
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "").strip()
 RESET_ON_STARTUP = os.getenv("RESET_ON_STARTUP", "").strip()
 
+# Reward configuration (can be overridden via environment variables)
+REWARD_CONFIG: Dict[str, float] = {
+    "baseline_runtime": float(os.getenv("REWARD_BASELINE_RUNTIME", "8.0")),
+    "sdxl_factor": float(os.getenv("REWARD_SDXL_FACTOR", "1.5")),
+    "sd15_factor": float(os.getenv("REWARD_SD15_FACTOR", "1.0")),
+    "anime_factor": float(os.getenv("REWARD_ANIME_FACTOR", "0.7")),
+    "base_reward": float(os.getenv("REWARD_BASE_HAI", "0.05")),
+}
+
 # ---------------------------------------------------------------------------
 # Version helpers
 # ---------------------------------------------------------------------------
@@ -517,6 +526,82 @@ def enqueue_job(wallet: str, model: str, task_type: str, data: str, weight: floa
     )
     conn.commit()
     return job_id
+
+
+def compute_reward(
+    model_name: str,
+    pipeline: str,
+    metrics: Dict[str, Any],
+    status: str,
+) -> Tuple[float, Dict[str, Any]]:
+    """Compute dynamic reward for a completed job.
+
+    Formula:
+        reward = base_reward * weight_factor * compute_cost_factor
+                  * runtime_factor * success_factor
+    """
+
+    try:
+        base_reward = float(REWARD_CONFIG.get("base_reward", 0.05))
+        # Weight factor based on manifest/model weight
+        model_weight = resolve_weight(model_name, 10.0)
+        weight_factor = model_weight / 10.0
+
+        # Compute-cost factor based on pipeline family
+        pipeline_norm = (pipeline or "sd15").lower()
+        if pipeline_norm == "sdxl":
+            compute_cost_factor = float(REWARD_CONFIG.get("sdxl_factor", 1.5))
+        elif pipeline_norm == "sd15":
+            compute_cost_factor = float(REWARD_CONFIG.get("sd15_factor", 1.0))
+        elif pipeline_norm in {"anime", "cartoon"}:
+            compute_cost_factor = float(REWARD_CONFIG.get("anime_factor", 0.7))
+        else:
+            compute_cost_factor = 1.0
+
+        # Runtime factor from actual runtime vs baseline
+        baseline_runtime = float(REWARD_CONFIG.get("baseline_runtime", 8.0)) or 8.0
+        runtime_sec = 0.0
+        inf_ms = metrics.get("inference_time_ms")
+        if isinstance(inf_ms, (int, float)) and inf_ms > 0:
+            runtime_sec = float(inf_ms) / 1000.0
+        else:
+            dur = metrics.get("duration")
+            if isinstance(dur, (int, float)) and dur > 0:
+                runtime_sec = float(dur)
+        runtime_sec = max(0.0, runtime_sec)
+        runtime_factor = max(1.0, runtime_sec / baseline_runtime) if baseline_runtime > 0 else 1.0
+
+        # Success / failure factor
+        status_norm = (status or "").lower()
+        success_factor = 1.0 if status_norm == "success" else 0.0
+
+        reward = base_reward * weight_factor * compute_cost_factor * runtime_factor * success_factor
+        reward = round(float(reward), 6)
+
+        factors = {
+            "base_reward": base_reward,
+            "weight_factor": weight_factor,
+            "compute_cost_factor": compute_cost_factor,
+            "runtime_factor": runtime_factor,
+            "success_factor": success_factor,
+            "runtime_seconds": runtime_sec,
+            "model_weight": model_weight,
+            "pipeline": pipeline_norm,
+            # TODO: future quality verification boost
+            # "quality_factor": 1.0,
+        }
+        return reward, factors
+    except Exception as exc:  # pragma: no cover - defensive
+        LOGGER.exception("Reward computation failed for %s: %s", model_name, exc)
+        return 0.0, {
+            "base_reward": float(REWARD_CONFIG.get("base_reward", 0.05)),
+            "weight_factor": 0.0,
+            "compute_cost_factor": 1.0,
+            "runtime_factor": 1.0,
+            "success_factor": 0.0,
+            "runtime_seconds": 0.0,
+            "error": str(exc),
+        }
 
 
 def fetch_next_job_for_node(node_id: str) -> Optional[Dict[str, Any]]:
@@ -1403,16 +1488,25 @@ def submit_results() -> Any:
         wallet = task.get("wallet")
         model_name = task.get("model_name", "creator-model")
         task_type = task.get("task_type", CREATOR_TASK_TYPE)
+        # Determine pipeline family for reward computation
+        cfg = get_model_config(model_name)
+        pipeline = cfg.get("pipeline", "sd15") if cfg else "sd15"
+
+        # Compute dynamic reward and factors
+        reward, reward_factors = compute_reward(model_name, pipeline, metrics, status)
+
         if node:
-            inference_time = float(metrics.get("inference_time_ms") or metrics.get("duration", 0) * 1000)
-            gpu_util = float(utilization or node.get("utilization", 0.0))
-            reward_weight = float(task.get("reward_weight", resolve_weight(model_name, 1.0)))
-            if inference_time > 0:
-                reward = round((gpu_util * reward_weight) / inference_time, 6)
             node["rewards"] = round(node.get("rewards", 0.0) + reward, 6)
             node["last_reward"] = reward
             history = node.setdefault("reward_history", [])
-            history.append({"reward": reward, "task_id": task_id, "timestamp": iso_now()})
+            history.append(
+                {
+                    "reward": reward,
+                    "task_id": task_id,
+                    "timestamp": iso_now(),
+                    "factors": reward_factors,
+                }
+            )
             if len(history) > 20:
                 history.pop(0)
             node["last_seen"] = iso_now()
@@ -1451,6 +1545,7 @@ def submit_results() -> Any:
                 "metrics": metrics,
                 "model_name": model_name,
                 "reward": reward,
+                "reward_factors": reward_factors,
                 "wallet": wallet,
                 "task_type": task_type,
                 "image_url": image_url,
@@ -1474,6 +1569,22 @@ def submit_results() -> Any:
 
         job = get_job(task_id)
         if job:
+            # Persist reward info into the job's data JSON for later inspection.
+            raw_data = job.get("data")
+            try:
+                payload = json.loads(raw_data) if isinstance(raw_data, str) else {}
+            except Exception:
+                payload = {}
+            if isinstance(payload, dict):
+                payload["reward"] = reward
+                payload["reward_factors"] = reward_factors
+                payload["reward_status"] = status
+                try:
+                    conn = get_db()
+                    conn.execute("UPDATE jobs SET data=? WHERE id=?", (json.dumps(payload), task_id))
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
             complete_job(task_id, status)
             wallet = wallet or job.get("wallet")
 
@@ -1545,6 +1656,68 @@ def rewards_endpoint() -> Any:
     with LOCK:
         rewards = {node_id: info.get("rewards", 0.0) for node_id, info in NODES.items()}
     return jsonify({"rewards": rewards, "total": job_summary["total_distributed"]})
+
+
+@app.route("/jobs/recent", methods=["GET"])
+def jobs_recent() -> Any:
+    """Return recent creator jobs with reward information."""
+
+    try:
+        limit = int(request.args.get("limit", 25))
+    except Exception:
+        limit = 25
+    summary = get_job_summary(limit=limit)
+    return jsonify({"jobs": summary.get("feed", []), "summary": summary})
+
+
+@app.route("/jobs/<job_id>", methods=["GET"])
+def job_detail(job_id: str) -> Any:
+    job = get_job(job_id)
+    if not job:
+        return jsonify({"error": "job_not_found", "job_id": job_id}), 404
+    conn = get_db()
+    reward_row = conn.execute(
+        "SELECT reward_hai, timestamp FROM rewards WHERE task_id=?",
+        (job_id,),
+    ).fetchone()
+    reward_value = float(reward_row["reward_hai"]) if reward_row else 0.0
+    reward_ts = reward_row["timestamp"] if reward_row else None
+
+    raw_data = job.get("data")
+    try:
+        payload = json.loads(raw_data) if isinstance(raw_data, str) else {}
+    except Exception:
+        payload = {}
+    reward_factors = payload.get("reward_factors") if isinstance(payload, dict) else None
+
+    return jsonify(
+        {
+            "id": job.get("id"),
+            "wallet": job.get("wallet"),
+            "model": job.get("model"),
+            "task_type": job.get("task_type"),
+            "status": job.get("status"),
+            "weight": job.get("weight"),
+            "node_id": job.get("node_id"),
+            "timestamp": job.get("timestamp"),
+            "completed_at": job.get("completed_at"),
+            "reward": reward_value,
+            "reward_timestamp": reward_ts,
+            "reward_factors": reward_factors,
+            "data": payload,
+        }
+    )
+
+
+@app.route("/nodes/<node_id>", methods=["GET"])
+def node_detail(node_id: str) -> Any:
+    with LOCK:
+        node = NODES.get(node_id)
+        if not node:
+            return jsonify({"error": "node_not_found", "node_id": node_id}), 404
+        payload = dict(node)
+        payload["node_id"] = node_id
+    return jsonify(payload)
 
 
 @app.route("/api/models/stats", methods=["GET"])

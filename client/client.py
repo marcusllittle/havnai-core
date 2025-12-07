@@ -51,11 +51,16 @@ try:
         from diffusers import DPMSolverMultistepScheduler as _DPMSolver  # type: ignore
     except Exception:  # pragma: no cover
         _DPMSolver = None  # type: ignore
+    try:
+        from diffusers import AutoencoderKL as _AutoencoderKL  # type: ignore
+    except Exception:  # pragma: no cover
+        _AutoencoderKL = None  # type: ignore
 except ImportError:  # pragma: no cover
     diffusers = None
     _AutoPipe = None  # type: ignore
     _SDPipe = None  # type: ignore
     _DPMSolver = None  # type: ignore
+    _AutoencoderKL = None  # type: ignore
 try:
     from PIL import Image  # type: ignore
 except Exception:  # pragma: no cover
@@ -481,6 +486,16 @@ def run_image_generation(task_id: str, entry: ModelEntry, model_path: Path, rewa
                     log(f"AutoPipeline load failed: {exc}", prefix="⚠️")
             if pipe is None and _SDPipe is not None:
                 pipe = _SDPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
+            # Optionally swap in a custom VAE for SD1.5-style checkpoints
+            if pipe is not None and getattr(entry, "vae_path", "") and pipeline_name != "sdxl":
+                vae_path = Path(str(getattr(entry, "vae_path", ""))).expanduser()
+                if vae_path.exists() and _AutoencoderKL is not None:
+                    try:
+                        custom_vae = _AutoencoderKL.from_single_file(str(vae_path), torch_dtype=dtype)
+                        pipe.vae = custom_vae
+                        log(f"Loaded custom VAE for {entry.name}", prefix="✅", vae=str(vae_path))
+                    except Exception as exc:
+                        log(f"Custom VAE load failed for {entry.name}: {exc}", prefix="⚠️", vae=str(vae_path))
             if hasattr(pipe, "enable_attention_slicing"):
                 pipe.enable_attention_slicing("max")
             if hasattr(pipe, "set_progress_bar_config"):

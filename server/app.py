@@ -1155,10 +1155,26 @@ def submit_job() -> Any:
     else:
         prompt_text = str(payload.get("prompt") or payload.get("data") or "")
         negative_prompt = str(payload.get("negative_prompt") or "")
+        job_settings: Dict[str, Any] = {"prompt": prompt_text}
         if negative_prompt:
-            job_data = json.dumps({"prompt": prompt_text, "negative_prompt": negative_prompt})
-        else:
-            job_data = prompt_text
+            job_settings["negative_prompt"] = negative_prompt
+
+        # Per-model defaults from manifest (steps/guidance/size/sampler/negative)
+        if cfg:
+            if cfg.get("steps") is not None:
+                job_settings["steps"] = cfg["steps"]
+            if cfg.get("guidance") is not None:
+                job_settings["guidance"] = cfg["guidance"]
+            if cfg.get("width") is not None:
+                job_settings["width"] = cfg["width"]
+            if cfg.get("height") is not None:
+                job_settings["height"] = cfg["height"]
+            if cfg.get("sampler"):
+                job_settings["sampler"] = cfg["sampler"]
+            if cfg.get("negative_prompt_default") and not negative_prompt:
+                job_settings["negative_prompt"] = cfg["negative_prompt_default"]
+
+        job_data = json.dumps(job_settings)
         task_type = CREATOR_TASK_TYPE
 
     with LOCK:

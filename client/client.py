@@ -394,7 +394,19 @@ def execute_task(task: Dict[str, Any]) -> None:
         log(f"Model resolution failed: {exc}", prefix="🚫")
         return
     if task_type == "image_gen":
-        metrics, util, image_b64 = run_image_generation(task_id, entry, model_path, reward_weight, prompt, negative_prompt)
+        # Parse structured settings from task if present
+        job_settings = None
+        try:
+            if isinstance(task.prompt, str) and task.prompt.strip().startswith("{"):
+                job_settings = json.loads(task.prompt)
+                prompt = job_settings.get("prompt", prompt)
+                negative_prompt = job_settings.get("negative_prompt", negative_prompt)
+            elif isinstance(task.prompt, str):
+                prompt = task.prompt
+        except Exception as exc:
+            log(f"Failed to parse job settings: {exc}", prefix=\"⚠️\", task_id=task_id)
+
+        metrics, util, image_b64 = run_image_generation(task_id, entry, model_path, reward_weight, prompt, negative_prompt, job_settings)
     else:
         metrics, util = run_ai_inference(entry, model_path, input_shape, reward_weight)
 
@@ -460,7 +472,15 @@ def run_ai_inference(entry: ModelEntry, model_path: Path, input_shape: List[int]
     return metrics, int(util)
 
 
-def run_image_generation(task_id: str, entry: ModelEntry, model_path: Path, reward_weight: float, prompt: str, negative_prompt: str) -> (Dict[str, Any], int, Optional[str]):
+def run_image_generation(
+    task_id: str,
+    entry: ModelEntry,
+    model_path: Path,
+    reward_weight: float,
+    prompt: str,
+    negative_prompt: str,
+    job_settings: Optional[Dict[str, Any]] = None,
+) -> (Dict[str, Any], int, Optional[str]):
 
     start_stats = read_gpu_stats()
     started = time.time()
@@ -513,6 +533,25 @@ def run_image_generation(task_id: str, entry: ModelEntry, model_path: Path, rewa
             generator = torch.Generator(device=device).manual_seed(seed)
             pos_text = prompt or "a high quality photo of a golden retriever on a beach at sunset"
             neg_text = negative_prompt or ""
+            # Merge per-job overrides with model defaults from manifest
+            steps = IMAGE_STEPS
+            guidance = IMAGE_GUIDANCE
+            height = IMAGE_HEIGHT
+            width = IMAGE_WIDTH
+            sampler = None
+            if job_settings and isinstance(job_settings, dict):
+                steps = int(job_settings.get("steps", steps) or steps)
+                guidance = float(job_settings.get("guidance", guidance) or guidance)
+                height = int(job_settings.get("height", height) or height)
+                width = int(job_settings.get("width", width) or width)
+                sampler = str(job_settings.get("sampler") or "").strip().lower() or None
+                if job_settings.get("negative_prompt"):
+                    neg_text = str(job_settings.get("negative_prompt") or "")
+            # clamp to sane ranges
+            steps = max(5, min(50, steps))
+            guidance = max(1.0, min(15.0, guidance))
+            height = max(256, min(1536, height))
+            width = max(256, min(1536, width))
             # Proactively truncate to CLIP token limit to avoid noisy warnings
             if hasattr(pipe, "tokenizer") and hasattr(pipe.tokenizer, "model_max_length"):
                 try:
@@ -538,15 +577,21 @@ def run_image_generation(task_id: str, entry: ModelEntry, model_path: Path, rewa
                 except Exception as exc:
                     log(f"Prompt truncation failed: {exc}", prefix="⚠️")
             gen_t0 = time.time()
+            # Optional sampler switch if supported
+            if sampler and hasattr(pipe, "scheduler") and _DPMSolver is not None and "dpmpp" in sampler:
+                try:
+                    pipe.scheduler = _DPMSolver.from_config(pipe.scheduler.config)
+                except Exception as exc:
+                    log(f"Sampler switch failed: {exc}", prefix="⚠️", sampler=sampler)
             with torch.inference_mode():
                 result = pipe(
                     pos_text,
                     negative_prompt=neg_text or None,
-                    num_inference_steps=IMAGE_STEPS,
-                    guidance_scale=IMAGE_GUIDANCE,
+                    num_inference_steps=steps,
+                    guidance_scale=guidance,
                     generator=generator,
-                    height=IMAGE_HEIGHT,
-                    width=IMAGE_WIDTH,
+                    height=height,
+                    width=width,
                 )
             gen_ms = int((time.time() - gen_t0) * 1000)
             log(f"Generated in {gen_ms}ms", prefix="✅")

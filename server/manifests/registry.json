@@ -6,12 +6,25 @@
       "path": "/mnt/d/havnai-storage/models/creator/majicmixRealistic_v7.safetensors",
       "vae_path": "/mnt/d/havnai-storage/models/creator/realisticVisionV60B1_v51HyperVAE.safetensors",
       "type": "checkpoint",
-      "tags": ["realism", "all_rounder", "low_light", "daylight", "hands_strong", "fabric_detail"],
+      "tags": [
+        "realism",
+        "all_rounder",
+        "low_light",
+        "daylight",
+        "hands_strong",
+        "fabric_detail"
+      ],
       "task_type": "IMAGE_GEN",
       "weight": 25,
       "reward_weight": 25,
       "strengths": "Best all-around realistic model. Extremely consistent. Excellent low-light and daylight performance.",
-      "weaknesses": "Sometimes too clean/perfect under bright lighting."
+      "weaknesses": "Sometimes too clean/perfect under bright lighting.",
+      "sampler": "euler_a",
+      "steps": 25,
+      "guidance": 6.8,
+      "width": 640,
+      "height": 832,
+      "negative_prompt_default": "extra limbs, extra fingers, bad hands, bad anatomy, disfigured face, distorted, blurry, artifact"
     },
     {
       "name": "lazymixRealAmateur_v40",
@@ -19,36 +32,68 @@
       "path": "/mnt/d/havnai-storage/models/creator/lazymixRealAmateur_v40.safetensors",
       "vae_path": "/mnt/d/havnai-storage/models/creator/realisticVisionV60B1_v51HyperVAE.safetensors",
       "type": "checkpoint",
-      "tags": ["realism", "phone_photo_style", "selfie", "natural_light"],
+      "tags": [
+        "realism",
+        "phone_photo_style",
+        "selfie",
+        "natural_light"
+      ],
       "task_type": "IMAGE_GEN",
       "weight": 25,
       "reward_weight": 25,
       "strengths": "Most authentic phone-photo style realism. Very strong across lighting scenarios.",
-      "weaknesses": "Slightly less fabric/metallic pop compared to majicmix."
+      "weaknesses": "Slightly less fabric/metallic pop compared to majicmix.",
+      "sampler": "euler_a",
+      "steps": 23,
+      "guidance": 6.8,
+      "width": 576,
+      "height": 768,
+      "negative_prompt_default": "extra limbs, extra fingers, bad hands, bad anatomy, disfigured face, distorted, blurry, artifact"
     },
     {
       "name": "juggernautXL_ragnarokBy",
       "pipeline": "sdxl",
       "path": "/mnt/d/havnai-storage/models/creator/juggernautXL_ragnarokBy.safetensors",
       "type": "checkpoint",
-      "tags": ["realism", "flash", "studio_light", "smooth_skin"],
+      "tags": [
+        "realism",
+        "flash",
+        "studio_light",
+        "smooth_skin"
+      ],
       "task_type": "IMAGE_GEN",
       "weight": 20,
       "reward_weight": 20,
       "strengths": "Elite realism and very strong flash/daylight skin performance.",
-      "weaknesses": "Backgrounds and hands can occasionally look too stiff or polished."
+      "weaknesses": "Backgrounds and hands can occasionally look too stiff or polished.",
+      "sampler": "dpmpp_2m_karras",
+      "steps": 30,
+      "guidance": 6.25,
+      "width": 832,
+      "height": 1248,
+      "negative_prompt_default": "extra limbs, bad hands, deformed fingers, disfigured, low quality, blurry"
     },
     {
       "name": "epicrealismXL_vxviiCrystalclear",
       "pipeline": "sdxl",
       "path": "/mnt/d/havnai-storage/models/creator/epicrealismXL_vxviiCrystalclear.safetensors",
       "type": "checkpoint",
-      "tags": ["realism", "daylight", "sharp_detail"],
+      "tags": [
+        "realism",
+        "daylight",
+        "sharp_detail"
+      ],
       "task_type": "IMAGE_GEN",
       "weight": 20,
       "reward_weight": 20,
       "strengths": "Very crisp detail and strong daylight realism.",
-      "weaknesses": "Backgrounds sometimes too symmetrical or flat."
+      "weaknesses": "Backgrounds sometimes too symmetrical or flat.",
+      "sampler": "dpmpp_2m_karras",
+      "steps": 30,
+      "guidance": 6.0,
+      "width": 832,
+      "height": 1248,
+      "negative_prompt_default": "extra limbs, bad hands, deformed fingers, disfigured, low quality, blurry"
     },
     {
       "name": "perfectdeliberate_v5SD15",
@@ -56,12 +101,21 @@
       "path": "/mnt/d/havnai-storage/models/creator/perfectdeliberate_v5SD15.safetensors",
       "vae_path": "/mnt/d/havnai-storage/models/creator/realisticVisionV60B1_v51HyperVAE.safetensors",
       "type": "checkpoint",
-      "tags": ["realism", "portrait"],
+      "tags": [
+        "realism",
+        "portrait"
+      ],
       "task_type": "IMAGE_GEN",
       "weight": 10,
       "reward_weight": 10,
       "strengths": "Solid realism when hands are not visible.",
-      "weaknesses": "Hands deform frequently (SD1.5 weakness)."
+      "weaknesses": "Hands deform frequently (SD1.5 weakness).",
+      "sampler": "euler_a",
+      "steps": 23,
+      "guidance": 6.3,
+      "width": 576,
+      "height": 768,
+      "negative_prompt_default": "extra fingers, bad hands, mangled, bad anatomy, duplicate limbs"
     },
     {
       "name": "uberRealisticPornMerge_v23Final",
@@ -69,12 +123,21 @@
       "path": "/mnt/d/havnai-storage/models/creator/uberRealisticPornMerge_v23Final.safetensors",
       "vae_path": "/mnt/d/havnai-storage/models/creator/realisticVisionV60B1_v51HyperVAE.safetensors",
       "type": "checkpoint",
-      "tags": ["studio_light", "glossy_skin"],
+      "tags": [
+        "studio_light",
+        "glossy_skin"
+      ],
       "task_type": "IMAGE_GEN",
       "weight": 8,
       "reward_weight": 8,
       "strengths": "Strong glossy skin aesthetic in bright studio lighting.",
-      "weaknesses": "Can produce overexposed skin and accessory artifacts."
+      "weaknesses": "Can produce overexposed skin and accessory artifacts.",
+      "sampler": "euler_a",
+      "steps": 23,
+      "guidance": 6.5,
+      "width": 576,
+      "height": 768,
+      "negative_prompt_default": "extra limbs, bad hands, bad anatomy, overexposed skin, artifacts"
     },
     {
       "name": "triomerge_v10",
@@ -82,12 +145,21 @@
       "path": "/mnt/d/havnai-storage/models/creator/triomerge_v10.safetensors",
       "vae_path": "/mnt/d/havnai-storage/models/creator/realisticVisionV60B1_v51HyperVAE.safetensors",
       "type": "checkpoint",
-      "tags": ["fantasy", "stylized"],
+      "tags": [
+        "fantasy",
+        "stylized"
+      ],
       "task_type": "IMAGE_GEN",
       "weight": 8,
       "reward_weight": 8,
       "strengths": "Great stylized fantasy art.",
-      "weaknesses": "Adds jewelry/headpieces automatically and cannot stay realistic."
+      "weaknesses": "Adds jewelry/headpieces automatically and cannot stay realistic.",
+      "sampler": "euler_a",
+      "steps": 22,
+      "guidance": 6.3,
+      "width": 576,
+      "height": 768,
+      "negative_prompt_default": "extra limbs, merged limbs, bad hands, distorted face, asymmetry"
     },
     {
       "name": "unstablePornhwa_beta",
@@ -95,12 +167,21 @@
       "path": "/mnt/d/havnai-storage/models/creator/unstablePornhwa_beta.safetensors",
       "vae_path": "/mnt/d/havnai-storage/models/creator/realisticVisionV60B1_v51HyperVAE.safetensors",
       "type": "checkpoint",
-      "tags": ["manhwa", "webtoon"],
+      "tags": [
+        "manhwa",
+        "webtoon"
+      ],
       "task_type": "IMAGE_GEN",
       "weight": 8,
       "reward_weight": 8,
       "strengths": "High-quality manhwa-style outputs.",
-      "weaknesses": "Flat shading, fantasy proportions, not realistic."
+      "weaknesses": "Flat shading, fantasy proportions, not realistic.",
+      "sampler": "euler_a",
+      "steps": 20,
+      "guidance": 6.3,
+      "width": 576,
+      "height": 768,
+      "negative_prompt_default": "extra limbs, bad hands, bad anatomy, distorted face"
     },
     {
       "name": "disneyPixarCartoon_v10",
@@ -108,12 +189,21 @@
       "path": "/mnt/d/havnai-storage/models/creator/disneyPixarCartoon_v10.safetensors",
       "vae_path": "/mnt/d/havnai-storage/models/creator/realisticVisionV60B1_v51HyperVAE.safetensors",
       "type": "checkpoint",
-      "tags": ["cartoon", "pixar"],
+      "tags": [
+        "cartoon",
+        "pixar"
+      ],
       "task_type": "IMAGE_GEN",
       "weight": 5,
       "reward_weight": 5,
       "strengths": "Excellent Pixar-style cartoon rendering.",
-      "weaknesses": "No realism. Typical 3D cartoon limitations."
+      "weaknesses": "No realism. Typical 3D cartoon limitations.",
+      "sampler": "euler_a",
+      "steps": 21,
+      "guidance": 6.3,
+      "width": 576,
+      "height": 768,
+      "negative_prompt_default": "duplicate head, floating hair, disembodied parts, extra limbs, extra fingers, bad hands, bad anatomy"
     },
     {
       "name": "kizukiAnimeHentai_animeHentaiV4",
@@ -121,19 +211,31 @@
       "path": "/mnt/d/havnai-storage/models/creator/kizukiAnimeHentai_animeHentaiV4.safetensors",
       "vae_path": "/mnt/d/havnai-storage/models/creator/realisticVisionV60B1_v51HyperVAE.safetensors",
       "type": "checkpoint",
-      "tags": ["anime", "stylized"],
+      "tags": [
+        "anime",
+        "stylized"
+      ],
       "task_type": "IMAGE_GEN",
       "weight": 5,
       "reward_weight": 5,
       "strengths": "Great anime/hentai-style rendering.",
-      "weaknesses": "Not realistic. Exaggerated eyes and proportions."
+      "weaknesses": "Not realistic. Exaggerated eyes and proportions.",
+      "sampler": "euler_a",
+      "steps": 20,
+      "guidance": 6.2,
+      "width": 576,
+      "height": 768,
+      "negative_prompt_default": "extra limbs, extra fingers, bad hands, bad anatomy, distorted face"
     },
     {
       "name": "wan_t2v_a14b",
       "pipeline": "wan",
       "path": "/mnt/d/havnai-storage/models/video/wan-2.2/T2V-A14B",
       "type": "diffusers",
-      "tags": ["video", "text2video"],
+      "tags": [
+        "video",
+        "text2video"
+      ],
       "task_type": "VIDEO_GEN",
       "reward_weight": 20.0
     },
@@ -142,7 +244,10 @@
       "pipeline": "wan",
       "path": "/mnt/d/havnai-storage/models/video/wan-2.2/TI2V-5B-Diffusers",
       "type": "diffusers",
-      "tags": ["video", "text2video"],
+      "tags": [
+        "video",
+        "text2video"
+      ],
       "task_type": "VIDEO_GEN",
       "reward_weight": 20.0
     },
@@ -151,7 +256,10 @@
       "pipeline": "wan",
       "path": "/mnt/d/havnai-storage/models/video/wan-2.2/Wan2.2-TI2V-5B",
       "type": "diffusers",
-      "tags": ["video", "text2video"],
+      "tags": [
+        "video",
+        "text2video"
+      ],
       "task_type": "VIDEO_GEN",
       "reward_weight": 22.0
     },
@@ -160,7 +268,10 @@
       "pipeline": "wan",
       "path": "/mnt/d/havnai-storage/models/video/wan-2.2/wan22EnhancedCameraPrompt_t2vHIGH.safetensors",
       "type": "checkpoint",
-      "tags": ["video", "prompt"],
+      "tags": [
+        "video",
+        "prompt"
+      ],
       "task_type": "VIDEO_GEN",
       "reward_weight": 5.0
     },
@@ -169,7 +280,11 @@
       "pipeline": "wan-i2v",
       "path": "/mnt/d/havnai-storage/models/video/wan-i2v/wan_2.2_lightning.safetensors",
       "type": "checkpoint",
-      "tags": ["video", "i2v", "t2v"],
+      "tags": [
+        "video",
+        "i2v",
+        "t2v"
+      ],
       "task_type": "VIDEO_GEN",
       "reward_weight": 22.0
     },
@@ -178,7 +293,11 @@
       "pipeline": "animatediff",
       "path": "/mnt/d/havnai-storage/models/creator/realisticVisionV60B1_v51HyperVAE.safetensors",
       "type": "checkpoint",
-      "tags": ["video", "animatediff", "sd15"],
+      "tags": [
+        "video",
+        "animatediff",
+        "sd15"
+      ],
       "task_type": "ANIMATEDIFF",
       "reward_weight": 15.0
     }

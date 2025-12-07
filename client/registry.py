@@ -21,6 +21,12 @@ except Exception:  # pragma: no cover
         reward_weight: float = 0.0
         task_type: str = "IMAGE_GEN"
         vae_path: str = ""
+        steps: int | None = None
+        guidance: float | None = None
+        width: int | None = None
+        height: int | None = None
+        sampler: str | None = None
+        negative_prompt_default: str = ""
 
     @dataclass
     class Manifest:  # type: ignore

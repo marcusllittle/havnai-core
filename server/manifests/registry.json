@@ -115,7 +115,7 @@
       "guidance": 6.3,
       "width": 576,
       "height": 768,
-      "negative_prompt_default": "extra fingers, bad hands, mangled, bad anatomy, duplicate limbs"
+      "negative_prompt_default": "duplicate face, multiple faces, extra hands, extra fingers, deformed hands, merged limbs, bad anatomy, mangled"
     },
     {
       "name": "uberRealisticPornMerge_v23Final",
@@ -134,10 +134,10 @@
       "weaknesses": "Can produce overexposed skin and accessory artifacts.",
       "sampler": "euler_a",
       "steps": 23,
-      "guidance": 6.5,
+      "guidance": 6.3,
       "width": 576,
       "height": 768,
-      "negative_prompt_default": "extra limbs, bad hands, bad anatomy, overexposed skin, artifacts"
+      "negative_prompt_default": "extra limbs, bad hands, missing hands, cropped hands, deformed hands, extra fingers, bad anatomy, overexposed skin, artifacts"
     },
     {
       "name": "triomerge_v10",

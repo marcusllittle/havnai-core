@@ -167,6 +167,7 @@ HIGHRES_STRENGTH_CONTROLNET = 0.2  # tighter when ControlNet is active
 # Quality/geometry safeguards
 QUALITY_FLOOR_NEG = "lowres, worst quality, jpeg artifacts, blurry, grainy"
 LIMB_GUARD_NEG = "extra limbs, extra hands, extra fingers, fused fingers, missing fingers, duplicate limb, malformed hands, warped feet, disjoint limbs"
+FACE_DUP_GUARD_NEG = "duplicate face, extra head, extra face, fused face, extra eyes, double head, distorted face"
 
 # Auto-pose/ControlNet settings
 POSE_LIBRARY_DIR = Path("/controlnet/poses/nsfw_openpose_package").expanduser()
@@ -242,6 +243,36 @@ def _tokenize_prompt(prompt: str) -> List[str]:
     """Lowercase tokenize prompt into words/phrases."""
     clean = re.sub(r"[^a-zA-Z0-9_]+", " ", prompt.lower())
     return [tok for tok in clean.split() if tok]
+
+
+def _is_anime_model(entry: "ModelEntry") -> bool:
+    tags = {t.lower() for t in getattr(entry, "tags", []) if isinstance(t, str)}
+    name = str(getattr(entry, "name", "") or "").lower()
+    return bool({"anime", "stylized", "manhwa", "webtoon", "cartoon"} & tags or any(k in name for k in ("anime", "stylized", "manhwa", "webtoon", "cartoon")))
+
+
+NSFW_KEYWORDS = {
+    "nsfw",
+    "nude",
+    "naked",
+    "lingerie",
+    "bikini",
+    "erotic",
+    "sex",
+    "sexual",
+    "explicit",
+    "porn",
+    "hardcore",
+    "ahegao",
+    "underwear",
+    "bra",
+    "panties",
+}
+
+
+def _is_nsfw_prompt_text(prompt: str) -> bool:
+    low = (prompt or "").lower()
+    return any(kw in low for kw in NSFW_KEYWORDS)
 
 
 def _pose_library() -> List[Dict[str, Any]]:
@@ -736,6 +767,9 @@ def run_image_generation(
                 if controlnet_image is None and _should_auto_pose(prompt):
                     controlnet_image = select_auto_pose(prompt)
                     auto_pose_used = controlnet_image is not None
+                # Force ControlNet on anime/stylized NSFW prompts if path is present
+                if controlnet_image is None and _is_anime_model(entry) and _is_nsfw_prompt_text(prompt):
+                    controlnet_image = select_auto_pose(prompt) or controlnet_image
                 if controlnet_image is None:
                     log("ControlNet specified but no pose image provided; falling back to base pipeline", prefix="⚠️")
                 else:
@@ -785,6 +819,8 @@ def run_image_generation(
             neg_parts.append(QUALITY_FLOOR_NEG)
             if controlnet_image is not None:
                 neg_parts.append(LIMB_GUARD_NEG)
+            if _is_anime_model(entry):
+                neg_parts.append(FACE_DUP_GUARD_NEG)
             neg_text = ", ".join([p for p in neg_parts if p])
             # clamp to sane ranges
             steps = max(5, min(50, steps))
@@ -795,6 +831,9 @@ def run_image_generation(
             target_height, target_width = height, width
             base_height, base_width = height, width
             if do_highres:
+                # For anime/stylized models without ControlNet, skip highres to avoid face/limb duplication.
+                if controlnet_image is None and _is_anime_model(entry):
+                    do_highres = False
                 base_height = max(256, int(target_height / HIGHRES_SCALE))
                 base_width = max(256, int(target_width / HIGHRES_SCALE))
                 base_height = max(256, int(round(base_height / 8) * 8))

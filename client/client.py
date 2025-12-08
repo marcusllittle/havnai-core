@@ -18,6 +18,8 @@ import signal
 from typing import Any, Dict, List, Optional
 import base64
 from io import BytesIO
+import json
+import re
 
 import requests
 
@@ -156,6 +158,46 @@ HIGHRES_MIN_EDGE = 1152
 HIGHRES_SCALE = 1.5  # target upscale factor (1.4–1.6x range)
 HIGHRES_STRENGTH = 0.4
 
+# Auto-pose/ControlNet settings
+POSE_LIBRARY_DIR = Path("/controlnet/poses/nsfw_openpose_package").expanduser()
+POSE_PREPROCESS_RES = 768
+AUTO_POSE_KEYWORDS = {
+    "nsfw",
+    "sex",
+    "sexual",
+    "explicit",
+    "nude",
+    "naked",
+    "porn",
+    "pornographic",
+    "hardcore",
+    "ahegao",
+    "all fours",
+    "doggy",
+    "doggystyle",
+    "double",
+    "penetration",
+    "dp",
+    "hair pull",
+    "spread",
+    "spreading",
+    "kneel",
+    "kneeling",
+    "bend",
+    "bending",
+    "arch",
+    "arched",
+    "pose",
+    "openpose",
+    "strap",
+    "strapon",
+    "reverse",
+    "cowgirl",
+    "missionary",
+    "69",
+}
+AUTO_POSE_TOP_NSFW = ["all_fours", "double_penetration", "hair_pull", "spread", "kneeling", "ahegao", "doggy", "dp"]
+
 
 # ---------------------------------------------------------------------------
 # Utilities
@@ -180,6 +222,107 @@ def load_pose_image(pose_image_b64: Optional[str], pose_image_path: Optional[str
                 return Image.open(path).convert("RGB")
         except Exception as exc:  # pragma: no cover - defensive
             log(f"Pose image load failed: {exc}", prefix="⚠️", path=pose_image_path)
+    return None
+
+
+def _tokenize_prompt(prompt: str) -> List[str]:
+    """Lowercase tokenize prompt into words/phrases."""
+    clean = re.sub(r"[^a-zA-Z0-9_]+", " ", prompt.lower())
+    return [tok for tok in clean.split() if tok]
+
+
+def _pose_library() -> List[Dict[str, Any]]:
+    """Index pose files and optional JSON descriptions."""
+
+    entries: List[Dict[str, Any]] = []
+    if not POSE_LIBRARY_DIR.exists():
+        return entries
+    for png in POSE_LIBRARY_DIR.glob("*.png"):
+        meta = {"path": png, "name": png.stem.lower(), "text": ""}
+        json_path = png.with_suffix(".json")
+        if json_path.exists():
+            try:
+                data = json.loads(json_path.read_text())
+                # Common fields: description, tags, title; merge to a text blob
+                parts: List[str] = []
+                for key in ("description", "tags", "title", "prompt"):
+                    val = data.get(key)
+                    if isinstance(val, str):
+                        parts.append(val)
+                    elif isinstance(val, list):
+                        parts.extend([str(v) for v in val])
+                meta["text"] = " ".join(parts).lower()
+            except Exception:
+                meta["text"] = ""
+        entries.append(meta)
+    return entries
+
+
+def _should_auto_pose(prompt: str) -> bool:
+    low = prompt.lower()
+    if "openpose" in low:
+        return True
+    tokens = _tokenize_prompt(low)
+    for kw in AUTO_POSE_KEYWORDS:
+        if kw in low or kw.replace(" ", "") in low:
+            return True
+        if kw in tokens:
+            return True
+    return False
+
+
+def _score_pose_entry(entry: Dict[str, Any], prompt_tokens: List[str], prompt_text: str) -> float:
+    """Score a pose entry based on filename/json overlap and priority keywords."""
+
+    score = 0.0
+    name = entry.get("name", "")
+    text = entry.get("text", "")
+    for tok in prompt_tokens:
+        if tok and tok in name:
+            score += 5.0
+        if tok and tok in text:
+            score += 3.0
+    for top_kw in AUTO_POSE_TOP_NSFW:
+        if top_kw in prompt_text and (top_kw in name or top_kw in text):
+            score += 4.0
+    # Small bonus for any overlap between common tokens and description words
+    if text:
+        desc_tokens = set(_tokenize_prompt(text))
+        overlap = desc_tokens.intersection(prompt_tokens)
+        score += 0.5 * len(overlap)
+    return score
+
+
+def select_auto_pose(prompt: str) -> Optional["Image.Image"]:
+    """Select the best matching pose image from the library based on the prompt."""
+
+    if Image is None:
+        return None
+    entries = _pose_library()
+    if not entries:
+        return None
+    prompt_tokens = _tokenize_prompt(prompt)
+    prompt_text = " ".join(prompt_tokens)
+    best_entry = None
+    best_score = -1.0
+    for entry in entries:
+        score = _score_pose_entry(entry, prompt_tokens, prompt_text)
+        if score > best_score:
+            best_score = score
+            best_entry = entry
+    if not best_entry:
+        return None
+    try:
+        img = Image.open(best_entry["path"]).convert("RGB")
+        # Preprocessor resolution hint: resize longest edge to POSE_PREPROCESS_RES
+        w, h = img.size
+        scale = POSE_PREPROCESS_RES / max(w, h)
+        if scale < 1.0:
+            img = img.resize((int(w * scale), int(h * scale)))
+        log("Auto-selected pose", prefix="✅", pose=str(best_entry["path"]), score=round(best_score, 2))
+        return img
+    except Exception as exc:
+        log(f"Auto pose load failed: {exc}", prefix="⚠️")
     return None
 
 
@@ -541,6 +684,7 @@ def run_image_generation(
             controlnet_image = None
             pose_image_b64: Optional[str] = None
             pose_image_path: Optional[str] = None
+            auto_pose_used = False
             # For SD1.5-style checkpoints (triomerge, etc.) use StableDiffusionPipeline
             # to match direct test behavior; reserve AutoPipeline for SDXL/other future types.
             pipeline_name = (getattr(entry, "pipeline", "") or "sd15").lower()
@@ -576,6 +720,9 @@ def run_image_generation(
                 and _SDControlPipe is not None
             ):
                 controlnet_image = load_pose_image(str(pose_image_b64 or "").strip() or None, pose_image_path)
+                if controlnet_image is None and _should_auto_pose(prompt):
+                    controlnet_image = select_auto_pose(prompt)
+                    auto_pose_used = controlnet_image is not None
                 if controlnet_image is None:
                     log("ControlNet specified but no pose image provided; falling back to base pipeline", prefix="⚠️")
                 else:
@@ -587,7 +734,7 @@ def run_image_generation(
                             torch_dtype=dtype,
                             safety_checker=None,
                         )
-                        log("Loaded ControlNet for pose guidance", prefix="✅", controlnet=str(controlnet_path))
+                        log("Loaded ControlNet for pose guidance", prefix="✅", controlnet=str(controlnet_path), auto_pose=auto_pose_used)
                     except Exception as exc:
                         log(f"ControlNet load failed; falling back to base pipeline: {exc}", prefix="⚠️")
 
@@ -675,6 +822,9 @@ def run_image_generation(
                 }
                 if controlnet_image is not None:
                     pipe_kwargs["image"] = controlnet_image
+                    pipe_kwargs["controlnet_conditioning_scale"] = 1.0
+                    pipe_kwargs["control_guidance_start"] = 0.0
+                    pipe_kwargs["control_guidance_end"] = 1.0
                 result = pipe(pos_text, **pipe_kwargs)
             gen_ms = int((time.time() - gen_t0) * 1000)
             log(f"Generated in {gen_ms}ms", prefix="✅")

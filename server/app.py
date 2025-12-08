@@ -110,6 +110,33 @@ AUTO_NSFW_KEYWORDS = {
     "openpose",
 }
 
+ANIME_KEYWORDS = {
+    "anime",
+    "manga",
+    "manhwa",
+    "webtoon",
+    "cartoon",
+    "pixar",
+    "cel-shaded",
+    "cel shaded",
+}
+
+FANTASY_KEYWORDS = {
+    "fantasy",
+    "wizard",
+    "dragon",
+    "elf",
+    "orc",
+    "knight",
+    "magic",
+    "myth",
+    "mythical",
+    "creature",
+    "castle",
+    "sword",
+    "armor",
+    "spell",
+}
 # Slight global positive bias to help realism skin detail.
 GLOBAL_POSITIVE_SUFFIX = "(ultra-realistic 8k:1.05), (detailed skin pores:1.03)"
 
@@ -1350,6 +1377,16 @@ def _is_nsfw_prompt(prompt: str) -> bool:
     return any(kw in low for kw in AUTO_NSFW_KEYWORDS)
 
 
+def _is_anime_prompt(prompt: str) -> bool:
+    low = (prompt or "").lower()
+    return any(kw in low for kw in ANIME_KEYWORDS)
+
+
+def _is_fantasy_prompt(prompt: str) -> bool:
+    low = (prompt or "").lower()
+    return any(kw in low for kw in FANTASY_KEYWORDS)
+
+
 def _filtered_candidates(candidates: List[Dict[str, Any]], prompt: str) -> List[Dict[str, Any]]:
     """Prefer realistic SD1.5 models for NSFW-ish prompts; avoid cartoon/anime picks."""
 
@@ -1418,32 +1455,64 @@ def _model_runtime_stats(model_name: str) -> Dict[str, Any]:
     return stats
 
 
-def _score_model_for_prompt(meta: Dict[str, Any], prompt_is_nsfw: bool) -> float:
+def _score_model_for_prompt(meta: Dict[str, Any], prompt_text: str, prompt_is_nsfw: bool) -> float:
     """Compute selection score for auto model choice."""
 
-    if not prompt_is_nsfw:
-        return 0.0
     tags = {t.lower() for t in meta.get("tags", []) if isinstance(t, str)}
     name = str(meta.get("name", "")).lower()
     pipeline = str(meta.get("pipeline", "")).lower()
     controlnet_enabled = bool(meta.get("controlnet_path"))
     stats = _model_runtime_stats(name)
+    is_anime = _is_anime_prompt(prompt_text)
+    is_fantasy = _is_fantasy_prompt(prompt_text)
+
     score = 0.0
-    if controlnet_enabled:
-        score += 40.0
-    if pipeline in {"sd15", "sd1.5"}:
-        score += 20.0
-    nsfw_rate = stats.get("nsfw_success_rate", 0.0) or 0.0
-    if nsfw_rate >= 0.90:
-        score += 30.0
-    if nsfw_rate >= 0.95:
-        score += 20.0
-    if "realism" in tags:
-        score += 10.0
-    if {"cartoon", "anime", "stylized", "manhwa", "webtoon", "pixar"} & tags or any(
-        bad in name for bad in ("cartoon", "pixar", "anime", "manhwa", "webtoon")
-    ):
-        score -= 100.0
+    if prompt_is_nsfw:
+        if controlnet_enabled:
+            score += 40.0
+        if pipeline in {"sd15", "sd1.5"}:
+            score += 20.0
+        nsfw_rate = stats.get("nsfw_success_rate", 0.0) or 0.0
+        if nsfw_rate >= 0.90:
+            score += 30.0
+        if nsfw_rate >= 0.95:
+            score += 20.0
+        if "realism" in tags:
+            score += 10.0
+        if {"cartoon", "anime", "stylized", "manhwa", "webtoon", "pixar"} & tags or any(
+            bad in name for bad in ("cartoon", "pixar", "anime", "manhwa", "webtoon")
+        ):
+            score -= 100.0
+    else:
+        # SFW routing: favor realism (juggernaut/epic) by default,
+        # but route anime/fantasy prompts to the right models.
+        if is_anime:
+            if {"anime", "manhwa", "webtoon", "stylized"} & tags:
+                score += 30.0
+            if "kizuki" in name:
+                score += 40.0
+            if {"cartoon", "pixar"} & tags:
+                score += 10.0
+            if "triomerge" in name:
+                score -= 10.0
+        elif is_fantasy:
+            if {"fantasy", "stylized"} & tags:
+                score += 30.0
+            if "triomerge" in name:
+                score += 40.0
+            if {"cartoon", "pixar"} & tags:
+                score -= 20.0
+        else:
+            # Realism default path
+            if "realism" in tags:
+                score += 20.0
+            if "juggernaut" in name or "epicrealism" in name:
+                score += 40.0
+            if {"cartoon", "anime", "stylized", "manhwa", "webtoon", "pixar"} & tags:
+                score -= 60.0
+            # Slight nod to SDXL for clean realism
+            if pipeline == "sdxl":
+                score += 10.0
     return score
 
 
@@ -1505,13 +1574,12 @@ def submit_job() -> Any:
             return jsonify({"error": "no_creator_models"}), 400
         chosen = None
         chosen_score = None
-        if prompt_is_nsfw:
-            for meta in candidates:
-                score = _score_model_for_prompt(meta, prompt_is_nsfw)
-                if chosen is None or score > (chosen_score or float("-inf")):
-                    chosen = meta["name"]
-                    chosen_score = score
-        if not chosen:
+        for meta in candidates:
+            score = _score_model_for_prompt(meta, prompt_for_auto, prompt_is_nsfw)
+            if chosen is None or score > (chosen_score or float("-inf")):
+                chosen = meta["name"]
+                chosen_score = score
+        if chosen is None:
             names = [meta["name"] for meta in candidates]
             weights = [resolve_weight(meta["name"].lower(), meta.get("reward_weight", 10.0)) for meta in candidates]
             chosen = random.choices(names, weights=weights, k=1)[0]

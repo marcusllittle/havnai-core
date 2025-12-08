@@ -176,10 +176,13 @@ AUTO_POSE_KEYWORDS = {
     "doggy",
     "doggystyle",
     "double",
+    "double penetration",
     "penetration",
     "dp",
     "hair pull",
+    "hairpull",
     "spread",
+    "spreadpussy",
     "spreading",
     "kneel",
     "kneeling",
@@ -196,7 +199,7 @@ AUTO_POSE_KEYWORDS = {
     "missionary",
     "69",
 }
-AUTO_POSE_TOP_NSFW = ["all_fours", "double_penetration", "hair_pull", "spread", "kneeling", "ahegao", "doggy", "dp"]
+AUTO_POSE_TOP_NSFW = ["all_fours", "double_penetration", "hair_pull", "hairpull", "spread", "spreadpussy", "kneeling", "ahegao", "doggy", "dp"]
 
 
 # ---------------------------------------------------------------------------
@@ -772,7 +775,7 @@ def run_image_generation(
             guidance = max(1.0, min(15.0, guidance))
             height = max(256, min(1536, height))
             width = max(256, min(1536, width))
-            do_highres = max(height, width) > HIGHRES_MIN_EDGE and _SDImg2ImgPipe is not None and controlnet_image is None
+            do_highres = max(height, width) > HIGHRES_MIN_EDGE and _SDImg2ImgPipe is not None
             target_height, target_width = height, width
             base_height, base_width = height, width
             if do_highres:

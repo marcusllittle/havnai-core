@@ -161,7 +161,12 @@ WAN_I2V_DEFAULTS: Dict[str, Any] = {
 # Highres defaults
 HIGHRES_MIN_EDGE = 1152
 HIGHRES_SCALE = 1.5  # target upscale factor (1.4–1.6x range)
-HIGHRES_STRENGTH = 0.3  # keep geometry tighter when ControlNet is active
+HIGHRES_STRENGTH_BASE = 0.3  # default highres strength
+HIGHRES_STRENGTH_CONTROLNET = 0.2  # tighter when ControlNet is active
+
+# Quality/geometry safeguards
+QUALITY_FLOOR_NEG = "lowres, worst quality, jpeg artifacts, blurry, grainy"
+LIMB_GUARD_NEG = "extra limbs, extra hands, extra fingers, fused fingers, missing fingers, duplicate limb, malformed hands, warped feet, disjoint limbs"
 
 # Auto-pose/ControlNet settings
 POSE_LIBRARY_DIR = Path("/controlnet/poses/nsfw_openpose_package").expanduser()
@@ -775,6 +780,12 @@ def run_image_generation(
             generator = torch.Generator(device=device).manual_seed(seed)
             pos_text = prompt or "a high quality photo of a golden retriever on a beach at sunset"
             neg_text = negative_prompt or ""
+            # Always enforce a quality floor; append limb guards when ControlNet is active.
+            neg_parts = [neg_text.strip()] if neg_text else []
+            neg_parts.append(QUALITY_FLOOR_NEG)
+            if controlnet_image is not None:
+                neg_parts.append(LIMB_GUARD_NEG)
+            neg_text = ", ".join([p for p in neg_parts if p])
             # clamp to sane ranges
             steps = max(5, min(50, steps))
             guidance = max(1.0, min(15.0, guidance))
@@ -881,7 +892,7 @@ def run_image_generation(
                     with torch.inference_mode():
                         hr_kwargs = {
                             "image": resized,
-                            "strength": HIGHRES_STRENGTH,
+                            "strength": HIGHRES_STRENGTH_CONTROLNET if controlnet_image is not None else HIGHRES_STRENGTH_BASE,
                             "negative_prompt": neg_text or None,
                             "num_inference_steps": hr_steps,
                             "guidance_scale": hr_guidance,

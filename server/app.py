@@ -54,6 +54,7 @@ MODEL_WEIGHTS: Dict[str, float] = {
 }
 
 MODEL_STATS: Dict[str, Dict[str, float]] = {}
+MODEL_RUNTIME_CACHE: Dict[str, Dict[str, Any]] = {}
 MANIFEST_MODELS: Dict[str, Dict[str, Any]] = {}
 EVENT_LOGS: deque = deque(maxlen=200)
 NODES: Dict[str, Dict[str, Any]] = {}
@@ -76,6 +77,37 @@ REWARD_CONFIG: Dict[str, float] = {
     "sd15_factor": float(os.getenv("REWARD_SD15_FACTOR", "1.0")),
     "anime_factor": float(os.getenv("REWARD_ANIME_FACTOR", "0.7")),
     "base_reward": float(os.getenv("REWARD_BASE_HAI", "0.05")),
+}
+
+# Basic NSFW/pose keyword sniffing to steer auto model selection away from cartoons.
+AUTO_NSFW_KEYWORDS = {
+    "nsfw",
+    "sex",
+    "sexual",
+    "explicit",
+    "nude",
+    "naked",
+    "porn",
+    "hardcore",
+    "ahegao",
+    "erotic",
+    "sexy",
+    "boobs",
+    "tits",
+    "ass",
+    "butt",
+    "nipple",
+    "penetration",
+    "dp",
+    "double penetration",
+    "doggy",
+    "doggystyle",
+    "all fours",
+    "hair pull",
+    "hairpull",
+    "spread",
+    "spreadpussy",
+    "openpose",
 }
 
 # Slight global positive bias to help realism skin detail.
@@ -719,6 +751,14 @@ def load_manifest() -> None:
             "task_type": entry.get("task_type", CREATOR_TASK_TYPE),
             "strengths": entry.get("strengths"),
             "weaknesses": entry.get("weaknesses"),
+            "vae_path": entry.get("vae_path", ""),
+            "controlnet_path": entry.get("controlnet_path", ""),
+            "steps": entry.get("steps"),
+            "guidance": entry.get("guidance"),
+            "width": entry.get("width"),
+            "height": entry.get("height"),
+            "sampler": entry.get("sampler"),
+            "negative_prompt_default": entry.get("negative_prompt_default", ""),
         }
         MANIFEST_MODELS[key] = entry_data
         MODEL_STATS.setdefault(key, {"count": 0.0, "total_time": 0.0})
@@ -1305,6 +1345,108 @@ def favicon() -> Any:
     return ("", 204)
 
 
+def _is_nsfw_prompt(prompt: str) -> bool:
+    low = (prompt or "").lower()
+    return any(kw in low for kw in AUTO_NSFW_KEYWORDS)
+
+
+def _filtered_candidates(candidates: List[Dict[str, Any]], prompt: str) -> List[Dict[str, Any]]:
+    """Prefer realistic SD1.5 models for NSFW-ish prompts; avoid cartoon/anime picks."""
+
+    if not _is_nsfw_prompt(prompt):
+        return candidates
+    filtered: List[Dict[str, Any]] = []
+    for meta in candidates:
+        tags = {t.lower() for t in meta.get("tags", [])}
+        name = str(meta.get("name", "")).lower()
+        pipeline = str(meta.get("pipeline", "")).lower()
+        # Skip obvious cartoon/anime/manhwa/pixar entries
+        if {"cartoon", "pixar", "anime", "stylized", "manhwa", "webtoon"} & tags:
+            continue
+        if any(bad in name for bad in ("cartoon", "pixar", "anime", "manhwa", "webtoon")):
+            continue
+        # Prefer sd15 checkpoints with controlnet/vae defined for pose-aware realism
+        if pipeline in {"sd15", "sd1.5"}:
+            filtered.append(meta)
+    return filtered or candidates
+
+
+def _model_runtime_stats(model_name: str) -> Dict[str, Any]:
+    """Compute rolling stats for a model from the last 200 jobs."""
+
+    now = unix_now()
+    cached = MODEL_RUNTIME_CACHE.get(model_name)
+    if cached and now - cached.get("ts", 0) < 30:
+        return cached["stats"]
+
+    stats = {
+        "total_jobs": 0,
+        "nsfw_jobs": 0,
+        "failed_jobs": 0,
+        "nsfw_success_rate": 0.0,
+    }
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT status, data FROM jobs WHERE model=? ORDER BY timestamp DESC LIMIT 200",
+        (model_name,),
+    ).fetchall()
+    nsfw_success = 0
+    nsfw_fail = 0
+    for row in rows:
+        stats["total_jobs"] += 1
+        status = (row["status"] or "").lower()
+        success = status in {"success", "completed"}
+        if not success:
+            stats["failed_jobs"] += 1
+        data_raw = row["data"]
+        prompt_text = ""
+        try:
+            parsed = json.loads(data_raw) if isinstance(data_raw, str) else {}
+            if isinstance(parsed, dict):
+                prompt_text = str(parsed.get("prompt") or parsed.get("data") or "")
+        except Exception:
+            prompt_text = ""
+        if _is_nsfw_prompt(prompt_text):
+            stats["nsfw_jobs"] += 1
+            if success:
+                nsfw_success += 1
+            else:
+                nsfw_fail += 1
+    if stats["nsfw_jobs"] > 0:
+        stats["nsfw_success_rate"] = round(nsfw_success / stats["nsfw_jobs"], 4)
+    MODEL_RUNTIME_CACHE[model_name] = {"ts": now, "stats": stats}
+    return stats
+
+
+def _score_model_for_prompt(meta: Dict[str, Any], prompt_is_nsfw: bool) -> float:
+    """Compute selection score for auto model choice."""
+
+    if not prompt_is_nsfw:
+        return 0.0
+    tags = {t.lower() for t in meta.get("tags", []) if isinstance(t, str)}
+    name = str(meta.get("name", "")).lower()
+    pipeline = str(meta.get("pipeline", "")).lower()
+    controlnet_enabled = bool(meta.get("controlnet_path"))
+    stats = _model_runtime_stats(name)
+    score = 0.0
+    if controlnet_enabled:
+        score += 40.0
+    if pipeline in {"sd15", "sd1.5"}:
+        score += 20.0
+    nsfw_rate = stats.get("nsfw_success_rate", 0.0) or 0.0
+    if nsfw_rate >= 0.90:
+        score += 30.0
+    if nsfw_rate >= 0.95:
+        score += 20.0
+    if "realism" in tags:
+        score += 10.0
+    if {"cartoon", "anime", "stylized", "manhwa", "webtoon", "pixar"} & tags or any(
+        bad in name for bad in ("cartoon", "pixar", "anime", "manhwa", "webtoon")
+    ):
+        score -= 100.0
+    return score
+
+
 # ---------------------------------------------------------------------------
 # API routes – manifest catalog only
 # ---------------------------------------------------------------------------
@@ -1343,6 +1485,9 @@ def submit_job() -> Any:
     model_name_raw = str(payload.get("model", "")).strip()
     model_name = model_name_raw.lower()
     weight = payload.get("weight")
+    prompt_for_auto = str(payload.get("prompt") or payload.get("data") or "")
+    prompt_is_nsfw = _is_nsfw_prompt(prompt_for_auto)
+    auto_choice_score: Optional[float] = None
 
     if not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid wallet"}), 400
@@ -1355,13 +1500,32 @@ def submit_job() -> Any:
             for key, meta in MANIFEST_MODELS.items()
             if (meta.get("task_type") or CREATOR_TASK_TYPE).upper() == CREATOR_TASK_TYPE
         ]
+        candidates = _filtered_candidates(candidates, prompt_for_auto)
         if not candidates:
             return jsonify({"error": "no_creator_models"}), 400
-        names = [meta["name"] for meta in candidates]
-        weights = [resolve_weight(meta["name"].lower(), meta.get("reward_weight", 10.0)) for meta in candidates]
-        chosen = random.choices(names, weights=weights, k=1)[0]
+        chosen = None
+        chosen_score = None
+        if prompt_is_nsfw:
+            for meta in candidates:
+                score = _score_model_for_prompt(meta, prompt_is_nsfw)
+                if chosen is None or score > (chosen_score or float("-inf")):
+                    chosen = meta["name"]
+                    chosen_score = score
+        if not chosen:
+            names = [meta["name"] for meta in candidates]
+            weights = [resolve_weight(meta["name"].lower(), meta.get("reward_weight", 10.0)) for meta in candidates]
+            chosen = random.choices(names, weights=weights, k=1)[0]
+            chosen_score = None
         model_name_raw = chosen
         model_name = chosen.lower()
+        auto_choice_score = chosen_score
+        if auto_choice_score is not None:
+            log_event(
+                "Auto model chosen",
+                model=model_name,
+                score=auto_choice_score,
+                prompt_is_nsfw=prompt_is_nsfw,
+            )
 
     if not model_name:
         return jsonify({"error": "missing model"}), 400
@@ -1485,6 +1649,15 @@ def submit_job() -> Any:
                 combined_negative = ", ".join(filter(None, [base_negative, GLOBAL_NEGATIVE_PROMPT]))
                 if combined_negative:
                     job_settings["negative_prompt"] = combined_negative
+        if auto_choice_score is not None:
+            stats = _model_runtime_stats(model_name)
+            job_settings["auto_selection"] = {
+                "model": model_name,
+                "score": auto_choice_score,
+                "prompt_is_nsfw": prompt_is_nsfw,
+                "stats": stats,
+                "controlnet_enabled": bool(cfg.get("controlnet_path") if cfg else False),
+            }
 
         job_data = json.dumps(job_settings)
         task_type = CREATOR_TASK_TYPE

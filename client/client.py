@@ -59,6 +59,10 @@ try:
     except Exception:  # pragma: no cover
         _SDImg2ImgPipe = None  # type: ignore
     try:
+        from diffusers import StableDiffusionControlNetImg2ImgPipeline as _SDControlImg2ImgPipe  # type: ignore
+    except Exception:  # pragma: no cover
+        _SDControlImg2ImgPipe = None  # type: ignore
+    try:
         from diffusers import DPMSolverMultistepScheduler as _DPMSolver  # type: ignore
     except Exception:  # pragma: no cover
         _DPMSolver = None  # type: ignore
@@ -76,6 +80,7 @@ except ImportError:  # pragma: no cover
     _SDPipe = None  # type: ignore
     _SDControlPipe = None  # type: ignore
     _SDImg2ImgPipe = None  # type: ignore
+    _SDControlImg2ImgPipe = None  # type: ignore
     _DPMSolver = None  # type: ignore
     _AutoencoderKL = None  # type: ignore
     _ControlNetModel = None  # type: ignore
@@ -156,7 +161,7 @@ WAN_I2V_DEFAULTS: Dict[str, Any] = {
 # Highres defaults
 HIGHRES_MIN_EDGE = 1152
 HIGHRES_SCALE = 1.5  # target upscale factor (1.4–1.6x range)
-HIGHRES_STRENGTH = 0.4
+HIGHRES_STRENGTH = 0.3  # keep geometry tighter when ControlNet is active
 
 # Auto-pose/ControlNet settings
 POSE_LIBRARY_DIR = Path("/controlnet/poses/nsfw_openpose_package").expanduser()
@@ -832,10 +837,26 @@ def run_image_generation(
             gen_ms = int((time.time() - gen_t0) * 1000)
             log(f"Generated in {gen_ms}ms", prefix="✅")
             img = result.images[0]
-            # Highres refinement pass using img2img pipeline
+            # Highres refinement pass using img2img; if ControlNet was used, keep ControlNet active to preserve pose/limbs.
             if do_highres:
                 try:
-                    hr_pipe = _SDImg2ImgPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
+                    hr_pipe = None
+                    if controlnet_image is not None and _SDControlImg2ImgPipe is not None and _ControlNetModel is not None and controlnet is not None:
+                        hr_pipe = _SDControlImg2ImgPipe(
+                            vae=pipe.vae,
+                            text_encoder=pipe.text_encoder,
+                            tokenizer=pipe.tokenizer,
+                            unet=pipe.unet,
+                            controlnet=controlnet,
+                            scheduler=pipe.scheduler,
+                            safety_checker=None,
+                            feature_extractor=None,
+                        )
+                        hr_pipe = hr_pipe.to(device, torch_dtype=dtype)
+                    elif _SDImg2ImgPipe is not None:
+                        hr_pipe = _SDImg2ImgPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
+                    if hr_pipe is None:
+                        raise RuntimeError("No highres img2img pipeline available")
                     if hasattr(hr_pipe, "enable_attention_slicing"):
                         hr_pipe.enable_attention_slicing("max")
                     if hasattr(hr_pipe, "set_progress_bar_config"):
@@ -845,7 +866,6 @@ def run_image_generation(
                             hr_pipe.scheduler = _DPMSolver.from_config(hr_pipe.scheduler.config)
                         except Exception as exc:
                             log(f"Highres scheduler setup failed: {exc}", prefix="⚠️")
-                    hr_pipe = hr_pipe.to(device)
                     if getattr(entry, "vae_path", "") and pipeline_name != "sdxl":
                         vae_path = Path(str(getattr(entry, "vae_path", ""))).expanduser()
                         if vae_path.exists() and _AutoencoderKL is not None:
@@ -859,17 +879,21 @@ def run_image_generation(
                     resized = img.resize((target_width, target_height))
                     hr_t0 = time.time()
                     with torch.inference_mode():
-                        img = hr_pipe(
-                            pos_text,
-                            image=resized,
-                            strength=HIGHRES_STRENGTH,
-                            negative_prompt=neg_text or None,
-                            num_inference_steps=hr_steps,
-                            guidance_scale=hr_guidance,
-                            generator=generator,
-                        ).images[0]
+                        hr_kwargs = {
+                            "image": resized,
+                            "strength": HIGHRES_STRENGTH,
+                            "negative_prompt": neg_text or None,
+                            "num_inference_steps": hr_steps,
+                            "guidance_scale": hr_guidance,
+                            "generator": generator,
+                        }
+                        if controlnet_image is not None and hasattr(hr_pipe, "__call__"):
+                            hr_kwargs["controlnet_conditioning_scale"] = 1.0
+                            hr_kwargs["control_guidance_start"] = 0.0
+                            hr_kwargs["control_guidance_end"] = 1.0
+                        img = hr_pipe(pos_text, **hr_kwargs).images[0]
                     hr_ms = int((time.time() - hr_t0) * 1000)
-                    log(f"Highres fix applied in {hr_ms}ms", prefix="✅", scale=HIGHRES_SCALE)
+                    log(f"Highres fix applied in {hr_ms}ms", prefix="✅", scale=HIGHRES_SCALE, controlnet=controlnet_image is not None)
                 except Exception as exc:
                     log(f"Highres fix failed, keeping base image: {exc}", prefix="⚠️")
             img.save(output_path)

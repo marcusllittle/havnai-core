@@ -67,11 +67,11 @@
       "strengths": "Elite realism and very strong flash/daylight skin performance.",
       "weaknesses": "Backgrounds and hands can occasionally look too stiff or polished.",
       "sampler": "dpmpp_2m_karras",
-      "steps": 30,
-      "guidance": 6.25,
+      "steps": 28,
+      "guidance": 6.0,
       "width": 832,
       "height": 1248,
-      "negative_prompt_default": "extra limbs, bad hands, deformed fingers, disfigured, low quality, blurry"
+      "negative_prompt_default": "extra fingers, extra hands, extra arms, twisted wrists, deformed hands, dislocated joints, malformed feet, backward feet, duplicate face, background ghosts, extra people, bad anatomy, low quality, blurry"
     },
     {
       "name": "epicrealismXL_vxviiCrystalclear",

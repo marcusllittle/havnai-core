@@ -17,6 +17,7 @@ import atexit
 import signal
 from typing import Any, Dict, List, Optional
 import base64
+from io import BytesIO
 
 import requests
 
@@ -48,6 +49,10 @@ try:
     except Exception:  # pragma: no cover
         _SDPipe = None  # type: ignore
     try:
+        from diffusers import StableDiffusionControlNetPipeline as _SDControlPipe  # type: ignore
+    except Exception:  # pragma: no cover
+        _SDControlPipe = None  # type: ignore
+    try:
         from diffusers import DPMSolverMultistepScheduler as _DPMSolver  # type: ignore
     except Exception:  # pragma: no cover
         _DPMSolver = None  # type: ignore
@@ -55,12 +60,18 @@ try:
         from diffusers import AutoencoderKL as _AutoencoderKL  # type: ignore
     except Exception:  # pragma: no cover
         _AutoencoderKL = None  # type: ignore
+    try:
+        from diffusers import ControlNetModel as _ControlNetModel  # type: ignore
+    except Exception:  # pragma: no cover
+        _ControlNetModel = None  # type: ignore
 except ImportError:  # pragma: no cover
     diffusers = None
     _AutoPipe = None  # type: ignore
     _SDPipe = None  # type: ignore
+    _SDControlPipe = None  # type: ignore
     _DPMSolver = None  # type: ignore
     _AutoencoderKL = None  # type: ignore
+    _ControlNetModel = None  # type: ignore
 try:
     from PIL import Image  # type: ignore
 except Exception:  # pragma: no cover
@@ -139,6 +150,27 @@ WAN_I2V_DEFAULTS: Dict[str, Any] = {
 # ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
+
+
+def load_pose_image(pose_image_b64: Optional[str], pose_image_path: Optional[str]) -> Optional["Image.Image"]:
+    """Decode a pose/control image from either base64 or filesystem path."""
+
+    if Image is None:
+        return None
+    if pose_image_b64:
+        try:
+            data = base64.b64decode(pose_image_b64)
+            return Image.open(BytesIO(data)).convert("RGB")
+        except Exception as exc:  # pragma: no cover - defensive
+            log(f"Pose image base64 decode failed: {exc}", prefix="⚠️")
+    if pose_image_path:
+        try:
+            path = Path(pose_image_path).expanduser()
+            if path.exists():
+                return Image.open(path).convert("RGB")
+        except Exception as exc:  # pragma: no cover - defensive
+            log(f"Pose image load failed: {exc}", prefix="⚠️", path=pose_image_path)
+    return None
 
 
 def load_version() -> str:
@@ -496,6 +528,9 @@ def run_image_generation(
             log("Loading text2image pipeline…", prefix="ℹ️", device=device)
             load_t0 = time.time()
             pipe = None
+            controlnet_image = None
+            pose_image_b64: Optional[str] = None
+            pose_image_path: Optional[str] = None
             # For SD1.5-style checkpoints (triomerge, etc.) use StableDiffusionPipeline
             # to match direct test behavior; reserve AutoPipeline for SDXL/other future types.
             pipeline_name = (getattr(entry, "pipeline", "") or "sd15").lower()
@@ -504,6 +539,48 @@ def run_image_generation(
                     pipe = _AutoPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
                 except Exception as exc:  # fallback to SD1.5 pipe
                     log(f"AutoPipeline load failed: {exc}", prefix="⚠️")
+            # Merge per-job overrides with model defaults from manifest
+            steps = IMAGE_STEPS
+            guidance = IMAGE_GUIDANCE
+            height = IMAGE_HEIGHT
+            width = IMAGE_WIDTH
+            sampler = None
+            if job_settings and isinstance(job_settings, dict):
+                steps = int(job_settings.get("steps", steps) or steps)
+                guidance = float(job_settings.get("guidance", guidance) or guidance)
+                height = int(job_settings.get("height", height) or height)
+                width = int(job_settings.get("width", width) or width)
+                sampler = str(job_settings.get("sampler") or "").strip().lower() or None
+                if job_settings.get("negative_prompt"):
+                    neg_text = str(job_settings.get("negative_prompt") or "")
+                pose_image_b64 = job_settings.get("pose_image_b64") or job_settings.get("pose_image")
+                pose_image_path = job_settings.get("pose_image_path")
+
+            # ControlNet: only enable for SD1.5-style checkpoints when both model and pose image are present.
+            controlnet_path = getattr(entry, "controlnet_path", "") or ""
+            if (
+                pipeline_name not in {"sdxl"}
+                and controlnet_path
+                and Path(str(controlnet_path)).expanduser().exists()
+                and _ControlNetModel is not None
+                and _SDControlPipe is not None
+            ):
+                controlnet_image = load_pose_image(str(pose_image_b64 or "").strip() or None, pose_image_path)
+                if controlnet_image is None:
+                    log("ControlNet specified but no pose image provided; falling back to base pipeline", prefix="⚠️")
+                else:
+                    try:
+                        controlnet = _ControlNetModel.from_single_file(str(Path(controlnet_path).expanduser()), torch_dtype=dtype)
+                        pipe = _SDControlPipe.from_single_file(
+                            str(model_path),
+                            controlnet=controlnet,
+                            torch_dtype=dtype,
+                            safety_checker=None,
+                        )
+                        log("Loaded ControlNet for pose guidance", prefix="✅", controlnet=str(controlnet_path))
+                    except Exception as exc:
+                        log(f"ControlNet load failed; falling back to base pipeline: {exc}", prefix="⚠️")
+
             if pipe is None and _SDPipe is not None:
                 pipe = _SDPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
             # Optionally swap in a custom VAE for SD1.5-style checkpoints
@@ -533,20 +610,6 @@ def run_image_generation(
             generator = torch.Generator(device=device).manual_seed(seed)
             pos_text = prompt or "a high quality photo of a golden retriever on a beach at sunset"
             neg_text = negative_prompt or ""
-            # Merge per-job overrides with model defaults from manifest
-            steps = IMAGE_STEPS
-            guidance = IMAGE_GUIDANCE
-            height = IMAGE_HEIGHT
-            width = IMAGE_WIDTH
-            sampler = None
-            if job_settings and isinstance(job_settings, dict):
-                steps = int(job_settings.get("steps", steps) or steps)
-                guidance = float(job_settings.get("guidance", guidance) or guidance)
-                height = int(job_settings.get("height", height) or height)
-                width = int(job_settings.get("width", width) or width)
-                sampler = str(job_settings.get("sampler") or "").strip().lower() or None
-                if job_settings.get("negative_prompt"):
-                    neg_text = str(job_settings.get("negative_prompt") or "")
             # clamp to sane ranges
             steps = max(5, min(50, steps))
             guidance = max(1.0, min(15.0, guidance))
@@ -584,15 +647,17 @@ def run_image_generation(
                 except Exception as exc:
                     log(f"Sampler switch failed: {exc}", prefix="⚠️", sampler=sampler)
             with torch.inference_mode():
-                result = pipe(
-                    pos_text,
-                    negative_prompt=neg_text or None,
-                    num_inference_steps=steps,
-                    guidance_scale=guidance,
-                    generator=generator,
-                    height=height,
-                    width=width,
-                )
+                pipe_kwargs = {
+                    "negative_prompt": neg_text or None,
+                    "num_inference_steps": steps,
+                    "guidance_scale": guidance,
+                    "generator": generator,
+                    "height": height,
+                    "width": width,
+                }
+                if controlnet_image is not None:
+                    pipe_kwargs["image"] = controlnet_image
+                result = pipe(pos_text, **pipe_kwargs)
             gen_ms = int((time.time() - gen_t0) * 1000)
             log(f"Generated in {gen_ms}ms", prefix="✅")
             img = result.images[0]

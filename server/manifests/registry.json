@@ -5,6 +5,7 @@
       "pipeline": "sd15",
       "path": "/mnt/d/havnai-storage/models/creator/majicmixRealistic_v7.safetensors",
       "vae_path": "/mnt/d/havnai-storage/models/creator/clearvaeSD15_v23.safetensors",
+      "controlnet_path": "/mnt/d/havnai-storage/models/controlnet/control_v11p_sd15_openpose.pth",
       "type": "checkpoint",
       "tags": [
         "realism",
@@ -31,6 +32,7 @@
       "pipeline": "sd15",
       "path": "/mnt/d/havnai-storage/models/creator/lazymixRealAmateur_v40.safetensors",
       "vae_path": "/mnt/d/havnai-storage/models/creator/clearvaeSD15_v23.safetensors",
+      "controlnet_path": "/mnt/d/havnai-storage/models/controlnet/control_v11p_sd15_openpose.pth",
       "type": "checkpoint",
       "tags": [
         "realism",
@@ -100,6 +102,7 @@
       "pipeline": "sd15",
       "path": "/mnt/d/havnai-storage/models/creator/perfectdeliberate_v5SD15.safetensors",
       "vae_path": "/mnt/d/havnai-storage/models/creator/clearvaeSD15_v23.safetensors",
+      "controlnet_path": "/mnt/d/havnai-storage/models/controlnet/control_v11p_sd15_openpose.pth",
       "type": "checkpoint",
       "tags": [
         "realism",
@@ -122,6 +125,7 @@
       "pipeline": "sd15",
       "path": "/mnt/d/havnai-storage/models/creator/uberRealisticPornMerge_v23Final.safetensors",
       "vae_path": "/mnt/d/havnai-storage/models/creator/clearvaeSD15_v23.safetensors",
+      "controlnet_path": "/mnt/d/havnai-storage/models/controlnet/control_v11p_sd15_openpose.pth",
       "type": "checkpoint",
       "tags": [
         "studio_light",
@@ -144,6 +148,7 @@
       "pipeline": "sd15",
       "path": "/mnt/d/havnai-storage/models/creator/triomerge_v10.safetensors",
       "vae_path": "/mnt/d/havnai-storage/models/creator/vaeKlF8Anime2_klF8Anime2VAE.safetensors",
+      "controlnet_path": "/mnt/d/havnai-storage/models/controlnet/control_v11p_sd15_openpose.pth",
       "type": "checkpoint",
       "tags": [
         "fantasy",
@@ -166,6 +171,7 @@
       "pipeline": "sd15",
       "path": "/mnt/d/havnai-storage/models/creator/unstablePornhwa_beta.safetensors",
       "vae_path": "/mnt/d/havnai-storage/models/creator/vaeKlF8Anime2_klF8Anime2VAE.safetensors",
+      "controlnet_path": "/mnt/d/havnai-storage/models/controlnet/control_v11p_sd15_openpose.pth",
       "type": "checkpoint",
       "tags": [
         "manhwa",
@@ -188,6 +194,7 @@
       "pipeline": "sd15",
       "path": "/mnt/d/havnai-storage/models/creator/disneyPixarCartoon_v10.safetensors",
       "vae_path": "/mnt/d/havnai-storage/models/creator/vaeKlF8Anime2_klF8Anime2VAE.safetensors",
+      "controlnet_path": "/mnt/d/havnai-storage/models/controlnet/control_v11p_sd15_openpose.pth",
       "type": "checkpoint",
       "tags": [
         "cartoon",
@@ -210,6 +217,7 @@
       "pipeline": "sd15",
       "path": "/mnt/d/havnai-storage/models/creator/kizukiAnimeHentai_animeHentaiV4.safetensors",
       "vae_path": "/mnt/d/havnai-storage/models/creator/vaeKlF8Anime2_klF8Anime2VAE.safetensors",
+      "controlnet_path": "/mnt/d/havnai-storage/models/controlnet/control_v11p_sd15_openpose.pth",
       "type": "checkpoint",
       "tags": [
         "anime",

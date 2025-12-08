@@ -21,6 +21,7 @@ except Exception:  # pragma: no cover
         reward_weight: float = 0.0
         task_type: str = "IMAGE_GEN"
         vae_path: str = ""
+        controlnet_path: str = ""
         steps: int | None = None
         guidance: float | None = None
         width: int | None = None

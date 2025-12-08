@@ -667,7 +667,7 @@ def record_reward(wallet: Optional[str], task_id: str, reward: float) -> None:
     conn.commit()
 
 
-def get_job_summary(limit: int = 12) -> Dict[str, Any]:
+def get_job_summary(limit: int = 50) -> Dict[str, Any]:
     conn = get_db()
     queued = conn.execute(
         "SELECT COUNT(*) FROM jobs WHERE status='queued' AND UPPER(task_type)=?",

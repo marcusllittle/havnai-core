@@ -53,6 +53,10 @@ try:
     except Exception:  # pragma: no cover
         _SDControlPipe = None  # type: ignore
     try:
+        from diffusers import StableDiffusionImg2ImgPipeline as _SDImg2ImgPipe  # type: ignore
+    except Exception:  # pragma: no cover
+        _SDImg2ImgPipe = None  # type: ignore
+    try:
         from diffusers import DPMSolverMultistepScheduler as _DPMSolver  # type: ignore
     except Exception:  # pragma: no cover
         _DPMSolver = None  # type: ignore
@@ -69,6 +73,7 @@ except ImportError:  # pragma: no cover
     _AutoPipe = None  # type: ignore
     _SDPipe = None  # type: ignore
     _SDControlPipe = None  # type: ignore
+    _SDImg2ImgPipe = None  # type: ignore
     _DPMSolver = None  # type: ignore
     _AutoencoderKL = None  # type: ignore
     _ControlNetModel = None  # type: ignore
@@ -145,6 +150,11 @@ WAN_I2V_DEFAULTS: Dict[str, Any] = {
     "height": 720,
     "width": 512,
 }
+
+# Highres defaults
+HIGHRES_MIN_EDGE = 1152
+HIGHRES_SCALE = 1.5  # target upscale factor (1.4–1.6x range)
+HIGHRES_STRENGTH = 0.4
 
 
 # ---------------------------------------------------------------------------
@@ -615,6 +625,14 @@ def run_image_generation(
             guidance = max(1.0, min(15.0, guidance))
             height = max(256, min(1536, height))
             width = max(256, min(1536, width))
+            do_highres = max(height, width) > HIGHRES_MIN_EDGE and _SDImg2ImgPipe is not None and controlnet_image is None
+            target_height, target_width = height, width
+            base_height, base_width = height, width
+            if do_highres:
+                base_height = max(256, int(target_height / HIGHRES_SCALE))
+                base_width = max(256, int(target_width / HIGHRES_SCALE))
+                base_height = max(256, int(round(base_height / 8) * 8))
+                base_width = max(256, int(round(base_width / 8) * 8))
             # Proactively truncate to CLIP token limit to avoid noisy warnings
             if hasattr(pipe, "tokenizer") and hasattr(pipe.tokenizer, "model_max_length"):
                 try:
@@ -652,8 +670,8 @@ def run_image_generation(
                     "num_inference_steps": steps,
                     "guidance_scale": guidance,
                     "generator": generator,
-                    "height": height,
-                    "width": width,
+                    "height": base_height,
+                    "width": base_width,
                 }
                 if controlnet_image is not None:
                     pipe_kwargs["image"] = controlnet_image
@@ -661,6 +679,46 @@ def run_image_generation(
             gen_ms = int((time.time() - gen_t0) * 1000)
             log(f"Generated in {gen_ms}ms", prefix="✅")
             img = result.images[0]
+            # Highres refinement pass using img2img pipeline
+            if do_highres:
+                try:
+                    hr_pipe = _SDImg2ImgPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
+                    if hasattr(hr_pipe, "enable_attention_slicing"):
+                        hr_pipe.enable_attention_slicing("max")
+                    if hasattr(hr_pipe, "set_progress_bar_config"):
+                        hr_pipe.set_progress_bar_config(disable=True)
+                    if hasattr(hr_pipe, "scheduler") and _DPMSolver is not None:
+                        try:
+                            hr_pipe.scheduler = _DPMSolver.from_config(hr_pipe.scheduler.config)
+                        except Exception as exc:
+                            log(f"Highres scheduler setup failed: {exc}", prefix="⚠️")
+                    hr_pipe = hr_pipe.to(device)
+                    if getattr(entry, "vae_path", "") and pipeline_name != "sdxl":
+                        vae_path = Path(str(getattr(entry, "vae_path", ""))).expanduser()
+                        if vae_path.exists() and _AutoencoderKL is not None:
+                            try:
+                                custom_vae = _AutoencoderKL.from_single_file(str(vae_path), torch_dtype=dtype)
+                                hr_pipe.vae = custom_vae
+                            except Exception:
+                                pass
+                    hr_steps = max(10, min(steps, 50))
+                    hr_guidance = max(1.0, min(guidance, 12.0))
+                    resized = img.resize((target_width, target_height))
+                    hr_t0 = time.time()
+                    with torch.inference_mode():
+                        img = hr_pipe(
+                            pos_text,
+                            image=resized,
+                            strength=HIGHRES_STRENGTH,
+                            negative_prompt=neg_text or None,
+                            num_inference_steps=hr_steps,
+                            guidance_scale=hr_guidance,
+                            generator=generator,
+                        ).images[0]
+                    hr_ms = int((time.time() - hr_t0) * 1000)
+                    log(f"Highres fix applied in {hr_ms}ms", prefix="✅", scale=HIGHRES_SCALE)
+                except Exception as exc:
+                    log(f"Highres fix failed, keeping base image: {exc}", prefix="⚠️")
             img.save(output_path)
             with output_path.open("rb") as fh:
                 image_b64 = base64.b64encode(fh.read()).decode("utf-8")

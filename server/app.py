@@ -78,9 +78,13 @@ REWARD_CONFIG: Dict[str, float] = {
     "base_reward": float(os.getenv("REWARD_BASE_HAI", "0.05")),
 }
 
+# Slight global positive bias to help realism skin detail.
+GLOBAL_POSITIVE_SUFFIX = "(ultra-realistic 8k:1.05), (detailed skin pores:1.03)"
+
 # Global negative prompt to discourage common artifacts across all models.
 GLOBAL_NEGATIVE_PROMPT = ", ".join(
     [
+        "FastNegativeV2",
         "liquid fingers",
         "interlocked fingers",
         "bad teeth",
@@ -349,6 +353,27 @@ GLOBAL_NEGATIVE_PROMPT = ", ".join(
         "blurry, pixelated, noisy, low resolution, JPEG artifacts, lack of focus, grainy textures, over-sharpened edges",
         "extra fingers, fused fingers, long necks, missing arms, mutated hands, malformed limbs, bad anatomy",
         "mutations, merged features, gross proportions",
+        "extra breasts",
+        "missing breasts",
+        "deformed breasts",
+        "plastic breasts",
+        "fake breasts",
+        "gravity-defying breasts",
+        "extra nipples",
+        "cloned face",
+        "duplicate body parts",
+        "censored",
+        "clothing on nude body",
+        "smooth featureless crotch",
+        "dildo clipping through body",
+        "merged holes",
+        "plastic skin",
+        "dry skin",
+        "flat chest",
+        "single snake",
+        "few snakes",
+        "bald spots",
+        "horror monster",
     ]
 )
 
@@ -1428,6 +1453,10 @@ def submit_job() -> Any:
         task_type = "ANIMATEDIFF"
     else:
         prompt_text = str(payload.get("prompt") or payload.get("data") or "")
+        if prompt_text:
+            prompt_text = f"{prompt_text}, {GLOBAL_POSITIVE_SUFFIX}"
+        else:
+            prompt_text = GLOBAL_POSITIVE_SUFFIX
         negative_prompt = str(payload.get("negative_prompt") or "")
         job_settings: Dict[str, Any] = {"prompt": prompt_text}
         if negative_prompt:

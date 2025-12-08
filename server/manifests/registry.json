@@ -93,7 +93,7 @@
       "guidance": 5.8,
       "width": 768,
       "height": 1152,
-      "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, twisted ankles, malformed feet, duplicate people, background ghosts, clothing merging, bad anatomy, low quality, blurry"
+      "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, action wrist hyperflex, prop-hand glow fusion, twisted ankles, malformed feet, duplicate people, background ghosts, clothing merging, bad anatomy, low quality, blurry"
     },
     {
       "name": "perfectdeliberate_v5SD15",

@@ -836,6 +836,17 @@ def run_image_generation(
                 source_face_image = load_source_image(source_face)
                 if pipeline_name == "sdxl" and source_face_image is not None and ipadapter_dir.exists():
                     use_ipadapter = True
+                log(
+                    "Face swap request",
+                    prefix="ℹ️",
+                    swap=face_swap,
+                    use_ipadapter=use_ipadapter,
+                    source_face_loaded=bool(source_face_image is not None),
+                    ipadapter_dir=str(ipadapter_dir),
+                    ipadapter_bin=ipadapter_bin,
+                    ipadapter_lora=ipadapter_lora,
+                    ipadapter_scale=ipadapter_scale,
+                )
 
             # ControlNet: only enable for SD1.5-style checkpoints when both model and pose image are present.
             controlnet_path = getattr(entry, "controlnet_path", "") or ""

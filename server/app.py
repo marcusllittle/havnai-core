@@ -1990,6 +1990,10 @@ def get_creator_tasks() -> Any:
                     if isinstance(parsed, dict):
                         prompt_text = str(parsed.get("prompt") or "")
                         negative_prompt = str(parsed.get("negative_prompt") or "")
+                        # For structured payloads (face swap, etc.), pass the raw JSON to the node
+                        prompt_for_node = raw_data
+                    else:
+                        prompt_for_node = prompt_text
 
                     assign_job_to_node(job["id"], node_id)
                     reward_weight = float(job["weight"] or cfg.get("reward_weight", resolve_weight(job["model"], 10.0)))
@@ -2008,7 +2012,7 @@ def get_creator_tasks() -> Any:
                             "assigned_to": node_id,
                             "job_id": job["id"],
                             "data": raw_data,
-                            "prompt": prompt_text,
+                            "prompt": prompt_for_node,
                             "negative_prompt": negative_prompt,
                         }
                     ]

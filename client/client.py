@@ -798,6 +798,8 @@ def run_image_generation(
             ipadapter_bin = IPADAPTER_BIN
             ipadapter_lora = IPADAPTER_LORA
             ipadapter_scale = 0.85
+            source_face_image = None
+            use_ipadapter = False
             # For SD1.5-style checkpoints (triomerge, etc.) use StableDiffusionPipeline
             # to match direct test behavior; reserve AutoPipeline for SDXL/other future types.
             pipeline_name = (getattr(entry, "pipeline", "") or "sd15").lower()
@@ -830,6 +832,10 @@ def run_image_generation(
                 ipadapter_bin = str(job_settings.get("ipadapter_bin") or ipadapter_bin)
                 ipadapter_lora = str(job_settings.get("ipadapter_lora") or ipadapter_lora)
                 ipadapter_scale = float(job_settings.get("ipadapter_scale", ipadapter_scale) or ipadapter_scale)
+            if face_swap:
+                source_face_image = load_source_image(source_face)
+                if pipeline_name == "sdxl" and source_face_image is not None and ipadapter_dir.exists():
+                    use_ipadapter = True
 
             # ControlNet: only enable for SD1.5-style checkpoints when both model and pose image are present.
             controlnet_path = getattr(entry, "controlnet_path", "") or ""
@@ -889,8 +895,8 @@ def run_image_generation(
             load_ms = int((time.time() - load_t0) * 1000)
             log(f"Pipeline ready in {load_ms}ms", prefix="✅")
 
-            # Apply HyperLoRA if requested and available
-            if face_swap and hyperlora_path.exists() and not (pipeline_name == "sdxl" and ipadapter_dir.exists()):
+            # Apply HyperLoRA if requested and available (skip when IP-Adapter SDXL is used)
+            if face_swap and hyperlora_path.exists() and not use_ipadapter:
                 try:
                     if hasattr(pipe, "load_lora_weights"):
                         pipe.load_lora_weights(str(hyperlora_path), adapter_name="hyperlora")
@@ -902,7 +908,7 @@ def run_image_generation(
                 except Exception as exc:
                         log(f"HyperLoRA load failed: {exc}", prefix="⚠️", lora=str(hyperlora_path))
             # Apply IP-Adapter if requested (SDXL only)
-            if face_swap and pipeline_name == "sdxl" and source_face_image is not None and ipadapter_dir.exists():
+            if use_ipadapter and source_face_image is not None:
                 _load_ip_adapter(pipe, ipadapter_dir, ipadapter_bin, ipadapter_lora, ipadapter_scale)
 
             seed = int(time.time()) & 0x7FFFFFFF
@@ -966,7 +972,7 @@ def run_image_generation(
                     pipe.scheduler = _DPMSolver.from_config(pipe.scheduler.config)
                 except Exception as exc:
                     log(f"Sampler switch failed: {exc}", prefix="⚠️", sampler=sampler)
-            use_img2img = face_swap and source_face_image is not None
+            use_img2img = face_swap and source_face_image is not None and not use_ipadapter
             img_pipe = None
             if use_img2img:
                 try:
@@ -1013,7 +1019,6 @@ def run_image_generation(
                     img = img_pipe(
                         pos_text,
                         image=source_face_image,
-                        ip_adapter_image=source_face_image if pipeline_name == "sdxl" else None,
                         strength=swap_strength,
                         negative_prompt=neg_text or None,
                         num_inference_steps=steps,
@@ -1034,6 +1039,8 @@ def run_image_generation(
                         pipe_kwargs["controlnet_conditioning_scale"] = 1.0
                         pipe_kwargs["control_guidance_start"] = 0.0
                         pipe_kwargs["control_guidance_end"] = 1.0
+                    if use_ipadapter and source_face_image is not None:
+                        pipe_kwargs["ip_adapter_image"] = source_face_image
                     result = pipe(pos_text, **pipe_kwargs)
                     img = result.images[0]
             gen_ms = int((time.time() - gen_t0) * 1000)

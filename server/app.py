@@ -79,6 +79,11 @@ REWARD_CONFIG: Dict[str, float] = {
     "base_reward": float(os.getenv("REWARD_BASE_HAI", "0.05")),
 }
 
+HYPERLORA_PATH_DEFAULT = os.getenv("HYPERLORA_PATH", "/mnt/d/havnai-storage/models/loras/HyperLoRA_SDXL.safetensors")
+IPADAPTER_DIR_DEFAULT = os.getenv("IPADAPTER_DIR", "/mnt/d/havnai-storage/models/ip-adapter-faceid")
+IPADAPTER_BIN_DEFAULT = os.getenv("IPADAPTER_BIN", "ip-adapter-faceid-plusv2_sdxl.bin")
+IPADAPTER_LORA_DEFAULT = os.getenv("IPADAPTER_LORA", "ip-adapter-faceid-plusv2_sdxl_lora.safetensors")
+
 # Basic NSFW/pose keyword sniffing to steer auto model selection away from cartoons.
 AUTO_NSFW_KEYWORDS = {
     "nsfw",
@@ -1527,6 +1532,58 @@ def list_models() -> Any:
     return jsonify({"models": list(MANIFEST_MODELS.values())})
 
 
+@app.route("/submit-swap-hyperlora", methods=["POST"])
+def submit_swap_hyperlora() -> Any:
+    """Face swap helper that injects HyperLoRA and a source face into a standard job."""
+
+    payload = request.get_json() or {}
+    # Reuse submit-job logic but mark face_swap and pass source_face
+    model = payload.get("model") or ""
+    prompt = payload.get("prompt") or payload.get("data") or ""
+    negative_prompt = payload.get("negative_prompt") or ""
+    source_face = payload.get("source_face") or payload.get("source_face_url") or payload.get("source_face_b64") or ""
+    hyperlora_weight = float(payload.get("hyperlora_weight", 0.85) or 0.85)
+    if not prompt or not source_face:
+        return jsonify({"error": "prompt and source_face required"}), 400
+
+    # Augment payload and forward to submit_job flow
+    payload["data"] = str(prompt)
+    payload["prompt"] = str(prompt)
+    payload["negative_prompt"] = str(negative_prompt)
+    payload["face_swap"] = True
+    payload["source_face"] = source_face
+    payload["hyperlora_weight"] = hyperlora_weight
+        payload["hyperlora_path"] = payload.get("hyperlora_path") or HYPERLORA_PATH_DEFAULT
+        # Directly call submit_job with modified payload
+        with app.test_request_context("/submit-job", method="POST", json=payload):
+            return submit_job()
+
+
+@app.route("/submit-swap-ipadapter", methods=["POST"])
+def submit_swap_ipadapter() -> Any:
+    """Face swap helper using IP-Adapter-FaceID-PlusV2 (SDXL)."""
+
+    payload = request.get_json() or {}
+    prompt = payload.get("prompt") or payload.get("data") or ""
+    negative_prompt = payload.get("negative_prompt") or ""
+    source_face = payload.get("source_face") or payload.get("source_face_url") or payload.get("source_face_b64") or ""
+    scale = float(payload.get("ipadapter_scale", 0.85) or 0.85)
+    if not prompt or not source_face:
+        return jsonify({"error": "prompt and source_face required"}), 400
+
+    payload["data"] = str(prompt)
+    payload["prompt"] = str(prompt)
+    payload["negative_prompt"] = str(negative_prompt)
+    payload["face_swap"] = True
+    payload["source_face"] = source_face
+    payload["ipadapter_dir"] = payload.get("ipadapter_dir") or IPADAPTER_DIR_DEFAULT
+    payload["ipadapter_bin"] = payload.get("ipadapter_bin") or IPADAPTER_BIN_DEFAULT
+    payload["ipadapter_lora"] = payload.get("ipadapter_lora") or IPADAPTER_LORA_DEFAULT
+    payload["ipadapter_scale"] = scale
+    with app.test_request_context("/submit-job", method="POST", json=payload):
+        return submit_job()
+
+
 @app.route("/installers/<path:filename>")
 def installer_assets(filename: str) -> Any:
     safe_path = (LEGACY_STATIC_DIR / filename).resolve()
@@ -1699,6 +1756,22 @@ def submit_job() -> Any:
             job_settings["pose_image_b64"] = str(pose_image)
         if pose_image_path:
             job_settings["pose_image_path"] = str(pose_image_path)
+        if payload.get("face_swap"):
+            job_settings["face_swap"] = True
+            job_settings["source_face"] = payload.get("source_face") or payload.get("source_face_url") or payload.get("source_face_b64")
+            job_settings["hyperlora_path"] = payload.get("hyperlora_path") or HYPERLORA_PATH_DEFAULT
+            if payload.get("hyperlora_weight") is not None:
+                job_settings["hyperlora_weight"] = payload.get("hyperlora_weight")
+            if payload.get("swap_strength") is not None:
+                job_settings["swap_strength"] = payload.get("swap_strength")
+            if payload.get("ipadapter_dir"):
+                job_settings["ipadapter_dir"] = payload.get("ipadapter_dir")
+            if payload.get("ipadapter_bin"):
+                job_settings["ipadapter_bin"] = payload.get("ipadapter_bin")
+            if payload.get("ipadapter_lora"):
+                job_settings["ipadapter_lora"] = payload.get("ipadapter_lora")
+            if payload.get("ipadapter_scale") is not None:
+                job_settings["ipadapter_scale"] = payload.get("ipadapter_scale")
 
         # Per-model defaults from manifest (steps/guidance/size/sampler/negative)
         if cfg:

@@ -55,6 +55,10 @@ try:
     except Exception:  # pragma: no cover
         _SDControlPipe = None  # type: ignore
     try:
+        from diffusers import StableDiffusionXLImg2ImgPipeline as _SDXLImg2ImgPipe  # type: ignore
+    except Exception:  # pragma: no cover
+        _SDXLImg2ImgPipe = None  # type: ignore
+    try:
         from diffusers import StableDiffusionImg2ImgPipeline as _SDImg2ImgPipe  # type: ignore
     except Exception:  # pragma: no cover
         _SDImg2ImgPipe = None  # type: ignore
@@ -79,6 +83,7 @@ except ImportError:  # pragma: no cover
     _AutoPipe = None  # type: ignore
     _SDPipe = None  # type: ignore
     _SDControlPipe = None  # type: ignore
+    _SDXLImg2ImgPipe = None  # type: ignore
     _SDImg2ImgPipe = None  # type: ignore
     _SDControlImg2ImgPipe = None  # type: ignore
     _DPMSolver = None  # type: ignore
@@ -169,6 +174,11 @@ QUALITY_FLOOR_NEG = "lowres, worst quality, jpeg artifacts, blurry, grainy"
 LIMB_GUARD_NEG = "extra limbs, extra hands, extra fingers, fused fingers, missing fingers, duplicate limb, malformed hands, warped feet, disjoint limbs"
 FACE_DUP_GUARD_NEG = "duplicate face, extra head, extra face, fused face, extra eyes, double head, distorted face"
 
+HYPERLORA_PATH = Path(os.environ.get("HYPERLORA_PATH", "/mnt/d/havnai-storage/models/loras/HyperLoRA_SDXL.safetensors")).expanduser()
+IPADAPTER_DIR = Path(os.environ.get("IPADAPTER_DIR", "/mnt/d/havnai-storage/models/ip-adapter-faceid")).expanduser()
+IPADAPTER_BIN = os.environ.get("IPADAPTER_BIN", "ip-adapter-faceid-plusv2_sdxl.bin")
+IPADAPTER_LORA = os.environ.get("IPADAPTER_LORA", "ip-adapter-faceid-plusv2_sdxl_lora.safetensors")
+
 # Auto-pose/ControlNet settings
 POSE_LIBRARY_DIR = Path("/controlnet/poses/nsfw_openpose_package").expanduser()
 POSE_PREPROCESS_RES = 768
@@ -237,6 +247,57 @@ def load_pose_image(pose_image_b64: Optional[str], pose_image_path: Optional[str
         except Exception as exc:  # pragma: no cover - defensive
             log(f"Pose image load failed: {exc}", prefix="⚠️", path=pose_image_path)
     return None
+
+
+def load_source_image(source: Optional[str]) -> Optional["Image.Image"]:
+    """Load a source face/image from base64, local path, or URL."""
+
+    if not source or Image is None:
+        return None
+    # base64?
+    if len(source) > 100 and all(c.isalnum() or c in "+/=\n" for c in source):
+        try:
+            data = base64.b64decode(source)
+            return Image.open(BytesIO(data)).convert("RGB")
+        except Exception:
+            pass
+    # URL?
+    if source.startswith("http://") or source.startswith("https://"):
+        try:
+            resp = requests.get(source, timeout=10)
+            resp.raise_for_status()
+            return Image.open(BytesIO(resp.content)).convert("RGB")
+        except Exception as exc:
+            log(f"Source face URL load failed: {exc}", prefix="⚠️", url=source)
+    # Path
+    try:
+        path = Path(source).expanduser()
+        if path.exists():
+            return Image.open(path).convert("RGB")
+    except Exception:
+        pass
+    return None
+
+
+def _load_ip_adapter(pipe: object, adapter_dir: Path, adapter_bin: str, adapter_lora: str, scale: float) -> None:
+    """Load IP-Adapter FaceID PlusV2 weights into the pipeline if supported."""
+
+    if not hasattr(pipe, "load_ip_adapter"):
+        return
+    bin_path = adapter_dir / adapter_bin
+    lora_path = adapter_dir / adapter_lora
+    if not bin_path.exists() or not lora_path.exists():
+        log("IP-Adapter files missing", prefix="⚠️", bin=str(bin_path), lora=str(lora_path))
+        return
+    try:
+        pipe.load_ip_adapter(str(adapter_dir), subfolder="", weight_name=adapter_bin)
+        if hasattr(pipe, "load_ip_adapter_weights"):
+            pipe.load_ip_adapter_weights(str(lora_path))
+        if hasattr(pipe, "set_ip_adapter_scale"):
+            pipe.set_ip_adapter_scale(scale)
+        log("IP-Adapter loaded", prefix="✅", adapter=str(bin_path), lora=str(lora_path), scale=scale)
+    except Exception as exc:  # pragma: no cover - defensive
+        log(f"IP-Adapter load failed: {exc}", prefix="⚠️")
 
 
 def _tokenize_prompt(prompt: str) -> List[str]:
@@ -729,6 +790,14 @@ def run_image_generation(
             pose_image_b64: Optional[str] = None
             pose_image_path: Optional[str] = None
             auto_pose_used = False
+            face_swap = False
+            hyperlora_path = HYPERLORA_PATH
+            hyperlora_weight = 0.85
+            source_face = None
+            ipadapter_dir = IPADAPTER_DIR
+            ipadapter_bin = IPADAPTER_BIN
+            ipadapter_lora = IPADAPTER_LORA
+            ipadapter_scale = 0.85
             # For SD1.5-style checkpoints (triomerge, etc.) use StableDiffusionPipeline
             # to match direct test behavior; reserve AutoPipeline for SDXL/other future types.
             pipeline_name = (getattr(entry, "pipeline", "") or "sd15").lower()
@@ -753,6 +822,14 @@ def run_image_generation(
                     neg_text = str(job_settings.get("negative_prompt") or "")
                 pose_image_b64 = job_settings.get("pose_image_b64") or job_settings.get("pose_image")
                 pose_image_path = job_settings.get("pose_image_path")
+                face_swap = bool(job_settings.get("face_swap", False))
+                hyperlora_weight = float(job_settings.get("hyperlora_weight", hyperlora_weight) or hyperlora_weight)
+                hyperlora_path = Path(str(job_settings.get("hyperlora_path") or hyperlora_path)).expanduser()
+                source_face = job_settings.get("source_face") or job_settings.get("source_face_url") or job_settings.get("source_face_b64")
+                ipadapter_dir = Path(str(job_settings.get("ipadapter_dir") or ipadapter_dir)).expanduser()
+                ipadapter_bin = str(job_settings.get("ipadapter_bin") or ipadapter_bin)
+                ipadapter_lora = str(job_settings.get("ipadapter_lora") or ipadapter_lora)
+                ipadapter_scale = float(job_settings.get("ipadapter_scale", ipadapter_scale) or ipadapter_scale)
 
             # ControlNet: only enable for SD1.5-style checkpoints when both model and pose image are present.
             controlnet_path = getattr(entry, "controlnet_path", "") or ""
@@ -784,6 +861,8 @@ def run_image_generation(
                         log("Loaded ControlNet for pose guidance", prefix="✅", controlnet=str(controlnet_path), auto_pose=auto_pose_used)
                     except Exception as exc:
                         log(f"ControlNet load failed; falling back to base pipeline: {exc}", prefix="⚠️")
+            # Face swap: prepare source face if requested
+            source_face_image = load_source_image(source_face) if face_swap else None
 
             if pipe is None and _SDPipe is not None:
                 pipe = _SDPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
@@ -810,6 +889,22 @@ def run_image_generation(
             load_ms = int((time.time() - load_t0) * 1000)
             log(f"Pipeline ready in {load_ms}ms", prefix="✅")
 
+            # Apply HyperLoRA if requested and available
+            if face_swap and hyperlora_path.exists() and not (pipeline_name == "sdxl" and ipadapter_dir.exists()):
+                try:
+                    if hasattr(pipe, "load_lora_weights"):
+                        pipe.load_lora_weights(str(hyperlora_path), adapter_name="hyperlora")
+                        if hasattr(pipe, "set_adapters"):
+                            pipe.set_adapters(["hyperlora"], adapter_weights=[hyperlora_weight])
+                        elif hasattr(pipe, "fuse_lora"):
+                            pipe.fuse_lora(lora_scale=hyperlora_weight)
+                    log("HyperLoRA applied", prefix="✅", lora=str(hyperlora_path), weight=hyperlora_weight)
+                except Exception as exc:
+                        log(f"HyperLoRA load failed: {exc}", prefix="⚠️", lora=str(hyperlora_path))
+            # Apply IP-Adapter if requested (SDXL only)
+            if face_swap and pipeline_name == "sdxl" and source_face_image is not None and ipadapter_dir.exists():
+                _load_ip_adapter(pipe, ipadapter_dir, ipadapter_bin, ipadapter_lora, ipadapter_scale)
+
             seed = int(time.time()) & 0x7FFFFFFF
             generator = torch.Generator(device=device).manual_seed(seed)
             pos_text = prompt or "a high quality photo of a golden retriever on a beach at sunset"
@@ -828,6 +923,8 @@ def run_image_generation(
             height = max(256, min(1536, height))
             width = max(256, min(1536, width))
             do_highres = max(height, width) > HIGHRES_MIN_EDGE and _SDImg2ImgPipe is not None
+            if face_swap:
+                do_highres = False  # keep identity stable; skip additional upscale for swaps
             target_height, target_width = height, width
             base_height, base_width = height, width
             if do_highres:
@@ -869,24 +966,78 @@ def run_image_generation(
                     pipe.scheduler = _DPMSolver.from_config(pipe.scheduler.config)
                 except Exception as exc:
                     log(f"Sampler switch failed: {exc}", prefix="⚠️", sampler=sampler)
+            use_img2img = face_swap and source_face_image is not None
+            img_pipe = None
+            if use_img2img:
+                try:
+                    if pipeline_name in {"sdxl"} and _SDXLImg2ImgPipe is not None:
+                        img_pipe = _SDXLImg2ImgPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
+                    elif _SDImg2ImgPipe is not None:
+                        img_pipe = _SDImg2ImgPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
+                    if img_pipe is not None:
+                        if hasattr(img_pipe, "enable_attention_slicing"):
+                            img_pipe.enable_attention_slicing("max")
+                        if hasattr(img_pipe, "set_progress_bar_config"):
+                            img_pipe.set_progress_bar_config(disable=True)
+                        if hasattr(img_pipe, "scheduler") and _DPMSolver is not None:
+                            try:
+                                img_pipe.scheduler = _DPMSolver.from_config(img_pipe.scheduler.config)
+                            except Exception as exc:
+                                log(f"Swap scheduler setup failed: {exc}", prefix="⚠️")
+                        if getattr(entry, "vae_path", "") and pipeline_name != "sdxl":
+                            vae_path = Path(str(getattr(entry, "vae_path", ""))).expanduser()
+                            if vae_path.exists() and _AutoencoderKL is not None:
+                                try:
+                                    custom_vae = _AutoencoderKL.from_single_file(str(vae_path), torch_dtype=dtype)
+                                    img_pipe.vae = custom_vae
+                                except Exception:
+                                    pass
+                        img_pipe = img_pipe.to(device)
+                        if face_swap and hyperlora_path.exists() and not (pipeline_name == "sdxl" and ipadapter_dir.exists()):
+                            try:
+                                img_pipe.load_lora_weights(str(hyperlora_path), adapter_name="hyperlora")
+                                if hasattr(img_pipe, "set_adapters"):
+                                    img_pipe.set_adapters(["hyperlora"], adapter_weights=[hyperlora_weight])
+                                elif hasattr(img_pipe, "fuse_lora"):
+                                    img_pipe.fuse_lora(lora_scale=hyperlora_weight)
+                            except Exception:
+                                pass
+                        if face_swap and pipeline_name == "sdxl" and source_face_image is not None and ipadapter_dir.exists():
+                            _load_ip_adapter(img_pipe, ipadapter_dir, ipadapter_bin, ipadapter_lora, ipadapter_scale)
+                except Exception as exc:
+                    log(f"Swap pipeline init failed: {exc}", prefix="⚠️")
+
             with torch.inference_mode():
-                pipe_kwargs = {
-                    "negative_prompt": neg_text or None,
-                    "num_inference_steps": steps,
-                    "guidance_scale": guidance,
-                    "generator": generator,
-                    "height": base_height,
-                    "width": base_width,
-                }
-                if controlnet_image is not None:
-                    pipe_kwargs["image"] = controlnet_image
-                    pipe_kwargs["controlnet_conditioning_scale"] = 1.0
-                    pipe_kwargs["control_guidance_start"] = 0.0
-                    pipe_kwargs["control_guidance_end"] = 1.0
-                result = pipe(pos_text, **pipe_kwargs)
+                if use_img2img and img_pipe is not None:
+                    swap_strength = float(job_settings.get("swap_strength", 0.35) if job_settings else 0.35)
+                    img = img_pipe(
+                        pos_text,
+                        image=source_face_image,
+                        ip_adapter_image=source_face_image if pipeline_name == "sdxl" else None,
+                        strength=swap_strength,
+                        negative_prompt=neg_text or None,
+                        num_inference_steps=steps,
+                        guidance_scale=guidance,
+                        generator=generator,
+                    ).images[0]
+                else:
+                    pipe_kwargs = {
+                        "negative_prompt": neg_text or None,
+                        "num_inference_steps": steps,
+                        "guidance_scale": guidance,
+                        "generator": generator,
+                        "height": base_height,
+                        "width": base_width,
+                    }
+                    if controlnet_image is not None:
+                        pipe_kwargs["image"] = controlnet_image
+                        pipe_kwargs["controlnet_conditioning_scale"] = 1.0
+                        pipe_kwargs["control_guidance_start"] = 0.0
+                        pipe_kwargs["control_guidance_end"] = 1.0
+                    result = pipe(pos_text, **pipe_kwargs)
+                    img = result.images[0]
             gen_ms = int((time.time() - gen_t0) * 1000)
-            log(f"Generated in {gen_ms}ms", prefix="✅")
-            img = result.images[0]
+            log(f"Generated in {gen_ms}ms", prefix="✅", swap=use_img2img)
             # Highres refinement pass using img2img; if ControlNet was used, keep ControlNet active to preserve pose/limbs.
             if do_highres:
                 try:

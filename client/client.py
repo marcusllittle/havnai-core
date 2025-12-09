@@ -687,14 +687,15 @@ def execute_task(task: Dict[str, Any]) -> None:
         # Parse structured settings from task if present
         job_settings = None
         try:
-            if isinstance(task.prompt, str) and task.prompt.strip().startswith("{"):
-                job_settings = json.loads(task.prompt)
+            raw_prompt = task.get("prompt") if isinstance(task, dict) else getattr(task, "prompt", None)
+            if isinstance(raw_prompt, str) and raw_prompt.strip().startswith("{"):
+                job_settings = json.loads(raw_prompt)
                 prompt = job_settings.get("prompt", prompt)
                 negative_prompt = job_settings.get("negative_prompt", negative_prompt)
-            elif isinstance(task.prompt, str):
-                prompt = task.prompt
+            elif isinstance(raw_prompt, str):
+                prompt = raw_prompt
         except Exception as exc:
-            log(f"Failed to parse job settings: {exc}", prefix=\"⚠️\", task_id=task_id)
+            log(f"Failed to parse job settings: {exc}", prefix="⚠️", task_id=task_id)
 
         metrics, util, image_b64 = run_image_generation(task_id, entry, model_path, reward_weight, prompt, negative_prompt, job_settings)
     else:

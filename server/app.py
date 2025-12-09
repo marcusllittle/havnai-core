@@ -1553,10 +1553,10 @@ def submit_swap_hyperlora() -> Any:
     payload["face_swap"] = True
     payload["source_face"] = source_face
     payload["hyperlora_weight"] = hyperlora_weight
-        payload["hyperlora_path"] = payload.get("hyperlora_path") or HYPERLORA_PATH_DEFAULT
-        # Directly call submit_job with modified payload
-        with app.test_request_context("/submit-job", method="POST", json=payload):
-            return submit_job()
+    payload["hyperlora_path"] = payload.get("hyperlora_path") or HYPERLORA_PATH_DEFAULT
+    # Directly call submit_job with modified payload
+    with app.test_request_context("/submit-job", method="POST", json=payload):
+        return submit_job()
 
 
 @app.route("/submit-swap-ipadapter", methods=["POST"])

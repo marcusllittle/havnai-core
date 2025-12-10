@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -17,13 +18,9 @@ import atexit
 import signal
 from typing import Any, Dict, List, Optional
 import base64
-from io import BytesIO
-import json
-import re
+import io
 
 import requests
-
-from registry import REGISTRY, ModelEntry, ManifestError
 
 try:
     import numpy as np  # type: ignore
@@ -51,44 +48,19 @@ try:
     except Exception:  # pragma: no cover
         _SDPipe = None  # type: ignore
     try:
-        from diffusers import StableDiffusionControlNetPipeline as _SDControlPipe  # type: ignore
+        from diffusers import StableDiffusionXLPipeline as _SDXLPipe  # type: ignore
     except Exception:  # pragma: no cover
-        _SDControlPipe = None  # type: ignore
-    try:
-        from diffusers import StableDiffusionXLImg2ImgPipeline as _SDXLImg2ImgPipe  # type: ignore
-    except Exception:  # pragma: no cover
-        _SDXLImg2ImgPipe = None  # type: ignore
-    try:
-        from diffusers import StableDiffusionImg2ImgPipeline as _SDImg2ImgPipe  # type: ignore
-    except Exception:  # pragma: no cover
-        _SDImg2ImgPipe = None  # type: ignore
-    try:
-        from diffusers import StableDiffusionControlNetImg2ImgPipeline as _SDControlImg2ImgPipe  # type: ignore
-    except Exception:  # pragma: no cover
-        _SDControlImg2ImgPipe = None  # type: ignore
+        _SDXLPipe = None  # type: ignore
     try:
         from diffusers import DPMSolverMultistepScheduler as _DPMSolver  # type: ignore
     except Exception:  # pragma: no cover
         _DPMSolver = None  # type: ignore
-    try:
-        from diffusers import AutoencoderKL as _AutoencoderKL  # type: ignore
-    except Exception:  # pragma: no cover
-        _AutoencoderKL = None  # type: ignore
-    try:
-        from diffusers import ControlNetModel as _ControlNetModel  # type: ignore
-    except Exception:  # pragma: no cover
-        _ControlNetModel = None  # type: ignore
 except ImportError:  # pragma: no cover
     diffusers = None
     _AutoPipe = None  # type: ignore
     _SDPipe = None  # type: ignore
-    _SDControlPipe = None  # type: ignore
-    _SDXLImg2ImgPipe = None  # type: ignore
-    _SDImg2ImgPipe = None  # type: ignore
-    _SDControlImg2ImgPipe = None  # type: ignore
+    _SDXLPipe = None  # type: ignore
     _DPMSolver = None  # type: ignore
-    _AutoencoderKL = None  # type: ignore
-    _ControlNetModel = None  # type: ignore
 try:
     from PIL import Image  # type: ignore
 except Exception:  # pragma: no cover
@@ -105,13 +77,19 @@ except ImportError:  # pragma: no cover
 
 HAVNAI_HOME = Path(os.environ.get("HAVNAI_HOME", Path.home() / ".havnai"))
 ENV_PATH = HAVNAI_HOME / ".env"
+CREATOR_SCAN_DIR = HAVNAI_HOME / "models" / "creator"
+DOWNLOAD_DIR = HAVNAI_HOME / "downloads"
 LOGS_DIR = HAVNAI_HOME / "logs"
 OUTPUTS_DIR = HAVNAI_HOME / "outputs"
 VERSION_SEARCH_PATHS = [HAVNAI_HOME / "VERSION", Path(__file__).resolve().parent / "VERSION"]
 
 HAVNAI_HOME.mkdir(parents=True, exist_ok=True)
+CREATOR_SCAN_DIR.mkdir(parents=True, exist_ok=True)
+DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+
+SUPPORTED_MODEL_EXTS = {".onnx", ".safetensors", ".ckpt"}
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -152,283 +130,9 @@ def log(message: str, prefix: str = "ℹ️", **extra: Any) -> None:
     LOGGER.info(f"{prefix} {message}", extra={"node": socket.gethostname(), **extra})
 
 
-WAN_I2V_DEFAULTS: Dict[str, Any] = {
-    "steps_high": 2,
-    "steps_low": 2,
-    "cfg": 1.0,
-    "sampler": "euler",
-    "num_frames": 32,
-    "fps": 24,
-    "height": 720,
-    "width": 512,
-}
-
-# Highres defaults
-HIGHRES_MIN_EDGE = 1152
-HIGHRES_SCALE = 1.5  # target upscale factor (1.4–1.6x range)
-HIGHRES_STRENGTH_BASE = 0.3  # default highres strength
-HIGHRES_STRENGTH_CONTROLNET = 0.2  # tighter when ControlNet is active
-
-# Quality/geometry safeguards
-QUALITY_FLOOR_NEG = "lowres, worst quality, jpeg artifacts, blurry, grainy"
-LIMB_GUARD_NEG = "extra limbs, extra hands, extra fingers, fused fingers, missing fingers, duplicate limb, malformed hands, warped feet, disjoint limbs"
-FACE_DUP_GUARD_NEG = "duplicate face, extra head, extra face, fused face, extra eyes, double head, distorted face"
-
-HYPERLORA_PATH = Path(os.environ.get("HYPERLORA_PATH", "/mnt/d/havnai-storage/models/loras/HyperLoRA_SDXL.safetensors")).expanduser()
-IPADAPTER_DIR = Path(os.environ.get("IPADAPTER_DIR", "/mnt/d/havnai-storage/models/ip-adapter-faceid")).expanduser()
-IPADAPTER_BIN = os.environ.get("IPADAPTER_BIN", "ip-adapter-faceid-plusv2_sdxl.bin")
-IPADAPTER_LORA = os.environ.get("IPADAPTER_LORA", "ip-adapter-faceid-plusv2_sdxl_lora.safetensors")
-
-# Auto-pose/ControlNet settings
-POSE_LIBRARY_DIR = Path("/controlnet/poses/nsfw_openpose_package").expanduser()
-POSE_PREPROCESS_RES = 768
-AUTO_POSE_KEYWORDS = {
-    "nsfw",
-    "sex",
-    "sexual",
-    "explicit",
-    "nude",
-    "naked",
-    "porn",
-    "pornographic",
-    "hardcore",
-    "ahegao",
-    "all fours",
-    "doggy",
-    "doggystyle",
-    "double",
-    "double penetration",
-    "penetration",
-    "dp",
-    "hair pull",
-    "hairpull",
-    "spread",
-    "spreadpussy",
-    "spreading",
-    "kneel",
-    "kneeling",
-    "bend",
-    "bending",
-    "arch",
-    "arched",
-    "pose",
-    "openpose",
-    "strap",
-    "strapon",
-    "reverse",
-    "cowgirl",
-    "missionary",
-    "69",
-}
-AUTO_POSE_TOP_NSFW = ["all_fours", "double_penetration", "hair_pull", "hairpull", "spread", "spreadpussy", "kneeling", "ahegao", "doggy", "dp"]
-
-
 # ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
-
-
-def load_pose_image(pose_image_b64: Optional[str], pose_image_path: Optional[str]) -> Optional["Image.Image"]:
-    """Decode a pose/control image from either base64 or filesystem path."""
-
-    if Image is None:
-        return None
-    if pose_image_b64:
-        try:
-            data = base64.b64decode(pose_image_b64)
-            return Image.open(BytesIO(data)).convert("RGB")
-        except Exception as exc:  # pragma: no cover - defensive
-            log(f"Pose image base64 decode failed: {exc}", prefix="⚠️")
-    if pose_image_path:
-        try:
-            path = Path(pose_image_path).expanduser()
-            if path.exists():
-                return Image.open(path).convert("RGB")
-        except Exception as exc:  # pragma: no cover - defensive
-            log(f"Pose image load failed: {exc}", prefix="⚠️", path=pose_image_path)
-    return None
-
-
-def load_source_image(source: Optional[str]) -> Optional["Image.Image"]:
-    """Load a source face/image from base64, local path, or URL."""
-
-    if not source or Image is None:
-        return None
-    # base64?
-    if len(source) > 100 and all(c.isalnum() or c in "+/=\n" for c in source):
-        try:
-            data = base64.b64decode(source)
-            return Image.open(BytesIO(data)).convert("RGB")
-        except Exception:
-            pass
-    # URL?
-    if source.startswith("http://") or source.startswith("https://"):
-        try:
-            resp = requests.get(source, timeout=10)
-            resp.raise_for_status()
-            return Image.open(BytesIO(resp.content)).convert("RGB")
-        except Exception as exc:
-            log(f"Source face URL load failed: {exc}", prefix="⚠️", url=source)
-    # Path
-    try:
-        path = Path(source).expanduser()
-        if path.exists():
-            return Image.open(path).convert("RGB")
-    except Exception:
-        pass
-    return None
-
-
-def _load_ip_adapter(pipe: object, adapter_dir: Path, adapter_bin: str, adapter_lora: str, scale: float) -> None:
-    """Load IP-Adapter FaceID PlusV2 weights into the pipeline if supported."""
-
-    if not hasattr(pipe, "load_ip_adapter"):
-        return
-    bin_path = adapter_dir / adapter_bin
-    lora_path = adapter_dir / adapter_lora
-    if not bin_path.exists() or not lora_path.exists():
-        log("IP-Adapter files missing", prefix="⚠️", bin=str(bin_path), lora=str(lora_path))
-        return
-    try:
-        pipe.load_ip_adapter(str(adapter_dir), subfolder="", weight_name=adapter_bin)
-        if hasattr(pipe, "load_ip_adapter_weights"):
-            pipe.load_ip_adapter_weights(str(lora_path))
-        if hasattr(pipe, "set_ip_adapter_scale"):
-            pipe.set_ip_adapter_scale(scale)
-        log("IP-Adapter loaded", prefix="✅", adapter=str(bin_path), lora=str(lora_path), scale=scale)
-    except Exception as exc:  # pragma: no cover - defensive
-        log(f"IP-Adapter load failed: {exc}", prefix="⚠️")
-
-
-def _tokenize_prompt(prompt: str) -> List[str]:
-    """Lowercase tokenize prompt into words/phrases."""
-    clean = re.sub(r"[^a-zA-Z0-9_]+", " ", prompt.lower())
-    return [tok for tok in clean.split() if tok]
-
-
-def _is_anime_model(entry: "ModelEntry") -> bool:
-    tags = {t.lower() for t in getattr(entry, "tags", []) if isinstance(t, str)}
-    name = str(getattr(entry, "name", "") or "").lower()
-    return bool({"anime", "stylized", "manhwa", "webtoon", "cartoon"} & tags or any(k in name for k in ("anime", "stylized", "manhwa", "webtoon", "cartoon")))
-
-
-NSFW_KEYWORDS = {
-    "nsfw",
-    "nude",
-    "naked",
-    "lingerie",
-    "bikini",
-    "erotic",
-    "sex",
-    "sexual",
-    "explicit",
-    "porn",
-    "hardcore",
-    "ahegao",
-    "underwear",
-    "bra",
-    "panties",
-}
-
-
-def _is_nsfw_prompt_text(prompt: str) -> bool:
-    low = (prompt or "").lower()
-    return any(kw in low for kw in NSFW_KEYWORDS)
-
-
-def _pose_library() -> List[Dict[str, Any]]:
-    """Index pose files and optional JSON descriptions."""
-
-    entries: List[Dict[str, Any]] = []
-    if not POSE_LIBRARY_DIR.exists():
-        return entries
-    for png in POSE_LIBRARY_DIR.glob("*.png"):
-        meta = {"path": png, "name": png.stem.lower(), "text": ""}
-        json_path = png.with_suffix(".json")
-        if json_path.exists():
-            try:
-                data = json.loads(json_path.read_text())
-                # Common fields: description, tags, title; merge to a text blob
-                parts: List[str] = []
-                for key in ("description", "tags", "title", "prompt"):
-                    val = data.get(key)
-                    if isinstance(val, str):
-                        parts.append(val)
-                    elif isinstance(val, list):
-                        parts.extend([str(v) for v in val])
-                meta["text"] = " ".join(parts).lower()
-            except Exception:
-                meta["text"] = ""
-        entries.append(meta)
-    return entries
-
-
-def _should_auto_pose(prompt: str) -> bool:
-    low = prompt.lower()
-    if "openpose" in low:
-        return True
-    tokens = _tokenize_prompt(low)
-    for kw in AUTO_POSE_KEYWORDS:
-        if kw in low or kw.replace(" ", "") in low:
-            return True
-        if kw in tokens:
-            return True
-    return False
-
-
-def _score_pose_entry(entry: Dict[str, Any], prompt_tokens: List[str], prompt_text: str) -> float:
-    """Score a pose entry based on filename/json overlap and priority keywords."""
-
-    score = 0.0
-    name = entry.get("name", "")
-    text = entry.get("text", "")
-    for tok in prompt_tokens:
-        if tok and tok in name:
-            score += 5.0
-        if tok and tok in text:
-            score += 3.0
-    for top_kw in AUTO_POSE_TOP_NSFW:
-        if top_kw in prompt_text and (top_kw in name or top_kw in text):
-            score += 4.0
-    # Small bonus for any overlap between common tokens and description words
-    if text:
-        desc_tokens = set(_tokenize_prompt(text))
-        overlap = desc_tokens.intersection(prompt_tokens)
-        score += 0.5 * len(overlap)
-    return score
-
-
-def select_auto_pose(prompt: str) -> Optional["Image.Image"]:
-    """Select the best matching pose image from the library based on the prompt."""
-
-    if Image is None:
-        return None
-    entries = _pose_library()
-    if not entries:
-        return None
-    prompt_tokens = _tokenize_prompt(prompt)
-    prompt_text = " ".join(prompt_tokens)
-    best_entry = None
-    best_score = -1.0
-    for entry in entries:
-        score = _score_pose_entry(entry, prompt_tokens, prompt_text)
-        if score > best_score:
-            best_score = score
-            best_entry = entry
-    if not best_entry:
-        return None
-    try:
-        img = Image.open(best_entry["path"]).convert("RGB")
-        # Preprocessor resolution hint: resize longest edge to POSE_PREPROCESS_RES
-        w, h = img.size
-        scale = POSE_PREPROCESS_RES / max(w, h)
-        if scale < 1.0:
-            img = img.resize((int(w * scale), int(h * scale)))
-        log("Auto-selected pose", prefix="✅", pose=str(best_entry["path"]), score=round(best_score, 2))
-        return img
-    except Exception as exc:
-        log(f"Auto pose load failed: {exc}", prefix="⚠️")
-    return None
 
 
 def load_version() -> str:
@@ -458,15 +162,13 @@ def load_env_file() -> Dict[str, str]:
             key, value = line.split("=", 1)
             env[key.strip()] = value.strip()
     defaults = {
-        # Prefer existing .env values; fall back to env vars only when missing, never overwrite existing keys.
-        "SERVER_URL": env.get("SERVER_URL") or os.environ.get("SERVER_URL") or os.environ.get("HAVNAI_SERVER") or "http://127.0.0.1:5001",
-        "WALLET": env.get("WALLET") or "0xYOUR_WALLET_ADDRESS",
-        "CREATOR_MODE": env.get("CREATOR_MODE") or "false",
-        "NODE_NAME": env.get("NODE_NAME") or socket.gethostname(),
-        "JOIN_TOKEN": env.get("JOIN_TOKEN") or "",
+        "SERVER_URL": os.environ.get("SERVER_URL") or os.environ.get("HAVNAI_SERVER") or "http://127.0.0.1:5001",
+        "WALLET": env.get("WALLET", "0xYOUR_WALLET_ADDRESS"),
+        "CREATOR_MODE": env.get("CREATOR_MODE", "false"),
+        "NODE_NAME": env.get("NODE_NAME", socket.gethostname()),
+        "JOIN_TOKEN": env.get("JOIN_TOKEN", ""),
     }
-    for key, value in defaults.items():
-        env.setdefault(key, value)
+    env.update({k: defaults.get(k, v) for k, v in defaults.items()})
     return env
 
 
@@ -489,71 +191,23 @@ FAST_PREVIEW = (
     in {"1", "true", "yes"}
 )
 
-REGISTRY.base_url = SERVER_BASE
-
 HEARTBEAT_INTERVAL = 30
 TASK_POLL_INTERVAL = 15
 BACKOFF_BASE = 5
 MAX_BACKOFF = 60
 START_TIME = time.time()
 
-IMAGE_STEPS = int(os.environ.get("HAI_STEPS", "20"))
-IMAGE_GUIDANCE = float(os.environ.get("HAI_GUIDANCE", "7.5"))
-IMAGE_WIDTH = int(os.environ.get("HAI_WIDTH", "512"))
-IMAGE_HEIGHT = int(os.environ.get("HAI_HEIGHT", "512"))
-
 utilization_hint = random.randint(10, 25 if ROLE == "creator" else 15)
 
+LOCAL_MODELS: Dict[str, Dict[str, Any]] = {}
 SESSION = requests.Session()
 SESSION.headers.update({"Content-Type": "application/json"})
 if JOIN_TOKEN:
     SESSION.headers["X-Join-Token"] = JOIN_TOKEN
 
-REGISTRY.session = SESSION
-
-
-def refresh_manifest_with_backoff(reason: str = "startup") -> None:
-    backoff = BACKOFF_BASE
-    while True:
-        try:
-            REGISTRY.refresh()
-            log("Model manifest refreshed", prefix="✅", reason=reason)
-            return
-        except Exception as exc:
-            log(f"Manifest refresh failed ({reason}): {exc}", prefix="⚠️")
-            time.sleep(backoff)
-            backoff = min(MAX_BACKOFF, backoff * 2)
-
 
 def endpoint(path: str) -> str:
     return f"{SERVER_BASE}{path}"
-
-
-def ensure_model_entry(model_name: str) -> ModelEntry:
-    try:
-        return REGISTRY.get(model_name)
-    except (KeyError, ManifestError) as exc:
-        raise RuntimeError(f"Model '{model_name}' missing from manifest") from exc
-
-
-def ensure_model_path(entry: ModelEntry) -> Path:
-    path = Path(entry.path).expanduser()
-    if not path.exists():
-        raise FileNotFoundError(f"Model path missing on node: {path}")
-    return path
-
-
-def discover_capabilities() -> Dict[str, List[str]]:
-    pipelines: set[str] = set()
-    models: List[str] = []
-    for entry in REGISTRY.list_entries():
-        try:
-            path = ensure_model_path(entry)
-        except Exception:
-            continue
-        pipelines.add(entry.pipeline)
-        models.append(entry.name)
-    return {"pipelines": sorted(pipelines), "models": sorted(models)}
 
 
 # ---------------------------------------------------------------------------
@@ -578,6 +232,69 @@ def ensure_wallet() -> str:
 
 
 WALLET = ensure_wallet()
+
+
+# ---------------------------------------------------------------------------
+# Model scanning & registration
+# ---------------------------------------------------------------------------
+
+
+def hash_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def scan_local_models() -> Dict[str, Dict[str, Any]]:
+    catalog: Dict[str, Dict[str, Any]] = {}
+    if not CREATOR_SCAN_DIR.exists():
+        return catalog
+    for path in CREATOR_SCAN_DIR.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in SUPPORTED_MODEL_EXTS:
+            continue
+        name = path.stem.lower().replace(" ", "-")
+        weight = 10.0 if path.suffix.lower() in {".safetensors", ".ckpt"} else 2.0
+        if "nsfw" in name:
+            weight = max(weight, 12.0)
+        catalog[name] = {
+            "name": name,
+            "filename": path.name,
+            "path": path,
+            "size": path.stat().st_size,
+            "hash": hash_file(path),
+            "tags": [path.suffix.lstrip(".")],
+            "weight": weight,
+            "task_type": "IMAGE_GEN",
+        }
+    return catalog
+
+
+def register_local_models() -> None:
+    global LOCAL_MODELS
+    LOCAL_MODELS = scan_local_models()
+    if not LOCAL_MODELS:
+        log("No creator models discovered under ~/.havnai/models/creator", prefix="ℹ️")
+        return
+    manifest = [
+        {
+            "name": meta["name"],
+            "filename": meta["filename"],
+            "size": meta["size"],
+            "hash": meta["hash"],
+            "tags": meta["tags"],
+            "weight": meta["weight"],
+            "task_type": meta["task_type"],
+        }
+        for meta in LOCAL_MODELS.values()
+    ]
+    try:
+        resp = SESSION.post(endpoint("/register/models"), data=json.dumps({"node_id": NODE_NAME, "models": manifest}), timeout=20)
+        resp.raise_for_status()
+        log(f"Registered {len(manifest)} local models.", prefix="✅")
+    except Exception as exc:
+        log(f"Model registration failed: {exc}", prefix="⚠️")
 
 
 # ---------------------------------------------------------------------------
@@ -654,6 +371,29 @@ def _handle_signal(signum, frame):  # type: ignore
         pass
 
 
+def resolve_model_path(model_name: str, model_url: str = "", filename_hint: Optional[str] = None) -> Path:
+    entry = LOCAL_MODELS.get(model_name.lower())
+    if entry:
+        return entry["path"]
+    if model_url:
+        filename = filename_hint or Path(model_url).name
+        target = DOWNLOAD_DIR / Path(filename).name
+        if target.exists():
+            return target
+        url = model_url
+        if url.startswith("/"):
+            url = f"{SERVER_BASE}{url}"
+        log(f"Downloading model {model_name} from {url}", prefix="⬇️")
+        resp = SESSION.get(url, stream=True, timeout=120)
+        resp.raise_for_status()
+        with target.open("wb") as handle:
+            for chunk in resp.iter_content(chunk_size=8192):
+                if chunk:
+                    handle.write(chunk)
+        return target
+    raise RuntimeError(f"Model {model_name} unavailable on node")
+
+
 def random_input(shape: List[int]) -> np.ndarray:
     if np is None:
         raise RuntimeError("NumPy required for inference")
@@ -667,10 +407,10 @@ def execute_task(task: Dict[str, Any]) -> None:
     task_id = task.get("task_id", "unknown")
     task_type = (task.get("type") or "IMAGE_GEN").lower()
     model_name = (task.get("model_name") or "model").lower()
+    model_url = task.get("model_url", "")
     reward_weight = float(task.get("reward_weight", 1.0))
     input_shape = task.get("input_shape") or []
     prompt = task.get("prompt") or ""
-    negative_prompt = task.get("negative_prompt") or ""
 
     if task_type == "image_gen" and ROLE != "creator":
         log(f"Skipping creator task {task_id[:8]} — node not in creator mode", prefix="⚠️")
@@ -679,51 +419,10 @@ def execute_task(task: Dict[str, Any]) -> None:
     log(f"Executing {task_type} task {task_id[:8]} · {model_name}", prefix="🚀")
 
     image_b64: Optional[str] = None
-    try:
-        entry = ensure_model_entry(model_name)
-        model_path = ensure_model_path(entry)
-    except Exception as exc:
-        log(f"Model resolution failed: {exc}", prefix="🚫")
-        return
     if task_type == "image_gen":
-        # === ROBUST PROMPT PARSING (handles string or old JSON-wrapped payloads) ===
-        raw_prompt = task.get("prompt", "")
-        job_settings = None
-        prompt = ""
-        negative_prompt = task.get("negative_prompt", "")
-
-        if isinstance(raw_prompt, str):
-            if raw_prompt.strip().startswith("{"):
-                try:
-                    job_settings = json.loads(raw_prompt)
-                    prompt = job_settings.get("prompt", "")
-                    negative_prompt = job_settings.get("negative_prompt", negative_prompt)
-                except json.JSONDecodeError:
-                    prompt = raw_prompt  # fall back to raw string
-            else:
-                prompt = raw_prompt
-        elif isinstance(raw_prompt, dict):
-            # legacy case some old coordinators still do
-            job_settings = raw_prompt
-            prompt = raw_prompt.get("prompt", "")
-            negative_prompt = raw_prompt.get("negative_prompt", negative_prompt)
-        else:
-            prompt = str(raw_prompt)
-
-        if not prompt:
-            prompt = "a beautiful landscape"  # absolute last-resort fallback
-
-        metrics, util, image_b64 = run_image_generation(
-            task_id,
-            entry,
-            model_path,
-            reward_weight,
-            prompt,
-            negative_prompt,
-            job_settings or {},
-        )
+        metrics, util, image_b64 = run_image_generation(task_id, model_name, model_url, reward_weight, prompt)
     else:
-        metrics, util = run_ai_inference(entry, model_path, input_shape, reward_weight)
+        metrics, util = run_ai_inference(model_name, model_url, input_shape, reward_weight)
 
     with lock:
         utilization_hint = util
@@ -739,19 +438,22 @@ def execute_task(task: Dict[str, Any]) -> None:
     if image_b64:
         payload["image_b64"] = image_b64
 
-    log(f"Sent image_b64 size: {len(payload.get('image_b64', ''))}", prefix="Debug", task_id=task_id)
-
     try:
-        resp = SESSION.post(endpoint("/results"), data=json.dumps(payload), timeout=60)
+        resp = SESSION.post(endpoint("/results"), data=json.dumps(payload), timeout=15)
         resp.raise_for_status()
         reward = resp.json().get("reward")
         prefix = "✅" if payload["status"] == "success" else "⚠️"
-        log(f"Task {task_id[:8]} {payload['status'].upper()} · reward {reward} HAI", prefix=prefix, status_code=resp.status_code)
+        log(f"Task {task_id[:8]} {payload['status'].upper()} · reward {reward} HAI", prefix=prefix)
     except Exception as exc:
-        log(f"Failed to submit result: {exc}", prefix="🚫", task_id=task_id)
+        log(f"Failed to submit result: {exc}", prefix="🚫")
 
 
-def run_ai_inference(entry: ModelEntry, model_path: Path, input_shape: List[int], reward_weight: float) -> (Dict[str, Any], int):
+def run_ai_inference(model_name: str, model_url: str, input_shape: List[int], reward_weight: float) -> (Dict[str, Any], int):
+    try:
+        model_path = resolve_model_path(model_name, model_url)
+    except Exception as exc:
+        return ({"status": "failed", "error": str(exc), "reward_weight": reward_weight}, utilization_hint)
+
     try:
         ort_session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
         input_name = ort_session.get_inputs()[0].name
@@ -776,7 +478,7 @@ def run_ai_inference(entry: ModelEntry, model_path: Path, input_shape: List[int]
     util = max(start_stats.get("utilization", 0), end_stats.get("utilization", 0), utilization_hint)
     metrics = {
         "status": status,
-        "model_name": entry.name,
+        "model_name": model_name,
         "model_path": str(model_path),
         "input_shape": input_shape,
         "reward_weight": reward_weight,
@@ -789,15 +491,36 @@ def run_ai_inference(entry: ModelEntry, model_path: Path, input_shape: List[int]
     return metrics, int(util)
 
 
-def run_image_generation(
-    task_id: str,
-    entry: ModelEntry,
-    model_path: Path,
-    reward_weight: float,
-    prompt: str,
-    negative_prompt: str,
-    job_settings: Optional[Dict[str, Any]] = None,
-) -> (Dict[str, Any], int, Optional[str]):
+def run_image_generation(task_id: str, model_name: str, model_url: str, reward_weight: float, prompt: str) -> (Dict[str, Any], int, Optional[str]):
+    """Run SD image generation with explicit pipeline and env-driven settings."""
+
+    def _env_int(name: str, default: int) -> int:
+        raw = os.environ.get(name) or ENV_VARS.get(name, "")
+        try:
+            v = int(raw)
+            return v if v > 0 else default
+        except Exception:
+            return default
+
+    def _env_float(name: str, default: float) -> float:
+        raw = os.environ.get(name) or ENV_VARS.get(name, "")
+        try:
+            return float(raw)
+        except Exception:
+            return default
+
+    try:
+        model_path = resolve_model_path(model_name, model_url, filename_hint=f"{model_name}.safetensors")
+    except Exception as exc:
+        return ({"status": "failed", "error": str(exc), "reward_weight": reward_weight}, utilization_hint, None)
+
+    steps = _env_int("HAI_STEPS", 24)
+    guidance = _env_float("HAI_GUIDANCE", 7.0)
+    width = _env_int("HAI_WIDTH", 512)
+    height = _env_int("HAI_HEIGHT", 512)
+    width = max(64, width - (width % 8))
+    height = max(64, height - (height % 8))
+    is_xl = "xl" in model_name.lower()
 
     start_stats = read_gpu_stats()
     started = time.time()
@@ -812,420 +535,78 @@ def run_image_generation(
             dtype = torch.float16 if device == "cuda" else torch.float32
             log("Loading text2image pipeline…", prefix="ℹ️", device=device)
             load_t0 = time.time()
+
             pipe = None
-            controlnet_image = None
-            pose_image_b64: Optional[str] = None
-            pose_image_path: Optional[str] = None
-            auto_pose_used = False
-            face_swap = False
-            hyperlora_path = HYPERLORA_PATH
-            hyperlora_weight = 0.85
-            source_face = None
-            ipadapter_dir = IPADAPTER_DIR
-            ipadapter_bin = IPADAPTER_BIN
-            ipadapter_lora = IPADAPTER_LORA
-            ipadapter_scale = 0.85
-            source_face_image = None
-            use_ipadapter = False
-            job_vae_path = None
-            pipeline_name = (getattr(entry, "pipeline", "") or "sd15").lower()
-            # Merge per-job overrides with model defaults from manifest
-            steps = IMAGE_STEPS
-            guidance = IMAGE_GUIDANCE
-            height = IMAGE_HEIGHT
-            width = IMAGE_WIDTH
-            sampler = None
-            if job_settings and isinstance(job_settings, dict):
-                steps = int(job_settings.get("steps", steps) or steps)
-                guidance = float(job_settings.get("guidance", guidance) or guidance)
-                height = int(job_settings.get("height", height) or height)
-                width = int(job_settings.get("width", width) or width)
-                sampler = str(job_settings.get("sampler") or "").strip().lower() or None
-                if job_settings.get("negative_prompt"):
-                    neg_text = str(job_settings.get("negative_prompt") or "")
-                pose_image_b64 = job_settings.get("pose_image_b64") or job_settings.get("pose_image")
-                pose_image_path = job_settings.get("pose_image_path")
-                face_swap = bool(job_settings.get("face_swap", False))
-                hyperlora_weight = float(job_settings.get("hyperlora_weight", hyperlora_weight) or hyperlora_weight)
-                hyperlora_path = Path(str(job_settings.get("hyperlora_path") or hyperlora_path)).expanduser()
-                source_face = job_settings.get("source_face") or job_settings.get("source_face_url") or job_settings.get("source_face_b64")
-                ipadapter_dir = Path(str(job_settings.get("ipadapter_dir") or ipadapter_dir)).expanduser()
-                ipadapter_bin = str(job_settings.get("ipadapter_bin") or ipadapter_bin)
-                ipadapter_lora = str(job_settings.get("ipadapter_lora") or ipadapter_lora)
-                ipadapter_scale = float(job_settings.get("ipadapter_scale", ipadapter_scale) or ipadapter_scale)
-                vae_override = str(job_settings.get("vae_path") or "").strip()
-                if vae_override:
-                    candidate = Path(vae_override).expanduser()
-                    job_vae_path = candidate if candidate.is_file() else None
-            if face_swap:
-                source_face_image = load_source_image(source_face)
-                if pipeline_name == "sdxl" and source_face_image is not None and ipadapter_dir.exists():
-                    use_ipadapter = True
-                log(
-                    "Face swap request",
-                    prefix="ℹ️",
-                    swap=face_swap,
-                    use_ipadapter=use_ipadapter,
-                    source_face_loaded=bool(source_face_image is not None),
-                    ipadapter_dir=str(ipadapter_dir),
-                    ipadapter_bin=ipadapter_bin,
-                    ipadapter_lora=ipadapter_lora,
-                    ipadapter_scale=ipadapter_scale,
-                )
+            # For XL checkpoints prefer StableDiffusionXLPipeline when
+            # available, otherwise fall back to SD1.5 pipeline as a best-effort.
+            if is_xl and _SDXLPipe is not None:
+                try:
+                    pipe = _SDXLPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
+                except Exception as exc:
+                    log(f"StableDiffusionXLPipeline load failed: {exc}", prefix="⚠️")
 
-            # ControlNet: only enable for SD1.5-style checkpoints when both model and pose image are present.
-            controlnet_path = getattr(entry, "controlnet_path", "") or ""
-            if (
-                pipeline_name not in {"sdxl"}
-                and controlnet_path
-                and Path(str(controlnet_path)).expanduser().exists()
-                and _ControlNetModel is not None
-                and _SDControlPipe is not None
-            ):
-                controlnet_image = load_pose_image(str(pose_image_b64 or "").strip() or None, pose_image_path)
-                if controlnet_image is None and _should_auto_pose(prompt):
-                    controlnet_image = select_auto_pose(prompt)
-                    auto_pose_used = controlnet_image is not None
-                # Force ControlNet on anime/stylized NSFW prompts if path is present
-                if controlnet_image is None and _is_anime_model(entry) and _is_nsfw_prompt_text(prompt):
-                    controlnet_image = select_auto_pose(prompt) or controlnet_image
-                if controlnet_image is None:
-                    log("ControlNet specified but no pose image provided; falling back to base pipeline", prefix="⚠️")
-                else:
-                    try:
-                        controlnet = _ControlNetModel.from_single_file(str(Path(controlnet_path).expanduser()), torch_dtype=dtype)
-                        pipe = _SDControlPipe.from_single_file(
-                            str(model_path),
-                            controlnet=controlnet,
-                            torch_dtype=dtype,
-                            safety_checker=None,
-                        )
-                        log("Loaded ControlNet for pose guidance", prefix="✅", controlnet=str(controlnet_path), auto_pose=auto_pose_used)
-                    except Exception as exc:
-                        log(f"ControlNet load failed; falling back to base pipeline: {exc}", prefix="⚠️")
-            # Face swap: prepare source face if requested
-            source_face_image = load_source_image(source_face) if face_swap else None
+            if pipe is None and _SDPipe is not None:
+                try:
+                    pipe = _SDPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
+                except Exception as exc:
+                    log(f"StableDiffusionPipeline load failed: {exc}", prefix="⚠️")
 
+            # AutoPipeline is truly optional; only use it when the expected
+            # helper is present in this diffusers version.
+            if pipe is None and _AutoPipe is not None and hasattr(_AutoPipe, "from_single_file"):
+                try:
+                    pipe = _AutoPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
+                except Exception as exc_auto:
+                    log(f"AutoPipeline load failed: {exc_auto}", prefix="🚫")
+                    raise
             if pipe is None:
-                # === CORRECT PIPELINE LOADING FOR SDXL vs SD 1.5 ===
-                from diffusers import StableDiffusionXLPipeline, StableDiffusionPipeline
+                raise RuntimeError("Failed to construct a text2image pipeline for model.")
 
-                is_sdxl = (
-                    "xl" in entry.name.lower() or
-                    "sdxl" in pipeline_name.lower() or
-                    "ragnarok" in entry.name.lower() or
-                    "juggernaut" in entry.name.lower()
-                )
-
-                if is_sdxl:
-                    pipe = StableDiffusionXLPipeline.from_single_file(
-                        str(model_path),
-                        torch_dtype=dtype,
-                        use_safetensors=True,
-                        variant="fp16",
-                        safety_checker=None,
-                    )
-                    log("Loaded SDXL pipeline", prefix="Loaded", model=entry.name)
-                else:
-                    pipe = StableDiffusionPipeline.from_single_file(
-                        str(model_path),
-                        torch_dtype=dtype,
-                        safety_checker=None,
-                    )
-                    log("Loaded SD 1.5 pipeline", prefix="Loaded")
-            # Optionally swap in a custom VAE for SD1.5-style checkpoints
-            selected_vae_path = None
-            if job_vae_path and job_vae_path.is_file():
-                selected_vae_path = job_vae_path
-            else:
-                entry_vae = Path(str(getattr(entry, "vae_path", "") or "")).expanduser()
-                if entry_vae.is_file():
-                    selected_vae_path = entry_vae
-            if pipe is not None and selected_vae_path and pipeline_name != "sdxl":
-                if selected_vae_path.exists():
-                    try:
-                        # === FIXED VAE LOADING THAT WORKS ON WSL + WINDOWS DRIVES ===
-                        from diffusers import AutoencoderKL
-
-                        vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse", torch_dtype=dtype)
-                        state_dict = torch.load(selected_vae_path, map_location="cpu")
-                        if isinstance(state_dict, dict) and "state_dict" in state_dict:
-                            state_dict = state_dict["state_dict"]
-                        vae_state_dict = {
-                            k: v
-                            for k, v in state_dict.items()
-                            if k.startswith(("decoder.", "encoder.", "quant_conv.", "post_quant_conv."))
-                        }
-                        vae.load_state_dict(vae_state_dict, strict=False)
-                        pipe.vae = vae.to(device)
-                        log(f"Loaded custom VAE: {selected_vae_path}", prefix="Success")
-                    except Exception as exc:
-                        log(f"VAE load failed (fallback to default): {exc}", prefix="Warning")
+            if _DPMSolver is not None and hasattr(pipe, "scheduler"):
+                try:
+                    pipe.scheduler = _DPMSolver.from_config(pipe.scheduler.config)  # type: ignore[attr-defined]
+                except Exception:
+                    pass
             if hasattr(pipe, "enable_attention_slicing"):
                 pipe.enable_attention_slicing("max")
             if hasattr(pipe, "set_progress_bar_config"):
                 pipe.set_progress_bar_config(disable=True)
-            if "_DPMSolver" in globals() and _DPMSolver is not None and hasattr(pipe, "scheduler"):
-                try:
-                    pipe.scheduler = _DPMSolver.from_config(pipe.scheduler.config)
-                except Exception as exc:
-                    log(f"DPM scheduler setup failed: {exc}", prefix="⚠️")
             pipe = pipe.to(device)
             load_ms = int((time.time() - load_t0) * 1000)
-            log(f"Pipeline ready in {load_ms}ms", prefix="✅")
-
-            # Apply HyperLoRA if requested and available (skip when IP-Adapter SDXL is used)
-            if face_swap and hyperlora_path.exists() and not use_ipadapter:
-                try:
-                    if hasattr(pipe, "load_lora_weights"):
-                        pipe.load_lora_weights(str(hyperlora_path), adapter_name="hyperlora")
-                        if hasattr(pipe, "set_adapters"):
-                            pipe.set_adapters(["hyperlora"], adapter_weights=[hyperlora_weight])
-                        elif hasattr(pipe, "fuse_lora"):
-                            pipe.fuse_lora(lora_scale=hyperlora_weight)
-                    log("HyperLoRA applied", prefix="✅", lora=str(hyperlora_path), weight=hyperlora_weight)
-                except Exception as exc:
-                        log(f"HyperLoRA load failed: {exc}", prefix="⚠️", lora=str(hyperlora_path))
-            # Apply IP-Adapter if requested (SDXL only)
-            if use_ipadapter and source_face_image is not None:
-                _load_ip_adapter(pipe, ipadapter_dir, ipadapter_bin, ipadapter_lora, ipadapter_scale)
+            log(
+                f"Pipeline ready in {load_ms}ms · {pipe.__class__.__name__}",
+                prefix="✅",
+            )
 
             seed = int(time.time()) & 0x7FFFFFFF
             generator = torch.Generator(device=device).manual_seed(seed)
-            pos_text = prompt or "a high quality photo of a golden retriever on a beach at sunset"
-            neg_text = negative_prompt or ""
-            # Always enforce a quality floor; append limb guards when ControlNet is active.
-            neg_parts = [neg_text.strip()] if neg_text else []
-            neg_parts.append(QUALITY_FLOOR_NEG)
-            if controlnet_image is not None:
-                neg_parts.append(LIMB_GUARD_NEG)
-            if _is_anime_model(entry):
-                neg_parts.append(FACE_DUP_GUARD_NEG)
-            neg_text = ", ".join([p for p in neg_parts if p])
-            # clamp to sane ranges
-            steps = max(5, min(50, steps))
-            guidance = max(1.0, min(15.0, guidance))
-            height = max(256, min(1536, height))
-            width = max(256, min(1536, width))
-            do_highres = max(height, width) > HIGHRES_MIN_EDGE and _SDImg2ImgPipe is not None
-            if face_swap:
-                do_highres = False  # keep identity stable; skip additional upscale for swaps
-            target_height, target_width = height, width
-            base_height, base_width = height, width
-            if do_highres:
-                # For anime/stylized models without ControlNet, skip highres to avoid face/limb duplication.
-                if controlnet_image is None and _is_anime_model(entry):
-                    do_highres = False
-                base_height = max(256, int(target_height / HIGHRES_SCALE))
-                base_width = max(256, int(target_width / HIGHRES_SCALE))
-                base_height = max(256, int(round(base_height / 8) * 8))
-                base_width = max(256, int(round(base_width / 8) * 8))
-            # Proactively truncate to CLIP token limit to avoid noisy warnings
-            if hasattr(pipe, "tokenizer") and hasattr(pipe.tokenizer, "model_max_length"):
-                try:
-                    encoded = pipe.tokenizer(
-                        pos_text,
-                        max_length=pipe.tokenizer.model_max_length,
-                        truncation=True,
-                        return_tensors="pt",
-                    )
-                    pos_text = pipe.tokenizer.batch_decode(
-                        encoded.input_ids, skip_special_tokens=True
-                    )[0]
-                    if neg_text:
-                        encoded_neg = pipe.tokenizer(
-                            neg_text,
-                            max_length=pipe.tokenizer.model_max_length,
-                            truncation=True,
-                            return_tensors="pt",
-                        )
-                        neg_text = pipe.tokenizer.batch_decode(
-                            encoded_neg.input_ids, skip_special_tokens=True
-                        )[0]
-                except Exception as exc:
-                    log(f"Prompt truncation failed: {exc}", prefix="⚠️")
+            text = prompt or "a high quality photo of a golden retriever on a beach at sunset"
             gen_t0 = time.time()
-            # Optional sampler switch if supported
-            if sampler and hasattr(pipe, "scheduler") and _DPMSolver is not None and "dpmpp" in sampler:
-                try:
-                    pipe.scheduler = _DPMSolver.from_config(pipe.scheduler.config)
-                except Exception as exc:
-                    log(f"Sampler switch failed: {exc}", prefix="⚠️", sampler=sampler)
-            use_img2img = face_swap and source_face_image is not None and not use_ipadapter
-            img_pipe = None
-            if use_img2img:
-                try:
-                    if pipeline_name in {"sdxl"} and _SDXLImg2ImgPipe is not None:
-                        img_pipe = _SDXLImg2ImgPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
-                    elif _SDImg2ImgPipe is not None:
-                        img_pipe = _SDImg2ImgPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
-                    if img_pipe is not None:
-                        if hasattr(img_pipe, "enable_attention_slicing"):
-                            img_pipe.enable_attention_slicing("max")
-                        if hasattr(img_pipe, "set_progress_bar_config"):
-                            img_pipe.set_progress_bar_config(disable=True)
-                        if hasattr(img_pipe, "scheduler") and _DPMSolver is not None:
-                            try:
-                                img_pipe.scheduler = _DPMSolver.from_config(img_pipe.scheduler.config)
-                            except Exception as exc:
-                                log(f"Swap scheduler setup failed: {exc}", prefix="⚠️")
-                        selected_img_vae = None
-                        if job_vae_path and job_vae_path.is_file():
-                            selected_img_vae = job_vae_path
-                        else:
-                            entry_img_vae = Path(str(getattr(entry, "vae_path", "") or "")).expanduser()
-                            if entry_img_vae.is_file():
-                                selected_img_vae = entry_img_vae
-                        if selected_img_vae and pipeline_name != "sdxl":
-                            try:
-                                # === FIXED VAE LOADING THAT WORKS ON WSL + WINDOWS DRIVES ===
-                                from diffusers import AutoencoderKL
-
-                                vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse", torch_dtype=dtype)
-                                state_dict = torch.load(selected_img_vae, map_location="cpu")
-                                if isinstance(state_dict, dict) and "state_dict" in state_dict:
-                                    state_dict = state_dict["state_dict"]
-                                vae_state_dict = {
-                                    k: v
-                                    for k, v in state_dict.items()
-                                    if k.startswith(("decoder.", "encoder.", "quant_conv.", "post_quant_conv."))
-                                }
-                                vae.load_state_dict(vae_state_dict, strict=False)
-                                img_pipe.vae = vae.to(device)
-                                log(f"Loaded custom VAE: {selected_img_vae}", prefix="Success")
-                            except Exception as exc:
-                                log(f"VAE load failed (fallback to default): {exc}", prefix="Warning")
-                        img_pipe = img_pipe.to(device)
-                        if face_swap and hyperlora_path.exists() and not (pipeline_name == "sdxl" and ipadapter_dir.exists()):
-                            try:
-                                img_pipe.load_lora_weights(str(hyperlora_path), adapter_name="hyperlora")
-                                if hasattr(img_pipe, "set_adapters"):
-                                    img_pipe.set_adapters(["hyperlora"], adapter_weights=[hyperlora_weight])
-                                elif hasattr(img_pipe, "fuse_lora"):
-                                    img_pipe.fuse_lora(lora_scale=hyperlora_weight)
-                            except Exception:
-                                pass
-                        if face_swap and pipeline_name == "sdxl" and source_face_image is not None and ipadapter_dir.exists():
-                            _load_ip_adapter(img_pipe, ipadapter_dir, ipadapter_bin, ipadapter_lora, ipadapter_scale)
-                except Exception as exc:
-                    log(f"Swap pipeline init failed: {exc}", prefix="⚠️")
-
             with torch.inference_mode():
-                if use_img2img and img_pipe is not None:
-                    swap_strength = float(job_settings.get("swap_strength", 0.35) if job_settings else 0.35)
-                    img = img_pipe(
-                        pos_text,
-                        image=source_face_image,
-                        strength=swap_strength,
-                        negative_prompt=neg_text or None,
-                        num_inference_steps=steps,
-                        guidance_scale=guidance,
-                        generator=generator,
-                    ).images[0]
-                else:
-                    pipe_kwargs = {
-                        "negative_prompt": neg_text or None,
-                        "num_inference_steps": steps,
-                        "guidance_scale": guidance,
-                        "generator": generator,
-                        "height": base_height,
-                        "width": base_width,
-                    }
-                    if controlnet_image is not None:
-                        pipe_kwargs["image"] = controlnet_image
-                        pipe_kwargs["controlnet_conditioning_scale"] = 1.0
-                        pipe_kwargs["control_guidance_start"] = 0.0
-                        pipe_kwargs["control_guidance_end"] = 1.0
-                    if use_ipadapter and source_face_image is not None:
-                        pipe_kwargs["ip_adapter_image"] = source_face_image
-                    result = pipe(pos_text, **pipe_kwargs)
-                    img = result.images[0]
+                result = pipe(
+                    text,
+                    num_inference_steps=steps,
+                    guidance_scale=guidance,
+                    generator=generator,
+                    height=height,
+                    width=width,
+                )
             gen_ms = int((time.time() - gen_t0) * 1000)
-            log(f"Generated in {gen_ms}ms", prefix="✅", swap=use_img2img)
-            # Highres refinement pass using img2img; if ControlNet was used, keep ControlNet active to preserve pose/limbs.
-            if do_highres:
-                try:
-                    hr_pipe = None
-                    if controlnet_image is not None and _SDControlImg2ImgPipe is not None and _ControlNetModel is not None and controlnet is not None:
-                        hr_pipe = _SDControlImg2ImgPipe(
-                            vae=pipe.vae,
-                            text_encoder=pipe.text_encoder,
-                            tokenizer=pipe.tokenizer,
-                            unet=pipe.unet,
-                            controlnet=controlnet,
-                            scheduler=pipe.scheduler,
-                            safety_checker=None,
-                            feature_extractor=None,
-                        )
-                        hr_pipe = hr_pipe.to(device, torch_dtype=dtype)
-                    elif _SDImg2ImgPipe is not None:
-                        hr_pipe = _SDImg2ImgPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
-                    if hr_pipe is None:
-                        raise RuntimeError("No highres img2img pipeline available")
-                    if hasattr(hr_pipe, "enable_attention_slicing"):
-                        hr_pipe.enable_attention_slicing("max")
-                    if hasattr(hr_pipe, "set_progress_bar_config"):
-                        hr_pipe.set_progress_bar_config(disable=True)
-                    if hasattr(hr_pipe, "scheduler") and _DPMSolver is not None:
-                        try:
-                            hr_pipe.scheduler = _DPMSolver.from_config(hr_pipe.scheduler.config)
-                        except Exception as exc:
-                            log(f"Highres scheduler setup failed: {exc}", prefix="⚠️")
-                    selected_hr_vae = None
-                    if job_vae_path and job_vae_path.is_file():
-                        selected_hr_vae = job_vae_path
-                    else:
-                        entry_hr_vae = Path(str(getattr(entry, "vae_path", "") or "")).expanduser()
-                        if entry_hr_vae.is_file():
-                            selected_hr_vae = entry_hr_vae
-                    if selected_hr_vae and pipeline_name != "sdxl":
-                        try:
-                            # === FIXED VAE LOADING THAT WORKS ON WSL + WINDOWS DRIVES ===
-                            from diffusers import AutoencoderKL
-
-                            vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse", torch_dtype=dtype)
-                            state_dict = torch.load(selected_hr_vae, map_location="cpu")
-                            if isinstance(state_dict, dict) and "state_dict" in state_dict:
-                                state_dict = state_dict["state_dict"]
-                            vae_state_dict = {
-                                k: v
-                                for k, v in state_dict.items()
-                                if k.startswith(("decoder.", "encoder.", "quant_conv.", "post_quant_conv."))
-                            }
-                            vae.load_state_dict(vae_state_dict, strict=False)
-                            hr_pipe.vae = vae.to(device)
-                            log(f"Loaded custom VAE: {selected_hr_vae}", prefix="Success")
-                        except Exception as exc:
-                            log(f"VAE load failed (fallback to default): {exc}", prefix="Warning")
-                    hr_steps = max(10, min(steps, 50))
-                    hr_guidance = max(1.0, min(guidance, 12.0))
-                    resized = img.resize((target_width, target_height))
-                    hr_t0 = time.time()
-                    with torch.inference_mode():
-                        hr_kwargs = {
-                            "image": resized,
-                            "strength": HIGHRES_STRENGTH_CONTROLNET if controlnet_image is not None else HIGHRES_STRENGTH_BASE,
-                            "negative_prompt": neg_text or None,
-                            "num_inference_steps": hr_steps,
-                            "guidance_scale": hr_guidance,
-                            "generator": generator,
-                        }
-                        if controlnet_image is not None and hasattr(hr_pipe, "__call__"):
-                            hr_kwargs["controlnet_conditioning_scale"] = 1.0
-                            hr_kwargs["control_guidance_start"] = 0.0
-                            hr_kwargs["control_guidance_end"] = 1.0
-                        img = hr_pipe(pos_text, **hr_kwargs).images[0]
-                    hr_ms = int((time.time() - hr_t0) * 1000)
-                    log(f"Highres fix applied in {hr_ms}ms", prefix="✅", scale=HIGHRES_SCALE, controlnet=controlnet_image is not None)
-                except Exception as exc:
-                    log(f"Highres fix failed, keeping base image: {exc}", prefix="⚠️")
+            log(
+                f"Generated in {gen_ms}ms",
+                prefix="✅",
+                steps=steps,
+                guidance=guidance,
+                width=width,
+                height=height,
+            )
+            img = result.images[0]
             img.save(output_path)
             with output_path.open("rb") as fh:
                 image_b64 = base64.b64encode(fh.read()).decode("utf-8")
         elif Image is not None:
             log("Using fast preview placeholder (no SD detected or FAST_PREVIEW enabled)", prefix="ℹ️")
-            # Fallback: deterministic gradient image with text-like bands so it isn't noisy
-            w = h = 512
+            w, h = width, height
             if np is not None:
                 yy = np.linspace(0, 255, h, dtype=np.uint8)
                 xx = np.linspace(0, 255, w, dtype=np.uint8)
@@ -1240,7 +621,6 @@ def run_image_generation(
             with output_path.open("rb") as fh:
                 image_b64 = base64.b64encode(fh.read()).decode("utf-8")
         else:
-            # No image libs available; simulate compute only
             time.sleep(random.uniform(1.2, 2.2))
     except Exception as exc:
         status = "failed"
@@ -1253,13 +633,17 @@ def run_image_generation(
     util = int(max(util, 70 if ROLE == "creator" else util))
     metrics = {
         "status": status,
-            "model_name": entry.name,
-            "model_path": str(model_path),
-            "reward_weight": reward_weight,
+        "model_name": model_name,
+        "model_path": str(model_path),
+        "reward_weight": reward_weight,
         "task_type": "image_gen",
         "inference_time_ms": round(duration * 1000, 3),
         "gpu_util_start": start_stats.get("utilization", 0),
         "gpu_util_end": end_stats.get("utilization", 0),
+        "steps": steps,
+        "guidance": guidance,
+        "width": width,
+        "height": height,
     }
     if status == "failed":
         metrics["error"] = error_msg or "image generation error"
@@ -1274,30 +658,21 @@ def run_image_generation(
 def heartbeat_loop() -> None:
     backoff = BACKOFF_BASE
     while True:
-        gpu_stats = read_gpu_stats()
-        capabilities = discover_capabilities()
         payload = {
             "node_id": NODE_NAME,
             "os": os.uname().sysname if hasattr(os, "uname") else os.name,
-            "gpu": gpu_stats.get("gpu_name", "Simulated"),
-            "gpu_stats": gpu_stats,
+            "gpu": read_gpu_stats(),
             "start_time": START_TIME,
             "uptime": time.time() - START_TIME,
             "role": ROLE,
             "version": CLIENT_VERSION,
             "node_name": NODE_NAME,
-            "models": capabilities["models"],
-            "pipelines": capabilities["pipelines"],
         }
         try:
             resp = SESSION.post(endpoint("/register"), data=json.dumps(payload), timeout=5)
             resp.raise_for_status()
             backoff = BACKOFF_BASE
             log(f"Heartbeat OK ({ROLE})", prefix="✅")
-            try:
-                REGISTRY.refresh()
-            except Exception as exc:
-                log(f"Manifest refresh failed (heartbeat): {exc}", prefix="⚠️")
         except Exception as exc:
             log(f"Heartbeat failed: {exc}", prefix="⚠️")
             time.sleep(backoff)
@@ -1333,7 +708,7 @@ def poll_tasks_loop() -> None:
 
 if __name__ == "__main__":
     log(f"Node ID: {NODE_NAME} · Role: {ROLE.upper()} · Version: {CLIENT_VERSION}")
-    refresh_manifest_with_backoff("startup")
+    register_local_models()
     link_wallet(WALLET)
     # Graceful shutdown hooks
     atexit.register(disconnect)

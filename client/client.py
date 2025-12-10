@@ -910,7 +910,7 @@ def run_image_generation(
                         variant="fp16",
                         safety_checker=None,
                     )
-                    log("Loaded SDXL pipeline (JuggernautXL RagnarokBy detected)", prefix="Loaded")
+                    log("Loaded SDXL pipeline", prefix="Loaded", model=entry.name)
                 else:
                     pipe = StableDiffusionPipeline.from_single_file(
                         str(model_path),

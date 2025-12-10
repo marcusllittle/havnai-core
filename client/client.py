@@ -942,13 +942,25 @@ def run_image_generation(
                 if entry_vae.is_file():
                     selected_vae_path = entry_vae
             if pipe is not None and selected_vae_path and pipeline_name != "sdxl":
-                if _AutoencoderKL is not None:
+                if selected_vae_path.exists():
                     try:
-                        custom_vae = _AutoencoderKL.from_single_file(str(selected_vae_path), torch_dtype=dtype)
-                        pipe.vae = custom_vae
-                        log(f"Loaded custom VAE for {entry.name}", prefix="✅", vae=str(selected_vae_path))
+                        # === FIXED VAE LOADING THAT WORKS ON WSL + WINDOWS DRIVES ===
+                        from diffusers import AutoencoderKL
+
+                        vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse", torch_dtype=dtype)
+                        state_dict = torch.load(selected_vae_path, map_location="cpu")
+                        if isinstance(state_dict, dict) and "state_dict" in state_dict:
+                            state_dict = state_dict["state_dict"]
+                        vae_state_dict = {
+                            k: v
+                            for k, v in state_dict.items()
+                            if k.startswith(("decoder.", "encoder.", "quant_conv.", "post_quant_conv."))
+                        }
+                        vae.load_state_dict(vae_state_dict, strict=False)
+                        pipe.vae = vae.to(device)
+                        log(f"Loaded custom VAE: {selected_vae_path}", prefix="Success")
                     except Exception as exc:
-                        log(f"Custom VAE load failed for {entry.name}: {exc}", prefix="⚠️", vae=str(selected_vae_path))
+                        log(f"VAE load failed (fallback to default): {exc}", prefix="Warning")
             if hasattr(pipe, "enable_attention_slicing"):
                 pipe.enable_attention_slicing("max")
             if hasattr(pipe, "set_progress_bar_config"):
@@ -1065,12 +1077,24 @@ def run_image_generation(
                             if entry_img_vae.is_file():
                                 selected_img_vae = entry_img_vae
                         if selected_img_vae and pipeline_name != "sdxl":
-                            if _AutoencoderKL is not None:
-                                try:
-                                    custom_vae = _AutoencoderKL.from_single_file(str(selected_img_vae), torch_dtype=dtype)
-                                    img_pipe.vae = custom_vae
-                                except Exception:
-                                    pass
+                            try:
+                                # === FIXED VAE LOADING THAT WORKS ON WSL + WINDOWS DRIVES ===
+                                from diffusers import AutoencoderKL
+
+                                vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse", torch_dtype=dtype)
+                                state_dict = torch.load(selected_img_vae, map_location="cpu")
+                                if isinstance(state_dict, dict) and "state_dict" in state_dict:
+                                    state_dict = state_dict["state_dict"]
+                                vae_state_dict = {
+                                    k: v
+                                    for k, v in state_dict.items()
+                                    if k.startswith(("decoder.", "encoder.", "quant_conv.", "post_quant_conv."))
+                                }
+                                vae.load_state_dict(vae_state_dict, strict=False)
+                                img_pipe.vae = vae.to(device)
+                                log(f"Loaded custom VAE: {selected_img_vae}", prefix="Success")
+                            except Exception as exc:
+                                log(f"VAE load failed (fallback to default): {exc}", prefix="Warning")
                         img_pipe = img_pipe.to(device)
                         if face_swap and hyperlora_path.exists() and not (pipeline_name == "sdxl" and ipadapter_dir.exists()):
                             try:
@@ -1155,12 +1179,24 @@ def run_image_generation(
                         if entry_hr_vae.is_file():
                             selected_hr_vae = entry_hr_vae
                     if selected_hr_vae and pipeline_name != "sdxl":
-                        if _AutoencoderKL is not None:
-                            try:
-                                custom_vae = _AutoencoderKL.from_single_file(str(selected_hr_vae), torch_dtype=dtype)
-                                hr_pipe.vae = custom_vae
-                            except Exception:
-                                pass
+                        try:
+                            # === FIXED VAE LOADING THAT WORKS ON WSL + WINDOWS DRIVES ===
+                            from diffusers import AutoencoderKL
+
+                            vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse", torch_dtype=dtype)
+                            state_dict = torch.load(selected_hr_vae, map_location="cpu")
+                            if isinstance(state_dict, dict) and "state_dict" in state_dict:
+                                state_dict = state_dict["state_dict"]
+                            vae_state_dict = {
+                                k: v
+                                for k, v in state_dict.items()
+                                if k.startswith(("decoder.", "encoder.", "quant_conv.", "post_quant_conv."))
+                            }
+                            vae.load_state_dict(vae_state_dict, strict=False)
+                            hr_pipe.vae = vae.to(device)
+                            log(f"Loaded custom VAE: {selected_hr_vae}", prefix="Success")
+                        except Exception as exc:
+                            log(f"VAE load failed (fallback to default): {exc}", prefix="Warning")
                     hr_steps = max(10, min(steps, 50))
                     hr_guidance = max(1.0, min(guidance, 12.0))
                     resized = img.resize((target_width, target_height))

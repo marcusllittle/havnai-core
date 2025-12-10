@@ -739,6 +739,8 @@ def execute_task(task: Dict[str, Any]) -> None:
     if image_b64:
         payload["image_b64"] = image_b64
 
+    log(f"Sent image_b64 size: {len(payload.get('image_b64', ''))}", prefix="Debug", task_id=task_id)
+
     try:
         resp = SESSION.post(endpoint("/results"), data=json.dumps(payload), timeout=60)
         resp.raise_for_status()

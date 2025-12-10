@@ -1691,7 +1691,9 @@ def get_creator_tasks() -> Any:
                     # Always send plain prompt text to the node (avoid passing raw JSON)
                     prompt_for_node = prompt_text
 
+                    # Assign under global lock to avoid multiple nodes claiming the same job
                     assign_job_to_node(job["id"], node_id)
+                    log_event("Job claimed by node", job_id=job["id"], node_id=node_id)
                     reward_weight = float(job["weight"] or cfg.get("reward_weight", resolve_weight(job["model"], 10.0)))
                     job_task_type = (job.get("task_type") or CREATOR_TASK_TYPE).upper()
                     pending = [
@@ -1837,80 +1839,103 @@ def submit_results() -> Any:
         # Compute dynamic reward and factors
         reward, reward_factors = compute_reward(model_name, pipeline, metrics, status)
 
-        if node:
-            node["rewards"] = round(node.get("rewards", 0.0) + reward, 6)
-            node["last_reward"] = reward
-            history = node.setdefault("reward_history", [])
-            history.append(
-                {
-                    "reward": reward,
+        # Validate job ownership/status in a transaction before completing
+        conn = get_db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            job_row = conn.execute("SELECT * FROM jobs WHERE id=?", (task_id,)).fetchone()
+            if not job_row:
+                conn.rollback()
+                return jsonify({"error": "task not found"}), 404
+            current_status = (job_row["status"] or "").lower()
+            owner = job_row["node_id"]
+            if current_status != "running" or (owner and owner != node_id):
+                conn.rollback()
+                log_event(
+                    "Results rejected (job not running/owned by node)",
+                    level="warning",
+                    job_id=task_id,
+                    node_id=node_id,
+                    status=current_status,
+                    owner=owner,
+                )
+                return jsonify({"error": "conflict"}), 409
+
+            log_event("Results accepted for job (running)", job_id=task_id, node_id=node_id)
+
+            if node:
+                node["rewards"] = round(node.get("rewards", 0.0) + reward, 6)
+                node["last_reward"] = reward
+                history = node.setdefault("reward_history", [])
+                history.append(
+                    {
+                        "reward": reward,
+                        "task_id": task_id,
+                        "timestamp": iso_now(),
+                        "factors": reward_factors,
+                    }
+                )
+                if len(history) > 20:
+                    history.pop(0)
+                node["last_seen"] = iso_now()
+                node["last_seen_unix"] = unix_now()
+                # If an image or video was uploaded, persist to outputs dir
+                image_url = None
+                video_url = None
+                if image_b64:
+                    try:
+                        import base64
+                        img_bytes = base64.b64decode(image_b64)
+                        out_path = OUTPUTS_DIR / f"{task_id}.png"
+                        OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+                        with out_path.open("wb") as fh:
+                            fh.write(img_bytes)
+                        image_url = f"/static/outputs/{task_id}.png"
+                    except Exception:
+                        pass
+                if video_b64:
+                    try:
+                        import base64
+                        video_bytes = base64.b64decode(video_b64)
+                        videos_dir = OUTPUTS_DIR / "videos"
+                        videos_dir.mkdir(parents=True, exist_ok=True)
+                        video_path = videos_dir / f"{task_id}.mp4"
+                        with video_path.open("wb") as fh:
+                            fh.write(video_bytes)
+                        # Stored at: STATIC_DIR / outputs / videos / <job_id>.mp4
+                        video_url = f"/static/outputs/videos/{task_id}.mp4"
+                    except Exception:
+                        pass
+
+                node["last_result"] = {
                     "task_id": task_id,
-                    "timestamp": iso_now(),
-                    "factors": reward_factors,
+                    "status": status,
+                    "metrics": metrics,
+                    "model_name": model_name,
+                    "reward": reward,
+                    "reward_factors": reward_factors,
+                    "wallet": wallet,
+                    "task_type": task_type,
+                    "image_url": image_url,
+                    "video_url": video_url,
                 }
-            )
-            if len(history) > 20:
-                history.pop(0)
-            node["last_seen"] = iso_now()
-            node["last_seen_unix"] = unix_now()
-            # If an image or video was uploaded, persist to outputs dir
-            image_url = None
-            video_url = None
-            if image_b64:
-                try:
-                    import base64
-                    img_bytes = base64.b64decode(image_b64)
-                    out_path = OUTPUTS_DIR / f"{task_id}.png"
-                    OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-                    with out_path.open("wb") as fh:
-                        fh.write(img_bytes)
-                    image_url = f"/static/outputs/{task_id}.png"
-                except Exception:
-                    pass
-            if video_b64:
-                try:
-                    import base64
-                    video_bytes = base64.b64decode(video_b64)
-                    videos_dir = OUTPUTS_DIR / "videos"
-                    videos_dir.mkdir(parents=True, exist_ok=True)
-                    video_path = videos_dir / f"{task_id}.mp4"
-                    with video_path.open("wb") as fh:
-                        fh.write(video_bytes)
-                    # Stored at: STATIC_DIR / outputs / videos / <job_id>.mp4
-                    video_url = f"/static/outputs/videos/{task_id}.mp4"
-                except Exception:
-                    pass
+                if status == "success":
+                    node["tasks_completed"] = node.get("tasks_completed", 0) + 1
+                node["current_task"] = None
+                if utilization is not None:
+                    try:
+                        util_val = float(utilization)
+                        node["utilization"] = util_val
+                        samples = node.setdefault("util_samples", [])
+                        samples.append(util_val)
+                        if len(samples) > 60:
+                            samples.pop(0)
+                        node["avg_utilization"] = round(sum(samples) / len(samples), 2)
+                    except (TypeError, ValueError):
+                        pass
+                save_nodes()
 
-            node["last_result"] = {
-                "task_id": task_id,
-                "status": status,
-                "metrics": metrics,
-                "model_name": model_name,
-                "reward": reward,
-                "reward_factors": reward_factors,
-                "wallet": wallet,
-                "task_type": task_type,
-                "image_url": image_url,
-                "video_url": video_url,
-            }
-            if status == "success":
-                node["tasks_completed"] = node.get("tasks_completed", 0) + 1
-            node["current_task"] = None
-            if utilization is not None:
-                try:
-                    util_val = float(utilization)
-                    node["utilization"] = util_val
-                    samples = node.setdefault("util_samples", [])
-                    samples.append(util_val)
-                    if len(samples) > 60:
-                        samples.pop(0)
-                    node["avg_utilization"] = round(sum(samples) / len(samples), 2)
-                except (TypeError, ValueError):
-                    pass
-            save_nodes()
-
-        job = get_job(task_id)
-        if job:
+            job = dict(job_row)
             # Persist reward info into the job's data JSON for later inspection.
             raw_data = job.get("data")
             try:
@@ -1922,13 +1947,16 @@ def submit_results() -> Any:
                 payload["reward_factors"] = reward_factors
                 payload["reward_status"] = status
                 try:
-                    conn = get_db()
                     conn.execute("UPDATE jobs SET data=? WHERE id=?", (json.dumps(payload), task_id))
-                    conn.commit()
                 except Exception:
                     conn.rollback()
-            complete_job(task_id, status)
+                    raise
+            conn.execute("UPDATE jobs SET status=?, completed_at=? WHERE id=?", (status, unix_now(), task_id))
+            conn.commit()
             wallet = wallet or job.get("wallet")
+        except Exception:
+            conn.rollback()
+            raise
 
         record_reward(wallet, task_id, reward)
 

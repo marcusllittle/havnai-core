@@ -713,7 +713,15 @@ def execute_task(task: Dict[str, Any]) -> None:
         if not prompt:
             prompt = "a beautiful landscape"  # absolute last-resort fallback
 
-        metrics, util, image_b64 = run_image_generation(task_id, entry, model_path, reward_weight, prompt, negative_prompt, job_settings)
+        metrics, util, image_b64 = run_image_generation(
+            task_id,
+            entry,
+            model_path,
+            reward_weight,
+            prompt,
+            negative_prompt,
+            job_settings or {},
+        )
     else:
         metrics, util = run_ai_inference(entry, model_path, input_shape, reward_weight)
 
@@ -732,13 +740,13 @@ def execute_task(task: Dict[str, Any]) -> None:
         payload["image_b64"] = image_b64
 
     try:
-        resp = SESSION.post(endpoint("/results"), data=json.dumps(payload), timeout=15)
+        resp = SESSION.post(endpoint("/results"), data=json.dumps(payload), timeout=60)
         resp.raise_for_status()
         reward = resp.json().get("reward")
         prefix = "✅" if payload["status"] == "success" else "⚠️"
-        log(f"Task {task_id[:8]} {payload['status'].upper()} · reward {reward} HAI", prefix=prefix)
+        log(f"Task {task_id[:8]} {payload['status'].upper()} · reward {reward} HAI", prefix=prefix, status_code=resp.status_code)
     except Exception as exc:
-        log(f"Failed to submit result: {exc}", prefix="🚫")
+        log(f"Failed to submit result: {exc}", prefix="🚫", task_id=task_id)
 
 
 def run_ai_inference(entry: ModelEntry, model_path: Path, input_shape: List[int], reward_weight: float) -> (Dict[str, Any], int):
@@ -817,6 +825,7 @@ def run_image_generation(
             ipadapter_scale = 0.85
             source_face_image = None
             use_ipadapter = False
+            job_vae_path = None
             pipeline_name = (getattr(entry, "pipeline", "") or "sd15").lower()
             # Merge per-job overrides with model defaults from manifest
             steps = IMAGE_STEPS
@@ -842,6 +851,7 @@ def run_image_generation(
                 ipadapter_bin = str(job_settings.get("ipadapter_bin") or ipadapter_bin)
                 ipadapter_lora = str(job_settings.get("ipadapter_lora") or ipadapter_lora)
                 ipadapter_scale = float(job_settings.get("ipadapter_scale", ipadapter_scale) or ipadapter_scale)
+                job_vae_path = Path(str(job_settings.get("vae_path"))).expanduser() if job_settings.get("vae_path") else None
             if face_swap:
                 source_face_image = load_source_image(source_face)
                 if pipeline_name == "sdxl" and source_face_image is not None and ipadapter_dir.exists():
@@ -919,15 +929,15 @@ def run_image_generation(
                     )
                     log("Loaded SD 1.5 pipeline", prefix="Loaded")
             # Optionally swap in a custom VAE for SD1.5-style checkpoints
-            if pipe is not None and getattr(entry, "vae_path", "") and pipeline_name != "sdxl":
-                vae_path = Path(str(getattr(entry, "vae_path", ""))).expanduser()
-                if vae_path.exists() and _AutoencoderKL is not None:
+            selected_vae_path = job_vae_path or Path(str(getattr(entry, "vae_path", "") or "")).expanduser()
+            if pipe is not None and selected_vae_path and selected_vae_path.exists() and pipeline_name != "sdxl":
+                if _AutoencoderKL is not None:
                     try:
-                        custom_vae = _AutoencoderKL.from_single_file(str(vae_path), torch_dtype=dtype)
+                        custom_vae = _AutoencoderKL.from_single_file(str(selected_vae_path), torch_dtype=dtype)
                         pipe.vae = custom_vae
-                        log(f"Loaded custom VAE for {entry.name}", prefix="✅", vae=str(vae_path))
+                        log(f"Loaded custom VAE for {entry.name}", prefix="✅", vae=str(selected_vae_path))
                     except Exception as exc:
-                        log(f"Custom VAE load failed for {entry.name}: {exc}", prefix="⚠️", vae=str(vae_path))
+                        log(f"Custom VAE load failed for {entry.name}: {exc}", prefix="⚠️", vae=str(selected_vae_path))
             if hasattr(pipe, "enable_attention_slicing"):
                 pipe.enable_attention_slicing("max")
             if hasattr(pipe, "set_progress_bar_config"):
@@ -1036,11 +1046,11 @@ def run_image_generation(
                                 img_pipe.scheduler = _DPMSolver.from_config(img_pipe.scheduler.config)
                             except Exception as exc:
                                 log(f"Swap scheduler setup failed: {exc}", prefix="⚠️")
-                        if getattr(entry, "vae_path", "") and pipeline_name != "sdxl":
-                            vae_path = Path(str(getattr(entry, "vae_path", ""))).expanduser()
-                            if vae_path.exists() and _AutoencoderKL is not None:
+                        selected_img_vae = job_vae_path or Path(str(getattr(entry, "vae_path", "") or "")).expanduser()
+                        if selected_img_vae and selected_img_vae.exists() and pipeline_name != "sdxl":
+                            if _AutoencoderKL is not None:
                                 try:
-                                    custom_vae = _AutoencoderKL.from_single_file(str(vae_path), torch_dtype=dtype)
+                                    custom_vae = _AutoencoderKL.from_single_file(str(selected_img_vae), torch_dtype=dtype)
                                     img_pipe.vae = custom_vae
                                 except Exception:
                                     pass
@@ -1120,11 +1130,11 @@ def run_image_generation(
                             hr_pipe.scheduler = _DPMSolver.from_config(hr_pipe.scheduler.config)
                         except Exception as exc:
                             log(f"Highres scheduler setup failed: {exc}", prefix="⚠️")
-                    if getattr(entry, "vae_path", "") and pipeline_name != "sdxl":
-                        vae_path = Path(str(getattr(entry, "vae_path", ""))).expanduser()
-                        if vae_path.exists() and _AutoencoderKL is not None:
+                    selected_hr_vae = job_vae_path or Path(str(getattr(entry, "vae_path", "") or "")).expanduser()
+                    if selected_hr_vae and selected_hr_vae.exists() and pipeline_name != "sdxl":
+                        if _AutoencoderKL is not None:
                             try:
-                                custom_vae = _AutoencoderKL.from_single_file(str(vae_path), torch_dtype=dtype)
+                                custom_vae = _AutoencoderKL.from_single_file(str(selected_hr_vae), torch_dtype=dtype)
                                 hr_pipe.vae = custom_vae
                             except Exception:
                                 pass

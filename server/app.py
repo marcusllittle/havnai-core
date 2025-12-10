@@ -54,7 +54,6 @@ MODEL_WEIGHTS: Dict[str, float] = {
 }
 
 MODEL_STATS: Dict[str, Dict[str, float]] = {}
-MODEL_RUNTIME_CACHE: Dict[str, Dict[str, Any]] = {}
 MANIFEST_MODELS: Dict[str, Dict[str, Any]] = {}
 EVENT_LOGS: deque = deque(maxlen=200)
 NODES: Dict[str, Dict[str, Any]] = {}
@@ -79,69 +78,6 @@ REWARD_CONFIG: Dict[str, float] = {
     "base_reward": float(os.getenv("REWARD_BASE_HAI", "0.05")),
 }
 
-HYPERLORA_PATH_DEFAULT = os.getenv("HYPERLORA_PATH", "/mnt/d/havnai-storage/models/loras/HyperLoRA_SDXL.safetensors")
-IPADAPTER_DIR_DEFAULT = os.getenv("IPADAPTER_DIR", "/mnt/d/havnai-storage/models/ip-adapter-faceid")
-IPADAPTER_BIN_DEFAULT = os.getenv("IPADAPTER_BIN", "ip-adapter-faceid-plusv2_sdxl.bin")
-IPADAPTER_LORA_DEFAULT = os.getenv("IPADAPTER_LORA", "ip-adapter-faceid-plusv2_sdxl_lora.safetensors")
-
-# Basic NSFW/pose keyword sniffing to steer auto model selection away from cartoons.
-AUTO_NSFW_KEYWORDS = {
-    "nsfw",
-    "sex",
-    "sexual",
-    "explicit",
-    "nude",
-    "naked",
-    "porn",
-    "hardcore",
-    "ahegao",
-    "erotic",
-    "sexy",
-    "boobs",
-    "tits",
-    "ass",
-    "butt",
-    "nipple",
-    "penetration",
-    "dp",
-    "double penetration",
-    "doggy",
-    "doggystyle",
-    "all fours",
-    "hair pull",
-    "hairpull",
-    "spread",
-    "spreadpussy",
-    "openpose",
-}
-
-ANIME_KEYWORDS = {
-    "anime",
-    "manga",
-    "manhwa",
-    "webtoon",
-    "cartoon",
-    "pixar",
-    "cel-shaded",
-    "cel shaded",
-}
-
-FANTASY_KEYWORDS = {
-    "fantasy",
-    "wizard",
-    "dragon",
-    "elf",
-    "orc",
-    "knight",
-    "magic",
-    "myth",
-    "mythical",
-    "creature",
-    "castle",
-    "sword",
-    "armor",
-    "spell",
-}
 # Slight global positive bias to help realism skin detail.
 GLOBAL_POSITIVE_SUFFIX = "(ultra-realistic 8k:1.05), (detailed skin pores:1.03)"
 
@@ -783,14 +719,6 @@ def load_manifest() -> None:
             "task_type": entry.get("task_type", CREATOR_TASK_TYPE),
             "strengths": entry.get("strengths"),
             "weaknesses": entry.get("weaknesses"),
-            "vae_path": entry.get("vae_path", ""),
-            "controlnet_path": entry.get("controlnet_path", ""),
-            "steps": entry.get("steps"),
-            "guidance": entry.get("guidance"),
-            "width": entry.get("width"),
-            "height": entry.get("height"),
-            "sampler": entry.get("sampler"),
-            "negative_prompt_default": entry.get("negative_prompt_default", ""),
         }
         MANIFEST_MODELS[key] = entry_data
         MODEL_STATS.setdefault(key, {"count": 0.0, "total_time": 0.0})
@@ -1377,150 +1305,6 @@ def favicon() -> Any:
     return ("", 204)
 
 
-def _is_nsfw_prompt(prompt: str) -> bool:
-    low = (prompt or "").lower()
-    return any(kw in low for kw in AUTO_NSFW_KEYWORDS)
-
-
-def _is_anime_prompt(prompt: str) -> bool:
-    low = (prompt or "").lower()
-    return any(kw in low for kw in ANIME_KEYWORDS)
-
-
-def _is_fantasy_prompt(prompt: str) -> bool:
-    low = (prompt or "").lower()
-    return any(kw in low for kw in FANTASY_KEYWORDS)
-
-
-def _filtered_candidates(candidates: List[Dict[str, Any]], prompt: str) -> List[Dict[str, Any]]:
-    """Prefer realistic SD1.5 models for NSFW-ish prompts; avoid cartoon/anime picks."""
-
-    if not _is_nsfw_prompt(prompt):
-        return candidates
-    filtered: List[Dict[str, Any]] = []
-    for meta in candidates:
-        tags = {t.lower() for t in meta.get("tags", [])}
-        name = str(meta.get("name", "")).lower()
-        pipeline = str(meta.get("pipeline", "")).lower()
-        # Skip obvious cartoon/anime/manhwa/pixar entries
-        if {"cartoon", "pixar", "anime", "stylized", "manhwa", "webtoon"} & tags:
-            continue
-        if any(bad in name for bad in ("cartoon", "pixar", "anime", "manhwa", "webtoon")):
-            continue
-        # Prefer sd15 checkpoints with controlnet/vae defined for pose-aware realism
-        if pipeline in {"sd15", "sd1.5"}:
-            filtered.append(meta)
-    return filtered or candidates
-
-
-def _model_runtime_stats(model_name: str) -> Dict[str, Any]:
-    """Compute rolling stats for a model from the last 200 jobs."""
-
-    now = unix_now()
-    cached = MODEL_RUNTIME_CACHE.get(model_name)
-    if cached and now - cached.get("ts", 0) < 30:
-        return cached["stats"]
-
-    stats = {
-        "total_jobs": 0,
-        "nsfw_jobs": 0,
-        "failed_jobs": 0,
-        "nsfw_success_rate": 0.0,
-    }
-    conn = get_db()
-    rows = conn.execute(
-        "SELECT status, data FROM jobs WHERE model=? ORDER BY timestamp DESC LIMIT 200",
-        (model_name,),
-    ).fetchall()
-    nsfw_success = 0
-    nsfw_fail = 0
-    for row in rows:
-        stats["total_jobs"] += 1
-        status = (row["status"] or "").lower()
-        success = status in {"success", "completed"}
-        if not success:
-            stats["failed_jobs"] += 1
-        data_raw = row["data"]
-        prompt_text = ""
-        try:
-            parsed = json.loads(data_raw) if isinstance(data_raw, str) else {}
-            if isinstance(parsed, dict):
-                prompt_text = str(parsed.get("prompt") or parsed.get("data") or "")
-        except Exception:
-            prompt_text = ""
-        if _is_nsfw_prompt(prompt_text):
-            stats["nsfw_jobs"] += 1
-            if success:
-                nsfw_success += 1
-            else:
-                nsfw_fail += 1
-    if stats["nsfw_jobs"] > 0:
-        stats["nsfw_success_rate"] = round(nsfw_success / stats["nsfw_jobs"], 4)
-    MODEL_RUNTIME_CACHE[model_name] = {"ts": now, "stats": stats}
-    return stats
-
-
-def _score_model_for_prompt(meta: Dict[str, Any], prompt_text: str, prompt_is_nsfw: bool) -> float:
-    """Compute selection score for auto model choice."""
-
-    tags = {t.lower() for t in meta.get("tags", []) if isinstance(t, str)}
-    name = str(meta.get("name", "")).lower()
-    pipeline = str(meta.get("pipeline", "")).lower()
-    controlnet_enabled = bool(meta.get("controlnet_path"))
-    stats = _model_runtime_stats(name)
-    is_anime = _is_anime_prompt(prompt_text)
-    is_fantasy = _is_fantasy_prompt(prompt_text)
-
-    score = 0.0
-    if prompt_is_nsfw:
-        if controlnet_enabled:
-            score += 40.0
-        if pipeline in {"sd15", "sd1.5"}:
-            score += 20.0
-        nsfw_rate = stats.get("nsfw_success_rate", 0.0) or 0.0
-        if nsfw_rate >= 0.90:
-            score += 30.0
-        if nsfw_rate >= 0.95:
-            score += 20.0
-        if "realism" in tags:
-            score += 10.0
-        if {"cartoon", "anime", "stylized", "manhwa", "webtoon", "pixar"} & tags or any(
-            bad in name for bad in ("cartoon", "pixar", "anime", "manhwa", "webtoon")
-        ):
-            score -= 100.0
-    else:
-        # SFW routing: favor realism (juggernaut/epic) by default,
-        # but route anime/fantasy prompts to the right models.
-        if is_anime:
-            if {"anime", "manhwa", "webtoon", "stylized"} & tags:
-                score += 30.0
-            if "kizuki" in name:
-                score += 40.0
-            if {"cartoon", "pixar"} & tags:
-                score += 10.0
-            if "triomerge" in name:
-                score -= 10.0
-        elif is_fantasy:
-            if {"fantasy", "stylized"} & tags:
-                score += 30.0
-            if "triomerge" in name:
-                score += 40.0
-            if {"cartoon", "pixar"} & tags:
-                score -= 20.0
-        else:
-            # Realism default path
-            if "realism" in tags:
-                score += 20.0
-            if "juggernaut" in name or "epicrealism" in name:
-                score += 40.0
-            if {"cartoon", "anime", "stylized", "manhwa", "webtoon", "pixar"} & tags:
-                score -= 60.0
-            # Slight nod to SDXL for clean realism
-            if pipeline == "sdxl":
-                score += 10.0
-    return score
-
-
 # ---------------------------------------------------------------------------
 # API routes – manifest catalog only
 # ---------------------------------------------------------------------------
@@ -1530,58 +1314,6 @@ def _score_model_for_prompt(meta: Dict[str, Any], prompt_text: str, prompt_is_ns
 def list_models() -> Any:
     load_manifest()
     return jsonify({"models": list(MANIFEST_MODELS.values())})
-
-
-@app.route("/submit-swap-hyperlora", methods=["POST"])
-def submit_swap_hyperlora() -> Any:
-    """Face swap helper that injects HyperLoRA and a source face into a standard job."""
-
-    payload = request.get_json() or {}
-    # Reuse submit-job logic but mark face_swap and pass source_face
-    model = payload.get("model") or ""
-    prompt = payload.get("prompt") or payload.get("data") or ""
-    negative_prompt = payload.get("negative_prompt") or ""
-    source_face = payload.get("source_face") or payload.get("source_face_url") or payload.get("source_face_b64") or ""
-    hyperlora_weight = float(payload.get("hyperlora_weight", 0.85) or 0.85)
-    if not prompt or not source_face:
-        return jsonify({"error": "prompt and source_face required"}), 400
-
-    # Augment payload and forward to submit_job flow
-    payload["data"] = str(prompt)
-    payload["prompt"] = str(prompt)
-    payload["negative_prompt"] = str(negative_prompt)
-    payload["face_swap"] = True
-    payload["source_face"] = source_face
-    payload["hyperlora_weight"] = hyperlora_weight
-    payload["hyperlora_path"] = payload.get("hyperlora_path") or HYPERLORA_PATH_DEFAULT
-    # Directly call submit_job with modified payload
-    with app.test_request_context("/submit-job", method="POST", json=payload):
-        return submit_job()
-
-
-@app.route("/submit-swap-ipadapter", methods=["POST"])
-def submit_swap_ipadapter() -> Any:
-    """Face swap helper using IP-Adapter-FaceID-PlusV2 (SDXL)."""
-
-    payload = request.get_json() or {}
-    prompt = payload.get("prompt") or payload.get("data") or ""
-    negative_prompt = payload.get("negative_prompt") or ""
-    source_face = payload.get("source_face") or payload.get("source_face_url") or payload.get("source_face_b64") or ""
-    scale = float(payload.get("ipadapter_scale", 0.85) or 0.85)
-    if not prompt or not source_face:
-        return jsonify({"error": "prompt and source_face required"}), 400
-
-    payload["data"] = str(prompt)
-    payload["prompt"] = str(prompt)
-    payload["negative_prompt"] = str(negative_prompt)
-    payload["face_swap"] = True
-    payload["source_face"] = source_face
-    payload["ipadapter_dir"] = payload.get("ipadapter_dir") or IPADAPTER_DIR_DEFAULT
-    payload["ipadapter_bin"] = payload.get("ipadapter_bin") or IPADAPTER_BIN_DEFAULT
-    payload["ipadapter_lora"] = payload.get("ipadapter_lora") or IPADAPTER_LORA_DEFAULT
-    payload["ipadapter_scale"] = scale
-    with app.test_request_context("/submit-job", method="POST", json=payload):
-        return submit_job()
 
 
 @app.route("/installers/<path:filename>")
@@ -1611,9 +1343,6 @@ def submit_job() -> Any:
     model_name_raw = str(payload.get("model", "")).strip()
     model_name = model_name_raw.lower()
     weight = payload.get("weight")
-    prompt_for_auto = str(payload.get("prompt") or payload.get("data") or "")
-    prompt_is_nsfw = _is_nsfw_prompt(prompt_for_auto)
-    auto_choice_score: Optional[float] = None
 
     if not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid wallet"}), 400
@@ -1626,31 +1355,13 @@ def submit_job() -> Any:
             for key, meta in MANIFEST_MODELS.items()
             if (meta.get("task_type") or CREATOR_TASK_TYPE).upper() == CREATOR_TASK_TYPE
         ]
-        candidates = _filtered_candidates(candidates, prompt_for_auto)
         if not candidates:
             return jsonify({"error": "no_creator_models"}), 400
-        chosen = None
-        chosen_score = None
-        for meta in candidates:
-            score = _score_model_for_prompt(meta, prompt_for_auto, prompt_is_nsfw)
-            if chosen is None or score > (chosen_score or float("-inf")):
-                chosen = meta["name"]
-                chosen_score = score
-        if chosen is None:
-            names = [meta["name"] for meta in candidates]
-            weights = [resolve_weight(meta["name"].lower(), meta.get("reward_weight", 10.0)) for meta in candidates]
-            chosen = random.choices(names, weights=weights, k=1)[0]
-            chosen_score = None
+        names = [meta["name"] for meta in candidates]
+        weights = [resolve_weight(meta["name"].lower(), meta.get("reward_weight", 10.0)) for meta in candidates]
+        chosen = random.choices(names, weights=weights, k=1)[0]
         model_name_raw = chosen
         model_name = chosen.lower()
-        auto_choice_score = chosen_score
-        if auto_choice_score is not None:
-            log_event(
-                "Auto model chosen",
-                model=model_name,
-                score=auto_choice_score,
-                prompt_is_nsfw=prompt_is_nsfw,
-            )
 
     if not model_name:
         return jsonify({"error": "missing model"}), 400
@@ -1756,22 +1467,6 @@ def submit_job() -> Any:
             job_settings["pose_image_b64"] = str(pose_image)
         if pose_image_path:
             job_settings["pose_image_path"] = str(pose_image_path)
-        if payload.get("face_swap"):
-            job_settings["face_swap"] = True
-            job_settings["source_face"] = payload.get("source_face") or payload.get("source_face_url") or payload.get("source_face_b64")
-            job_settings["hyperlora_path"] = payload.get("hyperlora_path") or HYPERLORA_PATH_DEFAULT
-            if payload.get("hyperlora_weight") is not None:
-                job_settings["hyperlora_weight"] = payload.get("hyperlora_weight")
-            if payload.get("swap_strength") is not None:
-                job_settings["swap_strength"] = payload.get("swap_strength")
-            if payload.get("ipadapter_dir"):
-                job_settings["ipadapter_dir"] = payload.get("ipadapter_dir")
-            if payload.get("ipadapter_bin"):
-                job_settings["ipadapter_bin"] = payload.get("ipadapter_bin")
-            if payload.get("ipadapter_lora"):
-                job_settings["ipadapter_lora"] = payload.get("ipadapter_lora")
-            if payload.get("ipadapter_scale") is not None:
-                job_settings["ipadapter_scale"] = payload.get("ipadapter_scale")
 
         # Per-model defaults from manifest (steps/guidance/size/sampler/negative)
         if cfg:
@@ -1790,15 +1485,6 @@ def submit_job() -> Any:
                 combined_negative = ", ".join(filter(None, [base_negative, GLOBAL_NEGATIVE_PROMPT]))
                 if combined_negative:
                     job_settings["negative_prompt"] = combined_negative
-        if auto_choice_score is not None:
-            stats = _model_runtime_stats(model_name)
-            job_settings["auto_selection"] = {
-                "model": model_name,
-                "score": auto_choice_score,
-                "prompt_is_nsfw": prompt_is_nsfw,
-                "stats": stats,
-                "controlnet_enabled": bool(cfg.get("controlnet_path") if cfg else False),
-            }
 
         job_data = json.dumps(job_settings)
         task_type = CREATOR_TASK_TYPE
@@ -1990,10 +1676,8 @@ def get_creator_tasks() -> Any:
                     if isinstance(parsed, dict):
                         prompt_text = str(parsed.get("prompt") or "")
                         negative_prompt = str(parsed.get("negative_prompt") or "")
-                        # For structured payloads (face swap, etc.), pass the raw JSON to the node
-                        prompt_for_node = raw_data
-                    else:
-                        prompt_for_node = prompt_text
+                    # Always send plain prompt text to the node (avoid passing raw JSON)
+                    prompt_for_node = prompt_text
 
                     assign_job_to_node(job["id"], node_id)
                     reward_weight = float(job["weight"] or cfg.get("reward_weight", resolve_weight(job["model"], 10.0)))

@@ -853,7 +853,10 @@ def run_image_generation(
                 ipadapter_bin = str(job_settings.get("ipadapter_bin") or ipadapter_bin)
                 ipadapter_lora = str(job_settings.get("ipadapter_lora") or ipadapter_lora)
                 ipadapter_scale = float(job_settings.get("ipadapter_scale", ipadapter_scale) or ipadapter_scale)
-                job_vae_path = Path(str(job_settings.get("vae_path"))).expanduser() if job_settings.get("vae_path") else None
+                vae_override = str(job_settings.get("vae_path") or "").strip()
+                if vae_override:
+                    candidate = Path(vae_override).expanduser()
+                    job_vae_path = candidate if candidate.is_file() else None
             if face_swap:
                 source_face_image = load_source_image(source_face)
                 if pipeline_name == "sdxl" and source_face_image is not None and ipadapter_dir.exists():
@@ -931,8 +934,14 @@ def run_image_generation(
                     )
                     log("Loaded SD 1.5 pipeline", prefix="Loaded")
             # Optionally swap in a custom VAE for SD1.5-style checkpoints
-            selected_vae_path = job_vae_path or Path(str(getattr(entry, "vae_path", "") or "")).expanduser()
-            if pipe is not None and selected_vae_path and selected_vae_path.exists() and pipeline_name != "sdxl":
+            selected_vae_path = None
+            if job_vae_path and job_vae_path.is_file():
+                selected_vae_path = job_vae_path
+            else:
+                entry_vae = Path(str(getattr(entry, "vae_path", "") or "")).expanduser()
+                if entry_vae.is_file():
+                    selected_vae_path = entry_vae
+            if pipe is not None and selected_vae_path and pipeline_name != "sdxl":
                 if _AutoencoderKL is not None:
                     try:
                         custom_vae = _AutoencoderKL.from_single_file(str(selected_vae_path), torch_dtype=dtype)
@@ -1048,8 +1057,14 @@ def run_image_generation(
                                 img_pipe.scheduler = _DPMSolver.from_config(img_pipe.scheduler.config)
                             except Exception as exc:
                                 log(f"Swap scheduler setup failed: {exc}", prefix="⚠️")
-                        selected_img_vae = job_vae_path or Path(str(getattr(entry, "vae_path", "") or "")).expanduser()
-                        if selected_img_vae and selected_img_vae.exists() and pipeline_name != "sdxl":
+                        selected_img_vae = None
+                        if job_vae_path and job_vae_path.is_file():
+                            selected_img_vae = job_vae_path
+                        else:
+                            entry_img_vae = Path(str(getattr(entry, "vae_path", "") or "")).expanduser()
+                            if entry_img_vae.is_file():
+                                selected_img_vae = entry_img_vae
+                        if selected_img_vae and pipeline_name != "sdxl":
                             if _AutoencoderKL is not None:
                                 try:
                                     custom_vae = _AutoencoderKL.from_single_file(str(selected_img_vae), torch_dtype=dtype)
@@ -1132,8 +1147,14 @@ def run_image_generation(
                             hr_pipe.scheduler = _DPMSolver.from_config(hr_pipe.scheduler.config)
                         except Exception as exc:
                             log(f"Highres scheduler setup failed: {exc}", prefix="⚠️")
-                    selected_hr_vae = job_vae_path or Path(str(getattr(entry, "vae_path", "") or "")).expanduser()
-                    if selected_hr_vae and selected_hr_vae.exists() and pipeline_name != "sdxl":
+                    selected_hr_vae = None
+                    if job_vae_path and job_vae_path.is_file():
+                        selected_hr_vae = job_vae_path
+                    else:
+                        entry_hr_vae = Path(str(getattr(entry, "vae_path", "") or "")).expanduser()
+                        if entry_hr_vae.is_file():
+                            selected_hr_vae = entry_hr_vae
+                    if selected_hr_vae and pipeline_name != "sdxl":
                         if _AutoencoderKL is not None:
                             try:
                                 custom_vae = _AutoencoderKL.from_single_file(str(selected_hr_vae), torch_dtype=dtype)

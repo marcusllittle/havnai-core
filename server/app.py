@@ -1600,10 +1600,22 @@ def register() -> Any:
             samples.pop(0)
         node["avg_utilization"] = round(sum(samples) / len(samples), 2) if samples else util
         node["last_seen"] = iso_now()
-        node["last_seen_unix"] = unix_now()
-        save_nodes()
+    node["last_seen_unix"] = unix_now()
+    save_nodes()
 
     return jsonify({"status": "ok", "node": node_id}), 200
+
+
+@app.route("/register_models", methods=["POST"])
+def register_models() -> Any:
+    """No-op endpoint to accept local model manifests from nodes."""
+
+    payload = request.get_json() or {}
+    node_id = payload.get("node_id")
+    models = payload.get("models") or []
+    count = len(models) if isinstance(models, list) else 0
+    log_event("Models registered (noop)", node_id=node_id, count=count)
+    return jsonify({"status": "ok", "registered": count}), 200
 
 
 @app.route("/link-wallet", methods=["POST"])

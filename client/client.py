@@ -458,13 +458,15 @@ def load_env_file() -> Dict[str, str]:
             key, value = line.split("=", 1)
             env[key.strip()] = value.strip()
     defaults = {
-        "SERVER_URL": os.environ.get("SERVER_URL") or os.environ.get("HAVNAI_SERVER") or "http://127.0.0.1:5001",
-        "WALLET": env.get("WALLET", "0xYOUR_WALLET_ADDRESS"),
-        "CREATOR_MODE": env.get("CREATOR_MODE", "false"),
-        "NODE_NAME": env.get("NODE_NAME", socket.gethostname()),
-        "JOIN_TOKEN": env.get("JOIN_TOKEN", ""),
+        # Prefer existing .env values; fall back to env vars only when missing, never overwrite existing keys.
+        "SERVER_URL": env.get("SERVER_URL") or os.environ.get("SERVER_URL") or os.environ.get("HAVNAI_SERVER") or "http://127.0.0.1:5001",
+        "WALLET": env.get("WALLET") or "0xYOUR_WALLET_ADDRESS",
+        "CREATOR_MODE": env.get("CREATOR_MODE") or "false",
+        "NODE_NAME": env.get("NODE_NAME") or socket.gethostname(),
+        "JOIN_TOKEN": env.get("JOIN_TOKEN") or "",
     }
-    env.update({k: defaults.get(k, v) for k, v in defaults.items()})
+    for key, value in defaults.items():
+        env.setdefault(key, value)
     return env
 
 

@@ -684,18 +684,32 @@ def execute_task(task: Dict[str, Any]) -> None:
         log(f"Model resolution failed: {exc}", prefix="🚫")
         return
     if task_type == "image_gen":
-        # Parse structured settings from task if present
+        # === ROBUST PROMPT PARSING (handles string or old JSON-wrapped payloads) ===
+        raw_prompt = task.get("prompt", "")
         job_settings = None
-        try:
-            raw_prompt = task.get("prompt") if isinstance(task, dict) else getattr(task, "prompt", None)
-            if isinstance(raw_prompt, str) and raw_prompt.strip().startswith("{"):
-                job_settings = json.loads(raw_prompt)
-                prompt = job_settings.get("prompt", prompt)
-                negative_prompt = job_settings.get("negative_prompt", negative_prompt)
-            elif isinstance(raw_prompt, str):
+        prompt = ""
+        negative_prompt = task.get("negative_prompt", "")
+
+        if isinstance(raw_prompt, str):
+            if raw_prompt.strip().startswith("{"):
+                try:
+                    job_settings = json.loads(raw_prompt)
+                    prompt = job_settings.get("prompt", "")
+                    negative_prompt = job_settings.get("negative_prompt", negative_prompt)
+                except json.JSONDecodeError:
+                    prompt = raw_prompt  # fall back to raw string
+            else:
                 prompt = raw_prompt
-        except Exception as exc:
-            log(f"Failed to parse job settings: {exc}", prefix="⚠️", task_id=task_id)
+        elif isinstance(raw_prompt, dict):
+            # legacy case some old coordinators still do
+            job_settings = raw_prompt
+            prompt = raw_prompt.get("prompt", "")
+            negative_prompt = raw_prompt.get("negative_prompt", negative_prompt)
+        else:
+            prompt = str(raw_prompt)
+
+        if not prompt:
+            prompt = "a beautiful landscape"  # absolute last-resort fallback
 
         metrics, util, image_b64 = run_image_generation(task_id, entry, model_path, reward_weight, prompt, negative_prompt, job_settings)
     else:
@@ -801,14 +815,7 @@ def run_image_generation(
             ipadapter_scale = 0.85
             source_face_image = None
             use_ipadapter = False
-            # For SD1.5-style checkpoints (triomerge, etc.) use StableDiffusionPipeline
-            # to match direct test behavior; reserve AutoPipeline for SDXL/other future types.
             pipeline_name = (getattr(entry, "pipeline", "") or "sd15").lower()
-            if pipeline_name in {"sdxl"} and _AutoPipe is not None:
-                try:
-                    pipe = _AutoPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
-                except Exception as exc:  # fallback to SD1.5 pipe
-                    log(f"AutoPipeline load failed: {exc}", prefix="⚠️")
             # Merge per-job overrides with model defaults from manifest
             steps = IMAGE_STEPS
             guidance = IMAGE_GUIDANCE
@@ -882,8 +889,33 @@ def run_image_generation(
             # Face swap: prepare source face if requested
             source_face_image = load_source_image(source_face) if face_swap else None
 
-            if pipe is None and _SDPipe is not None:
-                pipe = _SDPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
+            if pipe is None:
+                # === CORRECT PIPELINE LOADING FOR SDXL vs SD 1.5 ===
+                from diffusers import StableDiffusionXLPipeline, StableDiffusionPipeline
+
+                is_sdxl = (
+                    "xl" in entry.name.lower() or
+                    "sdxl" in pipeline_name.lower() or
+                    "ragnarok" in entry.name.lower() or
+                    "juggernaut" in entry.name.lower()
+                )
+
+                if is_sdxl:
+                    pipe = StableDiffusionXLPipeline.from_single_file(
+                        str(model_path),
+                        torch_dtype=dtype,
+                        use_safetensors=True,
+                        variant="fp16",
+                        safety_checker=None,
+                    )
+                    log("Loaded SDXL pipeline (JuggernautXL RagnarokBy detected)", prefix="Loaded")
+                else:
+                    pipe = StableDiffusionPipeline.from_single_file(
+                        str(model_path),
+                        torch_dtype=dtype,
+                        safety_checker=None,
+                    )
+                    log("Loaded SD 1.5 pipeline", prefix="Loaded")
             # Optionally swap in a custom VAE for SD1.5-style checkpoints
             if pipe is not None and getattr(entry, "vae_path", "") and pipeline_name != "sdxl":
                 vae_path = Path(str(getattr(entry, "vae_path", ""))).expanduser()

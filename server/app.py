@@ -1727,32 +1727,32 @@ def get_creator_tasks() -> Any:
                     log_event("Job claimed by node", job_id=job["id"], node_id=node_id)
                     reward_weight = float(job["weight"] or cfg.get("reward_weight", resolve_weight(job["model"], 10.0)))
                     job_task_type = (job.get("task_type") or CREATOR_TASK_TYPE).upper()
-                        pending = [
-                            {
-                                "task_id": job["id"],
-                                "task_type": job_task_type,
-                                "model_name": job["model"],
-                                "model_path": cfg.get("path", ""),
-                                "pipeline": cfg.get("pipeline", "sd15"),
-                                "input_shape": cfg.get("input_shape", []),
-                                "reward_weight": reward_weight,
-                                "status": "pending",
-                                "wallet": job["wallet"],
-                                "assigned_to": node_id,
-                                "job_id": job["id"],
-                                "data": raw_data,
-                                "prompt": prompt_for_node,
-                                "negative_prompt": negative_prompt,
-                                "queued_at": job.get("timestamp"),
-                            }
-                        ]
+                    pending = [
+                        {
+                            "task_id": job["id"],
+                            "task_type": job_task_type,
+                            "model_name": job["model"],
+                            "model_path": cfg.get("path", ""),
+                            "pipeline": cfg.get("pipeline", "sd15"),
+                            "input_shape": cfg.get("input_shape", []),
+                            "reward_weight": reward_weight,
+                            "status": "pending",
+                            "wallet": job["wallet"],
+                            "assigned_to": node_id,
+                            "job_id": job["id"],
+                            "data": raw_data,
+                            "prompt": prompt_for_node,
+                            "negative_prompt": negative_prompt,
+                            "queued_at": job.get("timestamp"),
+                        }
+                    ]
                     node_info["current_task"] = {
                         "task_id": job["id"],
                         "model_name": job["model"],
                         "status": "pending",
-                            "task_type": pending[0]["task_type"],
-                            "weight": pending[0]["reward_weight"],
-                        }
+                        "task_type": pending[0]["task_type"],
+                        "weight": pending[0]["reward_weight"],
+                    }
                     save_nodes()
                 else:
                     complete_job(job["id"], node_id, "failed")

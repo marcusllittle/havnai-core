@@ -79,7 +79,13 @@ REWARD_CONFIG: Dict[str, float] = {
 }
 
 # Slight global positive bias to help realism skin detail.
-GLOBAL_POSITIVE_SUFFIX = "(ultra-realistic 8k:1.05), (detailed skin pores:1.03)"
+GLOBAL_POSITIVE_SUFFIX = (
+    "(ultra-realistic 8k:1.05), "
+    "(detailed skin pores:1.03), "
+    "focused eyes, clear pupils, natural gaze, "
+    "well formed hands, five fingers on each hand, "
+    "natural teeth, realistic mouth structure"
+)
 
 # Global negative prompt to discourage common artifacts across all models.
 GLOBAL_NEGATIVE_PROMPT = ", ".join(
@@ -374,6 +380,15 @@ GLOBAL_NEGATIVE_PROMPT = ", ".join(
         "few snakes",
         "bald spots",
         "horror monster",
+        "lazy eye",
+        "crossed eyes",
+        "missing fingers",
+        "fused fingers",
+        "extra fingers",
+        "malformed teeth",
+        "extra teeth",
+        "bad teeth",
+        "open mouth deformity",
     ]
 )
 
@@ -1712,24 +1727,25 @@ def get_creator_tasks() -> Any:
                     log_event("Job claimed by node", job_id=job["id"], node_id=node_id)
                     reward_weight = float(job["weight"] or cfg.get("reward_weight", resolve_weight(job["model"], 10.0)))
                     job_task_type = (job.get("task_type") or CREATOR_TASK_TYPE).upper()
-                    pending = [
-                        {
-                            "task_id": job["id"],
-                            "task_type": job_task_type,
-                            "model_name": job["model"],
-                            "model_path": cfg.get("path", ""),
-                            "pipeline": cfg.get("pipeline", "sd15"),
-                            "input_shape": cfg.get("input_shape", []),
-                            "reward_weight": reward_weight,
-                            "status": "pending",
-                            "wallet": job["wallet"],
-                            "assigned_to": node_id,
-                            "job_id": job["id"],
-                            "data": raw_data,
-                            "prompt": prompt_for_node,
-                            "negative_prompt": negative_prompt,
-                        }
-                    ]
+                        pending = [
+                            {
+                                "task_id": job["id"],
+                                "task_type": job_task_type,
+                                "model_name": job["model"],
+                                "model_path": cfg.get("path", ""),
+                                "pipeline": cfg.get("pipeline", "sd15"),
+                                "input_shape": cfg.get("input_shape", []),
+                                "reward_weight": reward_weight,
+                                "status": "pending",
+                                "wallet": job["wallet"],
+                                "assigned_to": node_id,
+                                "job_id": job["id"],
+                                "data": raw_data,
+                                "prompt": prompt_for_node,
+                                "negative_prompt": negative_prompt,
+                                "queued_at": job.get("timestamp"),
+                            }
+                        ]
                     node_info["current_task"] = {
                         "task_id": job["id"],
                         "model_name": job["model"],
@@ -1759,6 +1775,8 @@ def get_creator_tasks() -> Any:
                 "wallet": task.get("wallet"),
                 "prompt": task.get("prompt") or task.get("data", ""),
                 "negative_prompt": task.get("negative_prompt") or "",
+                "queued_at": task.get("queued_at"),
+                "assigned_at": task.get("assigned_at"),
             }
             # If this is a WAN I2V video job, attempt to expose structured settings to the node
             if task_payload["type"].upper() == "VIDEO_GEN":
@@ -1941,6 +1959,27 @@ def submit_results() -> Any:
         # Persist reward info into the job's data JSON for later inspection.
         job = get_job(task_id)
         if job:
+            queued_at = job.get("timestamp")
+            assigned_at = job.get("assigned_at")
+            completed_at = job.get("completed_at")
+            queue_ms = None
+            run_ms = None
+            total_ms = None
+            if queued_at and assigned_at:
+                queue_ms = int((assigned_at - queued_at) * 1000)
+            if assigned_at and completed_at:
+                run_ms = int((completed_at - assigned_at) * 1000)
+            if queued_at and completed_at:
+                total_ms = int((completed_at - queued_at) * 1000)
+            log_event(
+                "Task timing",
+                job_id=task_id,
+                node_id=node_id,
+                queue_ms=queue_ms,
+                run_ms=run_ms,
+                total_ms=total_ms,
+                status=status,
+            )
             raw_data = job.get("data")
             try:
                 payload = json.loads(raw_data) if isinstance(raw_data, str) else {}

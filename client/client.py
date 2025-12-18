@@ -51,10 +51,7 @@ try:
         from diffusers import StableDiffusionXLPipeline as _SDXLPipe  # type: ignore
     except Exception:  # pragma: no cover
         _SDXLPipe = None  # type: ignore
-    try:
-        from diffusers import DPMSolverMultistepScheduler as _DPMSolver  # type: ignore
-    except Exception:  # pragma: no cover
-        _DPMSolver = None  # type: ignore
+    from diffusers import DPMSolverMultistepScheduler as _DPMSolver  # type: ignore
 except ImportError:  # pragma: no cover
     diffusers = None
     _AutoPipe = None  # type: ignore
@@ -290,7 +287,7 @@ def register_local_models() -> None:
         for meta in LOCAL_MODELS.values()
     ]
     try:
-        resp = SESSION.post(endpoint("/register/models"), data=json.dumps({"node_id": NODE_NAME, "models": manifest}), timeout=20)
+        resp = SESSION.post(endpoint("/register_models"), data=json.dumps({"node_id": NODE_NAME, "models": manifest}), timeout=20)
         resp.raise_for_status()
         log(f"Registered {len(manifest)} local models.", prefix="✅")
     except Exception as exc:
@@ -411,6 +408,15 @@ def execute_task(task: Dict[str, Any]) -> None:
     reward_weight = float(task.get("reward_weight", 1.0))
     input_shape = task.get("input_shape") or []
     prompt = task.get("prompt") or ""
+    queued_at = task.get("queued_at")
+    assigned_at = task.get("assigned_at")
+    task_started_at = time.time()
+    queue_wait_ms = None
+    assign_to_start_ms = None
+    if queued_at and assigned_at:
+        queue_wait_ms = int((assigned_at - queued_at) * 1000)
+    if assigned_at:
+        assign_to_start_ms = int((task_started_at - assigned_at) * 1000)
 
     if task_type == "image_gen" and ROLE != "creator":
         log(f"Skipping creator task {task_id[:8]} — node not in creator mode", prefix="⚠️")
@@ -423,6 +429,13 @@ def execute_task(task: Dict[str, Any]) -> None:
         metrics, util, image_b64 = run_image_generation(task_id, model_name, model_url, reward_weight, prompt)
     else:
         metrics, util = run_ai_inference(model_name, model_url, input_shape, reward_weight)
+
+    total_ms = int((time.time() - task_started_at) * 1000)
+    metrics["task_total_ms"] = total_ms
+    if queue_wait_ms is not None:
+        metrics["queue_wait_ms"] = queue_wait_ms
+    if assign_to_start_ms is not None:
+        metrics["assign_to_start_ms"] = assign_to_start_ms
 
     with lock:
         utilization_hint = util
@@ -443,7 +456,14 @@ def execute_task(task: Dict[str, Any]) -> None:
         resp.raise_for_status()
         reward = resp.json().get("reward")
         prefix = "✅" if payload["status"] == "success" else "⚠️"
-        log(f"Task {task_id[:8]} {payload['status'].upper()} · reward {reward} HAI", prefix=prefix)
+        log(
+            f"Task {task_id[:8]} {payload['status'].upper()} · reward {reward} HAI",
+            prefix=prefix,
+            task_total_ms=total_ms,
+            queue_wait_ms=queue_wait_ms,
+            assign_to_start_ms=assign_to_start_ms,
+            inference_ms=metrics.get("inference_time_ms"),
+        )
     except Exception as exc:
         log(f"Failed to submit result: {exc}", prefix="🚫")
 
@@ -562,11 +582,16 @@ def run_image_generation(task_id: str, model_name: str, model_url: str, reward_w
             if pipe is None:
                 raise RuntimeError("Failed to construct a text2image pipeline for model.")
 
-            if _DPMSolver is not None and hasattr(pipe, "scheduler"):
-                try:
-                    pipe.scheduler = _DPMSolver.from_config(pipe.scheduler.config)  # type: ignore[attr-defined]
-                except Exception:
-                    pass
+            pipe.scheduler = _DPMSolver.from_config(
+                pipe.scheduler.config,
+                algorithm_type="dpmsolver++",
+                use_karras_sigmas=True,
+            )  # type: ignore[attr-defined]
+            LOGGER.info(
+                "Scheduler=%s, use_karras_sigmas=%s",
+                type(pipe.scheduler).__name__,
+                getattr(pipe.scheduler.config, "use_karras_sigmas", None),
+            )
             if hasattr(pipe, "enable_attention_slicing"):
                 pipe.enable_attention_slicing("max")
             if hasattr(pipe, "set_progress_bar_config"):

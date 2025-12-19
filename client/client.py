@@ -158,11 +158,11 @@ IPADAPTER_LORA = os.environ.get("IPADAPTER_LORA", "ip-adapter-faceid-plusv2_sdxl
 CONTROLNET_PATH = Path(os.environ.get("CONTROLNET_PATH", "/mnt/d/havnai-storage/models/controlnet/controlnet-openpose.safetensors")).expanduser()
 POSE_LIBRARY_DIR = Path(os.environ.get("POSE_LIBRARY_DIR", "/mnt/d/havnai-storage/poses")).expanduser()
 LORA_DIR = Path(os.environ.get("LORA_DIR", "/mnt/d/havnai-storage/models/loras")).expanduser()
-LORA_REALISTIC_SKIN = LORA_DIR / "skin texture style v5.safetensors"
+LORA_REALISTIC_SKIN = LORA_DIR / "skintexturestylev5.safetensors"
 LORA_BAD_ANATOMY_NEG = LORA_DIR / "badanatomy_SDXL_negative_LORA_AutismMix_v1.safetensors"
-LORA_HANDS = LORA_DIR / "Hand v2.safetensors"
-LORA_DETAILED_PERFECTION = LORA_DIR / "perfection style v2d.safetensors"
-LORA_SWEAT_OILED = LORA_DIR / "Sweating my balls of mate.safetensors"
+LORA_HANDS = LORA_DIR / "Handv2.safetensors"
+LORA_DETAILED_PERFECTION = LORA_DIR / "perfectionstylev2d.safetensors"
+LORA_SWEAT_OILED = LORA_DIR / "Sweatingmyballsofmate.safetensors"
 
 
 # ---------------------------------------------------------------------------
@@ -773,14 +773,23 @@ def run_image_generation(
             if face_swap:
                 if base_prompt:
                     base_prompt = base_prompt.replace("perfect symmetrical face", "").strip(" ,")
+                # Keep the FaceSwap injection short to avoid CLIP token overflow.
                 base_prompt = ", ".join(
                     p for p in [
                         base_prompt,
-                        "accurate facial identity, consistent facial features, natural expression matching reference",
+                        "accurate facial identity, natural expression",
                     ]
                     if p
                 )
 
+            if is_xl:
+                base_prompt = ", ".join(
+                    p for p in [
+                        base_prompt,
+                        "subtle facial imperfections",
+                    ]
+                    if p
+                )
             final_prompt = ", ".join(p for p in [base_prompt, (prompt or "").strip()] if p)
             final_negative = negative_prompt
 
@@ -839,19 +848,37 @@ def run_image_generation(
                     positive_loras = [("sweat_oiled_skin_xl", 0.5)]
                 elif is_full_body and LORA_DETAILED_PERFECTION.exists():
                     positive_loras = [("detailed_perfection_xl", 0.4)]
-                elif is_hands and LORA_HANDS.exists():
-                    positive_loras = [("hands_xl", 0.4)]
-                    if LORA_BAD_ANATOMY_NEG.exists():
-                        negative_loras = [("bad_anatomy_negative_xl", -0.9)]
+                elif is_hands:
+                    if LORA_HANDS.exists():
+                        positive_loras = [("hands_xl", 0.4)]
+                        if LORA_BAD_ANATOMY_NEG.exists():
+                            negative_loras = [("bad_anatomy_negative_xl", -0.9)]
+                    else:
+                        log("Hands XL LoRA missing; falling back to default fixers", prefix="⚠️", path=str(LORA_HANDS))
+                        if LORA_REALISTIC_SKIN.exists():
+                            skin_weight = 0.45 if "juggernaut" in model_name.lower() else 0.35 if "epicrealism" in model_name.lower() else 0.5
+                            positive_loras = [("realistic_skin_texture_xl", skin_weight)]
+                        if LORA_BAD_ANATOMY_NEG.exists():
+                            negative_loras = [("bad_anatomy_negative_xl", -0.9)]
                 else:
                     if LORA_REALISTIC_SKIN.exists():
-                        positive_loras = [("realistic_skin_texture_xl", 0.5)]
+                        skin_weight = 0.45 if "juggernaut" in model_name.lower() else 0.35 if "epicrealism" in model_name.lower() else 0.5
+                        positive_loras = [("realistic_skin_texture_xl", skin_weight)]
                     if LORA_BAD_ANATOMY_NEG.exists():
                         negative_loras = [("bad_anatomy_negative_xl", -0.9)]
 
             if hasattr(pipe, "load_lora_weights") and (positive_loras or negative_loras):
                 loaded_names: List[str] = []
                 loaded_weights: List[float] = []
+                def _adapter_loaded(name: str) -> bool:
+                    if hasattr(pipe, "peft_config") and isinstance(pipe.peft_config, dict):
+                        return name in pipe.peft_config
+                    if hasattr(pipe, "get_active_adapters"):
+                        try:
+                            return name in (pipe.get_active_adapters() or [])
+                        except Exception:
+                            return False
+                    return True
                 try:
                     for name, weight in positive_loras:
                         if name == "realistic_skin_texture_xl" and LORA_REALISTIC_SKIN.exists():
@@ -864,13 +891,19 @@ def run_image_generation(
                             pipe.load_lora_weights(str(LORA_SWEAT_OILED), adapter_name=name)
                         else:
                             continue
-                        loaded_names.append(name)
-                        loaded_weights.append(weight)
+                        if _adapter_loaded(name):
+                            loaded_names.append(name)
+                            loaded_weights.append(weight)
+                        else:
+                            log("Quality fixer adapter not registered after load", prefix="⚠️", name=name)
                     for name, weight in negative_loras:
                         if name == "bad_anatomy_negative_xl" and LORA_BAD_ANATOMY_NEG.exists():
                             pipe.load_lora_weights(str(LORA_BAD_ANATOMY_NEG), adapter_name=name)
-                            loaded_names.append(name)
-                            loaded_weights.append(weight)
+                            if _adapter_loaded(name):
+                                loaded_names.append(name)
+                                loaded_weights.append(weight)
+                            else:
+                                log("Quality fixer adapter not registered after load", prefix="⚠️", name=name)
                     if hasattr(pipe, "set_adapters") and loaded_names:
                         pipe.set_adapters(loaded_names, adapter_weights=loaded_weights)
                     elif hasattr(pipe, "fuse_lora") and loaded_weights:

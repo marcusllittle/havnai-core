@@ -1193,10 +1193,14 @@ def submit_job() -> Any:
             prompt_text = GLOBAL_POSITIVE_SUFFIX
         negative_prompt = str(payload.get("negative_prompt") or "").strip()
         job_settings: Dict[str, Any] = {"prompt": prompt_text}
+        pipeline_name = str(cfg.get("pipeline") or "").lower() if cfg else ""
         base_negative = str(cfg.get("negative_prompt_default") or "").strip() if cfg else ""
-        combined_negative = ", ".join(
-            filter(None, [negative_prompt or base_negative, GLOBAL_NEGATIVE_PROMPT])
-        )
+        if pipeline_name == "sdxl":
+            combined_negative = ", ".join(filter(None, [negative_prompt, GLOBAL_NEGATIVE_PROMPT]))
+        else:
+            combined_negative = ", ".join(
+                filter(None, [negative_prompt or base_negative, GLOBAL_NEGATIVE_PROMPT])
+            )
         if combined_negative:
             job_settings["negative_prompt"] = combined_negative
         pose_image = payload.get("pose_image") or payload.get("pose_image_b64") or ""

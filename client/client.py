@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -17,10 +18,9 @@ import atexit
 import signal
 from typing import Any, Dict, List, Optional
 import base64
+import io
 
 import requests
-
-from registry import REGISTRY, ModelEntry, ManifestError
 
 try:
     import numpy as np  # type: ignore
@@ -48,13 +48,15 @@ try:
     except Exception:  # pragma: no cover
         _SDPipe = None  # type: ignore
     try:
-        from diffusers import DPMSolverMultistepScheduler as _DPMSolver  # type: ignore
+        from diffusers import StableDiffusionXLPipeline as _SDXLPipe  # type: ignore
     except Exception:  # pragma: no cover
-        _DPMSolver = None  # type: ignore
+        _SDXLPipe = None  # type: ignore
+    from diffusers import DPMSolverMultistepScheduler as _DPMSolver  # type: ignore
 except ImportError:  # pragma: no cover
     diffusers = None
     _AutoPipe = None  # type: ignore
     _SDPipe = None  # type: ignore
+    _SDXLPipe = None  # type: ignore
     _DPMSolver = None  # type: ignore
 try:
     from PIL import Image  # type: ignore
@@ -72,13 +74,19 @@ except ImportError:  # pragma: no cover
 
 HAVNAI_HOME = Path(os.environ.get("HAVNAI_HOME", Path.home() / ".havnai"))
 ENV_PATH = HAVNAI_HOME / ".env"
+CREATOR_SCAN_DIR = HAVNAI_HOME / "models" / "creator"
+DOWNLOAD_DIR = HAVNAI_HOME / "downloads"
 LOGS_DIR = HAVNAI_HOME / "logs"
 OUTPUTS_DIR = HAVNAI_HOME / "outputs"
 VERSION_SEARCH_PATHS = [HAVNAI_HOME / "VERSION", Path(__file__).resolve().parent / "VERSION"]
 
 HAVNAI_HOME.mkdir(parents=True, exist_ok=True)
+CREATOR_SCAN_DIR.mkdir(parents=True, exist_ok=True)
+DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+
+SUPPORTED_MODEL_EXTS = {".onnx", ".safetensors", ".ckpt"}
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -117,18 +125,6 @@ LOGGER = setup_logging()
 
 def log(message: str, prefix: str = "ℹ️", **extra: Any) -> None:
     LOGGER.info(f"{prefix} {message}", extra={"node": socket.gethostname(), **extra})
-
-
-WAN_I2V_DEFAULTS: Dict[str, Any] = {
-    "steps_high": 2,
-    "steps_low": 2,
-    "cfg": 1.0,
-    "sampler": "euler",
-    "num_frames": 32,
-    "fps": 24,
-    "height": 720,
-    "width": 512,
-}
 
 
 # ---------------------------------------------------------------------------
@@ -192,71 +188,23 @@ FAST_PREVIEW = (
     in {"1", "true", "yes"}
 )
 
-REGISTRY.base_url = SERVER_BASE
-
 HEARTBEAT_INTERVAL = 30
 TASK_POLL_INTERVAL = 15
 BACKOFF_BASE = 5
 MAX_BACKOFF = 60
 START_TIME = time.time()
 
-IMAGE_STEPS = int(os.environ.get("HAI_STEPS", "20"))
-IMAGE_GUIDANCE = float(os.environ.get("HAI_GUIDANCE", "7.5"))
-IMAGE_WIDTH = int(os.environ.get("HAI_WIDTH", "512"))
-IMAGE_HEIGHT = int(os.environ.get("HAI_HEIGHT", "512"))
-
 utilization_hint = random.randint(10, 25 if ROLE == "creator" else 15)
 
+LOCAL_MODELS: Dict[str, Dict[str, Any]] = {}
 SESSION = requests.Session()
 SESSION.headers.update({"Content-Type": "application/json"})
 if JOIN_TOKEN:
     SESSION.headers["X-Join-Token"] = JOIN_TOKEN
 
-REGISTRY.session = SESSION
-
-
-def refresh_manifest_with_backoff(reason: str = "startup") -> None:
-    backoff = BACKOFF_BASE
-    while True:
-        try:
-            REGISTRY.refresh()
-            log("Model manifest refreshed", prefix="✅", reason=reason)
-            return
-        except Exception as exc:
-            log(f"Manifest refresh failed ({reason}): {exc}", prefix="⚠️")
-            time.sleep(backoff)
-            backoff = min(MAX_BACKOFF, backoff * 2)
-
 
 def endpoint(path: str) -> str:
     return f"{SERVER_BASE}{path}"
-
-
-def ensure_model_entry(model_name: str) -> ModelEntry:
-    try:
-        return REGISTRY.get(model_name)
-    except (KeyError, ManifestError) as exc:
-        raise RuntimeError(f"Model '{model_name}' missing from manifest") from exc
-
-
-def ensure_model_path(entry: ModelEntry) -> Path:
-    path = Path(entry.path).expanduser()
-    if not path.exists():
-        raise FileNotFoundError(f"Model path missing on node: {path}")
-    return path
-
-
-def discover_capabilities() -> Dict[str, List[str]]:
-    pipelines: set[str] = set()
-    models: List[str] = []
-    for entry in REGISTRY.list_entries():
-        try:
-            path = ensure_model_path(entry)
-        except Exception:
-            continue
-        pipelines.add(entry.pipeline)
-        models.append(entry.name)
-    return {"pipelines": sorted(pipelines), "models": sorted(models)}
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +229,69 @@ def ensure_wallet() -> str:
 
 
 WALLET = ensure_wallet()
+
+
+# ---------------------------------------------------------------------------
+# Model scanning & registration
+# ---------------------------------------------------------------------------
+
+
+def hash_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def scan_local_models() -> Dict[str, Dict[str, Any]]:
+    catalog: Dict[str, Dict[str, Any]] = {}
+    if not CREATOR_SCAN_DIR.exists():
+        return catalog
+    for path in CREATOR_SCAN_DIR.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in SUPPORTED_MODEL_EXTS:
+            continue
+        name = path.stem.lower().replace(" ", "-")
+        weight = 10.0 if path.suffix.lower() in {".safetensors", ".ckpt"} else 2.0
+        if "nsfw" in name:
+            weight = max(weight, 12.0)
+        catalog[name] = {
+            "name": name,
+            "filename": path.name,
+            "path": path,
+            "size": path.stat().st_size,
+            "hash": hash_file(path),
+            "tags": [path.suffix.lstrip(".")],
+            "weight": weight,
+            "task_type": "IMAGE_GEN",
+        }
+    return catalog
+
+
+def register_local_models() -> None:
+    global LOCAL_MODELS
+    LOCAL_MODELS = scan_local_models()
+    if not LOCAL_MODELS:
+        log("No creator models discovered under ~/.havnai/models/creator", prefix="ℹ️")
+        return
+    manifest = [
+        {
+            "name": meta["name"],
+            "filename": meta["filename"],
+            "size": meta["size"],
+            "hash": meta["hash"],
+            "tags": meta["tags"],
+            "weight": meta["weight"],
+            "task_type": meta["task_type"],
+        }
+        for meta in LOCAL_MODELS.values()
+    ]
+    try:
+        resp = SESSION.post(endpoint("/register_models"), data=json.dumps({"node_id": NODE_NAME, "models": manifest}), timeout=20)
+        resp.raise_for_status()
+        log(f"Registered {len(manifest)} local models.", prefix="✅")
+    except Exception as exc:
+        log(f"Model registration failed: {exc}", prefix="⚠️")
 
 
 # ---------------------------------------------------------------------------
@@ -357,6 +368,29 @@ def _handle_signal(signum, frame):  # type: ignore
         pass
 
 
+def resolve_model_path(model_name: str, model_url: str = "", filename_hint: Optional[str] = None) -> Path:
+    entry = LOCAL_MODELS.get(model_name.lower())
+    if entry:
+        return entry["path"]
+    if model_url:
+        filename = filename_hint or Path(model_url).name
+        target = DOWNLOAD_DIR / Path(filename).name
+        if target.exists():
+            return target
+        url = model_url
+        if url.startswith("/"):
+            url = f"{SERVER_BASE}{url}"
+        log(f"Downloading model {model_name} from {url}", prefix="⬇️")
+        resp = SESSION.get(url, stream=True, timeout=120)
+        resp.raise_for_status()
+        with target.open("wb") as handle:
+            for chunk in resp.iter_content(chunk_size=8192):
+                if chunk:
+                    handle.write(chunk)
+        return target
+    raise RuntimeError(f"Model {model_name} unavailable on node")
+
+
 def random_input(shape: List[int]) -> np.ndarray:
     if np is None:
         raise RuntimeError("NumPy required for inference")
@@ -370,10 +404,19 @@ def execute_task(task: Dict[str, Any]) -> None:
     task_id = task.get("task_id", "unknown")
     task_type = (task.get("type") or "IMAGE_GEN").lower()
     model_name = (task.get("model_name") or "model").lower()
+    model_url = task.get("model_url", "")
     reward_weight = float(task.get("reward_weight", 1.0))
     input_shape = task.get("input_shape") or []
     prompt = task.get("prompt") or ""
-    negative_prompt = task.get("negative_prompt") or ""
+    queued_at = task.get("queued_at")
+    assigned_at = task.get("assigned_at")
+    task_started_at = time.time()
+    queue_wait_ms = None
+    assign_to_start_ms = None
+    if queued_at and assigned_at:
+        queue_wait_ms = int((assigned_at - queued_at) * 1000)
+    if assigned_at:
+        assign_to_start_ms = int((task_started_at - assigned_at) * 1000)
 
     if task_type == "image_gen" and ROLE != "creator":
         log(f"Skipping creator task {task_id[:8]} — node not in creator mode", prefix="⚠️")
@@ -382,16 +425,17 @@ def execute_task(task: Dict[str, Any]) -> None:
     log(f"Executing {task_type} task {task_id[:8]} · {model_name}", prefix="🚀")
 
     image_b64: Optional[str] = None
-    try:
-        entry = ensure_model_entry(model_name)
-        model_path = ensure_model_path(entry)
-    except Exception as exc:
-        log(f"Model resolution failed: {exc}", prefix="🚫")
-        return
     if task_type == "image_gen":
-        metrics, util, image_b64 = run_image_generation(task_id, entry, model_path, reward_weight, prompt, negative_prompt)
+        metrics, util, image_b64 = run_image_generation(task_id, model_name, model_url, reward_weight, prompt)
     else:
-        metrics, util = run_ai_inference(entry, model_path, input_shape, reward_weight)
+        metrics, util = run_ai_inference(model_name, model_url, input_shape, reward_weight)
+
+    total_ms = int((time.time() - task_started_at) * 1000)
+    metrics["task_total_ms"] = total_ms
+    if queue_wait_ms is not None:
+        metrics["queue_wait_ms"] = queue_wait_ms
+    if assign_to_start_ms is not None:
+        metrics["assign_to_start_ms"] = assign_to_start_ms
 
     with lock:
         utilization_hint = util
@@ -412,12 +456,24 @@ def execute_task(task: Dict[str, Any]) -> None:
         resp.raise_for_status()
         reward = resp.json().get("reward")
         prefix = "✅" if payload["status"] == "success" else "⚠️"
-        log(f"Task {task_id[:8]} {payload['status'].upper()} · reward {reward} HAI", prefix=prefix)
+        log(
+            f"Task {task_id[:8]} {payload['status'].upper()} · reward {reward} HAI",
+            prefix=prefix,
+            task_total_ms=total_ms,
+            queue_wait_ms=queue_wait_ms,
+            assign_to_start_ms=assign_to_start_ms,
+            inference_ms=metrics.get("inference_time_ms"),
+        )
     except Exception as exc:
         log(f"Failed to submit result: {exc}", prefix="🚫")
 
 
-def run_ai_inference(entry: ModelEntry, model_path: Path, input_shape: List[int], reward_weight: float) -> (Dict[str, Any], int):
+def run_ai_inference(model_name: str, model_url: str, input_shape: List[int], reward_weight: float) -> (Dict[str, Any], int):
+    try:
+        model_path = resolve_model_path(model_name, model_url)
+    except Exception as exc:
+        return ({"status": "failed", "error": str(exc), "reward_weight": reward_weight}, utilization_hint)
+
     try:
         ort_session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
         input_name = ort_session.get_inputs()[0].name
@@ -442,7 +498,7 @@ def run_ai_inference(entry: ModelEntry, model_path: Path, input_shape: List[int]
     util = max(start_stats.get("utilization", 0), end_stats.get("utilization", 0), utilization_hint)
     metrics = {
         "status": status,
-        "model_name": entry.name,
+        "model_name": model_name,
         "model_path": str(model_path),
         "input_shape": input_shape,
         "reward_weight": reward_weight,
@@ -455,7 +511,36 @@ def run_ai_inference(entry: ModelEntry, model_path: Path, input_shape: List[int]
     return metrics, int(util)
 
 
-def run_image_generation(task_id: str, entry: ModelEntry, model_path: Path, reward_weight: float, prompt: str, negative_prompt: str) -> (Dict[str, Any], int, Optional[str]):
+def run_image_generation(task_id: str, model_name: str, model_url: str, reward_weight: float, prompt: str) -> (Dict[str, Any], int, Optional[str]):
+    """Run SD image generation with explicit pipeline and env-driven settings."""
+
+    def _env_int(name: str, default: int) -> int:
+        raw = os.environ.get(name) or ENV_VARS.get(name, "")
+        try:
+            v = int(raw)
+            return v if v > 0 else default
+        except Exception:
+            return default
+
+    def _env_float(name: str, default: float) -> float:
+        raw = os.environ.get(name) or ENV_VARS.get(name, "")
+        try:
+            return float(raw)
+        except Exception:
+            return default
+
+    try:
+        model_path = resolve_model_path(model_name, model_url, filename_hint=f"{model_name}.safetensors")
+    except Exception as exc:
+        return ({"status": "failed", "error": str(exc), "reward_weight": reward_weight}, utilization_hint, None)
+
+    steps = _env_int("HAI_STEPS", 65)
+    guidance = _env_float("HAI_GUIDANCE", 8.2)
+    width = _env_int("HAI_WIDTH", 512)
+    height = _env_int("HAI_HEIGHT", 512)
+    width = max(64, width - (width % 8))
+    height = max(64, height - (height % 8))
+    is_xl = "xl" in model_name.lower()
 
     start_stats = read_gpu_stats()
     started = time.time()
@@ -470,79 +555,83 @@ def run_image_generation(task_id: str, entry: ModelEntry, model_path: Path, rewa
             dtype = torch.float16 if device == "cuda" else torch.float32
             log("Loading text2image pipeline…", prefix="ℹ️", device=device)
             load_t0 = time.time()
+
             pipe = None
-            # For SD1.5-style checkpoints (triomerge, etc.) use StableDiffusionPipeline
-            # to match direct test behavior; reserve AutoPipeline for SDXL/other future types.
-            pipeline_name = (getattr(entry, "pipeline", "") or "sd15").lower()
-            if pipeline_name in {"sdxl"} and _AutoPipe is not None:
+            # For XL checkpoints prefer StableDiffusionXLPipeline when
+            # available, otherwise fall back to SD1.5 pipeline as a best-effort.
+            if is_xl and _SDXLPipe is not None:
+                try:
+                    pipe = _SDXLPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
+                except Exception as exc:
+                    log(f"StableDiffusionXLPipeline load failed: {exc}", prefix="⚠️")
+
+            if pipe is None and _SDPipe is not None:
+                try:
+                    pipe = _SDPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
+                except Exception as exc:
+                    log(f"StableDiffusionPipeline load failed: {exc}", prefix="⚠️")
+
+            # AutoPipeline is truly optional; only use it when the expected
+            # helper is present in this diffusers version.
+            if pipe is None and _AutoPipe is not None and hasattr(_AutoPipe, "from_single_file"):
                 try:
                     pipe = _AutoPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
-                except Exception as exc:  # fallback to SD1.5 pipe
-                    log(f"AutoPipeline load failed: {exc}", prefix="⚠️")
-            if pipe is None and _SDPipe is not None:
-                pipe = _SDPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
+                except Exception as exc_auto:
+                    log(f"AutoPipeline load failed: {exc_auto}", prefix="🚫")
+                    raise
+            if pipe is None:
+                raise RuntimeError("Failed to construct a text2image pipeline for model.")
+
+            pipe.scheduler = _DPMSolver.from_config(
+                pipe.scheduler.config,
+                algorithm_type="dpmsolver++",
+                use_karras_sigmas=True,
+            )  # type: ignore[attr-defined]
+            LOGGER.info(
+                "Scheduler=%s, use_karras_sigmas=%s",
+                type(pipe.scheduler).__name__,
+                getattr(pipe.scheduler.config, "use_karras_sigmas", None),
+            )
             if hasattr(pipe, "enable_attention_slicing"):
                 pipe.enable_attention_slicing("max")
             if hasattr(pipe, "set_progress_bar_config"):
                 pipe.set_progress_bar_config(disable=True)
-            if "_DPMSolver" in globals() and _DPMSolver is not None and hasattr(pipe, "scheduler"):
-                try:
-                    pipe.scheduler = _DPMSolver.from_config(pipe.scheduler.config)
-                except Exception as exc:
-                    log(f"DPM scheduler setup failed: {exc}", prefix="⚠️")
             pipe = pipe.to(device)
             load_ms = int((time.time() - load_t0) * 1000)
-            log(f"Pipeline ready in {load_ms}ms", prefix="✅")
+            log(
+                f"Pipeline ready in {load_ms}ms · {pipe.__class__.__name__}",
+                prefix="✅",
+            )
 
             seed = int(time.time()) & 0x7FFFFFFF
             generator = torch.Generator(device=device).manual_seed(seed)
-            pos_text = prompt or "a high quality photo of a golden retriever on a beach at sunset"
-            neg_text = negative_prompt or ""
-            # Proactively truncate to CLIP token limit to avoid noisy warnings
-            if hasattr(pipe, "tokenizer") and hasattr(pipe.tokenizer, "model_max_length"):
-                try:
-                    encoded = pipe.tokenizer(
-                        pos_text,
-                        max_length=pipe.tokenizer.model_max_length,
-                        truncation=True,
-                        return_tensors="pt",
-                    )
-                    pos_text = pipe.tokenizer.batch_decode(
-                        encoded.input_ids, skip_special_tokens=True
-                    )[0]
-                    if neg_text:
-                        encoded_neg = pipe.tokenizer(
-                            neg_text,
-                            max_length=pipe.tokenizer.model_max_length,
-                            truncation=True,
-                            return_tensors="pt",
-                        )
-                        neg_text = pipe.tokenizer.batch_decode(
-                            encoded_neg.input_ids, skip_special_tokens=True
-                        )[0]
-                except Exception as exc:
-                    log(f"Prompt truncation failed: {exc}", prefix="⚠️")
+            text = prompt or "a high quality photo of a golden retriever on a beach at sunset"
             gen_t0 = time.time()
             with torch.inference_mode():
                 result = pipe(
-                    pos_text,
-                    negative_prompt=neg_text or None,
-                    num_inference_steps=IMAGE_STEPS,
-                    guidance_scale=IMAGE_GUIDANCE,
+                    text,
+                    num_inference_steps=steps,
+                    guidance_scale=guidance,
                     generator=generator,
-                    height=IMAGE_HEIGHT,
-                    width=IMAGE_WIDTH,
+                    height=height,
+                    width=width,
                 )
             gen_ms = int((time.time() - gen_t0) * 1000)
-            log(f"Generated in {gen_ms}ms", prefix="✅")
+            log(
+                f"Generated in {gen_ms}ms",
+                prefix="✅",
+                steps=steps,
+                guidance=guidance,
+                width=width,
+                height=height,
+            )
             img = result.images[0]
             img.save(output_path)
             with output_path.open("rb") as fh:
                 image_b64 = base64.b64encode(fh.read()).decode("utf-8")
         elif Image is not None:
             log("Using fast preview placeholder (no SD detected or FAST_PREVIEW enabled)", prefix="ℹ️")
-            # Fallback: deterministic gradient image with text-like bands so it isn't noisy
-            w = h = 512
+            w, h = width, height
             if np is not None:
                 yy = np.linspace(0, 255, h, dtype=np.uint8)
                 xx = np.linspace(0, 255, w, dtype=np.uint8)
@@ -557,7 +646,6 @@ def run_image_generation(task_id: str, entry: ModelEntry, model_path: Path, rewa
             with output_path.open("rb") as fh:
                 image_b64 = base64.b64encode(fh.read()).decode("utf-8")
         else:
-            # No image libs available; simulate compute only
             time.sleep(random.uniform(1.2, 2.2))
     except Exception as exc:
         status = "failed"
@@ -570,13 +658,17 @@ def run_image_generation(task_id: str, entry: ModelEntry, model_path: Path, rewa
     util = int(max(util, 70 if ROLE == "creator" else util))
     metrics = {
         "status": status,
-            "model_name": entry.name,
-            "model_path": str(model_path),
-            "reward_weight": reward_weight,
+        "model_name": model_name,
+        "model_path": str(model_path),
+        "reward_weight": reward_weight,
         "task_type": "image_gen",
         "inference_time_ms": round(duration * 1000, 3),
         "gpu_util_start": start_stats.get("utilization", 0),
         "gpu_util_end": end_stats.get("utilization", 0),
+        "steps": steps,
+        "guidance": guidance,
+        "width": width,
+        "height": height,
     }
     if status == "failed":
         metrics["error"] = error_msg or "image generation error"
@@ -591,30 +683,21 @@ def run_image_generation(task_id: str, entry: ModelEntry, model_path: Path, rewa
 def heartbeat_loop() -> None:
     backoff = BACKOFF_BASE
     while True:
-        gpu_stats = read_gpu_stats()
-        capabilities = discover_capabilities()
         payload = {
             "node_id": NODE_NAME,
             "os": os.uname().sysname if hasattr(os, "uname") else os.name,
-            "gpu": gpu_stats.get("gpu_name", "Simulated"),
-            "gpu_stats": gpu_stats,
+            "gpu": read_gpu_stats(),
             "start_time": START_TIME,
             "uptime": time.time() - START_TIME,
             "role": ROLE,
             "version": CLIENT_VERSION,
             "node_name": NODE_NAME,
-            "models": capabilities["models"],
-            "pipelines": capabilities["pipelines"],
         }
         try:
             resp = SESSION.post(endpoint("/register"), data=json.dumps(payload), timeout=5)
             resp.raise_for_status()
             backoff = BACKOFF_BASE
             log(f"Heartbeat OK ({ROLE})", prefix="✅")
-            try:
-                REGISTRY.refresh()
-            except Exception as exc:
-                log(f"Manifest refresh failed (heartbeat): {exc}", prefix="⚠️")
         except Exception as exc:
             log(f"Heartbeat failed: {exc}", prefix="⚠️")
             time.sleep(backoff)
@@ -650,7 +733,7 @@ def poll_tasks_loop() -> None:
 
 if __name__ == "__main__":
     log(f"Node ID: {NODE_NAME} · Role: {ROLE.upper()} · Version: {CLIENT_VERSION}")
-    refresh_manifest_with_backoff("startup")
+    register_local_models()
     link_wallet(WALLET)
     # Graceful shutdown hooks
     atexit.register(disconnect)

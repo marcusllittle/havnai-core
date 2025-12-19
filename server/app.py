@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import uuid
+import random
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -67,6 +68,329 @@ WALLET_REGEX = re.compile(r"^0x[a-fA-F0-9]{40}$")
 SERVER_JOIN_TOKEN = os.getenv("SERVER_JOIN_TOKEN", "").strip()
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "").strip()
 RESET_ON_STARTUP = os.getenv("RESET_ON_STARTUP", "").strip()
+
+# Reward configuration (can be overridden via environment variables)
+REWARD_CONFIG: Dict[str, float] = {
+    "baseline_runtime": float(os.getenv("REWARD_BASELINE_RUNTIME", "8.0")),
+    "sdxl_factor": float(os.getenv("REWARD_SDXL_FACTOR", "1.5")),
+    "sd15_factor": float(os.getenv("REWARD_SD15_FACTOR", "1.0")),
+    "anime_factor": float(os.getenv("REWARD_ANIME_FACTOR", "0.7")),
+    "base_reward": float(os.getenv("REWARD_BASE_HAI", "0.05")),
+}
+
+# Slight global positive bias to help realism skin detail.
+GLOBAL_POSITIVE_SUFFIX = (
+    "(ultra-realistic 8k:1.05), "
+    "(detailed skin pores:1.03), "
+    "focused eyes, clear pupils, natural gaze, "
+    "well formed hands, five fingers on each hand, "
+    "natural teeth, realistic mouth structure"
+)
+
+# Global negative prompt to discourage common artifacts across all models.
+GLOBAL_NEGATIVE_PROMPT = ", ".join(
+    [
+        "FastNegativeV2",
+        "liquid fingers",
+        "interlocked fingers",
+        "bad teeth",
+        "oversaturated",
+        "scan artifact",
+        "doll skin",
+        "exaggerated features",
+        "unnatural pose",
+        "disembodied limb",
+        "oversized head",
+        "webbed fingers",
+        "bad ears",
+        "bad chin",
+        "bad mouth",
+        "bad eyes",
+        "bad digit",
+        "bad shadow",
+        "bad color",
+        "bad lighting",
+        "bad crop",
+        "bad aspect ratio",
+        "bad vector",
+        "bad lineart",
+        "bad perspective",
+        "bad shading",
+        "bad sketch",
+        "bad trace",
+        "bad typesetting",
+        "color error",
+        "color mismatch",
+        "dirty art",
+        "dirty scan",
+        "dubious anatomy",
+        "exaggerated limbs",
+        "flat colors",
+        "gradient background",
+        "heavily pixelated",
+        "high noise",
+        "image noise",
+        "moire pattern",
+        "motion blur",
+        "muddy colors",
+        "overcompressed",
+        "poor lineart",
+        "scanned with errors",
+        "scan errors",
+        "very low quality",
+        "visible pixels",
+        "aliasing",
+        "anatomy error",
+        "anatomy mistake",
+        "broken anatomy",
+        "broken pose",
+        "camera aberration",
+        "chromatic aberration",
+        "clashing styles",
+        "compression artifacts",
+        "corrupted",
+        "cribbed from",
+        "downsampling",
+        "faded lines",
+        "filter abuse",
+        "grainy",
+        "noise",
+        "noisy background",
+        "pixelation",
+        "pixels",
+        "poor quality",
+        "amateur",
+        "amateur drawing",
+        "bad art",
+        "bad coloring",
+        "bad composition",
+        "bad contrast",
+        "bad drawing",
+        "bad image",
+        "bad photoshop",
+        "bad pose",
+        "bad proportions",
+        "beginner",
+        "black and white",
+        "deformed",
+        "disfigured",
+        "displeasing",
+        "distorted",
+        "distorted proportions",
+        "drawing",
+        "duplicate",
+        "early",
+        "exaggerated pose",
+        "gross proportions",
+        "malformed limbs",
+        "missing arm",
+        "missing leg",
+        "extra arm",
+        "extra leg",
+        "fused fingers",
+        "too many fingers",
+        "extra fingers",
+        "mutated hands",
+        "blurry",
+        "out of frame",
+        "contortionist",
+        "contorted limbs",
+        "disproportionate",
+        "twisted posture",
+        "disconnected",
+        "warped",
+        "misshapen",
+        "out of scale",
+        "score_6",
+        "score_5",
+        "score_4",
+        "tan",
+        "piercing",
+        "3d",
+        "render",
+        "cgi",
+        "doll",
+        "cartoon",
+        "illustration",
+        "painting",
+        "digital art",
+        "anime",
+        "fake",
+        "3d modeling",
+        "old",
+        "asymmetrical features",
+        "unrealistic proportions",
+        "mutated",
+        "unnatural textures",
+        "twisted limbs",
+        "malformed hands",
+        "bad hands",
+        "bad fingers",
+        "split image",
+        "amputee",
+        "mutation",
+        "missing fingers",
+        "extra digit",
+        "fewer digits",
+        "cropped",
+        "worst quality",
+        "low quality",
+        "normal quality",
+        "jpeg artifacts",
+        "signature",
+        "watermark",
+        "username",
+        "artist name",
+        "ugly",
+        "symbol",
+        "hieroglyph",
+        "six fingers per hand",
+        "four fingers per hand",
+        "disfigured hand",
+        "monochrome",
+        "missing limb",
+        "linked limb",
+        "connected limb",
+        "interconnected limb",
+        "broken finger",
+        "broken hand",
+        "broken wrist",
+        "broken leg",
+        "split limbs",
+        "no thumb",
+        "missing hand",
+        "missing arms",
+        "missing legs",
+        "fused digit",
+        "missing digit",
+        "extra knee",
+        "extra elbow",
+        "storyboard",
+        "split arms",
+        "split hands",
+        "split fingers",
+        "twisted fingers",
+        "disfigured butt",
+        "deformed hands",
+        "blurred faces",
+        "irregular face",
+        "irrregular body shape",
+        "ugly eyes",
+        "squint",
+        "tiling",
+        "poorly drawn hands",
+        "poorly drawn feet",
+        "poorly drawn face",
+        "poorly framed",
+        "body out of frame",
+        "cut off",
+        "draft",
+        "grainy",
+        "oversaturated",
+        "teeth",
+        "closed eyes",
+        "weird neck",
+        "long neck",
+        "long body",
+        "disgusting",
+        "childish",
+        "mutilated",
+        "mangled",
+        "surreal",
+        "fuse",
+        "off-center",
+        "text",
+        "logo",
+        "letterbox",
+        "bokeh",
+        "multiple views",
+        "multiple panels",
+        "extra hands",
+        "extra limbs",
+        "mutated fingers",
+        "detached arm",
+        "liquid hand",
+        "inverted hand",
+        "oversized head",
+        "three hands",
+        "three legs",
+        "bad arms",
+        "three crus",
+        "extra crus",
+        "fused crus",
+        "worst feet",
+        "three feet",
+        "fused feet",
+        "fused thigh",
+        "three thigh",
+        "extra thigh",
+        "worst thigh",
+        "ugly fingers",
+        "horn",
+        "realistic photo",
+        "extra eyes",
+        "huge eyes",
+        "2girl",
+        "2boy",
+        "dehydrated",
+        "morbid",
+        "mutation text",
+        "score_6, score_5, score_4",
+        "3d, render, cgi, doll, cartoon, illustration, painting, digital art, anime, fake, 3d modeling, old, bad anatomy, bad proportions, asymmetrical features, disfigured, deformed, malformed, unrealistic proportions, mutated, unnatural textures, fused fingers, extra limbs, extra fingers, distorted, twisted limbs, malformed hands, bad hands, bad fingers, bad eyes, bad teeth, blurry",
+        "split image, out of frame, amputee, mutated, mutation, deformed, severed, dismembered, corpse, photograph, poorly drawn, bad anatomy, blur, blurry, lowres, bad hands, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, artist name, ugly, symbol, hieroglyph, extra fingers, six fingers per hand, four fingers per hand, disfigured hand, monochrome, missing limb, disembodied limb, linked limb, connected limb, interconnected limb, broken finger, broken hand, broken wrist, broken leg, split limbs, no thumb, missing hand, missing arms, missing legs, fused finger, fused digit, missing digit, bad digit, extra knee, extra elbow, storyboard, split arms, split hands, split fingers, twisted fingers, disfigured butt",
+        "deformed hands, watermark, text, deformed fingers, blurred faces, irregular face, irrregular body shape, ugly eyes, deformed face, squint, tiling, poorly drawn hands, poorly drawn feet, poorly drawn face, out of frame, poorly framed, extra limbs, disfigured, deformed, body out of frame, blurry, bad anatomy, blurred, watermark, grainy, signature, cut off, draft",
+        "cartoon, black and white photo, disfigured, kitsch, ugly, oversaturated, grain, low-res, Deformed, blurry, bad anatomy, poorly drawn face, mutation, mutated, extra limb, poorly drawn hands, missing limb, blurry, floating limbs, disconnected limbs, malformed hands, blur, out of focus, long neck, long body, disgusting, poorly drawn, childish, mutilated, mangled, old, surreal",
+        "bad anatomy, fuze, ugly eyes, imperfections, bad finger, off-center, interlocked fingers, text, logo, watermark, signature, letterbox, bokeh, blurry, multiple views, multiple panels, missing limbs, missing fingers, deformed, cropped, extra hands, extra fingers, too many fingers, fused fingers, bad arm, monochrome, distorted arm, extra arms, malformed hands, poorly drawn hands, mutated fingers, extra limbs, poorly drawn face, artist name, fused arms, extra legs, missing leg, disembodied leg, detached arm, liquid hand, inverted hand, disembodied limb, oversized head",
+        "bad anatomy, bad hands, three hands, three legs, bad arms, missing legs, missing arms, poorly drawn face, bad face, fused face, cloned face, worst face, three crus, extra crus, fused crus, worst feet, three feet, fused feet, fused thigh, three thigh, extra thigh, worst thigh, missing fingers, extra fingers, ugly fingers, long fingers, horn, realistic photo, extra eyes, huge eyes, 2girl, amputation, disconnected limbs",
+        "bad anatomy, bad hands, three hands, three legs, bad arms, missing legs, missing arms, poorly drawn face, bad face, fused face, cloned face, worst face, out of frame double, three crus, extra crus, fused crus, worst feet, three feet, fused feet, fused thigh, three thigh, extra thigh, worst thigh, missing fingers, extra fingers, ugly fingers, long fingers, horn, realistic photo, extra eyes, huge eyes, 2girl, 2boy, amputation, disconnected limbs",
+        "mutation, deformed, deformed iris, duplicate, morbid, mutilated, disfigured, poorly drawn hand, poorly drawn face, bad proportions, gross proportions, extra limbs, cloned face, long neck, malformed limbs, missing arm, missing leg, extra arm, extra leg, fused fingers, too many fingers, extra fingers, mutated hands, blurry, bad anatomy, out of frame, contortionist, contorted limbs, exaggerated features, disproportionate, twisted posture, unnatural pose, disconnected, disproportionate, warped, misshapen, out of scale",
+        "3 or 4 ears, never BUT ONE EAR, blurry, bad anatomy, extra limbs, poorly drawn face, poorly drawn hands, missing fingers, mangled teeth, weird teeth, poorly drawn eyes, blurry eyes, tan skin, oversaturated, teeth, poorly drawn, ugly, closed eyes, 3D, weird neck, duplicate, morbid, mutilated, out of frame, extra fingers, mutated hands, poorly drawn hands, poorly drawn face, mutation, deformed, blurry, bad anatomy, bad proportions, extra limbs, cloned face, disfigured, extra limbs, gross proportions, malformed limbs, missing arms, missing legs, extra arms, extra legs, mutated hands, fused finger",
+        "amateur, amateur drawing, bad anatomy, bad art, bad aspect ratio, bad color, bad coloring, bad composition, bad contrast, bad crop, bad drawing, bad image, bad lighting, bad lineart, bad perspective, bad photoshop, bad pose, bad proportions, bad shading, bad sketch, bad trace, bad vector, beginner, black and white, broken anatomy, broken pose, clashing styles, color error, color issues, color mismatch, deformed, dirty art, disfigured, displeasing, distorted, distorted proportions, drawing, dubious anatomy, duplicate, early, exaggerated limbs, exaggerated pose, flat colors, gro",
+        "aliasing, anatomy error, anatomy mistake, artifact, artifacts, broken anatomy, broken pose, camera aberration, chromatic aberration, clashing styles, cloned face, color banding, color error, color issues, color mismatch, compression artifacts, corrupted, cribbed from, cropped, deformed, dirty scan, disfigured, distorted, downsampling, draft, dubious anatomy, emoji, error, exaggerated limbs, exaggerated pose, extra arms, extra digits, extra fingers, extra legs, extra limbs, faded lines, filter abuse, fused fingers, gradient background, grainy, heavily compressed, heavily pixelated, high noise",
+        "ai-generated, artifact, artifacts, bad quality, bad scan, blurred, blurry, compressed, compression artifacts, corrupted, dirty art scan, dirty scan, dithering, downsampling, faded lines, frameborder, grainy, heavily compressed, heavily pixelated, high noise, image noise, low dpi, low fidelity, low resolution, lowres, moire pattern, moiré pattern, motion blur, muddy colors, noise, noisy background, overcompressed, pixelation, pixels, poor quality, poor lineart, scanned with errors, scan artifact, scan errors, very low quality, visible pixels BREAK amateur, amateur drawing, bad anatomy, bad art",
+        "ugly, old, fat, slight, disgusting, Unflattering, Distorted, Poorly lit, Blurry, Grainy, Overexposed, Underexposed, Cluttered background, Distracti",
+        "bad anatomy, bad proportions, blurry, cloned face, cropped, deformed, dehydrated, disfigured, duplicate, error, extra arms, extra fingers, extra legs, extra limbs, fused fingers, gross proportions, jpeg artifacts, long neck, low quality, low-res, malformed limbs, missing arms, missing legs, morbid, mutated hands, mutation,text, signature, ugly, username, watermark, poorly drawn hands, worst quality",
+        "extra fingers, fused fingers, long necks, missing arms, mutated hands, malformed limbs, bad anatomy",
+        "mutations, merged features, gross proportions",
+        "extra wings, disproportionate body parts, random glowing elements, plastic texture, over-saturated colors, deformed legs, asymmetry, misplaced shadows, wrong perspective, poorly blended details",
+        "deformed, asymmetrical, extra eyes, extra limbs, worst quality, blurry, unnatural skin, bad anatomy",
+        "deformed, asymmetrical, extra fingers, extra limbs, fused fingers, unrealistic proportions, bad anatomy",
+        "deformed, asymmetrical, extra eyes, blurry, distorted, bad anatomy, disproportional, unrealistic skin",
+        "blurry, pixelated, noisy, low resolution, JPEG artifacts, lack of focus, grainy textures, over-sharpened edges",
+        "extra fingers, fused fingers, long necks, missing arms, mutated hands, malformed limbs, bad anatomy",
+        "mutations, merged features, gross proportions",
+        "extra breasts",
+        "missing breasts",
+        "deformed breasts",
+        "plastic breasts",
+        "fake breasts",
+        "gravity-defying breasts",
+        "extra nipples",
+        "cloned face",
+        "duplicate body parts",
+        "censored",
+        "clothing on nude body",
+        "smooth featureless crotch",
+        "dildo clipping through body",
+        "merged holes",
+        "plastic skin",
+        "dry skin",
+        "flat chest",
+        "single snake",
+        "few snakes",
+        "bald spots",
+        "horror monster",
+        "lazy eye",
+        "crossed eyes",
+        "missing fingers",
+        "fused fingers",
+        "extra fingers",
+        "malformed teeth",
+        "extra teeth",
+        "bad teeth",
+        "open mouth deformity",
+    ]
+)
 
 # ---------------------------------------------------------------------------
 # Version helpers
@@ -408,6 +732,8 @@ def load_manifest() -> None:
             "tags": entry.get("tags", []),
             "reward_weight": weight,
             "task_type": entry.get("task_type", CREATOR_TASK_TYPE),
+            "strengths": entry.get("strengths"),
+            "weaknesses": entry.get("weaknesses"),
         }
         MANIFEST_MODELS[key] = entry_data
         MODEL_STATS.setdefault(key, {"count": 0.0, "total_time": 0.0})
@@ -516,6 +842,82 @@ def enqueue_job(wallet: str, model: str, task_type: str, data: str, weight: floa
     return job_id
 
 
+def compute_reward(
+    model_name: str,
+    pipeline: str,
+    metrics: Dict[str, Any],
+    status: str,
+) -> Tuple[float, Dict[str, Any]]:
+    """Compute dynamic reward for a completed job.
+
+    Formula:
+        reward = base_reward * weight_factor * compute_cost_factor
+                  * runtime_factor * success_factor
+    """
+
+    try:
+        base_reward = float(REWARD_CONFIG.get("base_reward", 0.05))
+        # Weight factor based on manifest/model weight
+        model_weight = resolve_weight(model_name, 10.0)
+        weight_factor = model_weight / 10.0
+
+        # Compute-cost factor based on pipeline family
+        pipeline_norm = (pipeline or "sd15").lower()
+        if pipeline_norm == "sdxl":
+            compute_cost_factor = float(REWARD_CONFIG.get("sdxl_factor", 1.5))
+        elif pipeline_norm == "sd15":
+            compute_cost_factor = float(REWARD_CONFIG.get("sd15_factor", 1.0))
+        elif pipeline_norm in {"anime", "cartoon"}:
+            compute_cost_factor = float(REWARD_CONFIG.get("anime_factor", 0.7))
+        else:
+            compute_cost_factor = 1.0
+
+        # Runtime factor from actual runtime vs baseline
+        baseline_runtime = float(REWARD_CONFIG.get("baseline_runtime", 8.0)) or 8.0
+        runtime_sec = 0.0
+        inf_ms = metrics.get("inference_time_ms")
+        if isinstance(inf_ms, (int, float)) and inf_ms > 0:
+            runtime_sec = float(inf_ms) / 1000.0
+        else:
+            dur = metrics.get("duration")
+            if isinstance(dur, (int, float)) and dur > 0:
+                runtime_sec = float(dur)
+        runtime_sec = max(0.0, runtime_sec)
+        runtime_factor = max(1.0, runtime_sec / baseline_runtime) if baseline_runtime > 0 else 1.0
+
+        # Success / failure factor
+        status_norm = (status or "").lower()
+        success_factor = 1.0 if status_norm == "success" else 0.0
+
+        reward = base_reward * weight_factor * compute_cost_factor * runtime_factor * success_factor
+        reward = round(float(reward), 6)
+
+        factors = {
+            "base_reward": base_reward,
+            "weight_factor": weight_factor,
+            "compute_cost_factor": compute_cost_factor,
+            "runtime_factor": runtime_factor,
+            "success_factor": success_factor,
+            "runtime_seconds": runtime_sec,
+            "model_weight": model_weight,
+            "pipeline": pipeline_norm,
+            # TODO: future quality verification boost
+            # "quality_factor": 1.0,
+        }
+        return reward, factors
+    except Exception as exc:  # pragma: no cover - defensive
+        LOGGER.exception("Reward computation failed for %s: %s", model_name, exc)
+        return 0.0, {
+            "base_reward": float(REWARD_CONFIG.get("base_reward", 0.05)),
+            "weight_factor": 0.0,
+            "compute_cost_factor": 1.0,
+            "runtime_factor": 1.0,
+            "success_factor": 0.0,
+            "runtime_seconds": 0.0,
+            "error": str(exc),
+        }
+
+
 def fetch_next_job_for_node(node_id: str) -> Optional[Dict[str, Any]]:
     conn = get_db()
     rows = conn.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY timestamp ASC").fetchall()
@@ -555,10 +957,26 @@ def assign_job_to_node(job_id: str, node_id: str) -> None:
     conn.commit()
 
 
-def complete_job(job_id: str, status: str) -> None:
+def complete_job(job_id: str, node_id: str, status: str) -> bool:
+    """Mark a job complete only if it is still running for the given node."""
     conn = get_db()
-    conn.execute("UPDATE jobs SET status=?, completed_at=? WHERE id=?", (status, unix_now(), job_id))
-    conn.commit()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT status, node_id FROM jobs WHERE id=?", (job_id,)).fetchone()
+        current_status = (row["status"] or "").lower() if row else ""
+        owner = row["node_id"] if row else None
+        if not row or current_status != "running" or (owner and owner != node_id):
+            conn.rollback()
+            return False
+        conn.execute(
+            "UPDATE jobs SET status=?, node_id=?, completed_at=? WHERE id=?",
+            (status, node_id, unix_now(), job_id),
+        )
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def record_reward(wallet: Optional[str], task_id: str, reward: float) -> None:
@@ -579,7 +997,7 @@ def record_reward(wallet: Optional[str], task_id: str, reward: float) -> None:
     conn.commit()
 
 
-def get_job_summary(limit: int = 12) -> Dict[str, Any]:
+def get_job_summary(limit: int = 50) -> Dict[str, Any]:
     conn = get_db()
     queued = conn.execute(
         "SELECT COUNT(*) FROM jobs WHERE status='queued' AND UPPER(task_type)=?",
@@ -591,9 +1009,17 @@ def get_job_summary(limit: int = 12) -> Dict[str, Any]:
     ).fetchone()[0]
     total_distributed = conn.execute("SELECT COALESCE(SUM(reward_hai),0) FROM rewards").fetchone()[0]
     today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    # Count jobs that have finished today (either legacy 'completed' or
+    # newer 'success' status values).
     completed_today = conn.execute(
-        "SELECT COUNT(*) FROM jobs WHERE status='completed' AND completed_at IS NOT NULL AND completed_at >= ?",
-        (today_start,),
+        """
+        SELECT COUNT(*) FROM jobs
+        WHERE status IN ('completed', 'success')
+          AND completed_at IS NOT NULL
+          AND completed_at >= ?
+          AND UPPER(task_type)=?
+        """,
+        (today_start, CREATOR_TASK_TYPE),
     ).fetchone()[0]
     # Avoid binding LIMIT to sidestep driver quirks under concurrency; limit is internal and cast to int.
     limit_int = int(limit)
@@ -951,8 +1377,26 @@ def submit_job() -> Any:
 
     if not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid wallet"}), 400
+    # Allow "auto" model selection based on manifest weights
+    if not model_name or model_name in {"auto", "auto_image", "auto-image"}:
+        load_manifest()
+        # Candidate models: creator IMAGE_GEN only
+        candidates = [
+            meta
+            for key, meta in MANIFEST_MODELS.items()
+            if (meta.get("task_type") or CREATOR_TASK_TYPE).upper() == CREATOR_TASK_TYPE
+        ]
+        if not candidates:
+            return jsonify({"error": "no_creator_models"}), 400
+        names = [meta["name"] for meta in candidates]
+        weights = [resolve_weight(meta["name"].lower(), meta.get("reward_weight", 10.0)) for meta in candidates]
+        chosen = random.choices(names, weights=weights, k=1)[0]
+        model_name_raw = chosen
+        model_name = chosen.lower()
+
     if not model_name:
         return jsonify({"error": "missing model"}), 400
+
     cfg = get_model_config(model_name)
     if not cfg:
         return jsonify({"error": "unknown model"}), 400
@@ -1040,11 +1484,39 @@ def submit_job() -> Any:
         task_type = "ANIMATEDIFF"
     else:
         prompt_text = str(payload.get("prompt") or payload.get("data") or "")
-        negative_prompt = str(payload.get("negative_prompt") or "")
-        if negative_prompt:
-            job_data = json.dumps({"prompt": prompt_text, "negative_prompt": negative_prompt})
+        if prompt_text:
+            prompt_text = f"{prompt_text}, {GLOBAL_POSITIVE_SUFFIX}"
         else:
-            job_data = prompt_text
+            prompt_text = GLOBAL_POSITIVE_SUFFIX
+        negative_prompt = str(payload.get("negative_prompt") or "").strip()
+        job_settings: Dict[str, Any] = {"prompt": prompt_text}
+        base_negative = str(cfg.get("negative_prompt_default") or "").strip() if cfg else ""
+        combined_negative = ", ".join(
+            filter(None, [negative_prompt or base_negative, GLOBAL_NEGATIVE_PROMPT])
+        )
+        if combined_negative:
+            job_settings["negative_prompt"] = combined_negative
+        pose_image = payload.get("pose_image") or payload.get("pose_image_b64") or ""
+        pose_image_path = payload.get("pose_image_path") or ""
+        if pose_image:
+            job_settings["pose_image_b64"] = str(pose_image)
+        if pose_image_path:
+            job_settings["pose_image_path"] = str(pose_image_path)
+
+        # Per-model defaults from manifest (steps/guidance/size/sampler/negative)
+        if cfg:
+            if cfg.get("steps") is not None:
+                job_settings["steps"] = cfg["steps"]
+            if cfg.get("guidance") is not None:
+                job_settings["guidance"] = cfg["guidance"]
+            if cfg.get("width") is not None:
+                job_settings["width"] = cfg["width"]
+            if cfg.get("height") is not None:
+                job_settings["height"] = cfg["height"]
+            if cfg.get("sampler"):
+                job_settings["sampler"] = cfg["sampler"]
+
+        job_data = json.dumps(job_settings)
         task_type = CREATOR_TASK_TYPE
 
     with LOCK:
@@ -1158,10 +1630,22 @@ def register() -> Any:
             samples.pop(0)
         node["avg_utilization"] = round(sum(samples) / len(samples), 2) if samples else util
         node["last_seen"] = iso_now()
-        node["last_seen_unix"] = unix_now()
-        save_nodes()
+    node["last_seen_unix"] = unix_now()
+    save_nodes()
 
     return jsonify({"status": "ok", "node": node_id}), 200
+
+
+@app.route("/register_models", methods=["POST"])
+def register_models() -> Any:
+    """No-op endpoint to accept local model manifests from nodes."""
+
+    payload = request.get_json() or {}
+    node_id = payload.get("node_id")
+    models = payload.get("models") or []
+    count = len(models) if isinstance(models, list) else 0
+    log_event("Models registered (noop)", node_id=node_id, count=count)
+    return jsonify({"status": "ok", "registered": count}), 200
 
 
 @app.route("/link-wallet", methods=["POST"])
@@ -1234,8 +1718,12 @@ def get_creator_tasks() -> Any:
                     if isinstance(parsed, dict):
                         prompt_text = str(parsed.get("prompt") or "")
                         negative_prompt = str(parsed.get("negative_prompt") or "")
+                    # Always send plain prompt text to the node (avoid passing raw JSON)
+                    prompt_for_node = prompt_text
 
+                    # Assign under global lock to avoid multiple nodes claiming the same job
                     assign_job_to_node(job["id"], node_id)
+                    log_event("Job claimed by node", job_id=job["id"], node_id=node_id)
                     reward_weight = float(job["weight"] or cfg.get("reward_weight", resolve_weight(job["model"], 10.0)))
                     job_task_type = (job.get("task_type") or CREATOR_TASK_TYPE).upper()
                     pending = [
@@ -1252,20 +1740,21 @@ def get_creator_tasks() -> Any:
                             "assigned_to": node_id,
                             "job_id": job["id"],
                             "data": raw_data,
-                            "prompt": prompt_text,
+                            "prompt": prompt_for_node,
                             "negative_prompt": negative_prompt,
+                            "queued_at": job.get("timestamp"),
                         }
                     ]
                     node_info["current_task"] = {
                         "task_id": job["id"],
                         "model_name": job["model"],
                         "status": "pending",
-                            "task_type": pending[0]["task_type"],
-                            "weight": pending[0]["reward_weight"],
-                        }
+                        "task_type": pending[0]["task_type"],
+                        "weight": pending[0]["reward_weight"],
+                    }
                     save_nodes()
                 else:
-                    complete_job(job["id"], "failed")
+                    complete_job(job["id"], node_id, "failed")
 
         response_tasks = []
         for task in pending:
@@ -1285,6 +1774,8 @@ def get_creator_tasks() -> Any:
                 "wallet": task.get("wallet"),
                 "prompt": task.get("prompt") or task.get("data", ""),
                 "negative_prompt": task.get("negative_prompt") or "",
+                "queued_at": task.get("queued_at"),
+                "assigned_at": task.get("assigned_at"),
             }
             # If this is a WAN I2V video job, attempt to expose structured settings to the node
             if task_payload["type"].upper() == "VIDEO_GEN":
@@ -1374,16 +1865,36 @@ def submit_results() -> Any:
         wallet = task.get("wallet")
         model_name = task.get("model_name", "creator-model")
         task_type = task.get("task_type", CREATOR_TASK_TYPE)
+        # Determine pipeline family for reward computation
+        cfg = get_model_config(model_name)
+        pipeline = cfg.get("pipeline", "sd15") if cfg else "sd15"
+
+        # Compute dynamic reward and factors
+        reward, reward_factors = compute_reward(model_name, pipeline, metrics, status)
+
+        # Ensure job is still owned/running before completing
+        if not complete_job(task_id, node_id, status):
+            log_event(
+                "Results rejected (job not running/owned by node)",
+                level="warning",
+                job_id=task_id,
+                node_id=node_id,
+            )
+            TASKS.pop(task_id, None)
+            return jsonify({"error": "conflict"}), 409
+
         if node:
-            inference_time = float(metrics.get("inference_time_ms") or metrics.get("duration", 0) * 1000)
-            gpu_util = float(utilization or node.get("utilization", 0.0))
-            reward_weight = float(task.get("reward_weight", resolve_weight(model_name, 1.0)))
-            if inference_time > 0:
-                reward = round((gpu_util * reward_weight) / inference_time, 6)
             node["rewards"] = round(node.get("rewards", 0.0) + reward, 6)
             node["last_reward"] = reward
             history = node.setdefault("reward_history", [])
-            history.append({"reward": reward, "task_id": task_id, "timestamp": iso_now()})
+            history.append(
+                {
+                    "reward": reward,
+                    "task_id": task_id,
+                    "timestamp": iso_now(),
+                    "factors": reward_factors,
+                }
+            )
             if len(history) > 20:
                 history.pop(0)
             node["last_seen"] = iso_now()
@@ -1422,6 +1933,7 @@ def submit_results() -> Any:
                 "metrics": metrics,
                 "model_name": model_name,
                 "reward": reward,
+                "reward_factors": reward_factors,
                 "wallet": wallet,
                 "task_type": task_type,
                 "image_url": image_url,
@@ -1443,9 +1955,45 @@ def submit_results() -> Any:
                     pass
             save_nodes()
 
+        # Persist reward info into the job's data JSON for later inspection.
         job = get_job(task_id)
         if job:
-            complete_job(task_id, status)
+            queued_at = job.get("timestamp")
+            assigned_at = job.get("assigned_at")
+            completed_at = job.get("completed_at")
+            queue_ms = None
+            run_ms = None
+            total_ms = None
+            if queued_at and assigned_at:
+                queue_ms = int((assigned_at - queued_at) * 1000)
+            if assigned_at and completed_at:
+                run_ms = int((completed_at - assigned_at) * 1000)
+            if queued_at and completed_at:
+                total_ms = int((completed_at - queued_at) * 1000)
+            log_event(
+                "Task timing",
+                job_id=task_id,
+                node_id=node_id,
+                queue_ms=queue_ms,
+                run_ms=run_ms,
+                total_ms=total_ms,
+                status=status,
+            )
+            raw_data = job.get("data")
+            try:
+                payload = json.loads(raw_data) if isinstance(raw_data, str) else {}
+            except Exception:
+                payload = {}
+            if isinstance(payload, dict):
+                payload["reward"] = reward
+                payload["reward_factors"] = reward_factors
+                payload["reward_status"] = status
+                try:
+                    conn = get_db()
+                    conn.execute("UPDATE jobs SET data=? WHERE id=?", (json.dumps(payload), task_id))
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
             wallet = wallet or job.get("wallet")
 
         record_reward(wallet, task_id, reward)
@@ -1518,6 +2066,68 @@ def rewards_endpoint() -> Any:
     return jsonify({"rewards": rewards, "total": job_summary["total_distributed"]})
 
 
+@app.route("/jobs/recent", methods=["GET"])
+def jobs_recent() -> Any:
+    """Return recent creator jobs with reward information."""
+
+    try:
+        limit = int(request.args.get("limit", 25))
+    except Exception:
+        limit = 25
+    summary = get_job_summary(limit=limit)
+    return jsonify({"jobs": summary.get("feed", []), "summary": summary})
+
+
+@app.route("/jobs/<job_id>", methods=["GET"])
+def job_detail(job_id: str) -> Any:
+    job = get_job(job_id)
+    if not job:
+        return jsonify({"error": "job_not_found", "job_id": job_id}), 404
+    conn = get_db()
+    reward_row = conn.execute(
+        "SELECT reward_hai, timestamp FROM rewards WHERE task_id=?",
+        (job_id,),
+    ).fetchone()
+    reward_value = float(reward_row["reward_hai"]) if reward_row else 0.0
+    reward_ts = reward_row["timestamp"] if reward_row else None
+
+    raw_data = job.get("data")
+    try:
+        payload = json.loads(raw_data) if isinstance(raw_data, str) else {}
+    except Exception:
+        payload = {}
+    reward_factors = payload.get("reward_factors") if isinstance(payload, dict) else None
+
+    return jsonify(
+        {
+            "id": job.get("id"),
+            "wallet": job.get("wallet"),
+            "model": job.get("model"),
+            "task_type": job.get("task_type"),
+            "status": job.get("status"),
+            "weight": job.get("weight"),
+            "node_id": job.get("node_id"),
+            "timestamp": job.get("timestamp"),
+            "completed_at": job.get("completed_at"),
+            "reward": reward_value,
+            "reward_timestamp": reward_ts,
+            "reward_factors": reward_factors,
+            "data": payload,
+        }
+    )
+
+
+@app.route("/nodes/<node_id>", methods=["GET"])
+def node_detail(node_id: str) -> Any:
+    with LOCK:
+        node = NODES.get(node_id)
+        if not node:
+            return jsonify({"error": "node_not_found", "node_id": node_id}), 404
+        payload = dict(node)
+        payload["node_id"] = node_id
+    return jsonify(payload)
+
+
 @app.route("/api/models/stats", methods=["GET"])
 def models_stats() -> Any:
     """
@@ -1547,12 +2157,22 @@ def models_stats() -> Any:
 
     # Success rate: completed / total for creator jobs.
     conn = get_db()
+    # Total finished jobs (exclude queued/running)
     total_row = conn.execute(
-        "SELECT COUNT(*) FROM jobs WHERE UPPER(task_type)=?",
+        """
+        SELECT COUNT(*) FROM jobs
+        WHERE UPPER(task_type)=?
+          AND status NOT IN ('queued', 'running')
+        """,
         (CREATOR_TASK_TYPE,),
     ).fetchone()
+    # Successful jobs (legacy 'completed' or newer 'success')
     ok_row = conn.execute(
-        "SELECT COUNT(*) FROM jobs WHERE status='completed' AND UPPER(task_type)=?",
+        """
+        SELECT COUNT(*) FROM jobs
+        WHERE UPPER(task_type)=?
+          AND status IN ('completed', 'success')
+        """,
         (CREATOR_TASK_TYPE,),
     ).fetchone()
     total_jobs = int(total_row[0]) if total_row else 0

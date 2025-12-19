@@ -1488,10 +1488,14 @@ def submit_job() -> Any:
             prompt_text = f"{prompt_text}, {GLOBAL_POSITIVE_SUFFIX}"
         else:
             prompt_text = GLOBAL_POSITIVE_SUFFIX
-        negative_prompt = str(payload.get("negative_prompt") or "")
+        negative_prompt = str(payload.get("negative_prompt") or "").strip()
         job_settings: Dict[str, Any] = {"prompt": prompt_text}
-        if negative_prompt:
-            job_settings["negative_prompt"] = negative_prompt
+        base_negative = str(cfg.get("negative_prompt_default") or "").strip() if cfg else ""
+        combined_negative = ", ".join(
+            filter(None, [negative_prompt or base_negative, GLOBAL_NEGATIVE_PROMPT])
+        )
+        if combined_negative:
+            job_settings["negative_prompt"] = combined_negative
         pose_image = payload.get("pose_image") or payload.get("pose_image_b64") or ""
         pose_image_path = payload.get("pose_image_path") or ""
         if pose_image:
@@ -1511,11 +1515,6 @@ def submit_job() -> Any:
                 job_settings["height"] = cfg["height"]
             if cfg.get("sampler"):
                 job_settings["sampler"] = cfg["sampler"]
-            if not negative_prompt:
-                base_negative = str(cfg.get("negative_prompt_default") or "").strip()
-                combined_negative = ", ".join(filter(None, [base_negative, GLOBAL_NEGATIVE_PROMPT]))
-                if combined_negative:
-                    job_settings["negative_prompt"] = combined_negative
 
         job_data = json.dumps(job_settings)
         task_type = CREATOR_TASK_TYPE

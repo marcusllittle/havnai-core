@@ -534,8 +534,8 @@ def run_image_generation(task_id: str, model_name: str, model_url: str, reward_w
     except Exception as exc:
         return ({"status": "failed", "error": str(exc), "reward_weight": reward_weight}, utilization_hint, None)
 
-    steps = _env_int("HAI_STEPS", 24)
-    guidance = _env_float("HAI_GUIDANCE", 7.0)
+    steps = _env_int("HAI_STEPS", 65)
+    guidance = _env_float("HAI_GUIDANCE", 8.2)
     width = _env_int("HAI_WIDTH", 512)
     height = _env_int("HAI_HEIGHT", 512)
     width = max(64, width - (width % 8))

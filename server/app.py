@@ -1502,6 +1502,23 @@ def submit_job() -> Any:
             job_settings["pose_image_b64"] = str(pose_image)
         if pose_image_path:
             job_settings["pose_image_path"] = str(pose_image_path)
+        # Optional face swap / identity controls
+        for key in (
+            "face_swap",
+            "source_face",
+            "source_face_url",
+            "source_face_b64",
+            "ipadapter_scale",
+            "ipadapter_dir",
+            "ipadapter_bin",
+            "ipadapter_lora",
+            "hyperlora_path",
+            "hyperlora_weight",
+            "base_prompt",
+            "swap_strength",
+        ):
+            if key in payload and payload[key] is not None:
+                job_settings[key] = payload[key]
 
         # Per-model defaults from manifest (steps/guidance/size/sampler/negative)
         if cfg:
@@ -1523,6 +1540,12 @@ def submit_job() -> Any:
         job_id = enqueue_job(wallet, cfg.get("name", model_name), task_type, job_data, float(weight))
     log_event("Public job queued", wallet=wallet, model=model_name, job_id=job_id)
     return jsonify({"status": "queued", "job_id": job_id}), 200
+
+
+@app.route("/submit-swap-ipadapter", methods=["POST"])
+def submit_swap_ipadapter() -> Any:
+    """Compatibility wrapper for legacy face swap submissions."""
+    return submit_job()
 
 
 @app.route("/generate-video", methods=["POST"])

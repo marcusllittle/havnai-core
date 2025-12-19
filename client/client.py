@@ -51,12 +51,35 @@ try:
         from diffusers import StableDiffusionXLPipeline as _SDXLPipe  # type: ignore
     except Exception:  # pragma: no cover
         _SDXLPipe = None  # type: ignore
-    from diffusers import DPMSolverMultistepScheduler as _DPMSolver  # type: ignore
+    try:
+        from diffusers import StableDiffusionImg2ImgPipeline as _SDImg2ImgPipe  # type: ignore
+    except Exception:  # pragma: no cover
+        _SDImg2ImgPipe = None  # type: ignore
+    try:
+        from diffusers import StableDiffusionXLImg2ImgPipeline as _SDXLImg2ImgPipe  # type: ignore
+    except Exception:  # pragma: no cover
+        _SDXLImg2ImgPipe = None  # type: ignore
+    try:
+        from diffusers import StableDiffusionControlNetPipeline as _SDControlPipe  # type: ignore
+    except Exception:  # pragma: no cover
+        _SDControlPipe = None  # type: ignore
+    try:
+        from diffusers import ControlNetModel as _ControlNetModel  # type: ignore
+    except Exception:  # pragma: no cover
+        _ControlNetModel = None  # type: ignore
+    try:
+        from diffusers import DPMSolverMultistepScheduler as _DPMSolver  # type: ignore
+    except Exception:  # pragma: no cover
+        _DPMSolver = None  # type: ignore
 except ImportError:  # pragma: no cover
     diffusers = None
     _AutoPipe = None  # type: ignore
     _SDPipe = None  # type: ignore
     _SDXLPipe = None  # type: ignore
+    _SDImg2ImgPipe = None  # type: ignore
+    _SDXLImg2ImgPipe = None  # type: ignore
+    _SDControlPipe = None  # type: ignore
+    _ControlNetModel = None  # type: ignore
     _DPMSolver = None  # type: ignore
 try:
     from PIL import Image  # type: ignore
@@ -125,6 +148,15 @@ LOGGER = setup_logging()
 
 def log(message: str, prefix: str = "ℹ️", **extra: Any) -> None:
     LOGGER.info(f"{prefix} {message}", extra={"node": socket.gethostname(), **extra})
+
+
+# Face swap / identity settings
+HYPERLORA_PATH = Path(os.environ.get("HYPERLORA_PATH", "/mnt/d/havnai-storage/models/loras/HyperLoRA_SDXL.safetensors")).expanduser()
+IPADAPTER_DIR = Path(os.environ.get("IPADAPTER_DIR", "/mnt/d/havnai-storage/models/ip-adapter-faceid")).expanduser()
+IPADAPTER_BIN = os.environ.get("IPADAPTER_BIN", "ip-adapter-faceid-plusv2_sdxl.bin")
+IPADAPTER_LORA = os.environ.get("IPADAPTER_LORA", "ip-adapter-faceid-plusv2_sdxl_lora.safetensors")
+CONTROLNET_PATH = Path(os.environ.get("CONTROLNET_PATH", "/mnt/d/havnai-storage/models/controlnet/controlnet-openpose.safetensors")).expanduser()
+POSE_LIBRARY_DIR = Path(os.environ.get("POSE_LIBRARY_DIR", "/mnt/d/havnai-storage/poses")).expanduser()
 
 
 # ---------------------------------------------------------------------------
@@ -345,6 +377,79 @@ def run_command(cmd: List[str]) -> Optional[str]:
         return None
 
 
+def load_source_image(source: Optional[str]) -> Optional["Image.Image"]:
+    """Load a face/source image from base64, URL, or local path."""
+    if not source or Image is None:
+        return None
+    if len(source) > 100 and all(c.isalnum() or c in "+/=\n" for c in source):
+        try:
+            data = base64.b64decode(source)
+            return Image.open(io.BytesIO(data)).convert("RGB")
+        except Exception:
+            pass
+    if source.startswith("http://") or source.startswith("https://"):
+        try:
+            resp = SESSION.get(source, timeout=10)
+            resp.raise_for_status()
+            return Image.open(io.BytesIO(resp.content)).convert("RGB")
+        except Exception as exc:
+            log(f"Source face URL load failed: {exc}", prefix="⚠️", url=source)
+    try:
+        path = Path(source).expanduser()
+        if path.exists():
+            return Image.open(path).convert("RGB")
+    except Exception:
+        pass
+    return None
+
+
+def _load_ip_adapter(
+    pipe: object,
+    adapter_dir: Path,
+    weight_name: str,
+    lora_path: Optional[Path],
+    scale: float,
+) -> None:
+    """Load IP-Adapter FaceID weights into the pipeline if supported."""
+    if not hasattr(pipe, "load_ip_adapter"):
+        return
+    weight_path = adapter_dir / weight_name
+    if not weight_path.exists():
+        log("IP-Adapter file missing", prefix="⚠️", weight=str(weight_path))
+        return
+    try:
+        pipe.load_ip_adapter(str(adapter_dir), subfolder="", weight_name=weight_name)
+        if lora_path and hasattr(pipe, "load_ip_adapter_weights"):
+            pipe.load_ip_adapter_weights(str(lora_path))
+        if hasattr(pipe, "set_ip_adapter_scale"):
+            pipe.set_ip_adapter_scale(scale)
+        log("IP-Adapter loaded", prefix="✅", weight=str(weight_path), lora=str(lora_path) if lora_path else "", scale=scale)
+    except Exception as exc:  # pragma: no cover - defensive
+        log(f"IP-Adapter load failed: {exc}", prefix="⚠️")
+
+
+def load_pose_image(pose_image_b64: Optional[str], pose_image_path: Optional[str]) -> Optional["Image.Image"]:
+    """Load a pose image from base64 or filesystem path."""
+    if Image is None:
+        return None
+    if pose_image_b64:
+        try:
+            data = base64.b64decode(pose_image_b64)
+            return Image.open(io.BytesIO(data)).convert("RGB")
+        except Exception as exc:
+            log(f"Pose image base64 decode failed: {exc}", prefix="⚠️")
+    if pose_image_path:
+        try:
+            path = Path(pose_image_path).expanduser()
+            if not path.is_absolute() and POSE_LIBRARY_DIR.exists():
+                path = POSE_LIBRARY_DIR / path
+            if path.exists():
+                return Image.open(path).convert("RGB")
+        except Exception as exc:
+            log(f"Pose image load failed: {exc}", prefix="⚠️", path=pose_image_path)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Task execution helpers
 # ---------------------------------------------------------------------------
@@ -408,6 +513,23 @@ def execute_task(task: Dict[str, Any]) -> None:
     reward_weight = float(task.get("reward_weight", 1.0))
     input_shape = task.get("input_shape") or []
     prompt = task.get("prompt") or ""
+    job_settings: Dict[str, Any] = {}
+    raw_data = task.get("data")
+    if isinstance(raw_data, str):
+        try:
+            parsed = json.loads(raw_data)
+            if isinstance(parsed, dict):
+                job_settings.update(parsed)
+        except Exception:
+            pass
+    if isinstance(prompt, str) and prompt.strip().startswith("{"):
+        try:
+            parsed = json.loads(prompt)
+            if isinstance(parsed, dict):
+                job_settings.update(parsed)
+                prompt = parsed.get("prompt", "") or ""
+        except Exception:
+            pass
     queued_at = task.get("queued_at")
     assigned_at = task.get("assigned_at")
     task_started_at = time.time()
@@ -419,14 +541,21 @@ def execute_task(task: Dict[str, Any]) -> None:
         assign_to_start_ms = int((task_started_at - assigned_at) * 1000)
 
     if task_type == "image_gen" and ROLE != "creator":
-        log(f"Skipping creator task {task_id[:8]} — node not in creator mode", prefix="⚠️")
+        log(f"Skipping creator task {task_id} — node not in creator mode", prefix="⚠️")
         return
 
-    log(f"Executing {task_type} task {task_id[:8]} · {model_name}", prefix="🚀")
+    log(f"Executing {task_type} task {task_id} · {model_name}", prefix="🚀")
 
     image_b64: Optional[str] = None
     if task_type == "image_gen":
-        metrics, util, image_b64 = run_image_generation(task_id, model_name, model_url, reward_weight, prompt)
+        metrics, util, image_b64 = run_image_generation(
+            task_id,
+            model_name,
+            model_url,
+            reward_weight,
+            prompt,
+            job_settings,
+        )
     else:
         metrics, util = run_ai_inference(model_name, model_url, input_shape, reward_weight)
 
@@ -511,7 +640,14 @@ def run_ai_inference(model_name: str, model_url: str, input_shape: List[int], re
     return metrics, int(util)
 
 
-def run_image_generation(task_id: str, model_name: str, model_url: str, reward_weight: float, prompt: str) -> (Dict[str, Any], int, Optional[str]):
+def run_image_generation(
+    task_id: str,
+    model_name: str,
+    model_url: str,
+    reward_weight: float,
+    prompt: str,
+    job_settings: Optional[Dict[str, Any]] = None,
+) -> (Dict[str, Any], int, Optional[str]):
     """Run SD image generation with explicit pipeline and env-driven settings."""
 
     def _env_int(name: str, default: int) -> int:
@@ -541,6 +677,21 @@ def run_image_generation(task_id: str, model_name: str, model_url: str, reward_w
     width = max(64, width - (width % 8))
     height = max(64, height - (height % 8))
     is_xl = "xl" in model_name.lower()
+    job_settings = job_settings or {}
+    face_swap = bool(job_settings.get("face_swap", False))
+    source_face = (
+        job_settings.get("source_face")
+        or job_settings.get("source_face_url")
+        or job_settings.get("source_face_b64")
+    )
+    pose_image_b64 = job_settings.get("pose_image_b64") or job_settings.get("pose_image")
+    pose_image_path = job_settings.get("pose_image_path")
+    ipadapter_scale = float(job_settings.get("ipadapter_scale", 0.6) or 0.6)
+    ipadapter_scale = max(0.0, min(ipadapter_scale, 1.0))
+    hyperlora_weight = float(job_settings.get("hyperlora_weight", 0.6) or 0.6)
+    hyperlora_weight = min(hyperlora_weight, 0.8)
+    base_prompt = str(job_settings.get("base_prompt") or "").strip()
+    negative_prompt = str(job_settings.get("negative_prompt") or "").strip()
 
     start_stats = read_gpu_stats()
     started = time.time()
@@ -548,6 +699,10 @@ def run_image_generation(task_id: str, model_name: str, model_url: str, reward_w
     error_msg = ""
 
     image_b64: Optional[str] = None
+    controlnet_image = load_pose_image(pose_image_b64, pose_image_path)
+    use_controlnet = bool(controlnet_image is not None)
+    source_face_image = load_source_image(source_face) if face_swap else None
+    faceid_active = False
     output_path = OUTPUTS_DIR / f"{task_id}.png"
     try:
         if not FAST_PREVIEW and torch is not None and diffusers is not None:
@@ -567,7 +722,17 @@ def run_image_generation(task_id: str, model_name: str, model_url: str, reward_w
 
             if pipe is None and _SDPipe is not None:
                 try:
-                    pipe = _SDPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
+                    if use_controlnet and _SDControlPipe is not None and _ControlNetModel is not None and CONTROLNET_PATH.exists():
+                        controlnet = _ControlNetModel.from_single_file(str(CONTROLNET_PATH), torch_dtype=dtype)
+                        pipe = _SDControlPipe.from_single_file(
+                            str(model_path),
+                            controlnet=controlnet,
+                            torch_dtype=dtype,
+                            safety_checker=None,
+                        )
+                        log("Loaded ControlNet for pose guidance", prefix="✅", controlnet=str(CONTROLNET_PATH))
+                    else:
+                        pipe = _SDPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
                 except Exception as exc:
                     log(f"StableDiffusionPipeline load failed: {exc}", prefix="⚠️")
 
@@ -596,6 +761,26 @@ def run_image_generation(task_id: str, model_name: str, model_url: str, reward_w
                 pipe.enable_attention_slicing("max")
             if hasattr(pipe, "set_progress_bar_config"):
                 pipe.set_progress_bar_config(disable=True)
+
+            if face_swap:
+                if base_prompt:
+                    base_prompt = base_prompt.replace("perfect symmetrical face", "").strip(" ,")
+                base_prompt = ", ".join(
+                    p for p in [
+                        base_prompt,
+                        "accurate facial identity, consistent facial features, natural expression matching reference",
+                    ]
+                    if p
+                )
+
+            final_prompt = ", ".join(p for p in [base_prompt, (prompt or "").strip()] if p)
+            final_negative = negative_prompt
+
+            if face_swap:
+                log("FaceSwap mode", prefix="🧪", active=True)
+            else:
+                log("FaceSwap mode", prefix="🧪", active=False)
+
             pipe = pipe.to(device)
             load_ms = int((time.time() - load_t0) * 1000)
             log(
@@ -603,19 +788,65 @@ def run_image_generation(task_id: str, model_name: str, model_url: str, reward_w
                 prefix="✅",
             )
 
+            if face_swap and is_xl and source_face_image is not None:
+                lora_path = IPADAPTER_DIR / IPADAPTER_LORA
+                bin_path = IPADAPTER_DIR / IPADAPTER_BIN
+                weight_name = ""
+                lora_weight_path: Optional[Path] = None
+                if lora_path.exists():
+                    weight_name = IPADAPTER_LORA
+                    lora_weight_path = None
+                elif bin_path.exists():
+                    weight_name = IPADAPTER_BIN
+                    lora_weight_path = None
+                if weight_name:
+                    _load_ip_adapter(pipe, IPADAPTER_DIR, weight_name, lora_weight_path, ipadapter_scale)
+                    faceid_active = True
+                    log("IP-Adapter scale", prefix="🧪", scale=ipadapter_scale)
+
+            if HYPERLORA_PATH.exists() and hasattr(pipe, "load_lora_weights"):
+                try:
+                    if faceid_active:
+                        log("Conditioning order: FaceID -> Base prompt -> HyperLoRA -> User prompt", prefix="🧪")
+                    pipe.load_lora_weights(str(HYPERLORA_PATH), adapter_name="hyperlora")
+                    if hasattr(pipe, "set_adapters"):
+                        pipe.set_adapters(["hyperlora"], adapter_weights=[hyperlora_weight])
+                    elif hasattr(pipe, "fuse_lora"):
+                        pipe.fuse_lora(lora_scale=hyperlora_weight)
+                    log("HyperLoRA scale", prefix="🧪", scale=hyperlora_weight)
+                except Exception as exc:
+                    log(f"HyperLoRA load failed: {exc}", prefix="⚠️", lora=str(HYPERLORA_PATH))
+
             seed = int(time.time()) & 0x7FFFFFFF
             generator = torch.Generator(device=device).manual_seed(seed)
-            text = prompt or "a high quality photo of a golden retriever on a beach at sunset"
+            text = final_prompt or "a high quality photo of a golden retriever on a beach at sunset"
             gen_t0 = time.time()
             with torch.inference_mode():
-                result = pipe(
-                    text,
-                    num_inference_steps=steps,
-                    guidance_scale=guidance,
-                    generator=generator,
-                    height=height,
-                    width=width,
-                )
+                if is_xl:
+                    result = pipe(
+                        prompt=text,
+                        prompt_2=text,
+                        negative_prompt=final_negative or None,
+                        negative_prompt_2=final_negative or None,
+                        ip_adapter_image=source_face_image if faceid_active else None,
+                        num_inference_steps=steps,
+                        guidance_scale=guidance,
+                        generator=generator,
+                        height=height,
+                        width=width,
+                    )
+                else:
+                    result = pipe(
+                        text,
+                        negative_prompt=final_negative or None,
+                        image=controlnet_image if use_controlnet else None,
+                        controlnet_conditioning_scale=1.0 if use_controlnet else None,
+                        num_inference_steps=steps,
+                        guidance_scale=guidance,
+                        generator=generator,
+                        height=height,
+                        width=width,
+                    )
             gen_ms = int((time.time() - gen_t0) * 1000)
             log(
                 f"Generated in {gen_ms}ms",

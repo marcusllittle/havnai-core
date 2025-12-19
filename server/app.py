@@ -53,6 +53,25 @@ MODEL_WEIGHTS: Dict[str, float] = {
     "unstablepornhwa_beta": 12.0,
 }
 
+REALISM_MODEL_ALLOWLIST = {
+    "juggernautxl_ragnarokby",
+    "epicrealismxl_vxviicrystalclear",
+    "uberrealisticpornmerge_v23final",
+    "majicmixrealistic_v7",
+    "lazymixrealamateur_v40",
+}
+
+ANIME_KEYWORDS = {
+    "anime",
+    "manhwa",
+    "manga",
+    "cartoon",
+    "pixar",
+    "toon",
+    "waifu",
+    "hentai",
+}
+
 MODEL_STATS: Dict[str, Dict[str, float]] = {}
 MANIFEST_MODELS: Dict[str, Dict[str, Any]] = {}
 EVENT_LOGS: deque = deque(maxlen=200)
@@ -80,20 +99,14 @@ REWARD_CONFIG: Dict[str, float] = {
 
 # Slight global positive bias to help realism skin detail.
 GLOBAL_POSITIVE_SUFFIX = (
-    "(ultra-realistic 8k:1.05), "
-    "(detailed skin pores:1.03), "
-    "focused eyes, clear pupils, natural gaze, "
-    "well formed hands, five fingers on each hand, "
-    "natural teeth, realistic mouth structure"
+    "(masterpiece, ultra-realistic 8k:1.1), "
+    "(detailed skin pores and texture:1.05), "
+    "soft seductive half-lidded eyes, natural gaze, "
+    "perfect hands, natural relaxed hand pose"
 )
 
-# Global negative prompt to discourage common artifacts across all models.
-GLOBAL_NEGATIVE_PROMPT = (
-    "worst quality, low quality, lowres, blurry, jpeg artifacts, watermark, text, signature, "
-    "bad anatomy, deformed, mutated, extra limbs, missing limbs, fused fingers, extra fingers, "
-    "bad hands, deformed hands, plastic skin, doll skin, orange skin, harsh lighting, "
-    "intense stare, angry eyes, wide eyes, crazy eyes, uniform fabric, blurry fabric"
-)
+# Global negative prompt disabled for testing; rely on registry defaults only.
+GLOBAL_NEGATIVE_PROMPT = ""
 
 # ---------------------------------------------------------------------------
 # Version helpers
@@ -1089,6 +1102,13 @@ def submit_job() -> Any:
             for key, meta in MANIFEST_MODELS.items()
             if (meta.get("task_type") or CREATOR_TASK_TYPE).upper() == CREATOR_TASK_TYPE
         ]
+        prompt_hint = str(payload.get("prompt") or payload.get("data") or "").lower()
+        if not any(keyword in prompt_hint for keyword in ANIME_KEYWORDS):
+            candidates = [
+                meta
+                for meta in candidates
+                if str(meta.get("name", "")).lower() in REALISM_MODEL_ALLOWLIST
+            ]
         if not candidates:
             return jsonify({"error": "no_creator_models"}), 400
         names = [meta["name"] for meta in candidates]
@@ -1191,16 +1211,11 @@ def submit_job() -> Any:
             prompt_text = f"{prompt_text}, {GLOBAL_POSITIVE_SUFFIX}"
         else:
             prompt_text = GLOBAL_POSITIVE_SUFFIX
-        negative_prompt = str(payload.get("negative_prompt") or "").strip()
+        negative_prompt = ""
         job_settings: Dict[str, Any] = {"prompt": prompt_text}
         pipeline_name = str(cfg.get("pipeline") or "").lower() if cfg else ""
         base_negative = str(cfg.get("negative_prompt_default") or "").strip() if cfg else ""
-        if pipeline_name == "sdxl":
-            combined_negative = ", ".join(filter(None, [negative_prompt, GLOBAL_NEGATIVE_PROMPT]))
-        else:
-            combined_negative = ", ".join(
-                filter(None, [negative_prompt or base_negative, GLOBAL_NEGATIVE_PROMPT])
-            )
+        combined_negative = base_negative
         if combined_negative:
             job_settings["negative_prompt"] = combined_negative
         pose_image = payload.get("pose_image") or payload.get("pose_image_b64") or ""

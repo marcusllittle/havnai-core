@@ -163,6 +163,26 @@ LORA_BAD_ANATOMY_NEG = LORA_DIR / "badanatomy_SDXL_negative_LORA_AutismMix_v1.sa
 LORA_HANDS = LORA_DIR / "Handv2.safetensors"
 LORA_DETAILED_PERFECTION = LORA_DIR / "perfectionstylev2d.safetensors"
 LORA_SWEAT_OILED = LORA_DIR / "Sweatingmyballsofmate.safetensors"
+BASE_REALISM_SDXL_PERF = LORA_DIR / "perfectionstyle.safetensors"
+BASE_REALISM_SDXL_SKIN = LORA_DIR / "skintexturestylev3.safetensors"
+BASE_REALISM_SD15_PERF = LORA_DIR / "perfectionstyleSD1.5.safetensors"
+BASE_REALISM_SD15_SKIN = LORA_DIR / "skintexturestylesd1.5v1.safetensors"
+
+SDXL_MODEL_OVERRIDES = {
+    "juggernautxl_ragnarokby",
+    "epicrealismxl_vxviicrystalclear",
+    "uberrealisticpornmerge_v23final",
+}
+
+SD15_MODEL_OVERRIDES = {
+    "majicmixrealistic_v7",
+    "lazymixrealamateur_v40",
+    "perfectdeliberate_v5sd15",
+    "triomerge_v10",
+    "unstablepornhwa_beta",
+    "disneypixarcartoon_v10",
+    "kizukianimehentai_animehentaiv4",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -682,7 +702,13 @@ def run_image_generation(
     height = _env_int("HAI_HEIGHT", 512)
     width = max(64, width - (width % 8))
     height = max(64, height - (height % 8))
-    is_xl = "xl" in model_name.lower()
+    model_key = model_name.lower()
+    if model_key in SDXL_MODEL_OVERRIDES:
+        is_xl = True
+    elif model_key in SD15_MODEL_OVERRIDES:
+        is_xl = False
+    else:
+        is_xl = "xl" in model_key
     job_settings = job_settings or {}
     face_swap = bool(job_settings.get("face_swap", False))
     source_face = (
@@ -699,6 +725,7 @@ def run_image_generation(
     base_prompt = str(job_settings.get("base_prompt") or "").strip()
     negative_prompt = str(job_settings.get("negative_prompt") or "").strip()
     anatomy_unstable = bool(job_settings.get("anatomy_unstable", False))
+    malformed = bool(job_settings.get("malformed", False))
     style_preset = str(job_settings.get("style_preset") or "").strip().lower()
 
     start_stats = read_gpu_stats()
@@ -711,6 +738,7 @@ def run_image_generation(
     use_controlnet = bool(controlnet_image is not None)
     source_face_image = load_source_image(source_face) if face_swap else None
     faceid_active = False
+    base_realism_loaded = False
     output_path = OUTPUTS_DIR / f"{task_id}.png"
     try:
         if not FAST_PREVIEW and torch is not None and diffusers is not None:
@@ -720,6 +748,12 @@ def run_image_generation(
             load_t0 = time.time()
 
             pipe = None
+            log(
+                "Model pipeline selection",
+                prefix="🧪",
+                model=model_name,
+                pipeline="sdxl" if is_xl else "sd15",
+            )
             # For XL checkpoints prefer StableDiffusionXLPipeline when
             # available, otherwise fall back to SD1.5 pipeline as a best-effort.
             if is_xl and _SDXLPipe is not None:
@@ -786,17 +820,12 @@ def run_image_generation(
                 base_prompt = ", ".join(
                     p for p in [
                         base_prompt,
-                        "subtle facial imperfections",
+                        "natural facial proportions",
                     ]
                     if p
                 )
             final_prompt = ", ".join(p for p in [base_prompt, (prompt or "").strip()] if p)
             final_negative = negative_prompt
-
-            if face_swap:
-                log("FaceSwap mode", prefix="🧪", active=True)
-            else:
-                log("FaceSwap mode", prefix="🧪", active=False)
 
             pipe = pipe.to(device)
             load_ms = int((time.time() - load_t0) * 1000)
@@ -804,6 +833,36 @@ def run_image_generation(
                 f"Pipeline ready in {load_ms}ms · {pipe.__class__.__name__}",
                 prefix="✅",
             )
+
+            if not face_swap and hasattr(pipe, "load_lora_weights"):
+                if is_xl:
+                    perf_path = BASE_REALISM_SDXL_PERF
+                    skin_path = BASE_REALISM_SDXL_SKIN
+                    lora_label = "SDXL"
+                else:
+                    perf_path = BASE_REALISM_SD15_PERF
+                    skin_path = BASE_REALISM_SD15_SKIN
+                    lora_label = "SD1.5"
+                if perf_path.exists() and skin_path.exists():
+                    try:
+                        pipe.load_lora_weights(str(perf_path), adapter_name="perfection")
+                        pipe.load_lora_weights(str(skin_path), adapter_name="skin")
+                        if hasattr(pipe, "fuse_lora"):
+                            pipe.fuse_lora(lora_scale=0.6)
+                        base_realism_loaded = True
+                        log(
+                            f"Loaded {lora_label} LoRAs: perfection + skin",
+                            prefix="LoRA",
+                        )
+                    except Exception as exc:
+                        log(f"Base realism LoRA load failed: {exc}", prefix="⚠️")
+                else:
+                    log(
+                        f"Base realism LoRAs missing ({lora_label})",
+                        prefix="⚠️",
+                        perfection=str(perf_path),
+                        skin=str(skin_path),
+                    )
 
             if face_swap and is_xl and source_face_image is not None:
                 lora_path = IPADAPTER_DIR / IPADAPTER_LORA
@@ -827,7 +886,7 @@ def run_image_generation(
             # Quality fixer LoRAs (SDXL only, deterministic selection)
             positive_loras: List[tuple[str, float]] = []
             negative_loras: List[tuple[str, float]] = []
-            if is_xl:
+            if is_xl and not face_swap:
                 prompt_lc = (prompt or "").lower()
                 hands_keywords = {
                     "hands",
@@ -836,13 +895,19 @@ def run_image_generation(
                     "grabbing",
                     "holding",
                     "touching",
+                    "cupping",
+                    "hand on breast",
                     "pressed against",
                     "clutching",
                 }
-                full_body_keywords = {"full body", "standing", "kneeling", "lying down"}
+                full_body_keywords = {"full body", "standing", "kneeling", "lying down", "arched back", "silhouette"}
                 is_hands = any(k in prompt_lc for k in hands_keywords)
                 is_full_body = any(k in prompt_lc for k in full_body_keywords) or anatomy_unstable
                 is_sweat = style_preset == "sweat_oiled"
+
+                if is_full_body and face_swap:
+                    face_swap = False
+                    log("FaceSwap disabled for full-body prompt", prefix="🧪", model=model_name)
 
                 if is_sweat and LORA_SWEAT_OILED.exists():
                     positive_loras = [("sweat_oiled_skin_xl", 0.5)]
@@ -851,25 +916,45 @@ def run_image_generation(
                 elif is_hands:
                     if LORA_HANDS.exists():
                         positive_loras = [("hands_xl", 0.4)]
-                        if LORA_BAD_ANATOMY_NEG.exists():
-                            negative_loras = [("bad_anatomy_negative_xl", -0.9)]
                     else:
                         log("Hands XL LoRA missing; falling back to default fixers", prefix="⚠️", path=str(LORA_HANDS))
                         if LORA_REALISTIC_SKIN.exists():
                             skin_weight = 0.45 if "juggernaut" in model_name.lower() else 0.35 if "epicrealism" in model_name.lower() else 0.5
                             positive_loras = [("realistic_skin_texture_xl", skin_weight)]
-                        if LORA_BAD_ANATOMY_NEG.exists():
-                            negative_loras = [("bad_anatomy_negative_xl", -0.9)]
                 else:
                     if LORA_REALISTIC_SKIN.exists():
                         skin_weight = 0.45 if "juggernaut" in model_name.lower() else 0.35 if "epicrealism" in model_name.lower() else 0.5
                         positive_loras = [("realistic_skin_texture_xl", skin_weight)]
-                    if LORA_BAD_ANATOMY_NEG.exists():
+                if LORA_BAD_ANATOMY_NEG.exists():
+                    if ("juggernaut" not in model_name.lower() and "epicrealism" not in model_name.lower()) or anatomy_unstable or malformed:
                         negative_loras = [("bad_anatomy_negative_xl", -0.9)]
+                if positive_loras or negative_loras:
+                    log(
+                        "Quality fixer selection",
+                        prefix="🧪",
+                        positive=[name for name, _ in positive_loras],
+                        negative=[name for name, _ in negative_loras],
+                    )
+            else:
+                if face_swap:
+                    log("Quality fixer LoRAs skipped (FaceSwap mode)", prefix="🧪", model=model_name)
+                else:
+                    log("Quality fixer LoRAs skipped (non-SDXL model)", prefix="🧪", model=model_name)
+
+            log("FaceSwap mode", prefix="🧪", active=face_swap)
 
             if hasattr(pipe, "load_lora_weights") and (positive_loras or negative_loras):
                 loaded_names: List[str] = []
                 loaded_weights: List[float] = []
+                log(
+                    "Quality fixer LoRA paths "
+                    f"skin={LORA_REALISTIC_SKIN}({LORA_REALISTIC_SKIN.exists()}), "
+                    f"bad_anatomy={LORA_BAD_ANATOMY_NEG}({LORA_BAD_ANATOMY_NEG.exists()}), "
+                    f"hands={LORA_HANDS}({LORA_HANDS.exists()}), "
+                    f"perfection={LORA_DETAILED_PERFECTION}({LORA_DETAILED_PERFECTION.exists()}), "
+                    f"sweat={LORA_SWEAT_OILED}({LORA_SWEAT_OILED.exists()})",
+                    prefix="🧪",
+                )
                 def _adapter_loaded(name: str) -> bool:
                     if hasattr(pipe, "peft_config") and isinstance(pipe.peft_config, dict):
                         return name in pipe.peft_config
@@ -895,7 +980,11 @@ def run_image_generation(
                             loaded_names.append(name)
                             loaded_weights.append(weight)
                         else:
-                            log("Quality fixer adapter not registered after load", prefix="⚠️", name=name)
+                            log(
+                                f"Quality fixer adapter not registered after load: {name} "
+                                f"path={LORA_REALISTIC_SKIN if name == 'realistic_skin_texture_xl' else LORA_HANDS if name == 'hands_xl' else LORA_DETAILED_PERFECTION if name == 'detailed_perfection_xl' else LORA_SWEAT_OILED}",
+                                prefix="⚠️",
+                            )
                     for name, weight in negative_loras:
                         if name == "bad_anatomy_negative_xl" and LORA_BAD_ANATOMY_NEG.exists():
                             pipe.load_lora_weights(str(LORA_BAD_ANATOMY_NEG), adapter_name=name)
@@ -903,13 +992,22 @@ def run_image_generation(
                                 loaded_names.append(name)
                                 loaded_weights.append(weight)
                             else:
-                                log("Quality fixer adapter not registered after load", prefix="⚠️", name=name)
+                                log(
+                                    f"Quality fixer adapter not registered after load: {name} path={LORA_BAD_ANATOMY_NEG}",
+                                    prefix="⚠️",
+                                )
                     if hasattr(pipe, "set_adapters") and loaded_names:
                         pipe.set_adapters(loaded_names, adapter_weights=loaded_weights)
                     elif hasattr(pipe, "fuse_lora") and loaded_weights:
                         pipe.fuse_lora(lora_scale=loaded_weights[0])
                     if loaded_names:
                         log("Quality fixer LoRA", prefix="🧪", loras=loaded_names, weights=loaded_weights)
+                    if hasattr(pipe, "peft_config"):
+                        log(
+                            "Quality fixer adapter registry "
+                            f"{list(getattr(pipe, 'peft_config', {}).keys())}",
+                            prefix="🧪",
+                        )
                 except Exception as exc:
                     log(f"Quality fixer LoRA load failed: {exc}", prefix="⚠️")
 
@@ -967,6 +1065,14 @@ def run_image_generation(
             img.save(output_path)
             with output_path.open("rb") as fh:
                 image_b64 = base64.b64encode(fh.read()).decode("utf-8")
+            if base_realism_loaded:
+                try:
+                    if hasattr(pipe, "unfuse_lora"):
+                        pipe.unfuse_lora()
+                    if hasattr(pipe, "unload_lora_weights"):
+                        pipe.unload_lora_weights()
+                except Exception as exc:
+                    log(f"Base realism LoRA cleanup failed: {exc}", prefix="⚠️")
         elif Image is not None:
             log("Using fast preview placeholder (no SD detected or FAST_PREVIEW enabled)", prefix="ℹ️")
             w, h = width, height

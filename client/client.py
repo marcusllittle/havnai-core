@@ -157,6 +157,12 @@ IPADAPTER_BIN = os.environ.get("IPADAPTER_BIN", "ip-adapter-faceid-plusv2_sdxl.b
 IPADAPTER_LORA = os.environ.get("IPADAPTER_LORA", "ip-adapter-faceid-plusv2_sdxl_lora.safetensors")
 CONTROLNET_PATH = Path(os.environ.get("CONTROLNET_PATH", "/mnt/d/havnai-storage/models/controlnet/controlnet-openpose.safetensors")).expanduser()
 POSE_LIBRARY_DIR = Path(os.environ.get("POSE_LIBRARY_DIR", "/mnt/d/havnai-storage/poses")).expanduser()
+LORA_DIR = Path(os.environ.get("LORA_DIR", "/mnt/d/havnai-storage/models/loras")).expanduser()
+LORA_REALISTIC_SKIN = LORA_DIR / "skin texture style v5.safetensors"
+LORA_BAD_ANATOMY_NEG = LORA_DIR / "badanatomy_SDXL_negative_LORA_AutismMix_v1.safetensors"
+LORA_HANDS = LORA_DIR / "Hand v2.safetensors"
+LORA_DETAILED_PERFECTION = LORA_DIR / "perfection style v2d.safetensors"
+LORA_SWEAT_OILED = LORA_DIR / "Sweating my balls of mate.safetensors"
 
 
 # ---------------------------------------------------------------------------
@@ -692,6 +698,8 @@ def run_image_generation(
     hyperlora_weight = min(hyperlora_weight, 0.8)
     base_prompt = str(job_settings.get("base_prompt") or "").strip()
     negative_prompt = str(job_settings.get("negative_prompt") or "").strip()
+    anatomy_unstable = bool(job_settings.get("anatomy_unstable", False))
+    style_preset = str(job_settings.get("style_preset") or "").strip().lower()
 
     start_stats = read_gpu_stats()
     started = time.time()
@@ -804,10 +812,76 @@ def run_image_generation(
                     faceid_active = True
                     log("IP-Adapter scale", prefix="🧪", scale=ipadapter_scale)
 
-            if HYPERLORA_PATH.exists() and hasattr(pipe, "load_lora_weights"):
+            if faceid_active:
+                log("Conditioning order: FaceID -> Base prompt -> HyperLoRA -> User prompt", prefix="🧪")
+
+            # Quality fixer LoRAs (SDXL only, deterministic selection)
+            positive_loras: List[tuple[str, float]] = []
+            negative_loras: List[tuple[str, float]] = []
+            if is_xl:
+                prompt_lc = (prompt or "").lower()
+                hands_keywords = {
+                    "hands",
+                    "fingers",
+                    "gripping",
+                    "grabbing",
+                    "holding",
+                    "touching",
+                    "pressed against",
+                    "clutching",
+                }
+                full_body_keywords = {"full body", "standing", "kneeling", "lying down"}
+                is_hands = any(k in prompt_lc for k in hands_keywords)
+                is_full_body = any(k in prompt_lc for k in full_body_keywords) or anatomy_unstable
+                is_sweat = style_preset == "sweat_oiled"
+
+                if is_sweat and LORA_SWEAT_OILED.exists():
+                    positive_loras = [("sweat_oiled_skin_xl", 0.5)]
+                elif is_full_body and LORA_DETAILED_PERFECTION.exists():
+                    positive_loras = [("detailed_perfection_xl", 0.4)]
+                elif is_hands and LORA_HANDS.exists():
+                    positive_loras = [("hands_xl", 0.4)]
+                    if LORA_BAD_ANATOMY_NEG.exists():
+                        negative_loras = [("bad_anatomy_negative_xl", -0.9)]
+                else:
+                    if LORA_REALISTIC_SKIN.exists():
+                        positive_loras = [("realistic_skin_texture_xl", 0.5)]
+                    if LORA_BAD_ANATOMY_NEG.exists():
+                        negative_loras = [("bad_anatomy_negative_xl", -0.9)]
+
+            if hasattr(pipe, "load_lora_weights") and (positive_loras or negative_loras):
+                loaded_names: List[str] = []
+                loaded_weights: List[float] = []
                 try:
-                    if faceid_active:
-                        log("Conditioning order: FaceID -> Base prompt -> HyperLoRA -> User prompt", prefix="🧪")
+                    for name, weight in positive_loras:
+                        if name == "realistic_skin_texture_xl" and LORA_REALISTIC_SKIN.exists():
+                            pipe.load_lora_weights(str(LORA_REALISTIC_SKIN), adapter_name=name)
+                        elif name == "hands_xl" and LORA_HANDS.exists():
+                            pipe.load_lora_weights(str(LORA_HANDS), adapter_name=name)
+                        elif name == "detailed_perfection_xl" and LORA_DETAILED_PERFECTION.exists():
+                            pipe.load_lora_weights(str(LORA_DETAILED_PERFECTION), adapter_name=name)
+                        elif name == "sweat_oiled_skin_xl" and LORA_SWEAT_OILED.exists():
+                            pipe.load_lora_weights(str(LORA_SWEAT_OILED), adapter_name=name)
+                        else:
+                            continue
+                        loaded_names.append(name)
+                        loaded_weights.append(weight)
+                    for name, weight in negative_loras:
+                        if name == "bad_anatomy_negative_xl" and LORA_BAD_ANATOMY_NEG.exists():
+                            pipe.load_lora_weights(str(LORA_BAD_ANATOMY_NEG), adapter_name=name)
+                            loaded_names.append(name)
+                            loaded_weights.append(weight)
+                    if hasattr(pipe, "set_adapters") and loaded_names:
+                        pipe.set_adapters(loaded_names, adapter_weights=loaded_weights)
+                    elif hasattr(pipe, "fuse_lora") and loaded_weights:
+                        pipe.fuse_lora(lora_scale=loaded_weights[0])
+                    if loaded_names:
+                        log("Quality fixer LoRA", prefix="🧪", loras=loaded_names, weights=loaded_weights)
+                except Exception as exc:
+                    log(f"Quality fixer LoRA load failed: {exc}", prefix="⚠️")
+
+            if not positive_loras and HYPERLORA_PATH.exists() and hasattr(pipe, "load_lora_weights"):
+                try:
                     pipe.load_lora_weights(str(HYPERLORA_PATH), adapter_name="hyperlora")
                     if hasattr(pipe, "set_adapters"):
                         pipe.set_adapters(["hyperlora"], adapter_weights=[hyperlora_weight])

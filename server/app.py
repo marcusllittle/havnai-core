@@ -53,29 +53,6 @@ MODEL_WEIGHTS: Dict[str, float] = {
     "unstablepornhwa_beta": 12.0,
 }
 
-REALISM_MODELS = {
-    "juggernautxl_ragnarokby",
-    "epicrealismxl_vxviicrystalclear",
-    "zavychromaxl_v100",
-    "uberrealisticpornmerge_v23final",
-    "majicmixrealistic_v7",
-    "lazymixrealamateur_v40",
-}
-
-ANIME_MODELS = {
-    "kizukianimehentai",
-    "unstablepornhwa",
-    "disneypixarcartoon",
-}
-
-ANIME_KEYWORDS = {
-    "anime",
-    "manga",
-    "manhwa",
-    "illustration",
-    "toon",
-}
-
 MODEL_STATS: Dict[str, Dict[str, float]] = {}
 MANIFEST_MODELS: Dict[str, Dict[str, Any]] = {}
 EVENT_LOGS: deque = deque(maxlen=200)
@@ -103,14 +80,18 @@ REWARD_CONFIG: Dict[str, float] = {
 
 # Slight global positive bias to help realism skin detail.
 GLOBAL_POSITIVE_SUFFIX = (
-    "(masterpiece, ultra-realistic 8k:1.1), "
-    "(detailed skin pores and texture:1.05), "
-    "soft seductive half-lidded eyes, natural gaze, "
-    "perfect hands, natural relaxed hand pose"
+    "(masterpiece:1.1),"
+    "(high quality, detailed:1.05),"
+    "balanced lighting",
+    "soft seductive eyes,"
 )
 
 # Global negative prompt disabled for testing; rely on registry defaults only.
-GLOBAL_NEGATIVE_PROMPT = ""
+GLOBAL_NEGATIVE_PROMPT = (
+    "worst quality, low quality, lowres, blurry, jpeg artifacts, "
+    "watermark, text, signature, logo"
+)
+
 
 # ---------------------------------------------------------------------------
 # Version helpers
@@ -1097,12 +1078,6 @@ def submit_job() -> Any:
 
     if not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid wallet"}), 400
-    prompt_hint = str(payload.get("prompt") or payload.get("data") or "").lower()
-    model_hint = model_name.lower()
-    is_anime_prompt = any(keyword in prompt_hint for keyword in ANIME_KEYWORDS)
-    is_anime_model = any(tag in model_hint for tag in ANIME_MODELS)
-    style_mode = "anime" if (is_anime_prompt or is_anime_model) else "realism"
-
     # Allow "auto" model selection based on manifest weights
     if not model_name or model_name in {"auto", "auto_image", "auto-image"}:
         load_manifest()
@@ -1112,18 +1087,6 @@ def submit_job() -> Any:
             for key, meta in MANIFEST_MODELS.items()
             if (meta.get("task_type") or CREATOR_TASK_TYPE).upper() == CREATOR_TASK_TYPE
         ]
-        if style_mode == "realism":
-            candidates = [
-                meta
-                for meta in candidates
-                if str(meta.get("name", "")).lower() in REALISM_MODELS
-            ]
-        else:
-            candidates = [
-                meta
-                for meta in candidates
-                if any(tag in str(meta.get("name", "")).lower() for tag in ANIME_MODELS)
-            ]
         if not candidates:
             return jsonify({"error": "no_creator_models"}), 400
         names = [meta["name"] for meta in candidates]
@@ -1227,7 +1190,7 @@ def submit_job() -> Any:
         else:
             prompt_text = GLOBAL_POSITIVE_SUFFIX
         negative_prompt = ""
-        job_settings: Dict[str, Any] = {"prompt": prompt_text, "style_mode": style_mode}
+        job_settings: Dict[str, Any] = {"prompt": prompt_text}
         pipeline_name = str(cfg.get("pipeline") or "").lower() if cfg else ""
         base_negative = str(cfg.get("negative_prompt_default") or "").strip() if cfg else ""
         combined_negative = base_negative
@@ -1471,7 +1434,6 @@ def get_creator_tasks() -> Any:
                     raw_data = job.get("data")
                     prompt_text = raw_data or ""
                     negative_prompt = ""
-                    style_mode = ""
                     try:
                         parsed = json.loads(raw_data) if isinstance(raw_data, str) else None
                     except Exception:
@@ -1479,7 +1441,6 @@ def get_creator_tasks() -> Any:
                     if isinstance(parsed, dict):
                         prompt_text = str(parsed.get("prompt") or "")
                         negative_prompt = str(parsed.get("negative_prompt") or "")
-                        style_mode = str(parsed.get("style_mode") or "")
                     # Always send plain prompt text to the node (avoid passing raw JSON)
                     prompt_for_node = prompt_text
 
@@ -1504,7 +1465,6 @@ def get_creator_tasks() -> Any:
                             "data": raw_data,
                             "prompt": prompt_for_node,
                             "negative_prompt": negative_prompt,
-                            "style_mode": style_mode,
                             "queued_at": job.get("timestamp"),
                         }
                     ]

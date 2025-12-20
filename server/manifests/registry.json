@@ -24,8 +24,7 @@
       "steps": 25,
       "guidance": 6.8,
       "width": 640,
-      "height": 832,
-      "negative_prompt_default": "extra limbs, extra fingers, bad hands, bad anatomy, disfigured face, distorted, blurry, artifact"
+      "height": 832
     },
     {
       "name": "lazymixRealAmateur_v40",
@@ -49,8 +48,7 @@
       "steps": 23,
       "guidance": 6.8,
       "width": 576,
-      "height": 768,
-      "negative_prompt_default": "extra limbs, extra fingers, bad hands, bad anatomy, disfigured face, distorted, blurry, artifact"
+      "height": 768
     },
     {
       "name": "juggernautXL_ragnarokBy",
@@ -72,8 +70,7 @@
       "steps": 28,
       "guidance": 6.0,
       "width": 832,
-      "height": 1248,
-      "negative_prompt_default": "extra fingers, extra hands, extra arms, twisted wrists, deformed hands, dislocated joints, malformed feet, backward feet, duplicate face, background ghosts, extra people, bad anatomy, low quality, blurry"
+      "height": 1248
     },
     {
       "name": "epicrealismXL_vxviiCrystalclear",
@@ -94,8 +91,7 @@
       "steps": 28,
       "guidance": 5.8,
       "width": 768,
-      "height": 1152,
-      "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, action wrist hyperflex, prop-hand glow fusion, twisted ankles, malformed feet, duplicate people, background ghosts, clothing merging, bad anatomy, low quality, blurry"
+      "height": 1152
     },
     {
       "name": "zavychromaXL_v100",
@@ -116,8 +112,7 @@
       "steps": 28,
       "guidance": 6.0,
       "width": 832,
-      "height": 1248,
-      "negative_prompt_default": "extra fingers, extra hands, extra arms, twisted wrists, deformed hands, malformed feet, duplicate face, background ghosts, bad anatomy, low quality, blurry"
+      "height": 1248
     },
     {
       "name": "perfectdeliberate_v5SD15",
@@ -139,8 +134,7 @@
       "steps": 23,
       "guidance": 6.3,
       "width": 576,
-      "height": 768,
-      "negative_prompt_default": "duplicate face, multiple faces, extra hands, extra fingers, deformed hands, merged limbs, bad anatomy, mangled"
+      "height": 768
     },
     {
       "name": "uberRealisticPornMerge_v23Final",
@@ -162,8 +156,7 @@
       "steps": 23,
       "guidance": 6.3,
       "width": 576,
-      "height": 768,
-      "negative_prompt_default": "extra limbs, bad hands, missing hands, cropped hands, deformed hands, extra fingers, bad anatomy, overexposed skin, artifacts"
+      "height": 768
     },
     {
       "name": "triomerge_v10",
@@ -185,8 +178,7 @@
       "steps": 22,
       "guidance": 6.3,
       "width": 576,
-      "height": 768,
-      "negative_prompt_default": "extra limbs, merged limbs, bad hands, distorted face, asymmetry"
+      "height": 768
     },
     {
       "name": "unstablePornhwa_beta",
@@ -208,8 +200,7 @@
       "steps": 20,
       "guidance": 6.3,
       "width": 576,
-      "height": 768,
-      "negative_prompt_default": "extra limbs, bad hands, bad anatomy, distorted face"
+      "height": 768
     },
     {
       "name": "disneyPixarCartoon_v10",
@@ -231,8 +222,7 @@
       "steps": 21,
       "guidance": 6.3,
       "width": 576,
-      "height": 768,
-      "negative_prompt_default": "duplicate head, floating hair, disembodied parts, extra limbs, extra fingers, bad hands, bad anatomy"
+      "height": 768
     },
     {
       "name": "kizukiAnimeHentai_animeHentaiV4",
@@ -254,8 +244,7 @@
       "steps": 20,
       "guidance": 6.2,
       "width": 576,
-      "height": 768,
-      "negative_prompt_default": "extra limbs, extra fingers, bad hands, bad anatomy, distorted face"
+      "height": 768
     },
     {
       "name": "wan_t2v_a14b",

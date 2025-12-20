@@ -97,7 +97,40 @@ except ImportError:  # pragma: no cover
 
 HAVNAI_HOME = Path(os.environ.get("HAVNAI_HOME", Path.home() / ".havnai"))
 ENV_PATH = HAVNAI_HOME / ".env"
-CREATOR_SCAN_DIR = HAVNAI_HOME / "models" / "creator"
+SUPPORTED_MODEL_EXTS = {".onnx", ".safetensors", ".ckpt"}
+_DEFAULT_CREATOR_DIR = Path("/mnt/d/havnai-storage/models/creator")
+_ENV_CREATOR_DIR = Path(os.environ.get("CREATOR_SCAN_DIR", str(HAVNAI_HOME / "models" / "creator"))).expanduser()
+
+
+def _has_creator_models(path: Path) -> bool:
+    if not path.exists():
+        return False
+    for entry in path.rglob("*"):
+        if entry.is_file() and entry.suffix.lower() in SUPPORTED_MODEL_EXTS:
+            return True
+    return False
+
+
+if _has_creator_models(_ENV_CREATOR_DIR):
+    CREATOR_SCAN_DIR = _ENV_CREATOR_DIR
+elif _has_creator_models(_DEFAULT_CREATOR_DIR):
+    CREATOR_SCAN_DIR = _DEFAULT_CREATOR_DIR
+else:
+    CREATOR_SCAN_DIR = _ENV_CREATOR_DIR
+if os.environ.get("CREATOR_SCAN_DIR") and not _ENV_CREATOR_DIR.exists():
+    log(
+        "CREATOR_SCAN_DIR missing; falling back",
+        prefix="⚠️",
+        env=str(_ENV_CREATOR_DIR),
+        fallback=str(CREATOR_SCAN_DIR),
+    )
+elif _ENV_CREATOR_DIR.exists() and not _has_creator_models(_ENV_CREATOR_DIR) and _has_creator_models(_DEFAULT_CREATOR_DIR):
+    log(
+        "CREATOR_SCAN_DIR empty; falling back",
+        prefix="⚠️",
+        env=str(_ENV_CREATOR_DIR),
+        fallback=str(CREATOR_SCAN_DIR),
+    )
 DOWNLOAD_DIR = HAVNAI_HOME / "downloads"
 LOGS_DIR = HAVNAI_HOME / "logs"
 OUTPUTS_DIR = HAVNAI_HOME / "outputs"
@@ -108,8 +141,6 @@ CREATOR_SCAN_DIR.mkdir(parents=True, exist_ok=True)
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-
-SUPPORTED_MODEL_EXTS = {".onnx", ".safetensors", ".ckpt"}
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -722,6 +753,7 @@ def run_image_generation(
     try:
         model_path = resolve_model_path(model_name, model_url, filename_hint=f"{model_name}.safetensors")
     except Exception as exc:
+        log(f"Model resolution failed: {exc}", prefix="🚫", model=model_name, url=model_url or None)
         return ({"status": "failed", "error": str(exc), "reward_weight": reward_weight}, utilization_hint, None)
 
     steps = _env_int("HAI_STEPS", 65)

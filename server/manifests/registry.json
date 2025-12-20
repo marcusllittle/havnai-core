@@ -98,6 +98,28 @@
       "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, action wrist hyperflex, prop-hand glow fusion, twisted ankles, malformed feet, duplicate people, background ghosts, clothing merging, bad anatomy, low quality, blurry"
     },
     {
+      "name": "zavychromaXL_v100",
+      "pipeline": "sdxl",
+      "path": "/mnt/d/havnai-storage/models/creator/zavychromaXL_v100.safetensors",
+      "type": "checkpoint",
+      "tags": [
+        "realism",
+        "cinematic",
+        "sharp_detail"
+      ],
+      "task_type": "IMAGE_GEN",
+      "weight": 20,
+      "reward_weight": 20,
+      "strengths": "Cinematic SDXL realism with strong detail.",
+      "weaknesses": "May over-emphasize contrast in low light.",
+      "sampler": "dpmpp_2m_karras",
+      "steps": 28,
+      "guidance": 6.0,
+      "width": 832,
+      "height": 1248,
+      "negative_prompt_default": "extra fingers, extra hands, extra arms, twisted wrists, deformed hands, malformed feet, duplicate face, background ghosts, bad anatomy, low quality, blurry"
+    },
+    {
       "name": "perfectdeliberate_v5SD15",
       "pipeline": "sd15",
       "path": "/mnt/d/havnai-storage/models/creator/perfectdeliberate_v5SD15.safetensors",

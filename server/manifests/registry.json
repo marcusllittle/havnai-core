@@ -239,19 +239,25 @@
     "detailed_hair",
     "sharp_eyes",
     "vibrant_colors",
-    "intricate_outfit"
+    "intricate_outfit",
+    "yuri",
+    "nsfw",
+    "solo",
+    "multiple_girls"
   ],
   "task_type": "IMAGE_GEN",
   "weight": 10,
   "reward_weight": 10,
-  "strengths": "Outstanding anime/hentai-style rendering with sharp detailed eyes, vibrant colorful hair, intricate outfits, and high-contrast masterpiece aesthetics. Excellent coherence and style adherence.",
-  "weaknesses": "Not realistic. Intentionally exaggerated eyes, proportions, and features typical of hentai/anime. Can produce minor anatomy artifacts without strong negatives.",
+  "strengths": "Outstanding anime/hentai-style rendering with sharp eyes, vibrant hair, and masterpiece-level detail. Excellent for both solo and multi-girl (yuri) scenes when using the appropriate negative mode.",
+  "weaknesses": "Not realistic. Exaggerated proportions typical of hentai. Multi-character scenes require the enhanced negative to avoid body fusion/merging.",
   "sampler": "dpm++_sde_karras",
   "steps": 25,
   "guidance": 6.5,
   "width": 576,
   "height": 768,
-  "negative_prompt_default": "extra limbs, extra fingers, fused fingers, bad hands, mutated hands, bad anatomy, distorted face, deformed, blurry, low quality, realistic, photo, duplicate, cloned face, multiple heads, text, watermark, signature, ugly, poorly drawn"
+  "negative_prompt_default": "extra limbs, extra fingers, fused fingers, bad hands, mutated hands, bad anatomy, distorted face, deformed, blurry, low quality, realistic, photo, duplicate, cloned face, multiple heads, text, watermark, signature, ugly, poorly drawn",
+  "negative_prompt_multi_girl": "merged bodies, fused bodies, body fusion, conjoined, shared torso, merged breasts, malformed chest, extra torso, cloned body, duplicate body, merged limbs, fused torso, siamese twins, extra breasts, malformed anatomy, body overlap",
+  "notes": "Use 'negative_prompt_default' for solo (1girl) scenes — gives clean, perfect results. Append or replace with 'negative_prompt_multi_girl' terms when generating 2girls, yuri, couples, or any scene with physical contact to prevent merging/fusion artifacts."
 },
     {
       "name": "wan_t2v_a14b",

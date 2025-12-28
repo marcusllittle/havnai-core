@@ -83,7 +83,6 @@ GLOBAL_POSITIVE_SUFFIX = (
     "(ultra-realistic 8k:1.05), "
     "(detailed skin pores:1.03), "
     "focused eyes, clear pupils, natural gaze, "
-    "well formed hands, five fingers on each hand, "
     "natural teeth, realistic mouth structure"
 )
 

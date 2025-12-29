@@ -1735,7 +1735,7 @@ def get_creator_tasks() -> Any:
                         negative_prompt = str(parsed.get("negative_prompt") or "")
                         parsed_loras = parsed.get("loras") or []
                         if isinstance(parsed_loras, list):
-                            loras = [str(item) for item in parsed_loras if item]
+                            loras = [item for item in parsed_loras if item]
                     # Always send plain prompt text to the node (avoid passing raw JSON)
                     prompt_for_node = prompt_text
 

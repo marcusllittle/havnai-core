@@ -4,6 +4,38 @@ import re
 from typing import Optional, Tuple
 
 
+POSITION_LORA_WEIGHTS = {
+    "POVDoggy": 0.65,
+    "POVReverseCowgirl": 0.65,
+    "PSCowgirl": 0.65,
+    "MissionaryVaginal-v2": 0.60,
+}
+
+EXTRA_POSITION_NEGATIVE = (
+    ", merged bodies, conjoined twins, extra torso, duplicate torso, extra limbs, "
+    "extra arms, extra legs, deformed anatomy, body fusion, siamese, malformed chest, "
+    "missing penis, censored, bar censor, mosaic censor"
+)
+
+POSITION_REINFORCEMENTS = {
+    "POVDoggy": "(doggystyle:1.05)",
+    "POVReverseCowgirl": "(reverse cowgirl position:1.05)",
+    "PSCowgirl": "(cowgirl position:1.05)",
+    "MissionaryVaginal-v2": "(missionary position:1.05)",
+}
+
+POSITION_PENETRATION_SUFFIX = {
+    "POVDoggy": "(deep penetration:0.9)",
+    "POVReverseCowgirl": "(vaginal penetration:0.9), (penis inside:0.9)",
+    "PSCowgirl": "(vaginal penetration:0.9), (penis inside:0.9)",
+    "MissionaryVaginal-v2": "(vaginal penetration:0.9), (penis inside:0.9)",
+}
+
+
+def resolve_position_lora_weight(lora_name: str) -> float:
+    return float(POSITION_LORA_WEIGHTS.get(lora_name, 0.65))
+
+
 def enhance_prompt_for_positions(user_prompt: str) -> Tuple[str, Optional[str], Optional[str]]:
     """Enhance prompts with position-specific hints and routing metadata."""
 
@@ -52,11 +84,18 @@ def enhance_prompt_for_positions(user_prompt: str) -> Tuple[str, Optional[str], 
         position_lora = "POVDoggy"
 
     enhanced = prompt
+    reinforcement = POSITION_REINFORCEMENTS.get(position_lora, "(position:1.05)")
     if matched_pattern:
         def _reinforce(match: re.Match) -> str:
-            return f"({match.group(0)}:1.15)"
+            return reinforcement
 
         enhanced = re.sub(matched_pattern, _reinforce, enhanced, count=1, flags=re.IGNORECASE)
+    else:
+        enhanced = f"{enhanced}, {reinforcement}" if enhanced else reinforcement
+
+    penetration = POSITION_PENETRATION_SUFFIX.get(position_lora)
+    if penetration:
+        enhanced = f"{enhanced}, {penetration}"
 
     enhanced = f"{enhanced}, detailed, masterpiece" if enhanced else "detailed, masterpiece"
 
@@ -80,4 +119,9 @@ def enhance_prompt_for_positions(user_prompt: str) -> Tuple[str, Optional[str], 
     return enhanced, selected_model, position_lora
 
 
-__all__ = ["enhance_prompt_for_positions"]
+__all__ = [
+    "EXTRA_POSITION_NEGATIVE",
+    "POSITION_LORA_WEIGHTS",
+    "enhance_prompt_for_positions",
+    "resolve_position_lora_weight",
+]

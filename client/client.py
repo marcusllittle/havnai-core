@@ -558,35 +558,62 @@ def run_image_generation(
                     except Exception as exc:
                         log(f"Custom VAE load failed for {entry.name}: {exc}", prefix="⚠️", vae=str(vae_path))
             # Optional LoRA attachment for position/style enhancements
-            lora_paths: List[Path] = []
+            lora_entries: List[Tuple[Path, float, str]] = []
             if job_settings and isinstance(job_settings, dict):
                 requested = job_settings.get("loras") or []
                 if isinstance(requested, str):
                     requested = [requested]
                 if isinstance(requested, list):
                     for item in requested:
-                        name = str(item or "").strip()
+                        weight = 1.0
+                        if isinstance(item, dict):
+                            name = str(item.get("name") or "").strip()
+                            try:
+                                weight = float(item.get("weight", weight))
+                            except (TypeError, ValueError):
+                                weight = 1.0
+                        else:
+                            name = str(item or "").strip()
                         if not name:
                             continue
                         candidate = Path(name).expanduser()
                         if candidate.is_file():
-                            lora_paths.append(candidate)
+                            lora_entries.append((candidate, weight, candidate.stem))
                             continue
                         if candidate.suffix == "":
                             candidate = candidate.with_suffix(".safetensors")
                         fallback = LORA_DIR / candidate.name
                         if fallback.exists():
-                            lora_paths.append(fallback)
-            if len(lora_paths) > 1:
-                lora_paths = lora_paths[:1]
-            if lora_paths:
+                            lora_entries.append((fallback, weight, fallback.stem))
+            if len(lora_entries) > 1:
+                lora_entries = lora_entries[:1]
+            if lora_entries:
+                adapter_names: List[str] = []
+                adapter_weights: List[float] = []
                 if hasattr(pipe, "load_lora_weights"):
-                    for lora_path in lora_paths:
+                    for lora_path, lora_weight, adapter_name in lora_entries:
+                        adapter = f"pos_{adapter_name}"
                         try:
+                            pipe.load_lora_weights(str(lora_path), adapter_name=adapter)
+                        except TypeError:
                             pipe.load_lora_weights(str(lora_path))
-                            log(f"Loaded LoRA for {entry.name}", prefix="✅", lora=str(lora_path))
                         except Exception as exc:
                             log(f"LoRA load failed for {entry.name}: {exc}", prefix="⚠️", lora=str(lora_path))
+                            continue
+                        adapter_names.append(adapter)
+                        adapter_weights.append(lora_weight)
+                        log(f"Loaded LoRA for {entry.name}", prefix="✅", lora=str(lora_path), weight=lora_weight)
+                if adapter_names:
+                    if hasattr(pipe, "set_adapters"):
+                        try:
+                            pipe.set_adapters(adapter_names, adapter_weights)
+                        except TypeError:
+                            pipe.set_adapters(adapter_names)
+                    elif hasattr(pipe, "fuse_lora"):
+                        try:
+                            pipe.fuse_lora()
+                        except Exception as exc:
+                            log(f"LoRA fuse failed for {entry.name}: {exc}", prefix="⚠️")
                 else:
                     log("Pipeline does not support LoRA loading", prefix="⚠️")
             if hasattr(pipe, "enable_attention_slicing"):

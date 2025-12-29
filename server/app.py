@@ -46,7 +46,11 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 from havnai.video_engine.gguf_wan2_2 import VideoEngine, VideoJobRequest
-from common.prompt_enhancers import enhance_prompt_for_positions
+from common.prompt_enhancers import (
+    EXTRA_POSITION_NEGATIVE,
+    enhance_prompt_for_positions,
+    resolve_position_lora_weight,
+)
 
 # Reward weights bootstrap – enriched at runtime via registration
 MODEL_WEIGHTS: Dict[str, float] = {
@@ -1497,11 +1501,13 @@ def submit_job() -> Any:
         negative_prompt = str(payload.get("negative_prompt") or "").strip()
         job_settings: Dict[str, Any] = {"prompt": prompt_text}
         if position_lora:
-            job_settings["loras"] = [position_lora]
+            job_settings["loras"] = [{"name": position_lora, "weight": resolve_position_lora_weight(position_lora)}]
         base_negative = str(cfg.get("negative_prompt_default") or "").strip() if cfg else ""
         combined_negative = ", ".join(
             filter(None, [negative_prompt or base_negative, GLOBAL_NEGATIVE_PROMPT])
         )
+        if position_lora:
+            combined_negative = f"{combined_negative}{EXTRA_POSITION_NEGATIVE}" if combined_negative else EXTRA_POSITION_NEGATIVE.lstrip(", ")
         if combined_negative:
             job_settings["negative_prompt"] = combined_negative
         pose_image = payload.get("pose_image") or payload.get("pose_image_b64") or ""

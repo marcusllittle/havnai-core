@@ -46,6 +46,7 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 from havnai.video_engine.gguf_wan2_2 import VideoEngine, VideoJobRequest
+from common.prompt_enhancers import enhance_prompt_for_positions
 
 # Reward weights bootstrap – enriched at runtime via registration
 MODEL_WEIGHTS: Dict[str, float] = {
@@ -1373,6 +1374,12 @@ def submit_job() -> Any:
     model_name_raw = str(payload.get("model", "")).strip()
     model_name = model_name_raw.lower()
     weight = payload.get("weight")
+    raw_prompt = str(payload.get("prompt") or payload.get("data") or "")
+    enhanced_prompt, model_override, position_lora = enhance_prompt_for_positions(raw_prompt)
+    explicit_model = bool(model_name_raw) and model_name not in {"auto", "auto_image", "auto-image"}
+    if model_override and not explicit_model:
+        model_name_raw = model_override
+        model_name = model_override.lower()
 
     if not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid wallet"}), 400
@@ -1411,7 +1418,7 @@ def submit_job() -> Any:
 
     if is_wan_i2v:
         # Persist all WAN-specific controls inside the job data blob as JSON
-        prompt_text = str(payload.get("prompt") or "")
+        prompt_text = enhanced_prompt
         settings: Dict[str, Any] = {
             "prompt": prompt_text,
             "init_image": payload.get("init_image") or None,
@@ -1426,7 +1433,7 @@ def submit_job() -> Any:
         job_data = json.dumps(settings)
         task_type = "VIDEO_GEN"
     elif is_animatediff:
-        prompt_text = str(payload.get("prompt") or "")
+        prompt_text = enhanced_prompt
         negative_prompt = str(payload.get("negative_prompt") or "")
         # Core AnimateDiff controls – validated/coerced into safe ranges
         try:
@@ -1482,13 +1489,15 @@ def submit_job() -> Any:
         job_data = json.dumps(settings)
         task_type = "ANIMATEDIFF"
     else:
-        prompt_text = str(payload.get("prompt") or payload.get("data") or "")
+        prompt_text = enhanced_prompt
         if prompt_text:
             prompt_text = f"{prompt_text}, {GLOBAL_POSITIVE_SUFFIX}"
         else:
             prompt_text = GLOBAL_POSITIVE_SUFFIX
         negative_prompt = str(payload.get("negative_prompt") or "").strip()
         job_settings: Dict[str, Any] = {"prompt": prompt_text}
+        if position_lora:
+            job_settings["loras"] = [position_lora]
         base_negative = str(cfg.get("negative_prompt_default") or "").strip() if cfg else ""
         combined_negative = ", ".join(
             filter(None, [negative_prompt or base_negative, GLOBAL_NEGATIVE_PROMPT])
@@ -1773,6 +1782,7 @@ def get_creator_tasks() -> Any:
                 "wallet": task.get("wallet"),
                 "prompt": task.get("prompt") or task.get("data", ""),
                 "negative_prompt": task.get("negative_prompt") or "",
+                "loras": task.get("loras") or [],
                 "queued_at": task.get("queued_at"),
                 "assigned_at": task.get("assigned_at"),
             }

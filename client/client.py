@@ -85,6 +85,12 @@ ENV_PATH = HAVNAI_HOME / ".env"
 LOGS_DIR = HAVNAI_HOME / "logs"
 OUTPUTS_DIR = HAVNAI_HOME / "outputs"
 VERSION_SEARCH_PATHS = [HAVNAI_HOME / "VERSION", Path(__file__).resolve().parent / "VERSION"]
+DEFAULT_LORA_DIR = Path("/mnt/d/havnai-storage/models/loras")
+LORA_DIR = Path(
+    os.environ.get("HAI_LORA_DIR")
+    or os.environ.get("HAVNAI_LORA_DIR")
+    or (DEFAULT_LORA_DIR if DEFAULT_LORA_DIR.exists() else HAVNAI_HOME / "loras")
+).expanduser()
 
 HAVNAI_HOME.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -403,6 +409,11 @@ def execute_task(task: Dict[str, Any]) -> None:
         job_settings = None
         prompt_raw = task.get("prompt")
         try:
+            task_loras = task.get("loras") if isinstance(task, dict) else None
+            if task_loras:
+                if job_settings is None:
+                    job_settings = {}
+                job_settings["loras"] = task_loras
             if isinstance(prompt_raw, dict):
                 job_settings = prompt_raw
                 prompt = str(job_settings.get("prompt") or prompt)
@@ -534,6 +545,8 @@ def run_image_generation(
                         log(f"AutoPipeline load failed: {exc}", prefix="⚠️")
             if pipe is None and _SDPipe is not None:
                 pipe = _SDPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
+            if pipe is None:
+                raise RuntimeError("Failed to construct a text2image pipeline for model.")
             # Optionally swap in a custom VAE for SD1.5-style checkpoints
             if pipe is not None and getattr(entry, "vae_path", "") and pipeline_name != "sdxl":
                 vae_path = Path(str(getattr(entry, "vae_path", ""))).expanduser()
@@ -544,6 +557,38 @@ def run_image_generation(
                         log(f"Loaded custom VAE for {entry.name}", prefix="✅", vae=str(vae_path))
                     except Exception as exc:
                         log(f"Custom VAE load failed for {entry.name}: {exc}", prefix="⚠️", vae=str(vae_path))
+            # Optional LoRA attachment for position/style enhancements
+            lora_paths: List[Path] = []
+            if job_settings and isinstance(job_settings, dict):
+                requested = job_settings.get("loras") or []
+                if isinstance(requested, str):
+                    requested = [requested]
+                if isinstance(requested, list):
+                    for item in requested:
+                        name = str(item or "").strip()
+                        if not name:
+                            continue
+                        candidate = Path(name).expanduser()
+                        if candidate.is_file():
+                            lora_paths.append(candidate)
+                            continue
+                        if candidate.suffix == "":
+                            candidate = candidate.with_suffix(".safetensors")
+                        fallback = LORA_DIR / candidate.name
+                        if fallback.exists():
+                            lora_paths.append(fallback)
+            if len(lora_paths) > 1:
+                lora_paths = lora_paths[:1]
+            if lora_paths:
+                if hasattr(pipe, "load_lora_weights"):
+                    for lora_path in lora_paths:
+                        try:
+                            pipe.load_lora_weights(str(lora_path))
+                            log(f"Loaded LoRA for {entry.name}", prefix="✅", lora=str(lora_path))
+                        except Exception as exc:
+                            log(f"LoRA load failed for {entry.name}: {exc}", prefix="⚠️", lora=str(lora_path))
+                else:
+                    log("Pipeline does not support LoRA loading", prefix="⚠️")
             if hasattr(pipe, "enable_attention_slicing"):
                 pipe.enable_attention_slicing("max")
             if hasattr(pipe, "set_progress_bar_config"):

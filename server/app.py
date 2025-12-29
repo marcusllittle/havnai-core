@@ -48,6 +48,7 @@ if str(BASE_DIR) not in sys.path:
 from havnai.video_engine.gguf_wan2_2 import VideoEngine, VideoJobRequest
 from common.prompt_enhancers import (
     enhance_prompt_for_positions,
+    has_hardcore_keywords,
     resolve_position_lora_weight,
 )
 
@@ -89,6 +90,8 @@ GLOBAL_POSITIVE_SUFFIX = (
     "focused eyes, clear pupils, natural gaze, "
     "natural teeth, realistic mouth structure"
 )
+
+HARDCORE_POSITIVE_SUFFIX = "ultra sharp skin texture, photorealistic details, highres, masterpiece"
 
 # Global negative prompt to discourage common artifacts across all models.
 GLOBAL_NEGATIVE_PROMPT = ", ".join(
@@ -1378,12 +1381,21 @@ def submit_job() -> Any:
     model_name = model_name_raw.lower()
     weight = payload.get("weight")
     raw_prompt = str(payload.get("prompt") or payload.get("data") or "")
-    enhanced_prompt, model_override, position_lora, position_negative = enhance_prompt_for_positions(raw_prompt)
+    auto_model_request = not model_name or model_name in {"auto", "auto_image", "auto-image"}
+    hardcore_prompt = has_hardcore_keywords(raw_prompt)
+    if auto_model_request or hardcore_prompt:
+        enhanced_prompt, model_override, position_lora, position_negative = enhance_prompt_for_positions(raw_prompt)
+    else:
+        enhanced_prompt, model_override, position_lora, position_negative = raw_prompt, None, None, None
     explicit_model = bool(model_name_raw) and model_name not in {"auto", "auto_image", "auto-image"}
+    if (auto_model_request or hardcore_prompt) and model_override:
+        model_name_raw = model_override
+        model_name = model_override.lower()
+
     if not explicit_model:
         if position_lora:
             load_manifest()
-            for candidate in ("lazymixRealAmateur_v40", "majicmixRealistic_v7", "uberRealisticPornMerge_v23Final"):
+            for candidate in ("lazymixRealAmateur_v40", "majicmixRealistic_v7"):
                 if candidate.lower() in MANIFEST_MODELS:
                     model_name_raw = candidate
                     model_name = candidate.lower()
@@ -1501,6 +1513,13 @@ def submit_job() -> Any:
         task_type = "ANIMATEDIFF"
     else:
         prompt_text = enhanced_prompt
+        if position_lora:
+            lora_weight = resolve_position_lora_weight(position_lora)
+            lora_tag = f"<lora:{position_lora}:{lora_weight:.2f}>"
+            if lora_tag not in prompt_text:
+                prompt_text = f"{prompt_text}, {lora_tag}" if prompt_text else lora_tag
+        if hardcore_prompt and HARDCORE_POSITIVE_SUFFIX.lower() not in prompt_text.lower():
+            prompt_text = f"{prompt_text}, {HARDCORE_POSITIVE_SUFFIX}" if prompt_text else HARDCORE_POSITIVE_SUFFIX
         if prompt_text:
             prompt_text = f"{prompt_text}, {GLOBAL_POSITIVE_SUFFIX}"
         else:
@@ -1536,9 +1555,14 @@ def submit_job() -> Any:
                 job_settings["height"] = cfg["height"]
             if cfg.get("sampler"):
                 job_settings["sampler"] = cfg["sampler"]
-        if position_lora:
-            job_settings["steps"] = max(int(job_settings.get("steps", 0) or 0), 28)
-            job_settings["guidance"] = max(float(job_settings.get("guidance", 0.0) or 0.0), 7.2)
+        if hardcore_prompt:
+            current_steps = int(job_settings.get("steps", 0) or 0)
+            if current_steps <= 0:
+                current_steps = 28
+            else:
+                current_steps = max(current_steps, 28)
+            job_settings["steps"] = min(current_steps, 32)
+            job_settings["guidance"] = 7.0
 
         job_data = json.dumps(job_settings)
         task_type = CREATOR_TASK_TYPE

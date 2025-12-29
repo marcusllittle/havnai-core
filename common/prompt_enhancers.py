@@ -5,7 +5,7 @@ from typing import Optional, Tuple
 
 
 POSITION_LORA_WEIGHTS = {
-    "POVDoggy": 0.65,
+    "POVDoggy": 0.60,
     "POVReverseCowgirl": 0.65,
     "PSCowgirl": 0.65,
     "MissionaryVaginal-v2": 0.60,
@@ -18,6 +18,11 @@ BASE_POSITION_NEGATIVE = (
 )
 
 SHARPNESS_NEGATIVE = "blurry, lowres, soft focus, pixelated, artifacts, low quality"
+
+ANTI_OVERLAY_NEGATIVE = (
+    "duplicate ass, layered buttocks, overlapping anatomy, double pussy, ghosting, "
+    "transparent overlay, cloned body parts"
+)
 
 ANTI_ORAL_NEGATIVE = (
     "facesitting, sitting on face, cunnilingus, oral sex, anilingus, rimjob, blowjob"
@@ -55,9 +60,34 @@ POSITION_QUALITY_SUFFIX = (
     "highres, 8k, intricate details, cinematic lighting"
 )
 
+HARDCORE_KEYWORDS = [
+    r"\bsex\b",
+    r"\bfucking\b",
+    r"\bpenetration\b",
+    r"\banal\b",
+    r"doggy",
+    r"doggystyle",
+    r"doggy style",
+    r"from behind",
+    r"bent over",
+    r"\bcowgirl\b",
+    r"\briding\b",
+    r"\bon top\b",
+    r"\breverse cowgirl\b",
+    r"\breverse riding\b",
+    r"\bmissionary\b",
+    r"\blegs spread\b",
+]
+
 
 def resolve_position_lora_weight(lora_name: str) -> float:
     return float(POSITION_LORA_WEIGHTS.get(lora_name, 0.65))
+
+def has_hardcore_keywords(user_prompt: str) -> bool:
+    prompt = (user_prompt or "").strip()
+    if not prompt:
+        return False
+    return any(re.search(pat, prompt, flags=re.IGNORECASE) for pat in HARDCORE_KEYWORDS)
 
 
 def enhance_prompt_for_positions(user_prompt: str) -> Tuple[str, Optional[str], Optional[str], Optional[str]]:
@@ -73,26 +103,7 @@ def enhance_prompt_for_positions(user_prompt: str) -> Tuple[str, Optional[str], 
         ("MissionaryVaginal-v2", [r"\bmissionary\b", r"\blegs spread\b"]),
     ]
 
-    hardcore_keywords = [
-        r"\bsex\b",
-        r"\bfucking\b",
-        r"\bpenetration\b",
-        r"\banal\b",
-        r"doggy",
-        r"doggystyle",
-        r"doggy style",
-        r"from behind",
-        r"bent over",
-        r"\bcowgirl\b",
-        r"\briding\b",
-        r"\bon top\b",
-        r"\breverse cowgirl\b",
-        r"\breverse riding\b",
-        r"\bmissionary\b",
-        r"\blegs spread\b",
-    ]
-
-    if not any(re.search(pat, lower, flags=re.IGNORECASE) for pat in hardcore_keywords):
+    if not any(re.search(pat, lower, flags=re.IGNORECASE) for pat in HARDCORE_KEYWORDS):
         return prompt, None, None, None
 
     position_lora = None
@@ -153,7 +164,12 @@ def enhance_prompt_for_positions(user_prompt: str) -> Tuple[str, Optional[str], 
 
     negative = None
     if position_lora:
-        negatives = [BASE_POSITION_NEGATIVE, ANTI_MULTIPLE_GIRLS_NEGATIVE, SHARPNESS_NEGATIVE]
+        negatives = [
+            BASE_POSITION_NEGATIVE,
+            ANTI_MULTIPLE_GIRLS_NEGATIVE,
+            SHARPNESS_NEGATIVE,
+            ANTI_OVERLAY_NEGATIVE,
+        ]
         if position_lora == "POVDoggy":
             negatives.append(DOGGY_ANTI_ORAL_NEGATIVE)
         negative = ", ".join([item for item in negatives if item])
@@ -164,8 +180,11 @@ def enhance_prompt_for_positions(user_prompt: str) -> Tuple[str, Optional[str], 
 __all__ = [
     "ANTI_MULTIPLE_GIRLS_NEGATIVE",
     "ANTI_ORAL_NEGATIVE",
+    "ANTI_OVERLAY_NEGATIVE",
     "BASE_POSITION_NEGATIVE",
+    "HARDCORE_KEYWORDS",
     "POSITION_LORA_WEIGHTS",
     "enhance_prompt_for_positions",
+    "has_hardcore_keywords",
     "resolve_position_lora_weight",
 ]

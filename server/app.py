@@ -1527,7 +1527,22 @@ def submit_job() -> Any:
         else:
             prompt_text = GLOBAL_POSITIVE_SUFFIX
         negative_prompt = str(payload.get("negative_prompt") or "").strip()
-        job_settings: Dict[str, Any] = {"prompt": prompt_text}
+        seed = payload.get("seed")
+        try:
+            seed = int(seed) if seed is not None else None
+        except (TypeError, ValueError):
+            seed = None
+        auto_anatomy_raw = payload.get("auto_anatomy")
+        if isinstance(auto_anatomy_raw, bool):
+            auto_anatomy = auto_anatomy_raw
+        elif isinstance(auto_anatomy_raw, str):
+            auto_anatomy = auto_anatomy_raw.strip().lower() in {"1", "true", "yes"}
+        else:
+            auto_anatomy = False
+        # Pass through per-image overrides for the node to honor.
+        job_settings: Dict[str, Any] = {"prompt": prompt_text, "auto_anatomy": auto_anatomy}
+        if seed is not None:
+            job_settings["seed"] = seed
         if position_lora:
             job_settings["loras"] = [{"name": position_lora, "weight": resolve_position_lora_weight(position_lora)}]
         base_negative = str(cfg.get("negative_prompt_default") or "").strip() if cfg else ""
@@ -1769,6 +1784,7 @@ def get_creator_tasks() -> Any:
                     prompt_text = raw_data or ""
                     negative_prompt = ""
                     loras: List[str] = []
+                    image_overrides: Dict[str, Any] = {}
                     try:
                         parsed = json.loads(raw_data) if isinstance(raw_data, str) else None
                     except Exception:
@@ -1779,6 +1795,32 @@ def get_creator_tasks() -> Any:
                         parsed_loras = parsed.get("loras") or []
                         if isinstance(parsed_loras, list):
                             loras = [item for item in parsed_loras if item]
+                        # Forward per-image overrides stored in job settings.
+                        for key in ("steps", "guidance", "width", "height", "sampler", "seed", "auto_anatomy"):
+                            if key not in parsed:
+                                continue
+                            value = parsed.get(key)
+                            if value is None:
+                                continue
+                            if key in {"steps", "width", "height", "seed"}:
+                                try:
+                                    image_overrides[key] = int(value)
+                                except (TypeError, ValueError):
+                                    continue
+                            elif key == "guidance":
+                                try:
+                                    image_overrides[key] = float(value)
+                                except (TypeError, ValueError):
+                                    continue
+                            elif key == "sampler":
+                                value_str = str(value).strip()
+                                if value_str:
+                                    image_overrides[key] = value_str
+                            elif key == "auto_anatomy":
+                                if isinstance(value, bool):
+                                    image_overrides[key] = value
+                                elif isinstance(value, str):
+                                    image_overrides[key] = value.strip().lower() in {"1", "true", "yes"}
                     # Always send plain prompt text to the node (avoid passing raw JSON)
                     prompt_for_node = prompt_text
 
@@ -1787,8 +1829,7 @@ def get_creator_tasks() -> Any:
                     log_event("Job claimed by node", job_id=job["id"], node_id=node_id)
                     reward_weight = float(job["weight"] or cfg.get("reward_weight", resolve_weight(job["model"], 10.0)))
                     job_task_type = (job.get("task_type") or CREATOR_TASK_TYPE).upper()
-                    pending = [
-                        {
+                    pending_entry = {
                             "task_id": job["id"],
                             "task_type": job_task_type,
                             "model_name": job["model"],
@@ -1806,7 +1847,9 @@ def get_creator_tasks() -> Any:
                             "loras": loras,
                             "queued_at": job.get("timestamp"),
                         }
-                    ]
+                    if job_task_type == CREATOR_TASK_TYPE and image_overrides:
+                        pending_entry.update(image_overrides)
+                    pending = [pending_entry]
                     node_info["current_task"] = {
                         "task_id": job["id"],
                         "model_name": job["model"],
@@ -1840,6 +1883,11 @@ def get_creator_tasks() -> Any:
                 "queued_at": task.get("queued_at"),
                 "assigned_at": task.get("assigned_at"),
             }
+            if task_payload["type"].upper() == CREATOR_TASK_TYPE:
+                # Forward generation overrides for image tasks only.
+                for key in ("steps", "guidance", "width", "height", "sampler", "seed", "auto_anatomy"):
+                    if key in task and task[key] is not None:
+                        task_payload[key] = task[key]
             # If this is a WAN I2V video job, attempt to expose structured settings to the node
             if task_payload["type"].upper() == "VIDEO_GEN":
                 try:

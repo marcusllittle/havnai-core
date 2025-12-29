@@ -8,6 +8,7 @@ import math
 from logging.handlers import RotatingFileHandler
 import os
 import random
+import re
 import socket
 import subprocess
 import sys
@@ -431,6 +432,15 @@ def execute_task(task: Dict[str, Any]) -> None:
                 prompt = prompt_raw
         except Exception as exc:
             log(f"Failed to parse job settings: {exc}", prefix="⚠️", task_id=task_id)
+        # Merge coordinator-sent overrides even when prompt is plain text.
+        if isinstance(task, dict):
+            for key in ("steps", "guidance", "width", "height", "sampler", "seed", "auto_anatomy"):
+                value = task.get(key)
+                if value is None or value == "":
+                    continue
+                if job_settings is None:
+                    job_settings = {}
+                job_settings.setdefault(key, value)
 
         metrics, util, image_b64 = run_image_generation(
             task_id,
@@ -524,6 +534,16 @@ ANATOMY_LORA_NAMES = {
     "detailed perfection sd1.5",
 }
 ANATOMY_LORA_PREFIXES = ("badanatomy_sdxl_negative_lora",)
+ANATOMY_RISK_PATTERNS = (
+    r"\bhands?\b",
+    r"\bfingers?\b",
+    r"\blimbs?\b",
+    r"\bspread\b",
+    r"\bbent\b",
+    r"\bcrouching\b",
+    r"\bsquatting\b",
+    r"\bwide pose\b",
+)
 
 STYLE_LORA_NAMES = {
     "perfectionstyle",
@@ -581,6 +601,23 @@ def is_sdxl_model(model_name: str) -> bool:
     if name.endswith("xl") or "xl_" in name or "_xl" in name or "-xl" in name:
         return True
     return "xl" in name
+
+
+def coerce_bool(value: Any) -> bool:
+    """Normalize coordinator boolean flags without prompt hacks."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes"}
+    return bool(value) if value is not None else False
+
+
+def has_anatomy_risk(prompt: str) -> bool:
+    """Heuristic prompt scan for anatomy-risk poses."""
+    prompt = (prompt or "").strip()
+    if not prompt:
+        return False
+    return any(re.search(pat, prompt, flags=re.IGNORECASE) for pat in ANATOMY_RISK_PATTERNS)
 
 
 def normalize_lora_name(lora_name: str) -> str:
@@ -693,12 +730,15 @@ def find_auto_style_lora(model_is_sdxl: bool, seen: Set[str]) -> Optional[Tuple[
 def select_lora_entries(
     requested: List[Any],
     model_name: str,
+    prompt: Optional[str] = None,
+    auto_anatomy: bool = False,
 ) -> List[Tuple[Path, float, str]]:
     model_is_sdxl = is_sdxl_model(model_name)
     positions: List[Tuple[Path, float, str]] = []
     anatomies: List[Tuple[Path, float, str]] = []
     styles: List[Tuple[Path, float, str]] = []
     seen: Set[str] = set()
+    needs_auto_anatomy = auto_anatomy or has_anatomy_risk(prompt or "")
 
     for item in requested:
         raw_weight: Optional[float] = None
@@ -733,11 +773,12 @@ def select_lora_entries(
             styles.append(entry)
         seen.add(normalized)
 
-    if positions and not anatomies:
-        auto_anatomy = find_auto_anatomy_lora(model_is_sdxl, seen)
-        if auto_anatomy:
-            anatomies.append(auto_anatomy)
-            seen.add(normalize_lora_name(auto_anatomy[0].name))
+    if needs_auto_anatomy and not anatomies:
+        # Allow anatomy LoRA even without a position LoRA.
+        auto_anatomy_entry = find_auto_anatomy_lora(model_is_sdxl, seen)
+        if auto_anatomy_entry:
+            anatomies.append(auto_anatomy_entry)
+            seen.add(normalize_lora_name(auto_anatomy_entry[0].name))
 
     if positions and not styles:
         auto_style = find_auto_style_lora(model_is_sdxl, seen)
@@ -751,10 +792,9 @@ def select_lora_entries(
         selected.append(positions[0])
     if anatomies and len(selected) < MAX_LORAS:
         selected.append(anatomies[0])
-    for entry in styles:
-        if len(selected) >= MAX_LORAS:
-            break
-        selected.append(entry)
+    if styles and len(selected) < MAX_LORAS:
+        # Enforce at most one style/detail LoRA for safe stacking.
+        selected.append(styles[0])
     return selected
 
 
@@ -813,13 +853,18 @@ def run_image_generation(
                         log(f"Custom VAE load failed for {entry.name}: {exc}", prefix="⚠️", vae=str(vae_path))
             # Optional LoRA attachment with safe stacking and role-aware weights.
             lora_entries: List[Tuple[Path, float, str]] = []
+            requested: List[Any] = []
+            auto_anatomy = False
             if job_settings and isinstance(job_settings, dict):
                 requested = job_settings.get("loras") or []
-                if isinstance(requested, str):
-                    requested = [requested]
-                if isinstance(requested, list):
-                    model_hint = f"{entry.name} {pipeline_name}".strip()
-                    lora_entries = select_lora_entries(requested, model_hint)
+                auto_anatomy = coerce_bool(job_settings.get("auto_anatomy"))
+            if isinstance(requested, str):
+                requested = [requested]
+            if not isinstance(requested, list):
+                requested = []
+            # Evaluate auto anatomy even when no explicit LoRAs are requested.
+            model_hint = f"{entry.name} {pipeline_name}".strip()
+            lora_entries = select_lora_entries(requested, model_hint, prompt=prompt, auto_anatomy=auto_anatomy)
             if lora_entries:
                 lora_summary = ", ".join(
                     f"{adapter}:{weight:.2f} ({path.name})" for path, weight, adapter in lora_entries
@@ -869,7 +914,15 @@ def run_image_generation(
             load_ms = int((time.time() - load_t0) * 1000)
             log(f"Pipeline ready in {load_ms}ms", prefix="✅")
 
-            seed = int(time.time()) & 0x7FFFFFFF
+            seed = None
+            if job_settings and isinstance(job_settings, dict):
+                seed = job_settings.get("seed")
+            try:
+                seed = int(seed) if seed is not None else None
+            except (TypeError, ValueError):
+                seed = None
+            if seed is None:
+                seed = int(time.time()) & 0x7FFFFFFF
             generator = torch.Generator(device=device).manual_seed(seed)
             pos_text = prompt or "a high quality photo of a golden retriever on a beach at sunset"
             neg_text = negative_prompt or ""

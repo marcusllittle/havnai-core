@@ -11,10 +11,19 @@ POSITION_LORA_WEIGHTS = {
     "MissionaryVaginal-v2": 0.60,
 }
 
-EXTRA_POSITION_NEGATIVE = (
-    ", merged bodies, conjoined twins, extra torso, duplicate torso, extra limbs, "
+BASE_POSITION_NEGATIVE = (
+    "merged bodies, conjoined twins, extra torso, duplicate torso, extra limbs, "
     "extra arms, extra legs, deformed anatomy, body fusion, siamese, malformed chest, "
     "missing penis, censored, bar censor, mosaic censor"
+)
+
+ANTI_ORAL_NEGATIVE = (
+    "facesitting, sitting on face, cunnilingus, oral sex, anilingus, rimjob, blowjob"
+)
+
+ANTI_MULTIPLE_GIRLS_NEGATIVE = (
+    "multiple girls, two women, duplicate face, cloned face, multiple heads, "
+    "extra face, second woman, lesbian, yuri, girl on girl"
 )
 
 POSITION_REINFORCEMENTS = {
@@ -31,19 +40,27 @@ POSITION_PENETRATION_SUFFIX = {
     "MissionaryVaginal-v2": "(vaginal penetration:0.9), (penis inside:0.9)",
 }
 
+DOGGY_POV_SUFFIX = (
+    "(pov from behind male viewer:1.1), (ass focus:1.1), "
+    "(deep vaginal penetration:1.05), (penis inside:1.0), "
+    "onegirl, solo female, faceless male"
+)
+
+DOGGY_ANTI_ORAL_NEGATIVE = ANTI_ORAL_NEGATIVE
+
 
 def resolve_position_lora_weight(lora_name: str) -> float:
     return float(POSITION_LORA_WEIGHTS.get(lora_name, 0.65))
 
 
-def enhance_prompt_for_positions(user_prompt: str) -> Tuple[str, Optional[str], Optional[str]]:
+def enhance_prompt_for_positions(user_prompt: str) -> Tuple[str, Optional[str], Optional[str], Optional[str]]:
     """Enhance prompts with position-specific hints and routing metadata."""
 
     prompt = (user_prompt or "").strip()
     lower = prompt.lower()
 
     position_rules = [
-        ("POVDoggy", [r"\bdoggy\b", r"\bdoggystyle\b", r"\bfrom behind\b"]),
+        ("POVDoggy", [r"doggy", r"doggystyle", r"doggy style", r"from behind", r"bent over"]),
         ("POVReverseCowgirl", [r"\breverse cowgirl\b", r"\breverse riding\b"]),
         ("PSCowgirl", [r"\bcowgirl\b", r"\briding\b", r"\bon top\b"]),
         ("MissionaryVaginal-v2", [r"\bmissionary\b", r"\blegs spread\b"]),
@@ -54,9 +71,11 @@ def enhance_prompt_for_positions(user_prompt: str) -> Tuple[str, Optional[str], 
         r"\bfucking\b",
         r"\bpenetration\b",
         r"\banal\b",
-        r"\bdoggy\b",
-        r"\bdoggystyle\b",
-        r"\bfrom behind\b",
+        r"doggy",
+        r"doggystyle",
+        r"doggy style",
+        r"from behind",
+        r"bent over",
         r"\bcowgirl\b",
         r"\briding\b",
         r"\bon top\b",
@@ -67,7 +86,7 @@ def enhance_prompt_for_positions(user_prompt: str) -> Tuple[str, Optional[str], 
     ]
 
     if not any(re.search(pat, lower, flags=re.IGNORECASE) for pat in hardcore_keywords):
-        return prompt, None, None
+        return prompt, None, None, None
 
     position_lora = None
     matched_pattern = None
@@ -96,6 +115,8 @@ def enhance_prompt_for_positions(user_prompt: str) -> Tuple[str, Optional[str], 
     penetration = POSITION_PENETRATION_SUFFIX.get(position_lora)
     if penetration:
         enhanced = f"{enhanced}, {penetration}"
+    if position_lora == "POVDoggy":
+        enhanced = f"{enhanced}, {DOGGY_POV_SUFFIX}"
 
     enhanced = f"{enhanced}, detailed, masterpiece" if enhanced else "detailed, masterpiece"
 
@@ -116,11 +137,20 @@ def enhance_prompt_for_positions(user_prompt: str) -> Tuple[str, Optional[str], 
     if selected_model is None:
         selected_model = "uberRealisticPornMerge_v23Final"
 
-    return enhanced, selected_model, position_lora
+    negative = None
+    if position_lora:
+        negatives = [BASE_POSITION_NEGATIVE, ANTI_MULTIPLE_GIRLS_NEGATIVE]
+        if position_lora == "POVDoggy":
+            negatives.append(DOGGY_ANTI_ORAL_NEGATIVE)
+        negative = ", ".join([item for item in negatives if item])
+
+    return enhanced, selected_model, position_lora, negative
 
 
 __all__ = [
-    "EXTRA_POSITION_NEGATIVE",
+    "ANTI_MULTIPLE_GIRLS_NEGATIVE",
+    "ANTI_ORAL_NEGATIVE",
+    "BASE_POSITION_NEGATIVE",
     "POSITION_LORA_WEIGHTS",
     "enhance_prompt_for_positions",
     "resolve_position_lora_weight",

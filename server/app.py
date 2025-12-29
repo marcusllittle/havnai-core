@@ -47,7 +47,6 @@ if str(BASE_DIR) not in sys.path:
 
 from havnai.video_engine.gguf_wan2_2 import VideoEngine, VideoJobRequest
 from common.prompt_enhancers import (
-    EXTRA_POSITION_NEGATIVE,
     enhance_prompt_for_positions,
     resolve_position_lora_weight,
 )
@@ -1379,7 +1378,7 @@ def submit_job() -> Any:
     model_name = model_name_raw.lower()
     weight = payload.get("weight")
     raw_prompt = str(payload.get("prompt") or payload.get("data") or "")
-    enhanced_prompt, model_override, position_lora = enhance_prompt_for_positions(raw_prompt)
+    enhanced_prompt, model_override, position_lora, position_negative = enhance_prompt_for_positions(raw_prompt)
     explicit_model = bool(model_name_raw) and model_name not in {"auto", "auto_image", "auto-image"}
     if model_override and not explicit_model:
         model_name_raw = model_override
@@ -1506,8 +1505,8 @@ def submit_job() -> Any:
         combined_negative = ", ".join(
             filter(None, [negative_prompt or base_negative, GLOBAL_NEGATIVE_PROMPT])
         )
-        if position_lora:
-            combined_negative = f"{combined_negative}{EXTRA_POSITION_NEGATIVE}" if combined_negative else EXTRA_POSITION_NEGATIVE.lstrip(", ")
+        if position_negative:
+            combined_negative = f"{combined_negative}, {position_negative}" if combined_negative else position_negative
         if combined_negative:
             job_settings["negative_prompt"] = combined_negative
         pose_image = payload.get("pose_image") or payload.get("pose_image_b64") or ""

@@ -1380,9 +1380,17 @@ def submit_job() -> Any:
     raw_prompt = str(payload.get("prompt") or payload.get("data") or "")
     enhanced_prompt, model_override, position_lora, position_negative = enhance_prompt_for_positions(raw_prompt)
     explicit_model = bool(model_name_raw) and model_name not in {"auto", "auto_image", "auto-image"}
-    if model_override and not explicit_model:
-        model_name_raw = model_override
-        model_name = model_override.lower()
+    if not explicit_model:
+        if position_lora:
+            load_manifest()
+            for candidate in ("lazymixRealAmateur_v40", "majicmixRealistic_v7", "uberRealisticPornMerge_v23Final"):
+                if candidate.lower() in MANIFEST_MODELS:
+                    model_name_raw = candidate
+                    model_name = candidate.lower()
+                    break
+        elif model_override:
+            model_name_raw = model_override
+            model_name = model_override.lower()
 
     if not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid wallet"}), 400
@@ -1528,6 +1536,9 @@ def submit_job() -> Any:
                 job_settings["height"] = cfg["height"]
             if cfg.get("sampler"):
                 job_settings["sampler"] = cfg["sampler"]
+        if position_lora:
+            job_settings["steps"] = max(int(job_settings.get("steps", 0) or 0), 28)
+            job_settings["guidance"] = max(float(job_settings.get("guidance", 0.0) or 0.0), 7.2)
 
         job_data = json.dumps(job_settings)
         task_type = CREATOR_TASK_TYPE

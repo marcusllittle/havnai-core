@@ -17,6 +17,8 @@ BASE_POSITION_NEGATIVE = (
     "missing penis, censored, bar censor, mosaic censor"
 )
 
+SHARPNESS_NEGATIVE = "blurry, lowres, soft focus, pixelated, artifacts, low quality"
+
 ANTI_ORAL_NEGATIVE = (
     "facesitting, sitting on face, cunnilingus, oral sex, anilingus, rimjob, blowjob"
 )
@@ -47,6 +49,11 @@ DOGGY_POV_SUFFIX = (
 )
 
 DOGGY_ANTI_ORAL_NEGATIVE = ANTI_ORAL_NEGATIVE
+
+POSITION_QUALITY_SUFFIX = (
+    "ultra detailed skin, sharp focus, photorealistic, masterpiece, best quality, "
+    "highres, 8k, intricate details, cinematic lighting"
+)
 
 
 def resolve_position_lora_weight(lora_name: str) -> float:
@@ -118,7 +125,11 @@ def enhance_prompt_for_positions(user_prompt: str) -> Tuple[str, Optional[str], 
     if position_lora == "POVDoggy":
         enhanced = f"{enhanced}, {DOGGY_POV_SUFFIX}"
 
-    enhanced = f"{enhanced}, detailed, masterpiece" if enhanced else "detailed, masterpiece"
+    enhanced = (
+        f"{enhanced}, detailed, masterpiece, {POSITION_QUALITY_SUFFIX}"
+        if enhanced
+        else f"detailed, masterpiece, {POSITION_QUALITY_SUFFIX}"
+    )
 
     style_rules = [
         ("kizukiAnimeHentai_animeHentaiV4", [r"\banime\b", r"\bhentai\b", r"\bahegao\b", r"\b2d\b"]),
@@ -130,16 +141,19 @@ def enhance_prompt_for_positions(user_prompt: str) -> Tuple[str, Optional[str], 
     ]
 
     selected_model = None
-    for model_name, patterns in style_rules:
-        if any(re.search(pat, lower, flags=re.IGNORECASE) for pat in patterns):
-            selected_model = model_name
-            break
-    if selected_model is None:
-        selected_model = "uberRealisticPornMerge_v23Final"
+    if not position_lora:
+        for model_name, patterns in style_rules:
+            if any(re.search(pat, lower, flags=re.IGNORECASE) for pat in patterns):
+                selected_model = model_name
+                break
+        if selected_model is None:
+            selected_model = "uberRealisticPornMerge_v23Final"
+    else:
+        selected_model = "lazymixRealAmateur_v40"
 
     negative = None
     if position_lora:
-        negatives = [BASE_POSITION_NEGATIVE, ANTI_MULTIPLE_GIRLS_NEGATIVE]
+        negatives = [BASE_POSITION_NEGATIVE, ANTI_MULTIPLE_GIRLS_NEGATIVE, SHARPNESS_NEGATIVE]
         if position_lora == "POVDoggy":
             negatives.append(DOGGY_ANTI_ORAL_NEGATIVE)
         negative = ", ".join([item for item in negatives if item])

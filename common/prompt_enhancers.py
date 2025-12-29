@@ -21,7 +21,7 @@ SHARPNESS_NEGATIVE = "blurry, lowres, soft focus, pixelated, artifacts, low qual
 
 ANTI_OVERLAY_NEGATIVE = (
     "duplicate ass, layered buttocks, overlapping anatomy, double pussy, ghosting, "
-    "transparent overlay, cloned body parts"
+    "transparent overlay, cloned body parts, merged bodies, extra torso, body fusion"
 )
 
 ANTI_ORAL_NEGATIVE = (

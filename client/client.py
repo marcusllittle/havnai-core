@@ -517,7 +517,12 @@ POSITION_LORA_NAMES = {
     "missionaryvaginal-v2",
 }
 
-ANATOMY_LORA_NAMES = {"handv2"}
+ANATOMY_LORA_NAMES = {
+    "handv2",
+    "detailedperfectionsd1.5",
+    "detailedperfectionsd15",
+    "detailed perfection sd1.5",
+}
 ANATOMY_LORA_PREFIXES = ("badanatomy_sdxl_negative_lora",)
 
 STYLE_LORA_NAMES = {
@@ -535,7 +540,10 @@ LORA_BASE_TYPE = {
     "povreversecowgirl": "sd15",
     "pscowgirl": "sd15",
     "missionaryvaginal-v2": "sd15",
-    "handv2": "sd15",
+    "handv2": "sdxl",
+    "detailedperfectionsd1.5": "sd15",
+    "detailedperfectionsd15": "sd15",
+    "detailed perfection sd1.5": "sd15",
     "perfectionstylesd1.5": "sd15",
     "skintexturestylesd1.5v1": "sd15",
     "perfectionstyle": "sdxl",
@@ -547,12 +555,21 @@ LORA_BASE_TYPE = {
 
 ROLE_WEIGHT_RANGES = {
     "position": (0.0, 2.0, 0.95),
-    "anatomy": (0.35, 0.85, 0.45),
-    "style": (0.25, 0.45, 0.35),
+    "anatomy": (0.5, 0.8, 0.65),
+    "style": (0.3, 0.4, 0.35),
 }
 
-AUTO_ANATOMY_WEIGHT_SD15 = 0.8
-AUTO_ANATOMY_WEIGHT_SDXL = 0.45
+AUTO_ANATOMY_WEIGHT_SD15 = 0.5
+AUTO_ANATOMY_WEIGHT_SDXL = 0.5
+AUTO_STYLE_WEIGHT = 0.35
+AUTO_ANATOMY_SD15_CANDIDATES = (
+    "DetailedPerfectionSD1.5",
+    "DetailedPerfectionSD15",
+    "Detailed Perfection SD1.5",
+)
+AUTO_ANATOMY_SDXL_CANDIDATES = ("Handv2",)
+AUTO_STYLE_SD15_CANDIDATES = ("perfectionstyleSD1.5",)
+AUTO_STYLE_SDXL_CANDIDATES = ("perfectionstyle",)
 
 
 def is_sdxl_model(model_name: str) -> bool:
@@ -629,6 +646,15 @@ def resolve_lora_path(lora_name: str) -> Optional[Path]:
 
 def find_auto_anatomy_lora(model_is_sdxl: bool, seen: Set[str]) -> Optional[Tuple[Path, float, str]]:
     if model_is_sdxl:
+        for candidate in AUTO_ANATOMY_SDXL_CANDIDATES:
+            path = resolve_lora_path(candidate)
+            if path is None:
+                continue
+            normalized = normalize_lora_name(path.name)
+            if normalized in seen:
+                continue
+            weight = clamp_lora_weight(AUTO_ANATOMY_WEIGHT_SDXL, "anatomy")
+            return (path, weight, f"lora_anatomy_{path.stem}")
         for path in sorted(LORA_DIR.glob("*.safetensors")):
             normalized = normalize_lora_name(path.name)
             if normalized in seen:
@@ -638,18 +664,30 @@ def find_auto_anatomy_lora(model_is_sdxl: bool, seen: Set[str]) -> Optional[Tupl
                 return (path, weight, f"lora_anatomy_{path.stem}")
         return None
 
-    hand_path = resolve_lora_path("Handv2.safetensors")
-    if hand_path is None:
-        for path in sorted(LORA_DIR.glob("*.safetensors")):
-            if normalize_lora_name(path.name) == "handv2":
-                hand_path = path
-                break
-    if hand_path is None:
-        return None
-    if normalize_lora_name(hand_path.name) in seen:
-        return None
-    weight = clamp_lora_weight(AUTO_ANATOMY_WEIGHT_SD15, "anatomy")
-    return (hand_path, weight, f"lora_anatomy_{hand_path.stem}")
+    for candidate in AUTO_ANATOMY_SD15_CANDIDATES:
+        path = resolve_lora_path(candidate)
+        if path is None:
+            continue
+        normalized = normalize_lora_name(path.name)
+        if normalized in seen:
+            continue
+        weight = clamp_lora_weight(AUTO_ANATOMY_WEIGHT_SD15, "anatomy")
+        return (path, weight, f"lora_anatomy_{path.stem}")
+    return None
+
+
+def find_auto_style_lora(model_is_sdxl: bool, seen: Set[str]) -> Optional[Tuple[Path, float, str]]:
+    candidates = AUTO_STYLE_SDXL_CANDIDATES if model_is_sdxl else AUTO_STYLE_SD15_CANDIDATES
+    for candidate in candidates:
+        path = resolve_lora_path(candidate)
+        if path is None:
+            continue
+        normalized = normalize_lora_name(path.name)
+        if normalized in seen:
+            continue
+        weight = clamp_lora_weight(AUTO_STYLE_WEIGHT, "style")
+        return (path, weight, f"lora_style_{path.stem}")
+    return None
 
 
 def select_lora_entries(
@@ -699,6 +737,13 @@ def select_lora_entries(
         auto_anatomy = find_auto_anatomy_lora(model_is_sdxl, seen)
         if auto_anatomy:
             anatomies.append(auto_anatomy)
+            seen.add(normalize_lora_name(auto_anatomy[0].name))
+
+    if positions and not styles:
+        auto_style = find_auto_style_lora(model_is_sdxl, seen)
+        if auto_style:
+            styles.append(auto_style)
+            seen.add(normalize_lora_name(auto_style[0].name))
 
     selected: List[Tuple[Path, float, str]] = []
     # Enforce stack order: position -> anatomy -> style, with safe caps.

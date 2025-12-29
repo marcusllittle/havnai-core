@@ -1561,6 +1561,13 @@ def submit_job() -> Any:
             job_settings["steps"] = min(current_steps, 32)
             job_settings["guidance"] = 7.0
 
+        injected_loras = job_settings.get("loras") or []
+        log_event(
+            "Enhanced prompt: "
+            f"{prompt_text} | Selected model: {model_name_raw or model_name} | "
+            f"Injected LoRAs: {injected_loras} | Extra negatives: {position_negative or ''}"
+        )
+
         job_data = json.dumps(job_settings)
         task_type = CREATOR_TASK_TYPE
 

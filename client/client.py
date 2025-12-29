@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from logging.handlers import RotatingFileHandler
 import os
 import random
@@ -15,7 +16,7 @@ import time
 from pathlib import Path
 import atexit
 import signal
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 import base64
 
 import requests
@@ -91,6 +92,7 @@ LORA_DIR = Path(
     or os.environ.get("HAVNAI_LORA_DIR")
     or (DEFAULT_LORA_DIR if DEFAULT_LORA_DIR.exists() else HAVNAI_HOME / "loras")
 ).expanduser()
+MAX_LORAS = 3
 
 HAVNAI_HOME.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -504,6 +506,213 @@ def run_ai_inference(entry: ModelEntry, model_path: Path, input_shape: List[int]
     return metrics, int(util)
 
 
+# ---------------------------------------------------------------------------
+# LoRA helpers
+# ---------------------------------------------------------------------------
+
+POSITION_LORA_NAMES = {
+    "povdoggy",
+    "povreversecowgirl",
+    "pscowgirl",
+    "missionaryvaginal-v2",
+}
+
+ANATOMY_LORA_NAMES = {"handv2"}
+ANATOMY_LORA_PREFIXES = ("badanatomy_sdxl_negative_lora",)
+
+STYLE_LORA_NAMES = {
+    "perfectionstyle",
+    "perfectionstylesd1.5",
+    "perfectionstylev2d",
+    "skintexturestylesd1.5v1",
+    "skintexturestylev3",
+    "skintexturestylev5",
+    "hyperlora_sdxl",
+}
+
+LORA_BASE_TYPE = {
+    "povdoggy": "sd15",
+    "povreversecowgirl": "sd15",
+    "pscowgirl": "sd15",
+    "missionaryvaginal-v2": "sd15",
+    "handv2": "sd15",
+    "perfectionstylesd1.5": "sd15",
+    "skintexturestylesd1.5v1": "sd15",
+    "perfectionstyle": "sdxl",
+    "perfectionstylev2d": "sdxl",
+    "skintexturestylev3": "sdxl",
+    "skintexturestylev5": "sdxl",
+    "hyperlora_sdxl": "sdxl",
+}
+
+ROLE_WEIGHT_RANGES = {
+    "position": (0.0, 2.0, 0.95),
+    "anatomy": (0.35, 0.85, 0.45),
+    "style": (0.25, 0.45, 0.35),
+}
+
+AUTO_ANATOMY_WEIGHT_SD15 = 0.8
+AUTO_ANATOMY_WEIGHT_SDXL = 0.45
+
+
+def is_sdxl_model(model_name: str) -> bool:
+    name = (model_name or "").lower()
+    if "sdxl" in name:
+        return True
+    if "sd1.5" in name or "sd15" in name:
+        return False
+    if name.endswith("xl") or "xl_" in name or "_xl" in name or "-xl" in name:
+        return True
+    return "xl" in name
+
+
+def normalize_lora_name(lora_name: str) -> str:
+    base = Path(lora_name).name
+    if base.lower().endswith(".safetensors"):
+        base = base[:-len(".safetensors")]
+    return base.strip().lower()
+
+
+def infer_lora_base_type(normalized_name: str) -> Optional[str]:
+    for prefix in ANATOMY_LORA_PREFIXES:
+        if normalized_name.startswith(prefix):
+            return "sdxl"
+    mapped = LORA_BASE_TYPE.get(normalized_name)
+    if mapped:
+        return mapped
+    if "sdxl" in normalized_name:
+        return "sdxl"
+    if "sd1.5" in normalized_name or "sd15" in normalized_name or "sd_15" in normalized_name or "sd-15" in normalized_name:
+        return "sd15"
+    return None
+
+
+def classify_lora_role(normalized_name: str) -> str:
+    if normalized_name in POSITION_LORA_NAMES:
+        return "position"
+    if normalized_name in ANATOMY_LORA_NAMES:
+        return "anatomy"
+    for prefix in ANATOMY_LORA_PREFIXES:
+        if normalized_name.startswith(prefix):
+            return "anatomy"
+    if normalized_name in STYLE_LORA_NAMES:
+        return "style"
+    # Unknown LoRAs are treated conservatively as style to keep weights low.
+    return "style"
+
+
+def clamp_lora_weight(weight: Optional[float], role: str) -> float:
+    min_w, max_w, default_w = ROLE_WEIGHT_RANGES.get(role, (0.25, 0.45, 0.35))
+    try:
+        value = float(weight) if weight is not None else default_w
+    except (TypeError, ValueError):
+        value = default_w
+    if not math.isfinite(value):
+        value = default_w
+    if role == "position":
+        # Respect server-provided position weights without forcing a narrow clamp.
+        return value
+    return max(min_w, min(max_w, value))
+
+
+def resolve_lora_path(lora_name: str) -> Optional[Path]:
+    candidate = Path(lora_name).expanduser()
+    if candidate.is_file():
+        return candidate
+    if candidate.suffix == "":
+        candidate = candidate.with_suffix(".safetensors")
+    fallback = LORA_DIR / candidate.name
+    if fallback.exists():
+        return fallback
+    return None
+
+
+def find_auto_anatomy_lora(model_is_sdxl: bool, seen: Set[str]) -> Optional[Tuple[Path, float, str]]:
+    if model_is_sdxl:
+        for path in sorted(LORA_DIR.glob("*.safetensors")):
+            normalized = normalize_lora_name(path.name)
+            if normalized in seen:
+                continue
+            if any(normalized.startswith(prefix) for prefix in ANATOMY_LORA_PREFIXES):
+                weight = clamp_lora_weight(AUTO_ANATOMY_WEIGHT_SDXL, "anatomy")
+                return (path, weight, f"lora_anatomy_{path.stem}")
+        return None
+
+    hand_path = resolve_lora_path("Handv2.safetensors")
+    if hand_path is None:
+        for path in sorted(LORA_DIR.glob("*.safetensors")):
+            if normalize_lora_name(path.name) == "handv2":
+                hand_path = path
+                break
+    if hand_path is None:
+        return None
+    if normalize_lora_name(hand_path.name) in seen:
+        return None
+    weight = clamp_lora_weight(AUTO_ANATOMY_WEIGHT_SD15, "anatomy")
+    return (hand_path, weight, f"lora_anatomy_{hand_path.stem}")
+
+
+def select_lora_entries(
+    requested: List[Any],
+    model_name: str,
+) -> List[Tuple[Path, float, str]]:
+    model_is_sdxl = is_sdxl_model(model_name)
+    positions: List[Tuple[Path, float, str]] = []
+    anatomies: List[Tuple[Path, float, str]] = []
+    styles: List[Tuple[Path, float, str]] = []
+    seen: Set[str] = set()
+
+    for item in requested:
+        raw_weight: Optional[float] = None
+        if isinstance(item, dict):
+            name = str(item.get("name") or "").strip()
+            raw_weight = item.get("weight")
+        else:
+            name = str(item or "").strip()
+        if not name:
+            continue
+        normalized = normalize_lora_name(name)
+        if normalized in seen:
+            continue
+        base_type = infer_lora_base_type(normalized)
+        # Enforce SDXL/SD1.5 compatibility to avoid mismatched LoRA loads.
+        if base_type == "sdxl" and not model_is_sdxl:
+            continue
+        if base_type == "sd15" and model_is_sdxl:
+            continue
+        role = classify_lora_role(normalized)
+        weight = clamp_lora_weight(raw_weight, role)
+        lora_path = resolve_lora_path(name)
+        if not lora_path:
+            continue
+        adapter_name = f"lora_{role}_{lora_path.stem}"
+        entry = (lora_path, weight, adapter_name)
+        if role == "position":
+            positions.append(entry)
+        elif role == "anatomy":
+            anatomies.append(entry)
+        else:
+            styles.append(entry)
+        seen.add(normalized)
+
+    if positions and not anatomies:
+        auto_anatomy = find_auto_anatomy_lora(model_is_sdxl, seen)
+        if auto_anatomy:
+            anatomies.append(auto_anatomy)
+
+    selected: List[Tuple[Path, float, str]] = []
+    # Enforce stack order: position -> anatomy -> style, with safe caps.
+    if positions:
+        selected.append(positions[0])
+    if anatomies and len(selected) < MAX_LORAS:
+        selected.append(anatomies[0])
+    for entry in styles:
+        if len(selected) >= MAX_LORAS:
+            break
+        selected.append(entry)
+    return selected
+
+
 def run_image_generation(
     task_id: str,
     entry: ModelEntry,
@@ -557,42 +766,26 @@ def run_image_generation(
                         log(f"Loaded custom VAE for {entry.name}", prefix="✅", vae=str(vae_path))
                     except Exception as exc:
                         log(f"Custom VAE load failed for {entry.name}: {exc}", prefix="⚠️", vae=str(vae_path))
-            # Optional LoRA attachment for position/style enhancements
+            # Optional LoRA attachment with safe stacking and role-aware weights.
             lora_entries: List[Tuple[Path, float, str]] = []
             if job_settings and isinstance(job_settings, dict):
                 requested = job_settings.get("loras") or []
                 if isinstance(requested, str):
                     requested = [requested]
                 if isinstance(requested, list):
-                    for item in requested:
-                        weight = 1.0
-                        if isinstance(item, dict):
-                            name = str(item.get("name") or "").strip()
-                            try:
-                                weight = float(item.get("weight", weight))
-                            except (TypeError, ValueError):
-                                weight = 1.0
-                        else:
-                            name = str(item or "").strip()
-                        if not name:
-                            continue
-                        candidate = Path(name).expanduser()
-                        if candidate.is_file():
-                            lora_entries.append((candidate, weight, candidate.stem))
-                            continue
-                        if candidate.suffix == "":
-                            candidate = candidate.with_suffix(".safetensors")
-                        fallback = LORA_DIR / candidate.name
-                        if fallback.exists():
-                            lora_entries.append((fallback, weight, fallback.stem))
-            if len(lora_entries) > 1:
-                lora_entries = lora_entries[:1]
+                    model_hint = f"{entry.name} {pipeline_name}".strip()
+                    lora_entries = select_lora_entries(requested, model_hint)
+            if lora_entries:
+                lora_summary = ", ".join(f"{path.stem}:{weight:.2f}" for path, weight, _ in lora_entries)
+            else:
+                lora_summary = "none"
+            log(f"Loading LoRAs: {lora_summary}", prefix="🎛️")
             if lora_entries:
                 adapter_names: List[str] = []
                 adapter_weights: List[float] = []
                 if hasattr(pipe, "load_lora_weights"):
                     for lora_path, lora_weight, adapter_name in lora_entries:
-                        adapter = f"pos_{adapter_name}"
+                        adapter = adapter_name
                         try:
                             pipe.load_lora_weights(str(lora_path), adapter_name=adapter)
                         except TypeError:

@@ -1719,6 +1719,7 @@ def get_creator_tasks() -> Any:
                     raw_data = job.get("data")
                     prompt_text = raw_data or ""
                     negative_prompt = ""
+                    loras: List[str] = []
                     try:
                         parsed = json.loads(raw_data) if isinstance(raw_data, str) else None
                     except Exception:
@@ -1726,6 +1727,9 @@ def get_creator_tasks() -> Any:
                     if isinstance(parsed, dict):
                         prompt_text = str(parsed.get("prompt") or "")
                         negative_prompt = str(parsed.get("negative_prompt") or "")
+                        parsed_loras = parsed.get("loras") or []
+                        if isinstance(parsed_loras, list):
+                            loras = [str(item) for item in parsed_loras if item]
                     # Always send plain prompt text to the node (avoid passing raw JSON)
                     prompt_for_node = prompt_text
 
@@ -1750,6 +1754,7 @@ def get_creator_tasks() -> Any:
                             "data": raw_data,
                             "prompt": prompt_for_node,
                             "negative_prompt": negative_prompt,
+                            "loras": loras,
                             "queued_at": job.get("timestamp"),
                         }
                     ]

@@ -47,6 +47,8 @@ if str(BASE_DIR) not in sys.path:
 
 from havnai.video_engine.gguf_wan2_2 import VideoEngine, VideoJobRequest
 from common.prompt_enhancers import (
+    ANTI_OVERLAY_NEGATIVE,
+    SHARPNESS_NEGATIVE,
     enhance_prompt_for_positions,
     has_hardcore_keywords,
     resolve_position_lora_weight,
@@ -91,7 +93,10 @@ GLOBAL_POSITIVE_SUFFIX = (
     "natural teeth, realistic mouth structure"
 )
 
-HARDCORE_POSITIVE_SUFFIX = "ultra sharp skin texture, photorealistic details, highres, masterpiece"
+HARDCORE_POSITIVE_SUFFIX = (
+    "ultra sharp skin texture, photorealistic details, highres, masterpiece, "
+    "perfect anatomy, smooth proportions, no overlays, clean insertion"
+)
 
 # Global negative prompt to discourage common artifacts across all models.
 GLOBAL_NEGATIVE_PROMPT = ", ".join(
@@ -1531,6 +1536,11 @@ def submit_job() -> Any:
         )
         if position_negative:
             combined_negative = f"{combined_negative}, {position_negative}" if combined_negative else position_negative
+        if hardcore_prompt:
+            for extra_negative in (ANTI_OVERLAY_NEGATIVE, SHARPNESS_NEGATIVE):
+                if not extra_negative:
+                    continue
+                combined_negative = f"{combined_negative}, {extra_negative}" if combined_negative else extra_negative
         if combined_negative:
             job_settings["negative_prompt"] = combined_negative
         pose_image = payload.get("pose_image") or payload.get("pose_image_b64") or ""
@@ -1553,13 +1563,8 @@ def submit_job() -> Any:
             if cfg.get("sampler"):
                 job_settings["sampler"] = cfg["sampler"]
         if hardcore_prompt:
-            current_steps = int(job_settings.get("steps", 0) or 0)
-            if current_steps <= 0:
-                current_steps = 28
-            else:
-                current_steps = max(current_steps, 28)
-            job_settings["steps"] = min(current_steps, 32)
-            job_settings["guidance"] = 7.0
+            job_settings["steps"] = 40
+            job_settings["guidance"] = 7.5
 
         injected_loras = job_settings.get("loras") or []
         log_event(

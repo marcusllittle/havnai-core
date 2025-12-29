@@ -554,12 +554,12 @@ LORA_BASE_TYPE = {
 }
 
 ROLE_WEIGHT_RANGES = {
-    "position": (0.0, 2.0, 0.95),
+    "position": (0.0, 2.0, 0.6),
     "anatomy": (0.5, 0.8, 0.65),
     "style": (0.3, 0.4, 0.35),
 }
 
-AUTO_ANATOMY_WEIGHT_SD15 = 0.5
+AUTO_ANATOMY_WEIGHT_SD15 = 0.7
 AUTO_ANATOMY_WEIGHT_SDXL = 0.5
 AUTO_STYLE_WEIGHT = 0.35
 AUTO_ANATOMY_SD15_CANDIDATES = (
@@ -821,7 +821,9 @@ def run_image_generation(
                     model_hint = f"{entry.name} {pipeline_name}".strip()
                     lora_entries = select_lora_entries(requested, model_hint)
             if lora_entries:
-                lora_summary = ", ".join(f"{path.stem}:{weight:.2f}" for path, weight, _ in lora_entries)
+                lora_summary = ", ".join(
+                    f"{adapter}:{weight:.2f} ({path.name})" for path, weight, adapter in lora_entries
+                )
             else:
                 lora_summary = "none"
             log(f"Loading LoRAs: {lora_summary}", prefix="🎛️")

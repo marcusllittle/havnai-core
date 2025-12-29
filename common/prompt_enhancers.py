@@ -21,7 +21,8 @@ SHARPNESS_NEGATIVE = "blurry, lowres, soft focus, pixelated, artifacts, low qual
 
 ANTI_OVERLAY_NEGATIVE = (
     "duplicate ass, layered buttocks, overlapping anatomy, double pussy, ghosting, "
-    "transparent overlay, cloned body parts, merged bodies, extra torso, body fusion"
+    "transparent overlay, cloned body parts, merged bodies, extra torso, body fusion, "
+    "layered anatomy, double buttocks, ass fusion, penis overlay, genital merge, thigh overlap"
 )
 
 ANTI_ORAL_NEGATIVE = (
@@ -141,6 +142,9 @@ def enhance_prompt_for_positions(user_prompt: str) -> Tuple[str, Optional[str], 
         if enhanced
         else f"detailed, masterpiece, {POSITION_QUALITY_SUFFIX}"
     )
+    if "nude" not in lower:
+        nudity_suffix = "nude, no clothes, fully naked"
+        enhanced = f"{enhanced}, {nudity_suffix}" if enhanced else nudity_suffix
 
     style_rules = [
         ("kizukiAnimeHentai_animeHentaiV4", [r"\banime\b", r"\bhentai\b", r"\bahegao\b", r"\b2d\b"]),

@@ -1383,16 +1383,9 @@ def submit_job() -> Any:
     raw_prompt = str(payload.get("prompt") or payload.get("data") or "")
     auto_model_request = not model_name or model_name in {"auto", "auto_image", "auto-image"}
     hardcore_prompt = has_hardcore_keywords(raw_prompt)
-    if auto_model_request or hardcore_prompt:
-        enhanced_prompt, model_override, position_lora, position_negative = enhance_prompt_for_positions(raw_prompt)
-    else:
-        enhanced_prompt, model_override, position_lora, position_negative = raw_prompt, None, None, None
-    explicit_model = bool(model_name_raw) and model_name not in {"auto", "auto_image", "auto-image"}
-    if (auto_model_request or hardcore_prompt) and model_override:
-        model_name_raw = model_override
-        model_name = model_override.lower()
+    enhanced_prompt, model_override, position_lora, position_negative = enhance_prompt_for_positions(raw_prompt)
 
-    if not explicit_model:
+    if auto_model_request:
         if position_lora:
             load_manifest()
             for candidate in ("lazymixRealAmateur_v40", "majicmixRealistic_v7"):
@@ -1400,6 +1393,10 @@ def submit_job() -> Any:
                     model_name_raw = candidate
                     model_name = candidate.lower()
                     break
+            else:
+                if model_override:
+                    model_name_raw = model_override
+                    model_name = model_override.lower()
         elif model_override:
             model_name_raw = model_override
             model_name = model_override.lower()

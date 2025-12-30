@@ -1390,21 +1390,16 @@ def submit_job() -> Any:
     hardcore_prompt = has_hardcore_keywords(raw_prompt)
     enhanced_prompt, model_override, position_lora, position_negative = enhance_prompt_for_positions(raw_prompt)
 
-    if auto_model_request:
-        if position_lora:
-            load_manifest()
-            for candidate in ("lazymixRealAmateur_v40", "majicmixRealistic_v7"):
-                if candidate.lower() in MANIFEST_MODELS:
-                    model_name_raw = candidate
-                    model_name = candidate.lower()
-                    break
-            else:
-                if model_override:
-                    model_name_raw = model_override
-                    model_name = model_override.lower()
-        elif model_override:
-            model_name_raw = model_override
-            model_name = model_override.lower()
+    if model_override:
+        # Drop overrides that are no longer available in the manifest.
+        load_manifest()
+        if model_override.lower() not in MANIFEST_MODELS:
+            model_override = None
+
+    if auto_model_request and model_override:
+        # Use a valid override only; otherwise fall back to weighted auto selection.
+        model_name_raw = model_override
+        model_name = model_override.lower()
 
     if not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid wallet"}), 400
@@ -1418,12 +1413,19 @@ def submit_job() -> Any:
             if (meta.get("task_type") or CREATOR_TASK_TYPE).upper() == CREATOR_TASK_TYPE
         ]
         if not candidates:
-            return jsonify({"error": "no_creator_models"}), 400
-        names = [meta["name"] for meta in candidates]
-        weights = [resolve_weight(meta["name"].lower(), meta.get("reward_weight", 10.0)) for meta in candidates]
-        chosen = random.choices(names, weights=weights, k=1)[0]
-        model_name_raw = chosen
-        model_name = chosen.lower()
+            # Final safety fallback when weighted auto cannot select.
+            fallback = "uberRealisticPornMerge_v23Final"
+            if fallback.lower() in MANIFEST_MODELS:
+                model_name_raw = fallback
+                model_name = fallback.lower()
+            else:
+                return jsonify({"error": "no_creator_models"}), 400
+        else:
+            names = [meta["name"] for meta in candidates]
+            weights = [resolve_weight(meta["name"].lower(), meta.get("reward_weight", 10.0)) for meta in candidates]
+            chosen = random.choices(names, weights=weights, k=1)[0]
+            model_name_raw = chosen
+            model_name = chosen.lower()
 
     if not model_name:
         return jsonify({"error": "missing model"}), 400

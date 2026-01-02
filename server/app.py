@@ -1543,10 +1543,36 @@ def submit_job() -> Any:
             auto_anatomy = False
         # Pass through per-image overrides for the node to honor.
         job_settings: Dict[str, Any] = {"prompt": prompt_text, "auto_anatomy": auto_anatomy}
+        payload_loras = payload.get("loras") or []
+        loras_list: List[Dict[str, Any]] = []
+        if isinstance(payload_loras, list):
+            for item in payload_loras:
+                if isinstance(item, dict):
+                    name = str(item.get("name") or "").strip()
+                    if not name:
+                        continue
+                    entry: Dict[str, Any] = {"name": name}
+                    if "weight" in item:
+                        entry["weight"] = item.get("weight")
+                    loras_list.append(entry)
+                else:
+                    name = str(item).strip()
+                    if name:
+                        loras_list.append({"name": name})
+        if position_lora:
+            def normalize_lora_ref(name: str) -> str:
+                base = Path(name).name
+                if base.lower().endswith(".safetensors"):
+                    base = base[:-len(".safetensors")]
+                return base.strip().lower()
+
+            position_norm = normalize_lora_ref(position_lora)
+            if not any(normalize_lora_ref(str(entry.get("name") or "")) == position_norm for entry in loras_list):
+                loras_list.append({"name": position_lora, "weight": resolve_position_lora_weight(position_lora)})
+        if loras_list:
+            job_settings["loras"] = loras_list
         if seed is not None:
             job_settings["seed"] = seed
-        if position_lora:
-            job_settings["loras"] = [{"name": position_lora, "weight": resolve_position_lora_weight(position_lora)}]
         base_negative = str(cfg.get("negative_prompt_default") or "").strip() if cfg else ""
         combined_negative = ", ".join(
             filter(None, [negative_prompt or base_negative, GLOBAL_NEGATIVE_PROMPT])

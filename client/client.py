@@ -93,7 +93,7 @@ LORA_DIR = Path(
     or os.environ.get("HAVNAI_LORA_DIR")
     or (DEFAULT_LORA_DIR if DEFAULT_LORA_DIR.exists() else HAVNAI_HOME / "loras")
 ).expanduser()
-MAX_LORAS = 3
+MAX_LORAS = 5
 
 HAVNAI_HOME.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -731,14 +731,14 @@ def select_lora_entries(
     requested: List[Any],
     model_name: str,
     prompt: Optional[str] = None,
-    auto_anatomy: bool = False,
+    auto_anatomy_enabled: bool = True,
 ) -> List[Tuple[Path, float, str]]:
     model_is_sdxl = is_sdxl_model(model_name)
     positions: List[Tuple[Path, float, str]] = []
     anatomies: List[Tuple[Path, float, str]] = []
     styles: List[Tuple[Path, float, str]] = []
     seen: Set[str] = set()
-    needs_auto_anatomy = auto_anatomy or has_anatomy_risk(prompt or "")
+    needs_auto_anatomy = auto_anatomy_enabled and has_anatomy_risk(prompt or "")
 
     for item in requested:
         raw_weight: Optional[float] = None
@@ -787,15 +787,160 @@ def select_lora_entries(
             seen.add(normalize_lora_name(auto_style[0].name))
 
     selected: List[Tuple[Path, float, str]] = []
-    # Enforce stack order: position -> anatomy -> style, with safe caps.
+    # Enforce stack order: position -> anatomy -> styles (request order), with safe caps.
     if positions:
         selected.append(positions[0])
     if anatomies and len(selected) < MAX_LORAS:
         selected.append(anatomies[0])
-    if styles and len(selected) < MAX_LORAS:
-        # Enforce at most one style/detail LoRA for safe stacking.
-        selected.append(styles[0])
+    for style in styles:
+        if len(selected) >= MAX_LORAS:
+            break
+        selected.append(style)
     return selected
+
+
+def build_lora_stack(
+    prompt: str,
+    model_name: str,
+    requested_loras: Any,
+) -> List[Dict[str, Any]]:
+    """Build a deterministic LoRA stack from prompt rules and user requests."""
+    prompt_text = str(prompt or "")
+    prompt_text = re.sub(r"<\s*lora:[^>]+>", "", prompt_text)
+    model_is_sdxl = is_sdxl_model(model_name)
+
+    requested: List[Any]
+    if isinstance(requested_loras, str):
+        requested = [requested_loras]
+    elif isinstance(requested_loras, list):
+        requested = requested_loras
+    else:
+        requested = []
+
+    seen: Set[str] = set()
+    positions: List[Dict[str, Any]] = []
+    anatomies: List[Dict[str, Any]] = []
+    styles: List[Dict[str, Any]] = []
+
+    def add_entry(name: str, raw_weight: Optional[float], role: str) -> Optional[Dict[str, Any]]:
+        normalized = normalize_lora_name(name)
+        if normalized in seen:
+            return None
+        base_type = infer_lora_base_type(normalized)
+        if base_type == "sdxl" and not model_is_sdxl:
+            return None
+        if base_type == "sd15" and model_is_sdxl:
+            return None
+        if not resolve_lora_path(name):
+            return None
+        weight = clamp_lora_weight(raw_weight, role)
+        entry = {"name": name, "weight": weight, "normalized": normalized, "role": role}
+        seen.add(normalized)
+        return entry
+
+    for item in requested:
+        raw_weight: Optional[float] = None
+        if isinstance(item, dict):
+            name = str(item.get("name") or "").strip()
+            raw_weight = item.get("weight")
+        else:
+            name = str(item or "").strip()
+        if not name:
+            continue
+        normalized = normalize_lora_name(name)
+        role = classify_lora_role(normalized)
+        entry = add_entry(name, raw_weight, role)
+        if not entry:
+            continue
+        if role == "position":
+            positions.append(entry)
+        elif role == "anatomy":
+            anatomies.append(entry)
+        else:
+            styles.append(entry)
+
+    baseline_candidates = (
+        ("perfectionstyle", "skintexturestylev3")
+        if model_is_sdxl
+        else ("perfectionstyleSD1.5", "skintexturestylesd1.5", "skintexturestylesd1.5v1")
+    )
+    baseline_norms = {normalize_lora_name(name) for name in baseline_candidates}
+
+    baseline_entry: Optional[Dict[str, Any]] = None
+    remaining_styles: List[Dict[str, Any]] = []
+    for style in styles:
+        if baseline_entry is None and style["normalized"] in baseline_norms:
+            baseline_entry = style
+            continue
+        remaining_styles.append(style)
+
+    auto_baseline: Optional[Dict[str, Any]] = None
+    if baseline_entry is None:
+        for candidate in baseline_candidates:
+            entry = add_entry(candidate, None, "style")
+            if entry:
+                auto_baseline = entry
+                break
+
+    def prompt_hits(patterns: Tuple[str, ...]) -> bool:
+        return any(re.search(pattern, prompt_text, flags=re.IGNORECASE) for pattern in patterns)
+
+    effect_entries: List[Dict[str, Any]] = []
+    effect_entries.extend(remaining_styles)
+
+    auto_effects: List[Dict[str, Any]] = []
+    if prompt_hits((r"\bsweat\b", r"\bsweaty\b", r"\bperspiration\b")):
+        entry = add_entry("Sweatingmyballsofmate", None, "style")
+        if entry:
+            auto_effects.append(entry)
+    if prompt_hits((r"\bcum\b", r"\bcumshot\b", r"\bcumming\b", r"\bejacu(?:late|lation|lating)\b", r"\bsemen\b", r"\bjizz\b")):
+        for candidate in ("CumOnCloth", "reverse_fellatio"):
+            entry = add_entry(candidate, None, "style")
+            if entry:
+                auto_effects.append(entry)
+                break
+    if model_is_sdxl and prompt_hits((r"\bbdsm\b", r"\bbondage\b", r"\bdominatrix\b", r"\bdomination\b", r"\bsubmissive\b", r"\bgag(?:ged)?\b", r"\bcollar\b", r"\bleash\b", r"\bspank(?:ing)?\b")):
+        entry = add_entry("bdsm_SDXL_1", None, "style")
+        if entry:
+            auto_effects.append(entry)
+    if model_is_sdxl and prompt_hits((r"\bcinematic lighting\b", r"\bdramatic lighting\b", r"\brim light\b", r"\bbacklight\b", r"\bvolumetric\b", r"\bstudio lighting\b")):
+        entry = add_entry("HyperLoRA_SDXL", None, "style")
+        if entry:
+            auto_effects.append(entry)
+
+    selected: List[Dict[str, Any]] = []
+    if positions and len(selected) < MAX_LORAS:
+        selected.append(positions[0])
+    if anatomies and len(selected) < MAX_LORAS:
+        selected.append(anatomies[0])
+
+    max_effects = 2
+    remaining_slots = max(0, MAX_LORAS - len(selected))
+    user_effects_without_baseline = min(max_effects, len(effect_entries), remaining_slots)
+    if baseline_entry is None and auto_baseline is not None and remaining_slots > 0:
+        # Only add auto baseline if it does not reduce user-requested effects.
+        slots_if_baseline = remaining_slots - 1
+        user_effects_with_baseline = min(max_effects, len(effect_entries), max(0, slots_if_baseline))
+        if user_effects_with_baseline == user_effects_without_baseline:
+            baseline_entry = auto_baseline
+
+    if baseline_entry is not None and len(selected) < MAX_LORAS:
+        selected.append(baseline_entry)
+
+    effect_slots = min(max_effects, MAX_LORAS - len(selected))
+    for entry in effect_entries:
+        if effect_slots <= 0:
+            break
+        selected.append(entry)
+        effect_slots -= 1
+    if effect_slots > 0:
+        for entry in auto_effects:
+            if effect_slots <= 0:
+                break
+            selected.append(entry)
+            effect_slots -= 1
+
+    return [{"name": entry["name"], "weight": entry["weight"]} for entry in selected]
 
 
 def run_image_generation(
@@ -854,17 +999,28 @@ def run_image_generation(
             # Optional LoRA attachment with safe stacking and role-aware weights.
             lora_entries: List[Tuple[Path, float, str]] = []
             requested: List[Any] = []
-            auto_anatomy = False
             if job_settings and isinstance(job_settings, dict):
                 requested = job_settings.get("loras") or []
-                auto_anatomy = coerce_bool(job_settings.get("auto_anatomy"))
             if isinstance(requested, str):
                 requested = [requested]
             if not isinstance(requested, list):
                 requested = []
-            # Evaluate auto anatomy even when no explicit LoRAs are requested.
             model_hint = f"{entry.name} {pipeline_name}".strip()
-            lora_entries = select_lora_entries(requested, model_hint, prompt=prompt, auto_anatomy=auto_anatomy)
+            recommended = build_lora_stack(prompt, model_hint, requested)
+            for item in recommended:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "").strip()
+                if not name:
+                    continue
+                lora_path = resolve_lora_path(name)
+                if not lora_path:
+                    continue
+                normalized = normalize_lora_name(name)
+                role = classify_lora_role(normalized)
+                weight = clamp_lora_weight(item.get("weight"), role)
+                adapter_name = f"lora_{role}_{lora_path.stem}"
+                lora_entries.append((lora_path, weight, adapter_name))
             if lora_entries:
                 lora_summary = ", ".join(
                     f"{adapter}:{weight:.2f} ({path.name})" for path, weight, adapter in lora_entries

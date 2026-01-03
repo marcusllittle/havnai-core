@@ -90,7 +90,8 @@ GLOBAL_POSITIVE_SUFFIX = (
     "(ultra-realistic 8k:1.05), "
     "(detailed skin pores:1.03), "
     "focused eyes, clear pupils, natural gaze, "
-    "natural teeth, realistic mouth structure"
+    "natural teeth, realistic mouth structure, "
+    "no extra breasts, no multiple breasts, not deformed, no multiple legs"
 )
 
 HARDCORE_POSITIVE_SUFFIX = (

@@ -103,6 +103,7 @@ GLOBAL_NEGATIVE_PROMPT = (
     "bad anatomy, bad hands, missing fingers, extra digits, fused fingers, "
     "deformed, disfigured, mutated, ugly, poorly drawn face, "
     "extra limbs, missing limbs, extra arms, missing arms, "
+    "extra breasts, multiple breasts, multiple legs, "
     "blurry, low quality, out of frame, watermark, signature, text, "
     "duplicate body parts, merged bodies, cloned face, "
     "duplicate ass, layered buttocks, overlapping anatomy, "

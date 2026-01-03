@@ -1006,21 +1006,35 @@ def run_image_generation(
             if not isinstance(requested, list):
                 requested = []
             model_hint = f"{entry.name} {pipeline_name}".strip()
-            recommended = build_lora_stack(prompt, model_hint, requested)
-            for item in recommended:
-                if not isinstance(item, dict):
-                    continue
-                name = str(item.get("name") or "").strip()
+            model_is_sdxl = is_sdxl_model(model_hint)
+            seen: Set[str] = set()
+            for item in requested:
+                if len(lora_entries) >= MAX_LORAS:
+                    break
+                raw_weight: Optional[float] = None
+                if isinstance(item, dict):
+                    name = str(item.get("name") or "").strip()
+                    raw_weight = item.get("weight")
+                else:
+                    name = str(item or "").strip()
                 if not name:
+                    continue
+                normalized = normalize_lora_name(name)
+                if normalized in seen:
+                    continue
+                base_type = infer_lora_base_type(normalized)
+                if base_type == "sdxl" and not model_is_sdxl:
+                    continue
+                if base_type == "sd15" and model_is_sdxl:
                     continue
                 lora_path = resolve_lora_path(name)
                 if not lora_path:
                     continue
-                normalized = normalize_lora_name(name)
                 role = classify_lora_role(normalized)
-                weight = clamp_lora_weight(item.get("weight"), role)
+                weight = clamp_lora_weight(raw_weight, role)
                 adapter_name = f"lora_{role}_{lora_path.stem}"
                 lora_entries.append((lora_path, weight, adapter_name))
+                seen.add(normalized)
             if lora_entries:
                 lora_summary = ", ".join(
                     f"{adapter}:{weight:.2f} ({path.name})" for path, weight, adapter in lora_entries
@@ -1127,11 +1141,13 @@ def run_image_generation(
                     log(f"Prompt truncation failed: {exc}", prefix="⚠️")
             gen_t0 = time.time()
             # Optional sampler switch if supported
-            if sampler and hasattr(pipe, "scheduler") and _DPMSolver is not None and "dpmpp" in sampler:
-                try:
-                    pipe.scheduler = _DPMSolver.from_config(pipe.scheduler.config)
-                except Exception as exc:
-                    log(f"Sampler switch failed: {exc}", prefix="⚠️", sampler=sampler)
+            if sampler and hasattr(pipe, "scheduler") and _DPMSolver is not None:
+                sampler_norm = sampler.replace("+", "p")
+                if "dpmpp" in sampler_norm:
+                    try:
+                        pipe.scheduler = _DPMSolver.from_config(pipe.scheduler.config)
+                    except Exception as exc:
+                        log(f"Sampler switch failed: {exc}", prefix="⚠️", sampler=sampler)
             with torch.inference_mode():
                 result = pipe(
                     pos_text,

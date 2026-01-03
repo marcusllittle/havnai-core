@@ -1265,6 +1265,15 @@ def submit_job() -> Any:
                     name = str(item).strip()
                     if name:
                         loras_list.append({"name": name})
+        if not loras_list:
+            pipeline_norm = str(cfg.get("pipeline", "")).lower() if cfg else ""
+            if pipeline_norm == "sdxl" or "sdxl" in pipeline_norm:
+                loras_list = [{"name": "perfectionstyle", "weight": 0.35}]
+            elif pipeline_norm in {"sd15", "sd1.5", ""}:
+                loras_list = [
+                    {"name": "DetailedPerfectionSD1.5", "weight": 0.6},
+                    {"name": "perfectionstyleSD1.5", "weight": 0.3},
+                ]
         if position_lora:
             def normalize_lora_ref(name: str) -> str:
                 base = Path(name).name
@@ -1281,7 +1290,7 @@ def submit_job() -> Any:
             job_settings["seed"] = seed
         base_negative = str(cfg.get("negative_prompt_default") or "").strip() if cfg else ""
         combined_negative = ", ".join(
-            filter(None, [negative_prompt or base_negative, GLOBAL_NEGATIVE_PROMPT])
+            filter(None, [negative_prompt, base_negative, GLOBAL_NEGATIVE_PROMPT])
         )
         if position_negative:
             combined_negative = f"{combined_negative}, {position_negative}" if combined_negative else position_negative

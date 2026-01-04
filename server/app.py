@@ -46,6 +46,13 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 from havnai.video_engine.gguf_wan2_2 import VideoEngine, VideoJobRequest
+from common.prompt_enhancers import (
+    ANTI_OVERLAY_NEGATIVE,
+    SHARPNESS_NEGATIVE,
+    enhance_prompt_for_positions,
+    has_hardcore_keywords,
+    resolve_position_lora_weight,
+)
 
 # Reward weights bootstrap – enriched at runtime via registration
 MODEL_WEIGHTS: Dict[str, float] = {
@@ -83,313 +90,25 @@ GLOBAL_POSITIVE_SUFFIX = (
     "(ultra-realistic 8k:1.05), "
     "(detailed skin pores:1.03), "
     "focused eyes, clear pupils, natural gaze, "
-    "well formed hands, five fingers on each hand, "
-    "natural teeth, realistic mouth structure"
+    "natural teeth, realistic mouth structure, "
+    "no extra breasts, no multiple breasts, not deformed, no multiple legs"
+)
+
+HARDCORE_POSITIVE_SUFFIX = (
+    "ultra sharp skin texture, photorealistic details, highres, masterpiece, "
+    "perfect anatomy, smooth proportions, no overlays, clean insertion"
 )
 
 # Global negative prompt to discourage common artifacts across all models.
-GLOBAL_NEGATIVE_PROMPT = ", ".join(
-    [
-        "FastNegativeV2",
-        "liquid fingers",
-        "interlocked fingers",
-        "bad teeth",
-        "oversaturated",
-        "scan artifact",
-        "doll skin",
-        "exaggerated features",
-        "unnatural pose",
-        "disembodied limb",
-        "oversized head",
-        "webbed fingers",
-        "bad ears",
-        "bad chin",
-        "bad mouth",
-        "bad eyes",
-        "bad digit",
-        "bad shadow",
-        "bad color",
-        "bad lighting",
-        "bad crop",
-        "bad aspect ratio",
-        "bad vector",
-        "bad lineart",
-        "bad perspective",
-        "bad shading",
-        "bad sketch",
-        "bad trace",
-        "bad typesetting",
-        "color error",
-        "color mismatch",
-        "dirty art",
-        "dirty scan",
-        "dubious anatomy",
-        "exaggerated limbs",
-        "flat colors",
-        "gradient background",
-        "heavily pixelated",
-        "high noise",
-        "image noise",
-        "moire pattern",
-        "motion blur",
-        "muddy colors",
-        "overcompressed",
-        "poor lineart",
-        "scanned with errors",
-        "scan errors",
-        "very low quality",
-        "visible pixels",
-        "aliasing",
-        "anatomy error",
-        "anatomy mistake",
-        "broken anatomy",
-        "broken pose",
-        "camera aberration",
-        "chromatic aberration",
-        "clashing styles",
-        "compression artifacts",
-        "corrupted",
-        "cribbed from",
-        "downsampling",
-        "faded lines",
-        "filter abuse",
-        "grainy",
-        "noise",
-        "noisy background",
-        "pixelation",
-        "pixels",
-        "poor quality",
-        "amateur",
-        "amateur drawing",
-        "bad art",
-        "bad coloring",
-        "bad composition",
-        "bad contrast",
-        "bad drawing",
-        "bad image",
-        "bad photoshop",
-        "bad pose",
-        "bad proportions",
-        "beginner",
-        "black and white",
-        "deformed",
-        "disfigured",
-        "displeasing",
-        "distorted",
-        "distorted proportions",
-        "drawing",
-        "duplicate",
-        "early",
-        "exaggerated pose",
-        "gross proportions",
-        "malformed limbs",
-        "missing arm",
-        "missing leg",
-        "extra arm",
-        "extra leg",
-        "fused fingers",
-        "too many fingers",
-        "extra fingers",
-        "mutated hands",
-        "blurry",
-        "out of frame",
-        "contortionist",
-        "contorted limbs",
-        "disproportionate",
-        "twisted posture",
-        "disconnected",
-        "warped",
-        "misshapen",
-        "out of scale",
-        "score_6",
-        "score_5",
-        "score_4",
-        "tan",
-        "piercing",
-        "3d",
-        "render",
-        "cgi",
-        "doll",
-        "cartoon",
-        "illustration",
-        "painting",
-        "digital art",
-        "anime",
-        "fake",
-        "3d modeling",
-        "old",
-        "asymmetrical features",
-        "unrealistic proportions",
-        "mutated",
-        "unnatural textures",
-        "twisted limbs",
-        "malformed hands",
-        "bad hands",
-        "bad fingers",
-        "split image",
-        "amputee",
-        "mutation",
-        "missing fingers",
-        "extra digit",
-        "fewer digits",
-        "cropped",
-        "worst quality",
-        "low quality",
-        "normal quality",
-        "jpeg artifacts",
-        "signature",
-        "watermark",
-        "username",
-        "artist name",
-        "ugly",
-        "symbol",
-        "hieroglyph",
-        "six fingers per hand",
-        "four fingers per hand",
-        "disfigured hand",
-        "monochrome",
-        "missing limb",
-        "linked limb",
-        "connected limb",
-        "interconnected limb",
-        "broken finger",
-        "broken hand",
-        "broken wrist",
-        "broken leg",
-        "split limbs",
-        "no thumb",
-        "missing hand",
-        "missing arms",
-        "missing legs",
-        "fused digit",
-        "missing digit",
-        "extra knee",
-        "extra elbow",
-        "storyboard",
-        "split arms",
-        "split hands",
-        "split fingers",
-        "twisted fingers",
-        "disfigured butt",
-        "deformed hands",
-        "blurred faces",
-        "irregular face",
-        "irrregular body shape",
-        "ugly eyes",
-        "squint",
-        "tiling",
-        "poorly drawn hands",
-        "poorly drawn feet",
-        "poorly drawn face",
-        "poorly framed",
-        "body out of frame",
-        "cut off",
-        "draft",
-        "grainy",
-        "oversaturated",
-        "teeth",
-        "closed eyes",
-        "weird neck",
-        "long neck",
-        "long body",
-        "disgusting",
-        "childish",
-        "mutilated",
-        "mangled",
-        "surreal",
-        "fuse",
-        "off-center",
-        "text",
-        "logo",
-        "letterbox",
-        "bokeh",
-        "multiple views",
-        "multiple panels",
-        "extra hands",
-        "extra limbs",
-        "mutated fingers",
-        "detached arm",
-        "liquid hand",
-        "inverted hand",
-        "oversized head",
-        "three hands",
-        "three legs",
-        "bad arms",
-        "three crus",
-        "extra crus",
-        "fused crus",
-        "worst feet",
-        "three feet",
-        "fused feet",
-        "fused thigh",
-        "three thigh",
-        "extra thigh",
-        "worst thigh",
-        "ugly fingers",
-        "horn",
-        "realistic photo",
-        "extra eyes",
-        "huge eyes",
-        "2girl",
-        "2boy",
-        "dehydrated",
-        "morbid",
-        "mutation text",
-        "score_6, score_5, score_4",
-        "3d, render, cgi, doll, cartoon, illustration, painting, digital art, anime, fake, 3d modeling, old, bad anatomy, bad proportions, asymmetrical features, disfigured, deformed, malformed, unrealistic proportions, mutated, unnatural textures, fused fingers, extra limbs, extra fingers, distorted, twisted limbs, malformed hands, bad hands, bad fingers, bad eyes, bad teeth, blurry",
-        "split image, out of frame, amputee, mutated, mutation, deformed, severed, dismembered, corpse, photograph, poorly drawn, bad anatomy, blur, blurry, lowres, bad hands, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, artist name, ugly, symbol, hieroglyph, extra fingers, six fingers per hand, four fingers per hand, disfigured hand, monochrome, missing limb, disembodied limb, linked limb, connected limb, interconnected limb, broken finger, broken hand, broken wrist, broken leg, split limbs, no thumb, missing hand, missing arms, missing legs, fused finger, fused digit, missing digit, bad digit, extra knee, extra elbow, storyboard, split arms, split hands, split fingers, twisted fingers, disfigured butt",
-        "deformed hands, watermark, text, deformed fingers, blurred faces, irregular face, irrregular body shape, ugly eyes, deformed face, squint, tiling, poorly drawn hands, poorly drawn feet, poorly drawn face, out of frame, poorly framed, extra limbs, disfigured, deformed, body out of frame, blurry, bad anatomy, blurred, watermark, grainy, signature, cut off, draft",
-        "cartoon, black and white photo, disfigured, kitsch, ugly, oversaturated, grain, low-res, Deformed, blurry, bad anatomy, poorly drawn face, mutation, mutated, extra limb, poorly drawn hands, missing limb, blurry, floating limbs, disconnected limbs, malformed hands, blur, out of focus, long neck, long body, disgusting, poorly drawn, childish, mutilated, mangled, old, surreal",
-        "bad anatomy, fuze, ugly eyes, imperfections, bad finger, off-center, interlocked fingers, text, logo, watermark, signature, letterbox, bokeh, blurry, multiple views, multiple panels, missing limbs, missing fingers, deformed, cropped, extra hands, extra fingers, too many fingers, fused fingers, bad arm, monochrome, distorted arm, extra arms, malformed hands, poorly drawn hands, mutated fingers, extra limbs, poorly drawn face, artist name, fused arms, extra legs, missing leg, disembodied leg, detached arm, liquid hand, inverted hand, disembodied limb, oversized head",
-        "bad anatomy, bad hands, three hands, three legs, bad arms, missing legs, missing arms, poorly drawn face, bad face, fused face, cloned face, worst face, three crus, extra crus, fused crus, worst feet, three feet, fused feet, fused thigh, three thigh, extra thigh, worst thigh, missing fingers, extra fingers, ugly fingers, long fingers, horn, realistic photo, extra eyes, huge eyes, 2girl, amputation, disconnected limbs",
-        "bad anatomy, bad hands, three hands, three legs, bad arms, missing legs, missing arms, poorly drawn face, bad face, fused face, cloned face, worst face, out of frame double, three crus, extra crus, fused crus, worst feet, three feet, fused feet, fused thigh, three thigh, extra thigh, worst thigh, missing fingers, extra fingers, ugly fingers, long fingers, horn, realistic photo, extra eyes, huge eyes, 2girl, 2boy, amputation, disconnected limbs",
-        "mutation, deformed, deformed iris, duplicate, morbid, mutilated, disfigured, poorly drawn hand, poorly drawn face, bad proportions, gross proportions, extra limbs, cloned face, long neck, malformed limbs, missing arm, missing leg, extra arm, extra leg, fused fingers, too many fingers, extra fingers, mutated hands, blurry, bad anatomy, out of frame, contortionist, contorted limbs, exaggerated features, disproportionate, twisted posture, unnatural pose, disconnected, disproportionate, warped, misshapen, out of scale",
-        "3 or 4 ears, never BUT ONE EAR, blurry, bad anatomy, extra limbs, poorly drawn face, poorly drawn hands, missing fingers, mangled teeth, weird teeth, poorly drawn eyes, blurry eyes, tan skin, oversaturated, teeth, poorly drawn, ugly, closed eyes, 3D, weird neck, duplicate, morbid, mutilated, out of frame, extra fingers, mutated hands, poorly drawn hands, poorly drawn face, mutation, deformed, blurry, bad anatomy, bad proportions, extra limbs, cloned face, disfigured, extra limbs, gross proportions, malformed limbs, missing arms, missing legs, extra arms, extra legs, mutated hands, fused finger",
-        "amateur, amateur drawing, bad anatomy, bad art, bad aspect ratio, bad color, bad coloring, bad composition, bad contrast, bad crop, bad drawing, bad image, bad lighting, bad lineart, bad perspective, bad photoshop, bad pose, bad proportions, bad shading, bad sketch, bad trace, bad vector, beginner, black and white, broken anatomy, broken pose, clashing styles, color error, color issues, color mismatch, deformed, dirty art, disfigured, displeasing, distorted, distorted proportions, drawing, dubious anatomy, duplicate, early, exaggerated limbs, exaggerated pose, flat colors, gro",
-        "aliasing, anatomy error, anatomy mistake, artifact, artifacts, broken anatomy, broken pose, camera aberration, chromatic aberration, clashing styles, cloned face, color banding, color error, color issues, color mismatch, compression artifacts, corrupted, cribbed from, cropped, deformed, dirty scan, disfigured, distorted, downsampling, draft, dubious anatomy, emoji, error, exaggerated limbs, exaggerated pose, extra arms, extra digits, extra fingers, extra legs, extra limbs, faded lines, filter abuse, fused fingers, gradient background, grainy, heavily compressed, heavily pixelated, high noise",
-        "ai-generated, artifact, artifacts, bad quality, bad scan, blurred, blurry, compressed, compression artifacts, corrupted, dirty art scan, dirty scan, dithering, downsampling, faded lines, frameborder, grainy, heavily compressed, heavily pixelated, high noise, image noise, low dpi, low fidelity, low resolution, lowres, moire pattern, moiré pattern, motion blur, muddy colors, noise, noisy background, overcompressed, pixelation, pixels, poor quality, poor lineart, scanned with errors, scan artifact, scan errors, very low quality, visible pixels BREAK amateur, amateur drawing, bad anatomy, bad art",
-        "ugly, old, fat, slight, disgusting, Unflattering, Distorted, Poorly lit, Blurry, Grainy, Overexposed, Underexposed, Cluttered background, Distracti",
-        "bad anatomy, bad proportions, blurry, cloned face, cropped, deformed, dehydrated, disfigured, duplicate, error, extra arms, extra fingers, extra legs, extra limbs, fused fingers, gross proportions, jpeg artifacts, long neck, low quality, low-res, malformed limbs, missing arms, missing legs, morbid, mutated hands, mutation,text, signature, ugly, username, watermark, poorly drawn hands, worst quality",
-        "extra fingers, fused fingers, long necks, missing arms, mutated hands, malformed limbs, bad anatomy",
-        "mutations, merged features, gross proportions",
-        "extra wings, disproportionate body parts, random glowing elements, plastic texture, over-saturated colors, deformed legs, asymmetry, misplaced shadows, wrong perspective, poorly blended details",
-        "deformed, asymmetrical, extra eyes, extra limbs, worst quality, blurry, unnatural skin, bad anatomy",
-        "deformed, asymmetrical, extra fingers, extra limbs, fused fingers, unrealistic proportions, bad anatomy",
-        "deformed, asymmetrical, extra eyes, blurry, distorted, bad anatomy, disproportional, unrealistic skin",
-        "blurry, pixelated, noisy, low resolution, JPEG artifacts, lack of focus, grainy textures, over-sharpened edges",
-        "extra fingers, fused fingers, long necks, missing arms, mutated hands, malformed limbs, bad anatomy",
-        "mutations, merged features, gross proportions",
-        "extra breasts",
-        "missing breasts",
-        "deformed breasts",
-        "plastic breasts",
-        "fake breasts",
-        "gravity-defying breasts",
-        "extra nipples",
-        "cloned face",
-        "duplicate body parts",
-        "censored",
-        "clothing on nude body",
-        "smooth featureless crotch",
-        "dildo clipping through body",
-        "merged holes",
-        "plastic skin",
-        "dry skin",
-        "flat chest",
-        "single snake",
-        "few snakes",
-        "bald spots",
-        "horror monster",
-        "lazy eye",
-        "crossed eyes",
-        "missing fingers",
-        "fused fingers",
-        "extra fingers",
-        "malformed teeth",
-        "extra teeth",
-        "bad teeth",
-        "open mouth deformity",
-    ]
+GLOBAL_NEGATIVE_PROMPT = (
+    "bad anatomy, bad hands, missing fingers, extra digits, fused fingers, "
+    "deformed, disfigured, mutated, ugly, poorly drawn face, "
+    "extra limbs, missing limbs, extra arms, missing arms, "
+    "extra breasts, multiple breasts, multiple legs, "
+    "blurry, low quality, out of frame, watermark, signature, text, "
+    "duplicate body parts, merged bodies, cloned face, "
+    "duplicate ass, layered buttocks, overlapping anatomy, "
+    "pixelated, jpeg artifacts, lowres, worst quality"
 )
 
 # ---------------------------------------------------------------------------
@@ -1374,6 +1093,21 @@ def submit_job() -> Any:
     model_name_raw = str(payload.get("model", "")).strip()
     model_name = model_name_raw.lower()
     weight = payload.get("weight")
+    raw_prompt = str(payload.get("prompt") or payload.get("data") or "")
+    auto_model_request = not model_name or model_name in {"auto", "auto_image", "auto-image"}
+    hardcore_prompt = has_hardcore_keywords(raw_prompt)
+    enhanced_prompt, model_override, position_lora, position_negative = enhance_prompt_for_positions(raw_prompt)
+
+    if model_override:
+        # Drop overrides that are no longer available in the manifest.
+        load_manifest()
+        if model_override.lower() not in MANIFEST_MODELS:
+            model_override = None
+
+    if auto_model_request and model_override:
+        # Use a valid override only; otherwise fall back to weighted auto selection.
+        model_name_raw = model_override
+        model_name = model_override.lower()
 
     if not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid wallet"}), 400
@@ -1387,12 +1121,19 @@ def submit_job() -> Any:
             if (meta.get("task_type") or CREATOR_TASK_TYPE).upper() == CREATOR_TASK_TYPE
         ]
         if not candidates:
-            return jsonify({"error": "no_creator_models"}), 400
-        names = [meta["name"] for meta in candidates]
-        weights = [resolve_weight(meta["name"].lower(), meta.get("reward_weight", 10.0)) for meta in candidates]
-        chosen = random.choices(names, weights=weights, k=1)[0]
-        model_name_raw = chosen
-        model_name = chosen.lower()
+            # Final safety fallback when weighted auto cannot select.
+            fallback = "uberRealisticPornMerge_v23Final"
+            if fallback.lower() in MANIFEST_MODELS:
+                model_name_raw = fallback
+                model_name = fallback.lower()
+            else:
+                return jsonify({"error": "no_creator_models"}), 400
+        else:
+            names = [meta["name"] for meta in candidates]
+            weights = [resolve_weight(meta["name"].lower(), meta.get("reward_weight", 10.0)) for meta in candidates]
+            chosen = random.choices(names, weights=weights, k=1)[0]
+            model_name_raw = chosen
+            model_name = chosen.lower()
 
     if not model_name:
         return jsonify({"error": "missing model"}), 400
@@ -1412,7 +1153,7 @@ def submit_job() -> Any:
 
     if is_wan_i2v:
         # Persist all WAN-specific controls inside the job data blob as JSON
-        prompt_text = str(payload.get("prompt") or "")
+        prompt_text = enhanced_prompt
         settings: Dict[str, Any] = {
             "prompt": prompt_text,
             "init_image": payload.get("init_image") or None,
@@ -1427,7 +1168,7 @@ def submit_job() -> Any:
         job_data = json.dumps(settings)
         task_type = "VIDEO_GEN"
     elif is_animatediff:
-        prompt_text = str(payload.get("prompt") or "")
+        prompt_text = enhanced_prompt
         negative_prompt = str(payload.get("negative_prompt") or "")
         # Core AnimateDiff controls – validated/coerced into safe ranges
         try:
@@ -1483,17 +1224,83 @@ def submit_job() -> Any:
         job_data = json.dumps(settings)
         task_type = "ANIMATEDIFF"
     else:
-        prompt_text = str(payload.get("prompt") or payload.get("data") or "")
+        prompt_text = enhanced_prompt
+        if position_lora:
+            lora_weight = resolve_position_lora_weight(position_lora)
+            lora_tag = f"<lora:{position_lora}:{lora_weight:.2f}>"
+            if lora_tag not in prompt_text:
+                prompt_text = f"{prompt_text}, {lora_tag}" if prompt_text else lora_tag
+        if hardcore_prompt and HARDCORE_POSITIVE_SUFFIX.lower() not in prompt_text.lower():
+            prompt_text = f"{prompt_text}, {HARDCORE_POSITIVE_SUFFIX}" if prompt_text else HARDCORE_POSITIVE_SUFFIX
         if prompt_text:
             prompt_text = f"{prompt_text}, {GLOBAL_POSITIVE_SUFFIX}"
         else:
             prompt_text = GLOBAL_POSITIVE_SUFFIX
         negative_prompt = str(payload.get("negative_prompt") or "").strip()
-        job_settings: Dict[str, Any] = {"prompt": prompt_text}
+        seed = payload.get("seed")
+        try:
+            seed = int(seed) if seed is not None else None
+        except (TypeError, ValueError):
+            seed = None
+        auto_anatomy_raw = payload.get("auto_anatomy")
+        if isinstance(auto_anatomy_raw, bool):
+            auto_anatomy = auto_anatomy_raw
+        elif isinstance(auto_anatomy_raw, str):
+            auto_anatomy = auto_anatomy_raw.strip().lower() in {"1", "true", "yes"}
+        else:
+            auto_anatomy = False
+        # Pass through per-image overrides for the node to honor.
+        job_settings: Dict[str, Any] = {"prompt": prompt_text, "auto_anatomy": auto_anatomy}
+        payload_loras = payload.get("loras") or []
+        loras_list: List[Dict[str, Any]] = []
+        if isinstance(payload_loras, list):
+            for item in payload_loras:
+                if isinstance(item, dict):
+                    name = str(item.get("name") or "").strip()
+                    if not name:
+                        continue
+                    entry: Dict[str, Any] = {"name": name}
+                    if "weight" in item:
+                        entry["weight"] = item.get("weight")
+                    loras_list.append(entry)
+                else:
+                    name = str(item).strip()
+                    if name:
+                        loras_list.append({"name": name})
+        if not loras_list:
+            pipeline_norm = str(cfg.get("pipeline", "")).lower() if cfg else ""
+            if pipeline_norm == "sdxl" or "sdxl" in pipeline_norm:
+                loras_list = [{"name": "perfectionstyle", "weight": 0.35}]
+            elif pipeline_norm in {"sd15", "sd1.5", ""}:
+                loras_list = [
+                    {"name": "DetailedPerfectionSD1.5", "weight": 0.6},
+                    {"name": "perfectionstyleSD1.5", "weight": 0.3},
+                ]
+        if position_lora:
+            def normalize_lora_ref(name: str) -> str:
+                base = Path(name).name
+                if base.lower().endswith(".safetensors"):
+                    base = base[:-len(".safetensors")]
+                return base.strip().lower()
+
+            position_norm = normalize_lora_ref(position_lora)
+            if not any(normalize_lora_ref(str(entry.get("name") or "")) == position_norm for entry in loras_list):
+                loras_list.append({"name": position_lora, "weight": resolve_position_lora_weight(position_lora)})
+        if loras_list:
+            job_settings["loras"] = loras_list
+        if seed is not None:
+            job_settings["seed"] = seed
         base_negative = str(cfg.get("negative_prompt_default") or "").strip() if cfg else ""
         combined_negative = ", ".join(
-            filter(None, [negative_prompt or base_negative, GLOBAL_NEGATIVE_PROMPT])
+            filter(None, [negative_prompt, base_negative, GLOBAL_NEGATIVE_PROMPT])
         )
+        if position_negative:
+            combined_negative = f"{combined_negative}, {position_negative}" if combined_negative else position_negative
+        if hardcore_prompt:
+            for extra_negative in (ANTI_OVERLAY_NEGATIVE, SHARPNESS_NEGATIVE):
+                if not extra_negative:
+                    continue
+                combined_negative = f"{combined_negative}, {extra_negative}" if combined_negative else extra_negative
         if combined_negative:
             job_settings["negative_prompt"] = combined_negative
         pose_image = payload.get("pose_image") or payload.get("pose_image_b64") or ""
@@ -1515,6 +1322,16 @@ def submit_job() -> Any:
                 job_settings["height"] = cfg["height"]
             if cfg.get("sampler"):
                 job_settings["sampler"] = cfg["sampler"]
+        if hardcore_prompt:
+            job_settings["steps"] = 40
+            job_settings["guidance"] = 7.5
+
+        injected_loras = job_settings.get("loras") or []
+        log_event(
+            "Enhanced prompt: "
+            f"{prompt_text} | Selected model: {model_name_raw or model_name} | "
+            f"Injected LoRAs: {injected_loras} | Extra negatives: {position_negative or ''}"
+        )
 
         job_data = json.dumps(job_settings)
         task_type = CREATOR_TASK_TYPE
@@ -1711,6 +1528,8 @@ def get_creator_tasks() -> Any:
                     raw_data = job.get("data")
                     prompt_text = raw_data or ""
                     negative_prompt = ""
+                    loras: List[str] = []
+                    image_overrides: Dict[str, Any] = {}
                     try:
                         parsed = json.loads(raw_data) if isinstance(raw_data, str) else None
                     except Exception:
@@ -1718,6 +1537,35 @@ def get_creator_tasks() -> Any:
                     if isinstance(parsed, dict):
                         prompt_text = str(parsed.get("prompt") or "")
                         negative_prompt = str(parsed.get("negative_prompt") or "")
+                        parsed_loras = parsed.get("loras") or []
+                        if isinstance(parsed_loras, list):
+                            loras = [item for item in parsed_loras if item]
+                        # Forward per-image overrides stored in job settings.
+                        for key in ("steps", "guidance", "width", "height", "sampler", "seed", "auto_anatomy"):
+                            if key not in parsed:
+                                continue
+                            value = parsed.get(key)
+                            if value is None:
+                                continue
+                            if key in {"steps", "width", "height", "seed"}:
+                                try:
+                                    image_overrides[key] = int(value)
+                                except (TypeError, ValueError):
+                                    continue
+                            elif key == "guidance":
+                                try:
+                                    image_overrides[key] = float(value)
+                                except (TypeError, ValueError):
+                                    continue
+                            elif key == "sampler":
+                                value_str = str(value).strip()
+                                if value_str:
+                                    image_overrides[key] = value_str
+                            elif key == "auto_anatomy":
+                                if isinstance(value, bool):
+                                    image_overrides[key] = value
+                                elif isinstance(value, str):
+                                    image_overrides[key] = value.strip().lower() in {"1", "true", "yes"}
                     # Always send plain prompt text to the node (avoid passing raw JSON)
                     prompt_for_node = prompt_text
 
@@ -1726,8 +1574,7 @@ def get_creator_tasks() -> Any:
                     log_event("Job claimed by node", job_id=job["id"], node_id=node_id)
                     reward_weight = float(job["weight"] or cfg.get("reward_weight", resolve_weight(job["model"], 10.0)))
                     job_task_type = (job.get("task_type") or CREATOR_TASK_TYPE).upper()
-                    pending = [
-                        {
+                    pending_entry = {
                             "task_id": job["id"],
                             "task_type": job_task_type,
                             "model_name": job["model"],
@@ -1742,9 +1589,12 @@ def get_creator_tasks() -> Any:
                             "data": raw_data,
                             "prompt": prompt_for_node,
                             "negative_prompt": negative_prompt,
+                            "loras": loras,
                             "queued_at": job.get("timestamp"),
                         }
-                    ]
+                    if job_task_type == CREATOR_TASK_TYPE and image_overrides:
+                        pending_entry.update(image_overrides)
+                    pending = [pending_entry]
                     node_info["current_task"] = {
                         "task_id": job["id"],
                         "model_name": job["model"],
@@ -1774,9 +1624,15 @@ def get_creator_tasks() -> Any:
                 "wallet": task.get("wallet"),
                 "prompt": task.get("prompt") or task.get("data", ""),
                 "negative_prompt": task.get("negative_prompt") or "",
+                "loras": task.get("loras") or [],
                 "queued_at": task.get("queued_at"),
                 "assigned_at": task.get("assigned_at"),
             }
+            if task_payload["type"].upper() == CREATOR_TASK_TYPE:
+                # Forward generation overrides for image tasks only.
+                for key in ("steps", "guidance", "width", "height", "sampler", "seed", "auto_anatomy"):
+                    if key in task and task[key] is not None:
+                        task_payload[key] = task[key]
             # If this is a WAN I2V video job, attempt to expose structured settings to the node
             if task_payload["type"].upper() == "VIDEO_GEN":
                 try:

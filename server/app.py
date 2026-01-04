@@ -645,13 +645,13 @@ def fetch_next_job_for_node(node_id: str) -> Optional[Dict[str, Any]]:
     node_supports = {s.lower() for s in node.get("supports", []) if isinstance(s, str)}
     for row in rows:
         task_type = (row["task_type"] or CREATOR_TASK_TYPE).upper()
-        # Support standard IMAGE_GEN, WAN video jobs, and AnimateDiff video jobs.
-        if task_type not in {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF"}:
+        # Support standard IMAGE_GEN, WAN video jobs, AnimateDiff, and face swap jobs.
+        if task_type not in {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP"}:
             continue
         if role != "creator":
             continue
         required_support = "image"
-        if task_type in {"VIDEO_GEN", "ANIMATEDIFF"}:
+        if task_type in {"VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP"}:
             required_support = "animatediff" if task_type == "ANIMATEDIFF" else "image"
         if node_supports and required_support not in node_supports:
             continue
@@ -848,7 +848,7 @@ def pending_tasks_for_node(node_id: str) -> List[Dict[str, Any]]:
         if task.get("status") not in relevant_status:
             continue
         task_type = (task.get("task_type") or CREATOR_TASK_TYPE).upper()
-        if task_type not in {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF"}:
+        if task_type not in {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP"}:
             continue
         tasks.append(task)
     return tasks
@@ -1084,6 +1084,159 @@ def installer_assets(filename: str) -> Any:
 # ---------------------------------------------------------------------------
 
 
+def _coerce_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _clamp(value: int, min_value: int, max_value: int) -> int:
+    return max(min_value, min(max_value, value))
+
+
+def _align_multiple(value: int, multiple: int) -> int:
+    if multiple <= 1:
+        return value
+    return value - (value % multiple)
+
+
+def parse_lora_payload(payload_loras: Any) -> List[Dict[str, Any]]:
+    loras_list: List[Dict[str, Any]] = []
+    if isinstance(payload_loras, list):
+        for item in payload_loras:
+            if isinstance(item, dict):
+                name = str(item.get("name") or "").strip()
+                if not name:
+                    continue
+                entry: Dict[str, Any] = {"name": name}
+                if "weight" in item:
+                    entry["weight"] = item.get("weight")
+                loras_list.append(entry)
+            else:
+                name = str(item).strip()
+                if name:
+                    loras_list.append({"name": name})
+    return loras_list
+
+
+def build_animatediff_settings(payload: Dict[str, Any], prompt_text: str) -> Dict[str, Any]:
+    negative_prompt = str(payload.get("negative_prompt") or "").strip()
+    frames = _coerce_int(payload.get("num_frames", payload.get("frames", 16)), 16)
+    fps = _coerce_int(payload.get("fps", 8), 8)
+    steps = _coerce_int(payload.get("steps", 25), 25)
+    guidance = _coerce_float(payload.get("guidance", 7.0), 7.0)
+    width = _coerce_int(payload.get("width", 512), 512)
+    height = _coerce_int(payload.get("height", 512), 512)
+    frames = _clamp(frames, 1, 64)
+    fps = _clamp(fps, 1, 60)
+    steps = _clamp(steps, 5, 60)
+    guidance = max(1.0, min(15.0, guidance))
+    width = _clamp(width, 256, 1536)
+    height = _clamp(height, 256, 1536)
+    width = _align_multiple(width, 8)
+    height = _align_multiple(height, 8)
+
+    motion_adapter = str(payload.get("motion_adapter") or "").strip()
+    legacy_motion = str(payload.get("motion") or "").strip()
+    if not motion_adapter:
+        motion_adapter = legacy_motion
+    if not motion_adapter:
+        motion_adapter = "guoyww/animatediff-motion-adapter-v1-5-2"
+    if "/" not in motion_adapter and not Path(motion_adapter).exists():
+        motion_adapter = "guoyww/animatediff-motion-adapter-v1-5-2"
+
+    scheduler = str(payload.get("scheduler") or "DDIM").upper()
+    if scheduler not in {"DDIM", "EULER", "HEUN", "DPM"}:
+        scheduler = "DDIM"
+
+    output_format = str(payload.get("output_format") or payload.get("format") or "mp4").lower()
+    if output_format not in {"mp4", "gif"}:
+        output_format = "mp4"
+
+    seed = payload.get("seed")
+    try:
+        seed = int(seed) if seed is not None else None
+    except (TypeError, ValueError):
+        seed = None
+    lora_strength = payload.get("lora_strength")
+    try:
+        lora_strength = float(lora_strength) if lora_strength is not None else None
+    except (TypeError, ValueError):
+        lora_strength = None
+
+    settings: Dict[str, Any] = {
+        "prompt": prompt_text,
+        "negative_prompt": negative_prompt,
+        "frames": frames,
+        "num_frames": frames,
+        "fps": fps,
+        "steps": steps,
+        "guidance": guidance,
+        "motion_adapter": motion_adapter,
+        "width": width,
+        "height": height,
+        "seed": seed,
+        "lora_strength": lora_strength,
+        "init_image": payload.get("init_image") or None,
+        "scheduler": scheduler,
+        "output_format": output_format,
+    }
+    base_model = str(payload.get("base_model") or "").strip()
+    if base_model:
+        settings["base_model"] = base_model
+    if legacy_motion:
+        settings["motion"] = legacy_motion
+    loras_list = parse_lora_payload(payload.get("loras"))
+    if loras_list:
+        settings["loras"] = loras_list
+    return settings
+
+
+def build_faceswap_settings(payload: Dict[str, Any], prompt_text: str) -> Dict[str, Any]:
+    base_image_url = str(
+        payload.get("base_image_url")
+        or payload.get("base_image")
+        or payload.get("image")
+        or ""
+    ).strip()
+    face_source_url = str(
+        payload.get("face_source_url")
+        or payload.get("face_source")
+        or payload.get("face_image")
+        or ""
+    ).strip()
+    strength = _coerce_float(payload.get("strength", 0.8), 0.8)
+    num_steps = _coerce_int(payload.get("num_steps", payload.get("steps", 20)), 20)
+    strength = max(0.0, min(1.0, strength))
+    num_steps = _clamp(num_steps, 5, 60)
+    settings: Dict[str, Any] = {
+        "prompt": prompt_text,
+        "base_image_url": base_image_url,
+        "face_source_url": face_source_url,
+        "strength": strength,
+        "num_steps": num_steps,
+    }
+    seed = payload.get("seed")
+    try:
+        seed = int(seed) if seed is not None else None
+    except (TypeError, ValueError):
+        seed = None
+    if seed is not None:
+        settings["seed"] = seed
+    loras_list = parse_lora_payload(payload.get("loras"))
+    if loras_list:
+        settings["loras"] = loras_list
+    return settings
+
+
 @app.route("/submit-job", methods=["POST"])
 def submit_job() -> Any:
     if not rate_limit(f"submit-job:{request.remote_addr}", limit=30):
@@ -1169,58 +1322,7 @@ def submit_job() -> Any:
         task_type = "VIDEO_GEN"
     elif is_animatediff:
         prompt_text = enhanced_prompt
-        negative_prompt = str(payload.get("negative_prompt") or "")
-        # Core AnimateDiff controls – validated/coerced into safe ranges
-        try:
-            frames = int(payload.get("frames", 16))
-        except (TypeError, ValueError):
-            frames = 16
-        try:
-            fps = int(payload.get("fps", 8))
-        except (TypeError, ValueError):
-            fps = 8
-        frames = max(1, min(frames, 64))
-        fps = max(1, min(fps, 60))
-
-        motion = str(payload.get("motion") or "").strip().lower() or "zoom-in"
-        base_model = str(payload.get("base_model") or "realisticVision")
-        width = int(payload.get("width", 512) or 512)
-        height = int(payload.get("height", 512) or 512)
-        # Clamp to supported grid
-        if width not in {512, 768}:
-            width = 512
-        if height not in {512, 768}:
-            height = 512
-
-        seed = payload.get("seed")
-        try:
-            seed = int(seed) if seed is not None else None
-        except (TypeError, ValueError):
-            seed = None
-        lora_strength = payload.get("lora_strength")
-        try:
-            lora_strength = float(lora_strength) if lora_strength is not None else None
-        except (TypeError, ValueError):
-            lora_strength = None
-        init_image = payload.get("init_image") or None
-        scheduler = str(payload.get("scheduler") or "DDIM").upper()
-        if scheduler not in {"DDIM", "EULER", "HEUN"}:
-            scheduler = "DDIM"
-
-        settings = {
-            "prompt": prompt_text,
-            "negative_prompt": negative_prompt,
-            "frames": frames,
-            "fps": fps,
-            "motion": motion,
-            "base_model": base_model,
-            "width": width,
-            "height": height,
-            "seed": seed,
-            "lora_strength": lora_strength,
-            "init_image": init_image,
-            "scheduler": scheduler,
-        }
+        settings = build_animatediff_settings(payload, prompt_text)
         job_data = json.dumps(settings)
         task_type = "ANIMATEDIFF"
     else:
@@ -1339,6 +1441,73 @@ def submit_job() -> Any:
     with LOCK:
         job_id = enqueue_job(wallet, cfg.get("name", model_name), task_type, job_data, float(weight))
     log_event("Public job queued", wallet=wallet, model=model_name, job_id=job_id)
+    return jsonify({"status": "queued", "job_id": job_id}), 200
+
+
+@app.route("/submit-video-job", methods=["POST"])
+def submit_video_job_endpoint() -> Any:
+    if not rate_limit(f"submit-video-job:{request.remote_addr}", limit=30):
+        return jsonify({"error": "rate limit"}), 429
+    payload = request.get_json() or {}
+    wallet = str(payload.get("wallet", "")).strip()
+    model_name_raw = str(payload.get("model") or "animatediff").strip()
+    model_name = model_name_raw.lower()
+    raw_prompt = str(payload.get("prompt") or payload.get("data") or "")
+    if not raw_prompt:
+        return jsonify({"error": "missing prompt"}), 400
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+
+    load_manifest()
+    cfg = get_model_config(model_name)
+    if not cfg:
+        return jsonify({"error": "unknown model"}), 400
+
+    weight = payload.get("weight")
+    if weight is None:
+        weight = cfg.get("reward_weight", resolve_weight(model_name, 10.0))
+
+    settings = build_animatediff_settings(payload, raw_prompt)
+    job_data = json.dumps(settings)
+    with LOCK:
+        job_id = enqueue_job(wallet, cfg.get("name", model_name), "ANIMATEDIFF", job_data, float(weight))
+    log_event("AnimateDiff job queued", wallet=wallet, model=model_name, job_id=job_id)
+    return jsonify({"status": "queued", "job_id": job_id}), 200
+
+
+@app.route("/submit-faceswap-job", methods=["POST"])
+def submit_faceswap_job_endpoint() -> Any:
+    if not rate_limit(f"submit-faceswap-job:{request.remote_addr}", limit=30):
+        return jsonify({"error": "rate limit"}), 429
+    payload = request.get_json() or {}
+    wallet = str(payload.get("wallet", "")).strip()
+    model_name_raw = str(payload.get("model") or "epicrealismxl_vxviicrystalclear").strip()
+    model_name = model_name_raw.lower()
+    prompt_text = str(payload.get("prompt") or "").strip()
+
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+
+    settings = build_faceswap_settings(payload, prompt_text)
+    if not settings.get("base_image_url") or not settings.get("face_source_url"):
+        return jsonify({"error": "base_image_url and face_source_url are required"}), 400
+
+    load_manifest()
+    cfg = get_model_config(model_name)
+    if not cfg:
+        return jsonify({"error": "unknown model"}), 400
+    pipeline_norm = str(cfg.get("pipeline", "")).lower()
+    if "sdxl" not in pipeline_norm:
+        return jsonify({"error": "faceswap requires an SDXL base model"}), 400
+
+    weight = payload.get("weight")
+    if weight is None:
+        weight = cfg.get("reward_weight", resolve_weight(model_name, 10.0))
+
+    job_data = json.dumps(settings)
+    with LOCK:
+        job_id = enqueue_job(wallet, cfg.get("name", model_name), "FACE_SWAP", job_data, float(weight))
+    log_event("Face-swap job queued", wallet=wallet, model=model_name, job_id=job_id)
     return jsonify({"status": "queued", "job_id": job_id}), 200
 
 
@@ -1656,8 +1825,10 @@ def get_creator_tasks() -> Any:
                         "prompt",
                         "negative_prompt",
                         "frames",
+                        "num_frames",
                         "fps",
                         "motion",
+                        "motion_adapter",
                         "base_model",
                         "width",
                         "height",
@@ -1665,9 +1836,31 @@ def get_creator_tasks() -> Any:
                         "lora_strength",
                         "init_image",
                         "scheduler",
+                        "steps",
+                        "guidance",
+                        "output_format",
+                        "loras",
                     ):
                         if key in ad_settings and ad_settings[key] is not None:
                             task_payload[key] = ad_settings[key]
+            if task_payload["type"].upper() == "FACE_SWAP":
+                try:
+                    raw_fs = task.get("data") or ""
+                    fs_settings = json.loads(raw_fs) if isinstance(raw_fs, str) else {}
+                except Exception:
+                    fs_settings = {}
+                if isinstance(fs_settings, dict):
+                    for key in (
+                        "prompt",
+                        "base_image_url",
+                        "face_source_url",
+                        "strength",
+                        "num_steps",
+                        "seed",
+                        "loras",
+                    ):
+                        if key in fs_settings and fs_settings[key] is not None:
+                            task_payload[key] = fs_settings[key]
             response_tasks.append(task_payload)
     return jsonify({"tasks": response_tasks}), 200
 
@@ -1693,6 +1886,9 @@ def submit_results() -> Any:
     utilization = data.get("utilization")
     image_b64 = data.get("image_b64")
     video_b64 = data.get("video_b64")
+    video_format = str(data.get("video_format") or "").strip().lower()
+    if video_format not in {"mp4", "gif"}:
+        video_format = "mp4"
 
     if not node_id or not task_id:
         return jsonify({"error": "missing node_id or task_id"}), 400
@@ -1762,11 +1958,14 @@ def submit_results() -> Any:
                 try:
                     import base64
                     img_bytes = base64.b64decode(image_b64)
-                    out_path = OUTPUTS_DIR / f"{task_id}.png"
+                    image_filename = f"{task_id}.png"
+                    if str(task_type).upper() == "FACE_SWAP":
+                        image_filename = f"swapped_{task_id}.png"
+                    out_path = OUTPUTS_DIR / image_filename
                     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
                     with out_path.open("wb") as fh:
                         fh.write(img_bytes)
-                    image_url = f"/static/outputs/{task_id}.png"
+                    image_url = f"/static/outputs/{image_filename}"
                 except Exception:
                     pass
             if video_b64:
@@ -1775,11 +1974,12 @@ def submit_results() -> Any:
                     video_bytes = base64.b64decode(video_b64)
                     videos_dir = OUTPUTS_DIR / "videos"
                     videos_dir.mkdir(parents=True, exist_ok=True)
-                    video_path = videos_dir / f"{task_id}.mp4"
+                    video_ext = "gif" if video_format == "gif" else "mp4"
+                    video_path = videos_dir / f"{task_id}.{video_ext}"
                     with video_path.open("wb") as fh:
                         fh.write(video_bytes)
                     # Stored at: STATIC_DIR / outputs / videos / <job_id>.mp4
-                    video_url = f"/static/outputs/videos/{task_id}.mp4"
+                    video_url = f"/static/outputs/videos/{task_id}.{video_ext}"
                 except Exception:
                     pass
 
@@ -1864,11 +2064,18 @@ def submit_results() -> Any:
         TASKS.pop(task_id, None)
     # Return a small payload including image and video URLs if saved
     resp_payload = {"status": "ok", "task_id": task_id, "reward": reward}
-    if (OUTPUTS_DIR / f"{task_id}.png").exists():
+    swapped_path = OUTPUTS_DIR / f"swapped_{task_id}.png"
+    if swapped_path.exists():
+        resp_payload["image_url"] = f"/static/outputs/swapped_{task_id}.png"
+    elif (OUTPUTS_DIR / f"{task_id}.png").exists():
         resp_payload["image_url"] = f"/static/outputs/{task_id}.png"
     videos_dir = OUTPUTS_DIR / "videos"
-    if (videos_dir / f"{task_id}.mp4").exists():
+    video_mp4 = videos_dir / f"{task_id}.mp4"
+    video_gif = videos_dir / f"{task_id}.gif"
+    if video_mp4.exists():
         resp_payload["video_url"] = f"/static/outputs/videos/{task_id}.mp4"
+    elif video_gif.exists():
+        resp_payload["video_url"] = f"/static/outputs/videos/{task_id}.gif"
     return jsonify(resp_payload), 200
 
 
@@ -2168,15 +2375,21 @@ def get_result(job_id: str) -> Any:
     if not job_id:
         return jsonify({"error": "missing job_id"}), 400
 
+    swapped_path = OUTPUTS_DIR / f"swapped_{job_id}.png"
     image_path = OUTPUTS_DIR / f"{job_id}.png"
     videos_dir = OUTPUTS_DIR / "videos"
-    video_path = videos_dir / f"{job_id}.mp4"
+    video_mp4 = videos_dir / f"{job_id}.mp4"
+    video_gif = videos_dir / f"{job_id}.gif"
 
     payload: Dict[str, Any] = {"job_id": job_id}
-    if image_path.exists():
+    if swapped_path.exists():
+        payload["image_url"] = f"/static/outputs/swapped_{job_id}.png"
+    elif image_path.exists():
         payload["image_url"] = f"/static/outputs/{job_id}.png"
-    if video_path.exists():
+    if video_mp4.exists():
         payload["video_url"] = f"/static/outputs/videos/{job_id}.mp4"
+    elif video_gif.exists():
+        payload["video_url"] = f"/static/outputs/videos/{job_id}.gif"
 
     if "image_url" not in payload and "video_url" not in payload:
         return jsonify({"error": "result_not_found", "job_id": job_id}), 404

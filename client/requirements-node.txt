@@ -8,13 +8,14 @@ onnxruntime
 
 # Core AI stack
 torch
-diffusers>=0.30.0
+diffusers[torch]>=0.30.0
 transformers>=4.36.0
 accelerate>=0.24.0
 safetensors
 pillow
 scipy
 huggingface-hub
+insightface
 
 # For our manual checkpoint → pipeline code
 einops
@@ -24,6 +25,9 @@ filelock
 
 # For image saving
 opencv-python
+
+# For video export helpers
+imageio[ffmpeg]
 
 # Optional / GPU optimization (pip will skip if not available)
 xformers

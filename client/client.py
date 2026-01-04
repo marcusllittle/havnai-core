@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import inspect
+import io
 import json
 import logging
 import math
@@ -61,6 +63,31 @@ try:
         from diffusers import AutoencoderKL as _AutoencoderKL  # type: ignore
     except Exception:  # pragma: no cover
         _AutoencoderKL = None  # type: ignore
+    try:
+        from diffusers import MotionAdapter as _MotionAdapter  # type: ignore
+    except Exception:  # pragma: no cover
+        _MotionAdapter = None  # type: ignore
+    try:
+        from diffusers import AnimateDiffPipeline as _AnimateDiffPipe  # type: ignore
+    except Exception:  # pragma: no cover
+        _AnimateDiffPipe = None  # type: ignore
+    try:
+        from diffusers import DDIMScheduler as _DDIMScheduler  # type: ignore
+    except Exception:  # pragma: no cover
+        _DDIMScheduler = None  # type: ignore
+    try:
+        from diffusers import EulerDiscreteScheduler as _EulerScheduler  # type: ignore
+    except Exception:  # pragma: no cover
+        _EulerScheduler = None  # type: ignore
+    try:
+        from diffusers import HeunDiscreteScheduler as _HeunScheduler  # type: ignore
+    except Exception:  # pragma: no cover
+        _HeunScheduler = None  # type: ignore
+    try:
+        from diffusers.utils import export_to_gif as _export_to_gif, export_to_video as _export_to_video  # type: ignore
+    except Exception:  # pragma: no cover
+        _export_to_gif = None  # type: ignore
+        _export_to_video = None  # type: ignore
 except ImportError:  # pragma: no cover
     diffusers = None
     _AutoPipe = None  # type: ignore
@@ -68,10 +95,29 @@ except ImportError:  # pragma: no cover
     _SDXLPipe = None  # type: ignore
     _DPMSolver = None  # type: ignore
     _AutoencoderKL = None  # type: ignore
+    _MotionAdapter = None  # type: ignore
+    _AnimateDiffPipe = None  # type: ignore
+    _DDIMScheduler = None  # type: ignore
+    _EulerScheduler = None  # type: ignore
+    _HeunScheduler = None  # type: ignore
+    _export_to_gif = None  # type: ignore
+    _export_to_video = None  # type: ignore
 try:
     from PIL import Image  # type: ignore
 except Exception:  # pragma: no cover
     Image = None  # type: ignore
+try:
+    import cv2  # type: ignore
+except Exception:  # pragma: no cover
+    cv2 = None  # type: ignore
+try:
+    from insightface.app import FaceAnalysis  # type: ignore
+except Exception:  # pragma: no cover
+    FaceAnalysis = None  # type: ignore
+try:
+    from huggingface_hub import hf_hub_download  # type: ignore
+except Exception:  # pragma: no cover
+    hf_hub_download = None  # type: ignore
 
 try:
     import psutil  # type: ignore
@@ -148,6 +194,26 @@ WAN_I2V_DEFAULTS: Dict[str, Any] = {
     "height": 720,
     "width": 512,
 }
+
+ANIMATEDIFF_DEFAULTS: Dict[str, Any] = {
+    "frames": 16,
+    "fps": 8,
+    "steps": 25,
+    "guidance": 7.0,
+    "width": 512,
+    "height": 512,
+    "motion_adapter": "guoyww/animatediff-motion-adapter-v1-5-2",
+    "scheduler": "DDIM",
+    "output_format": "mp4",
+}
+
+INSTANTID_REPO = os.environ.get("INSTANTID_REPO", "instantx/InstantID-XL")
+INSTANTID_CONTROLNET_SUBFOLDER = os.environ.get("INSTANTID_CONTROLNET_SUBFOLDER", "ControlNetModel")
+INSTANTID_IP_ADAPTER_FILE = os.environ.get("INSTANTID_IP_ADAPTER_FILE", "ip-adapter.bin")
+INSTANTID_CACHE_DIR = (HAVNAI_HOME / "instantid").resolve()
+INSTANTID_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+_FACE_ANALYSIS: Optional["FaceAnalysis"] = None
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +467,7 @@ def execute_task(task: Dict[str, Any]) -> None:
     log(f"Executing {task_type} task {task_id[:8]} · {model_name}", prefix="🚀")
 
     image_b64: Optional[str] = None
+    video_b64: Optional[str] = None
     try:
         entry = ensure_model_entry(model_name)
         model_path = ensure_model_path(entry)
@@ -451,6 +518,62 @@ def execute_task(task: Dict[str, Any]) -> None:
             negative_prompt,
             job_settings,
         )
+    elif task_type == "animatediff":
+        job_settings = {}
+        if isinstance(task, dict):
+            for key in (
+                "frames",
+                "num_frames",
+                "fps",
+                "motion",
+                "motion_adapter",
+                "base_model",
+                "width",
+                "height",
+                "seed",
+                "lora_strength",
+                "init_image",
+                "scheduler",
+                "steps",
+                "guidance",
+                "output_format",
+                "loras",
+            ):
+                if key in task and task[key] is not None:
+                    job_settings[key] = task[key]
+        metrics, util, video_b64 = run_animatediff_generation(
+            task_id,
+            entry,
+            model_path,
+            reward_weight,
+            prompt,
+            negative_prompt,
+            job_settings,
+        )
+    elif task_type == "face_swap":
+        job_settings = {}
+        if isinstance(task, dict):
+            for key in (
+                "base_image_url",
+                "base_image",
+                "face_source_url",
+                "face_source",
+                "strength",
+                "num_steps",
+                "seed",
+                "loras",
+            ):
+                if key in task and task[key] is not None:
+                    job_settings[key] = task[key]
+        metrics, util, image_b64 = run_faceswap_generation(
+            task_id,
+            entry,
+            model_path,
+            reward_weight,
+            prompt,
+            negative_prompt,
+            job_settings,
+        )
     else:
         metrics, util = run_ai_inference(entry, model_path, input_shape, reward_weight)
 
@@ -467,6 +590,11 @@ def execute_task(task: Dict[str, Any]) -> None:
     }
     if image_b64:
         payload["image_b64"] = image_b64
+    if video_b64:
+        payload["video_b64"] = video_b64
+        video_format = metrics.get("output_format")
+        if video_format:
+            payload["video_format"] = video_format
 
     try:
         resp = SESSION.post(endpoint("/results"), data=json.dumps(payload), timeout=15)
@@ -610,6 +738,179 @@ def coerce_bool(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes"}
     return bool(value) if value is not None else False
+
+
+def coerce_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def coerce_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def load_image_source(value: Any, target_size: Optional[Tuple[int, int]] = None) -> Optional["Image.Image"]:
+    if not value or Image is None:
+        return None
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    img = None
+    if text.startswith("http://") or text.startswith("https://"):
+        try:
+            resp = requests.get(text, timeout=30)
+            resp.raise_for_status()
+            img = Image.open(io.BytesIO(resp.content))
+        except Exception:
+            return None
+    else:
+        if text.startswith("data:"):
+            parts = text.split(",", 1)
+            text = parts[1] if len(parts) > 1 else ""
+        path = Path(text).expanduser()
+        if path.exists():
+            try:
+                img = Image.open(path)
+            except Exception:
+                return None
+        else:
+            raw = None
+            try:
+                raw = base64.b64decode(text, validate=True)
+            except Exception:
+                try:
+                    raw = base64.b64decode(text)
+                except Exception:
+                    return None
+            try:
+                img = Image.open(io.BytesIO(raw))
+            except Exception:
+                return None
+    if img is None:
+        return None
+    img = img.convert("RGB")
+    if target_size and target_size[0] > 0 and target_size[1] > 0:
+        img = img.resize(target_size, resample=Image.LANCZOS)
+    return img
+
+
+def get_face_analysis() -> "FaceAnalysis":
+    global _FACE_ANALYSIS
+    if _FACE_ANALYSIS is not None:
+        return _FACE_ANALYSIS
+    if FaceAnalysis is None:
+        raise RuntimeError("insightface is required for face swap")
+    providers = ["CPUExecutionProvider"]
+    ctx_id = -1
+    if torch is not None and torch.cuda.is_available():
+        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        ctx_id = 0
+    app = FaceAnalysis(name="antelopev2", root=str(INSTANTID_CACHE_DIR), providers=providers)
+    app.prepare(ctx_id=ctx_id, det_size=(640, 640))
+    _FACE_ANALYSIS = app
+    return app
+
+
+def pick_primary_face(face_infos: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not face_infos:
+        return None
+    return sorted(
+        face_infos,
+        key=lambda info: (info["bbox"][2] - info["bbox"][0]) * (info["bbox"][3] - info["bbox"][1]),
+    )[-1]
+
+
+def resize_img(
+    input_image: "Image.Image",
+    max_side: int = 1280,
+    min_side: int = 1024,
+    size: Optional[Tuple[int, int]] = None,
+    pad_to_max_side: bool = False,
+    mode: int = Image.BILINEAR if Image is not None else 2,
+    base_pixel_number: int = 64,
+) -> "Image.Image":
+    if np is None:
+        raise RuntimeError("NumPy required for face swap preprocessing")
+    w, h = input_image.size
+    if size is not None:
+        w_resize_new, h_resize_new = size
+    else:
+        ratio = min_side / min(h, w)
+        w, h = round(ratio * w), round(ratio * h)
+        ratio = max_side / max(h, w)
+        input_image = input_image.resize([round(ratio * w), round(ratio * h)], mode)
+        w_resize_new = (round(ratio * w) // base_pixel_number) * base_pixel_number
+        h_resize_new = (round(ratio * h) // base_pixel_number) * base_pixel_number
+    input_image = input_image.resize([w_resize_new, h_resize_new], mode)
+
+    if pad_to_max_side:
+        res = np.ones([max_side, max_side, 3], dtype=np.uint8) * 255
+        offset_x = (max_side - w_resize_new) // 2
+        offset_y = (max_side - h_resize_new) // 2
+        res[offset_y : offset_y + h_resize_new, offset_x : offset_x + w_resize_new] = np.array(input_image)
+        input_image = Image.fromarray(res)
+    return input_image
+
+
+def prepare_mask_and_pose_control(
+    pose_image: "Image.Image",
+    face_info: Dict[str, Any],
+    padding: int = 60,
+    mask_grow: int = 40,
+    resize: bool = True,
+) -> Tuple[Tuple["Image.Image", "Image.Image", "Image.Image"], Tuple[int, int, int, int]]:
+    if np is None or cv2 is None:
+        raise RuntimeError("opencv + numpy required for face swap preprocessing")
+    if padding < mask_grow:
+        raise ValueError("mask_grow cannot be greater than padding")
+
+    from pipeline_stable_diffusion_xl_instantid import draw_kps  # type: ignore
+
+    kps = np.array(face_info["kps"])
+    width, height = pose_image.size
+
+    x1, y1, x2, y2 = face_info["bbox"]
+    x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+
+    m_x1 = max(0, x1 - mask_grow)
+    m_y1 = max(0, y1 - mask_grow)
+    m_x2 = min(width, x2 + mask_grow)
+    m_y2 = min(height, y2 + mask_grow)
+
+    m_x1, m_y1, m_x2, m_y2 = int(m_x1), int(m_y1), int(m_x2), int(m_y2)
+
+    p_x1 = max(0, x1 - padding)
+    p_y1 = max(0, y1 - padding)
+    p_x2 = min(width, x2 + padding)
+    p_y2 = min(height, y2 + padding)
+
+    p_x1, p_y1, p_x2, p_y2 = int(p_x1), int(p_y1), int(p_x2), int(p_y2)
+
+    mask = np.zeros([height, width, 3])
+    mask[m_y1:m_y2, m_x1:m_x2] = 255
+    mask = mask[p_y1:p_y2, p_x1:p_x2]
+    mask = Image.fromarray(mask.astype(np.uint8))
+
+    image = np.array(pose_image)[p_y1:p_y2, p_x1:p_x2]
+    image = Image.fromarray(image.astype(np.uint8))
+
+    original_width, original_height = image.size
+    kps -= [p_x1, p_y1]
+    if resize:
+        mask = resize_img(mask)
+        image = resize_img(image)
+        new_width, new_height = image.size
+        kps *= [new_width / original_width, new_height / original_height]
+    control_image = draw_kps(image, kps)
+
+    return (mask, image, control_image), (p_x1, p_y1, original_width, original_height)
 
 
 def has_anatomy_risk(prompt: str) -> bool:
@@ -799,6 +1100,46 @@ def select_lora_entries(
     return selected
 
 
+def collect_lora_entries(requested: Any, model_hint: str) -> List[Tuple[Path, float, str]]:
+    lora_entries: List[Tuple[Path, float, str]] = []
+    if isinstance(requested, str):
+        requested_list = [requested]
+    elif isinstance(requested, list):
+        requested_list = requested
+    else:
+        requested_list = []
+    model_is_sdxl = is_sdxl_model(model_hint)
+    seen: Set[str] = set()
+    for item in requested_list:
+        if len(lora_entries) >= MAX_LORAS:
+            break
+        raw_weight: Optional[float] = None
+        if isinstance(item, dict):
+            name = str(item.get("name") or "").strip()
+            raw_weight = item.get("weight")
+        else:
+            name = str(item or "").strip()
+        if not name:
+            continue
+        normalized = normalize_lora_name(name)
+        if normalized in seen:
+            continue
+        base_type = infer_lora_base_type(normalized)
+        if base_type == "sdxl" and not model_is_sdxl:
+            continue
+        if base_type == "sd15" and model_is_sdxl:
+            continue
+        lora_path = resolve_lora_path(name)
+        if not lora_path:
+            continue
+        role = classify_lora_role(normalized)
+        weight = clamp_lora_weight(raw_weight, role)
+        adapter_name = f"lora_{role}_{lora_path.stem}"
+        lora_entries.append((lora_path, weight, adapter_name))
+        seen.add(normalized)
+    return lora_entries
+
+
 def build_lora_stack(
     prompt: str,
     model_name: str,
@@ -943,6 +1284,564 @@ def build_lora_stack(
     return [{"name": entry["name"], "weight": entry["weight"]} for entry in selected]
 
 
+def load_init_image(value: Any, target_size: Optional[Tuple[int, int]] = None) -> Optional["Image.Image"]:
+    if not value or Image is None:
+        return None
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if text.startswith("data:"):
+        parts = text.split(",", 1)
+        text = parts[1] if len(parts) > 1 else ""
+    img = None
+    path = Path(text).expanduser()
+    if path.exists():
+        try:
+            img = Image.open(path)
+        except Exception:
+            return None
+    else:
+        raw = None
+        try:
+            raw = base64.b64decode(text, validate=True)
+        except Exception:
+            try:
+                raw = base64.b64decode(text)
+            except Exception:
+                return None
+        try:
+            img = Image.open(io.BytesIO(raw))
+        except Exception:
+            return None
+    if img is None:
+        return None
+    img = img.convert("RGB")
+    if target_size and target_size[0] > 0 and target_size[1] > 0:
+        img = img.resize(target_size, resample=Image.LANCZOS)
+    return img
+
+
+def run_animatediff_generation(
+    task_id: str,
+    entry: ModelEntry,
+    model_path: Path,
+    reward_weight: float,
+    prompt: str,
+    negative_prompt: str,
+    job_settings: Optional[Dict[str, Any]] = None,
+) -> (Dict[str, Any], int, Optional[str]):
+
+    start_stats = read_gpu_stats()
+    started = time.time()
+    status = "success"
+    error_msg = ""
+    video_b64: Optional[str] = None
+    video_path: Optional[Path] = None
+    output_format = ANIMATEDIFF_DEFAULTS["output_format"]
+
+    try:
+        if torch is None or diffusers is None:
+            raise RuntimeError("diffusers/torch required for AnimateDiff")
+        if _MotionAdapter is None or _AnimateDiffPipe is None:
+            raise RuntimeError("AnimateDiff components unavailable; update diffusers")
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        dtype = torch.float16 if device == "cuda" else torch.float32
+        settings = job_settings if isinstance(job_settings, dict) else {}
+
+        frames = coerce_int(
+            settings.get("num_frames", settings.get("frames", ANIMATEDIFF_DEFAULTS["frames"])),
+            ANIMATEDIFF_DEFAULTS["frames"],
+        )
+        fps = coerce_int(settings.get("fps", ANIMATEDIFF_DEFAULTS["fps"]), ANIMATEDIFF_DEFAULTS["fps"])
+        steps = coerce_int(settings.get("steps", ANIMATEDIFF_DEFAULTS["steps"]), ANIMATEDIFF_DEFAULTS["steps"])
+        guidance = coerce_float(settings.get("guidance", ANIMATEDIFF_DEFAULTS["guidance"]), ANIMATEDIFF_DEFAULTS["guidance"])
+        width = coerce_int(settings.get("width", ANIMATEDIFF_DEFAULTS["width"]), ANIMATEDIFF_DEFAULTS["width"])
+        height = coerce_int(settings.get("height", ANIMATEDIFF_DEFAULTS["height"]), ANIMATEDIFF_DEFAULTS["height"])
+        frames = max(1, min(64, frames))
+        fps = max(1, min(60, fps))
+        steps = max(5, min(60, steps))
+        guidance = max(1.0, min(15.0, guidance))
+        width = max(256, min(1536, width))
+        height = max(256, min(1536, height))
+        width = width - (width % 8)
+        height = height - (height % 8)
+
+        motion_adapter = str(
+            settings.get("motion_adapter") or settings.get("motion") or ANIMATEDIFF_DEFAULTS["motion_adapter"]
+        ).strip()
+        if not motion_adapter:
+            motion_adapter = ANIMATEDIFF_DEFAULTS["motion_adapter"]
+
+        scheduler_name = str(settings.get("scheduler") or ANIMATEDIFF_DEFAULTS["scheduler"]).strip().upper()
+        output_format = str(settings.get("output_format") or ANIMATEDIFF_DEFAULTS["output_format"]).strip().lower()
+        if output_format not in {"mp4", "gif"}:
+            output_format = "mp4"
+
+        lora_strength = settings.get("lora_strength")
+        try:
+            lora_strength = float(lora_strength) if lora_strength is not None else None
+        except (TypeError, ValueError):
+            lora_strength = None
+
+        seed = settings.get("seed")
+        try:
+            seed = int(seed) if seed is not None else None
+        except (TypeError, ValueError):
+            seed = None
+        if seed is None:
+            seed = int(time.time()) & 0x7FFFFFFF
+        generator = torch.Generator(device=device).manual_seed(seed)
+
+        base_entry = entry
+        base_path = model_path
+        base_model_ref = str(settings.get("base_model") or "").strip()
+        if base_model_ref:
+            try:
+                base_entry = ensure_model_entry(base_model_ref)
+                base_path = ensure_model_path(base_entry)
+            except Exception:
+                candidate = Path(base_model_ref).expanduser()
+                if candidate.exists():
+                    base_path = candidate
+
+        pipeline_name = (getattr(base_entry, "pipeline", "") or "sd15").lower()
+        model_hint = f"{getattr(base_entry, 'name', entry.name)} {pipeline_name}".strip()
+
+        log("Loading AnimateDiff pipeline…", prefix="ℹ️", device=device, adapter=motion_adapter)
+        load_t0 = time.time()
+        base_pipe = None
+        if pipeline_name in {"sdxl"} and _SDXLPipe is not None:
+            try:
+                if base_path.is_dir():
+                    base_pipe = _SDXLPipe.from_pretrained(str(base_path), torch_dtype=dtype, safety_checker=None)
+                else:
+                    base_pipe = _SDXLPipe.from_single_file(str(base_path), torch_dtype=dtype, safety_checker=None)
+            except Exception as exc:
+                log(f"SDXL base load failed: {exc}", prefix="⚠️")
+            auto_from_single = getattr(_AutoPipe, "from_single_file", None) if _AutoPipe is not None else None
+            if base_pipe is None and callable(auto_from_single):
+                try:
+                    base_pipe = auto_from_single(str(base_path), torch_dtype=dtype, safety_checker=None)
+                except Exception as exc:
+                    log(f"AutoPipeline base load failed: {exc}", prefix="⚠️")
+        if base_pipe is None and _SDPipe is not None:
+            try:
+                if base_path.is_dir():
+                    base_pipe = _SDPipe.from_pretrained(str(base_path), torch_dtype=dtype, safety_checker=None)
+                else:
+                    base_pipe = _SDPipe.from_single_file(str(base_path), torch_dtype=dtype, safety_checker=None)
+            except Exception as exc:
+                log(f"SD base load failed: {exc}", prefix="⚠️")
+        if base_pipe is None:
+            raise RuntimeError("Failed to construct base pipeline for AnimateDiff.")
+        if getattr(base_entry, "vae_path", "") and pipeline_name != "sdxl":
+            vae_path = Path(str(getattr(base_entry, "vae_path", ""))).expanduser()
+            if vae_path.exists() and _AutoencoderKL is not None:
+                try:
+                    custom_vae = _AutoencoderKL.from_single_file(str(vae_path), torch_dtype=dtype)
+                    base_pipe.vae = custom_vae
+                    log(f"Loaded custom VAE for {base_entry.name}", prefix="✅", vae=str(vae_path))
+                except Exception as exc:
+                    log(f"Custom VAE load failed for {base_entry.name}: {exc}", prefix="⚠️", vae=str(vae_path))
+
+        adapter = _MotionAdapter.from_pretrained(motion_adapter, torch_dtype=dtype)
+        pipe = None
+        if hasattr(_AnimateDiffPipe, "from_pipe"):
+            try:
+                pipe = _AnimateDiffPipe.from_pipe(base_pipe, motion_adapter=adapter)
+            except Exception as exc:
+                log(f"AnimateDiff from_pipe failed: {exc}", prefix="⚠️")
+        if pipe is None:
+            components = getattr(base_pipe, "components", None)
+            if isinstance(components, dict):
+                try:
+                    pipe = _AnimateDiffPipe(**components, motion_adapter=adapter)
+                except Exception as exc:
+                    log(f"AnimateDiff component init failed: {exc}", prefix="⚠️")
+        if pipe is None:
+            if base_path.is_dir():
+                pipe = _AnimateDiffPipe.from_pretrained(str(base_path), motion_adapter=adapter, torch_dtype=dtype)
+            else:
+                raise RuntimeError("Failed to construct AnimateDiff pipeline.")
+
+        if scheduler_name == "DDIM" and _DDIMScheduler is not None:
+            pipe.scheduler = _DDIMScheduler.from_config(pipe.scheduler.config)
+        elif scheduler_name == "EULER" and _EulerScheduler is not None:
+            pipe.scheduler = _EulerScheduler.from_config(pipe.scheduler.config)
+        elif scheduler_name == "HEUN" and _HeunScheduler is not None:
+            pipe.scheduler = _HeunScheduler.from_config(pipe.scheduler.config)
+        elif scheduler_name in {"DPM", "DPM++", "DPMSOLVER"} and _DPMSolver is not None:
+            pipe.scheduler = _DPMSolver.from_config(pipe.scheduler.config)
+
+        requested = settings.get("loras") or []
+        lora_entries = collect_lora_entries(requested, model_hint)
+        if lora_entries:
+            lora_summary = ", ".join(
+                f"{adapter_name}:{weight:.2f} ({path.name})" for path, weight, adapter_name in lora_entries
+            )
+        else:
+            lora_summary = "none"
+        log(f"Loading LoRAs: {lora_summary}", prefix="🎛️")
+        if lora_entries and hasattr(pipe, "load_lora_weights"):
+            adapter_names: List[str] = []
+            adapter_weights: List[float] = []
+            for lora_path, lora_weight, adapter_name in lora_entries:
+                try:
+                    pipe.load_lora_weights(str(lora_path), adapter_name=adapter_name)
+                except TypeError:
+                    pipe.load_lora_weights(str(lora_path))
+                except Exception as exc:
+                    log(f"LoRA load failed for {base_entry.name}: {exc}", prefix="⚠️", lora=str(lora_path))
+                    continue
+                adapter_names.append(adapter_name)
+                adapter_weights.append(lora_weight)
+                log(f"Loaded LoRA for {base_entry.name}", prefix="✅", lora=str(lora_path), weight=lora_weight)
+            if adapter_names:
+                if hasattr(pipe, "set_adapters"):
+                    try:
+                        pipe.set_adapters(adapter_names, adapter_weights)
+                    except TypeError:
+                        pipe.set_adapters(adapter_names)
+                elif hasattr(pipe, "fuse_lora"):
+                    try:
+                        pipe.fuse_lora()
+                    except Exception as exc:
+                        log(f"LoRA fuse failed for {base_entry.name}: {exc}", prefix="⚠️")
+        elif lora_entries:
+            log("Pipeline does not support LoRA loading", prefix="⚠️")
+
+        if hasattr(pipe, "enable_attention_slicing"):
+            pipe.enable_attention_slicing("max")
+        if hasattr(pipe, "set_progress_bar_config"):
+            pipe.set_progress_bar_config(disable=True)
+
+        pipe = pipe.to(device)
+        load_ms = int((time.time() - load_t0) * 1000)
+        log(f"AnimateDiff pipeline ready in {load_ms}ms", prefix="✅")
+
+        pos_text = prompt or "a cinematic scene"
+        neg_text = negative_prompt or ""
+        if hasattr(pipe, "tokenizer") and hasattr(pipe.tokenizer, "model_max_length"):
+            try:
+                encoded = pipe.tokenizer(
+                    pos_text,
+                    max_length=pipe.tokenizer.model_max_length,
+                    truncation=True,
+                    return_tensors="pt",
+                )
+                pos_text = pipe.tokenizer.batch_decode(encoded.input_ids, skip_special_tokens=True)[0]
+                if neg_text:
+                    encoded_neg = pipe.tokenizer(
+                        neg_text,
+                        max_length=pipe.tokenizer.model_max_length,
+                        truncation=True,
+                        return_tensors="pt",
+                    )
+                    neg_text = pipe.tokenizer.batch_decode(encoded_neg.input_ids, skip_special_tokens=True)[0]
+            except Exception as exc:
+                log(f"Prompt truncation failed: {exc}", prefix="⚠️")
+
+        init_image = load_init_image(settings.get("init_image"), (width, height))
+        call_kwargs: Dict[str, Any] = {
+            "prompt": pos_text,
+            "negative_prompt": neg_text or None,
+            "num_inference_steps": steps,
+            "guidance_scale": guidance,
+            "num_frames": frames,
+            "generator": generator,
+            "height": height,
+            "width": width,
+        }
+        if init_image is not None:
+            try:
+                sig = inspect.signature(pipe.__call__)
+                if "image" in sig.parameters:
+                    call_kwargs["image"] = init_image
+                elif "init_image" in sig.parameters:
+                    call_kwargs["init_image"] = init_image
+            except Exception:
+                call_kwargs["image"] = init_image
+        if lora_strength is not None:
+            call_kwargs["cross_attention_kwargs"] = {"scale": lora_strength}
+
+        gen_t0 = time.time()
+        with torch.inference_mode():
+            result = pipe(**call_kwargs)
+        gen_ms = int((time.time() - gen_t0) * 1000)
+        log(f"Generated video in {gen_ms}ms", prefix="✅")
+
+        frames_out = getattr(result, "frames", None)
+        if frames_out is None:
+            frames_out = getattr(result, "images", None)
+        if frames_out is None:
+            raise RuntimeError("AnimateDiff output missing frames")
+        if isinstance(frames_out, (list, tuple)) and frames_out and isinstance(frames_out[0], (list, tuple)):
+            frame_list = frames_out[0]
+        else:
+            frame_list = frames_out
+        if not isinstance(frame_list, list):
+            frame_list = list(frame_list)
+
+        videos_dir = OUTPUTS_DIR / "videos"
+        videos_dir.mkdir(parents=True, exist_ok=True)
+        if output_format == "gif":
+            video_path = videos_dir / f"{task_id}.gif"
+            if _export_to_gif is None:
+                raise RuntimeError("export_to_gif not available")
+            try:
+                _export_to_gif(frame_list, str(video_path), fps=fps)
+            except TypeError:
+                _export_to_gif(frame_list, str(video_path))
+        else:
+            video_path = videos_dir / f"{task_id}.mp4"
+            if _export_to_video is None:
+                raise RuntimeError("export_to_video not available")
+            try:
+                _export_to_video(frame_list, str(video_path), fps=fps)
+            except TypeError:
+                _export_to_video(frame_list, str(video_path))
+
+        with video_path.open("rb") as fh:
+            video_b64 = base64.b64encode(fh.read()).decode("utf-8")
+    except Exception as exc:
+        status = "failed"
+        error_msg = str(exc)
+        log(f"AnimateDiff generation failed: {error_msg}", prefix="🚫")
+
+    duration = time.time() - started
+    end_stats = read_gpu_stats()
+    util = max(start_stats.get("utilization", 0), end_stats.get("utilization", 0), utilization_hint)
+    util = int(max(util, 70 if ROLE == "creator" else util))
+    metrics = {
+        "status": status,
+        "model_name": entry.name,
+        "model_path": str(model_path),
+        "reward_weight": reward_weight,
+        "task_type": "animatediff",
+        "inference_time_ms": round(duration * 1000, 3),
+        "gpu_util_start": start_stats.get("utilization", 0),
+        "gpu_util_end": end_stats.get("utilization", 0),
+        "frames": frames if "frames" in locals() else None,
+        "fps": fps if "fps" in locals() else None,
+        "steps": steps if "steps" in locals() else None,
+        "guidance": guidance if "guidance" in locals() else None,
+        "width": width if "width" in locals() else None,
+        "height": height if "height" in locals() else None,
+        "output_format": output_format,
+        "video_path": str(video_path) if video_path else None,
+    }
+    if status == "failed":
+        metrics["error"] = error_msg or "animatediff error"
+    return metrics, util, video_b64
+
+
+def run_faceswap_generation(
+    task_id: str,
+    entry: ModelEntry,
+    model_path: Path,
+    reward_weight: float,
+    prompt: str,
+    negative_prompt: str,
+    job_settings: Optional[Dict[str, Any]] = None,
+) -> (Dict[str, Any], int, Optional[str]):
+
+    start_stats = read_gpu_stats()
+    started = time.time()
+    status = "success"
+    error_msg = ""
+    image_b64: Optional[str] = None
+
+    output_path = OUTPUTS_DIR / f"swapped_{task_id}.png"
+    try:
+        if torch is None or diffusers is None:
+            raise RuntimeError("diffusers/torch required for face swap")
+        if np is None or cv2 is None:
+            raise RuntimeError("opencv-python and numpy are required for face swap")
+        if FaceAnalysis is None:
+            raise RuntimeError("insightface is required for face swap")
+        if hf_hub_download is None:
+            raise RuntimeError("huggingface_hub is required for face swap")
+
+        from diffusers import ControlNetModel  # type: ignore
+        from pipeline_stable_diffusion_xl_instantid_inpaint import (  # type: ignore
+            StableDiffusionXLInstantIDInpaintPipeline,
+        )
+
+        settings = job_settings if isinstance(job_settings, dict) else {}
+        base_image_src = settings.get("base_image_url") or settings.get("base_image")
+        face_source_src = settings.get("face_source_url") or settings.get("face_source")
+        if not base_image_src or not face_source_src:
+            raise RuntimeError("base_image_url and face_source_url required")
+
+        strength = coerce_float(settings.get("strength", 0.8), 0.8)
+        num_steps = coerce_int(settings.get("num_steps", 20), 20)
+        strength = max(0.0, min(1.0, strength))
+        num_steps = max(5, min(60, num_steps))
+
+        base_image = load_image_source(str(base_image_src))
+        face_image = load_image_source(str(face_source_src))
+        if base_image is None or face_image is None:
+            raise RuntimeError("Failed to load base or face source image")
+
+        app = get_face_analysis()
+        face_infos = app.get(cv2.cvtColor(np.array(face_image), cv2.COLOR_RGB2BGR))
+        face_info = pick_primary_face(face_infos)
+        if not face_info:
+            raise RuntimeError("No face detected in face_source_url image")
+        face_emb = face_info["embedding"]
+
+        target_infos = app.get(cv2.cvtColor(np.array(base_image), cv2.COLOR_RGB2BGR))
+        target_face = pick_primary_face(target_infos)
+        if not target_face:
+            raise RuntimeError("No face detected in base_image_url image")
+
+        images, position = prepare_mask_and_pose_control(base_image, target_face)
+        mask, pose_image_preprocessed, control_image = images
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        dtype = torch.float16 if device == "cuda" else torch.float32
+
+        controlnet = ControlNetModel.from_pretrained(
+            INSTANTID_REPO,
+            subfolder=INSTANTID_CONTROLNET_SUBFOLDER,
+            torch_dtype=dtype,
+            cache_dir=str(INSTANTID_CACHE_DIR),
+        )
+
+        pipe = None
+        if hasattr(StableDiffusionXLInstantIDInpaintPipeline, "from_single_file") and model_path.is_file():
+            try:
+                pipe = StableDiffusionXLInstantIDInpaintPipeline.from_single_file(
+                    str(model_path), controlnet=controlnet, torch_dtype=dtype, safety_checker=None
+                )
+            except Exception as exc:
+                log(f"InstantID from_single_file failed: {exc}", prefix="⚠️")
+        if pipe is None:
+            if model_path.is_dir():
+                pipe = StableDiffusionXLInstantIDInpaintPipeline.from_pretrained(
+                    str(model_path), controlnet=controlnet, torch_dtype=dtype
+                )
+            else:
+                pipe = StableDiffusionXLInstantIDInpaintPipeline.from_pretrained(
+                    str(model_path), controlnet=controlnet, torch_dtype=dtype
+                )
+
+        adapter_path = hf_hub_download(
+            INSTANTID_REPO,
+            filename=INSTANTID_IP_ADAPTER_FILE,
+            cache_dir=str(INSTANTID_CACHE_DIR),
+        )
+        pipe.load_ip_adapter_instantid(adapter_path, scale=strength)
+
+        requested = settings.get("loras") or []
+        model_hint = f"{entry.name} sdxl"
+        lora_entries = collect_lora_entries(requested, model_hint)
+        if lora_entries:
+            lora_summary = ", ".join(
+                f"{adapter_name}:{weight:.2f} ({path.name})" for path, weight, adapter_name in lora_entries
+            )
+        else:
+            lora_summary = "none"
+        log(f"Loading LoRAs: {lora_summary}", prefix="🎛️")
+        if lora_entries and hasattr(pipe, "load_lora_weights"):
+            adapter_names: List[str] = []
+            adapter_weights: List[float] = []
+            for lora_path, lora_weight, adapter_name in lora_entries:
+                try:
+                    pipe.load_lora_weights(str(lora_path), adapter_name=adapter_name)
+                except TypeError:
+                    pipe.load_lora_weights(str(lora_path))
+                except Exception as exc:
+                    log(f"LoRA load failed for {entry.name}: {exc}", prefix="⚠️", lora=str(lora_path))
+                    continue
+                adapter_names.append(adapter_name)
+                adapter_weights.append(lora_weight)
+                log(f"Loaded LoRA for {entry.name}", prefix="✅", lora=str(lora_path), weight=lora_weight)
+            if adapter_names:
+                if hasattr(pipe, "set_adapters"):
+                    try:
+                        pipe.set_adapters(adapter_names, adapter_weights)
+                    except TypeError:
+                        pipe.set_adapters(adapter_names)
+                elif hasattr(pipe, "fuse_lora"):
+                    try:
+                        pipe.fuse_lora()
+                    except Exception as exc:
+                        log(f"LoRA fuse failed for {entry.name}: {exc}", prefix="⚠️")
+        elif lora_entries:
+            log("Pipeline does not support LoRA loading", prefix="⚠️")
+
+        if hasattr(pipe, "enable_attention_slicing"):
+            pipe.enable_attention_slicing("max")
+        if hasattr(pipe, "set_progress_bar_config"):
+            pipe.set_progress_bar_config(disable=True)
+        pipe = pipe.to(device)
+
+        seed = settings.get("seed")
+        try:
+            seed = int(seed) if seed is not None else None
+        except (TypeError, ValueError):
+            seed = None
+        if seed is None:
+            seed = int(time.time()) & 0x7FFFFFFF
+        generator = torch.Generator(device=device).manual_seed(seed)
+
+        prompt_text = prompt or ""
+        neg_text = negative_prompt or ""
+        guidance_scale = 5.0 if prompt_text else 0.0
+
+        result = pipe(
+            prompt=prompt_text,
+            negative_prompt=neg_text or None,
+            image_embeds=face_emb,
+            control_image=control_image,
+            image=pose_image_preprocessed,
+            mask_image=mask,
+            strength=strength,
+            controlnet_conditioning_scale=strength,
+            ip_adapter_scale=strength,
+            num_inference_steps=num_steps,
+            guidance_scale=guidance_scale,
+            generator=generator,
+        )
+
+        face_patch = result.images[0]
+        x, y, w, h = position
+        face_patch = face_patch.resize((w, h))
+        base_image.paste(face_patch, (x, y))
+        base_image.save(output_path)
+        with output_path.open("rb") as fh:
+            image_b64 = base64.b64encode(fh.read()).decode("utf-8")
+    except Exception as exc:
+        status = "failed"
+        error_msg = str(exc)
+        log(f"Face swap failed: {error_msg}", prefix="🚫")
+
+    duration = time.time() - started
+    end_stats = read_gpu_stats()
+    util = max(start_stats.get("utilization", 0), end_stats.get("utilization", 0), utilization_hint)
+    util = int(max(util, 70 if ROLE == "creator" else util))
+    metrics = {
+        "status": status,
+        "model_name": entry.name,
+        "model_path": str(model_path),
+        "reward_weight": reward_weight,
+        "task_type": "face_swap",
+        "inference_time_ms": round(duration * 1000, 3),
+        "gpu_util_start": start_stats.get("utilization", 0),
+        "gpu_util_end": end_stats.get("utilization", 0),
+        "strength": strength if "strength" in locals() else None,
+        "num_steps": num_steps if "num_steps" in locals() else None,
+        "output_path": str(output_path) if output_path else None,
+    }
+    if status == "failed":
+        metrics["error"] = error_msg or "face swap error"
+    return metrics, util, image_b64
+
+
 def run_image_generation(
     task_id: str,
     entry: ModelEntry,
@@ -997,44 +1896,11 @@ def run_image_generation(
                     except Exception as exc:
                         log(f"Custom VAE load failed for {entry.name}: {exc}", prefix="⚠️", vae=str(vae_path))
             # Optional LoRA attachment with safe stacking and role-aware weights.
-            lora_entries: List[Tuple[Path, float, str]] = []
             requested: List[Any] = []
             if job_settings and isinstance(job_settings, dict):
                 requested = job_settings.get("loras") or []
-            if isinstance(requested, str):
-                requested = [requested]
-            if not isinstance(requested, list):
-                requested = []
             model_hint = f"{entry.name} {pipeline_name}".strip()
-            model_is_sdxl = is_sdxl_model(model_hint)
-            seen: Set[str] = set()
-            for item in requested:
-                if len(lora_entries) >= MAX_LORAS:
-                    break
-                raw_weight: Optional[float] = None
-                if isinstance(item, dict):
-                    name = str(item.get("name") or "").strip()
-                    raw_weight = item.get("weight")
-                else:
-                    name = str(item or "").strip()
-                if not name:
-                    continue
-                normalized = normalize_lora_name(name)
-                if normalized in seen:
-                    continue
-                base_type = infer_lora_base_type(normalized)
-                if base_type == "sdxl" and not model_is_sdxl:
-                    continue
-                if base_type == "sd15" and model_is_sdxl:
-                    continue
-                lora_path = resolve_lora_path(name)
-                if not lora_path:
-                    continue
-                role = classify_lora_role(normalized)
-                weight = clamp_lora_weight(raw_weight, role)
-                adapter_name = f"lora_{role}_{lora_path.stem}"
-                lora_entries.append((lora_path, weight, adapter_name))
-                seen.add(normalized)
+            lora_entries = collect_lora_entries(requested, model_hint)
             if lora_entries:
                 lora_summary = ", ".join(
                     f"{adapter}:{weight:.2f} ({path.name})" for path, weight, adapter in lora_entries

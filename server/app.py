@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 from logging.handlers import RotatingFileHandler
 import os
 import re
@@ -308,11 +309,26 @@ def _run_video_job(job_id: str, job_request: VideoJobRequest) -> None:
             VIDEO_JOBS[job_id]["status"] = "running"
             VIDEO_JOBS[job_id]["started_at"] = iso_now()
     result = VIDEO_ENGINE.generate(job_request)
+    video_url = None
+    if result.video_path:
+        try:
+            src = Path(result.video_path)
+            if src.exists():
+                videos_dir = OUTPUTS_DIR / "videos"
+                videos_dir.mkdir(parents=True, exist_ok=True)
+                ext = src.suffix.lstrip(".") or "mp4"
+                dest = videos_dir / f"{job_id}.{ext}"
+                if src.resolve() != dest.resolve():
+                    shutil.copy2(src, dest)
+                video_url = f"/static/outputs/videos/{job_id}.{ext}"
+        except Exception:
+            video_url = None
     with VIDEO_JOB_LOCK:
         payload = VIDEO_JOBS.get(job_id, {})
         payload["status"] = result.status
         payload["completed_at"] = iso_now()
         payload["video_path"] = result.video_path
+        payload["video_url"] = video_url
         payload["frame_paths"] = result.frame_paths
         payload["error"] = result.error
         payload["metadata"] = result.metadata

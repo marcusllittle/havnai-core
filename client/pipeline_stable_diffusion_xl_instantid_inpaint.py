@@ -338,19 +338,19 @@ class StableDiffusionXLInstantIDInpaintPipeline(StableDiffusionXLControlNetInpai
 
         # 5.2 Prepare control images
         if isinstance(controlnet, ControlNetModel):
-            control_image = self.prepare_control_image(
-                image=control_image,
-                width=width,
-                height=height,
-                batch_size=batch_size * num_images_per_prompt,
-                num_images_per_prompt=num_images_per_prompt,
-                device=device,
-                dtype=controlnet.dtype,
-                #crops_coords=crops_coords,
-                #resize_mode=resize_mode,
-                do_classifier_free_guidance=self.do_classifier_free_guidance,
-                guess_mode=guess_mode,
-            )
+                control_image = self.prepare_control_image(
+                    image=control_image,
+                    width=width,
+                    height=height,
+                    batch_size=batch_size * num_images_per_prompt,
+                    num_images_per_prompt=num_images_per_prompt,
+                    device=device,
+                    dtype=controlnet.dtype,
+                    crops_coords=crops_coords,
+                    resize_mode=resize_mode,
+                    do_classifier_free_guidance=self.do_classifier_free_guidance,
+                    guess_mode=guess_mode,
+                )
         elif isinstance(controlnet, MultiControlNetModel):
             control_images = []
 
@@ -363,8 +363,8 @@ class StableDiffusionXLInstantIDInpaintPipeline(StableDiffusionXLControlNetInpai
                     num_images_per_prompt=num_images_per_prompt,
                     device=device,
                     dtype=controlnet.dtype,
-                    #crops_coords=crops_coords,
-                    #resize_mode=resize_mode,
+                    crops_coords=crops_coords,
+                    resize_mode=resize_mode,
                     do_classifier_free_guidance=self.do_classifier_free_guidance,
                     guess_mode=guess_mode,
                 )

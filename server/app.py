@@ -734,13 +734,14 @@ def record_reward(wallet: Optional[str], task_id: str, reward: float) -> None:
 
 def get_job_summary(limit: int = 50) -> Dict[str, Any]:
     conn = get_db()
+    tracked_types = (CREATOR_TASK_TYPE, "FACE_SWAP")
     queued = conn.execute(
-        "SELECT COUNT(*) FROM jobs WHERE status='queued' AND UPPER(task_type)=?",
-        (CREATOR_TASK_TYPE,),
+        "SELECT COUNT(*) FROM jobs WHERE status='queued' AND UPPER(task_type) IN (?, ?)",
+        tracked_types,
     ).fetchone()[0]
     active = conn.execute(
-        "SELECT COUNT(*) FROM jobs WHERE status='running' AND UPPER(task_type)=?",
-        (CREATOR_TASK_TYPE,),
+        "SELECT COUNT(*) FROM jobs WHERE status='running' AND UPPER(task_type) IN (?, ?)",
+        tracked_types,
     ).fetchone()[0]
     total_distributed = conn.execute("SELECT COALESCE(SUM(reward_hai),0) FROM rewards").fetchone()[0]
     today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
@@ -752,9 +753,9 @@ def get_job_summary(limit: int = 50) -> Dict[str, Any]:
         WHERE status IN ('completed', 'success')
           AND completed_at IS NOT NULL
           AND completed_at >= ?
-          AND UPPER(task_type)=?
+          AND UPPER(task_type) IN (?, ?)
         """,
-        (today_start, CREATOR_TASK_TYPE),
+        (today_start, *tracked_types),
     ).fetchone()[0]
     # Avoid binding LIMIT to sidestep driver quirks under concurrency; limit is internal and cast to int.
     limit_int = int(limit)
@@ -764,11 +765,11 @@ def get_job_summary(limit: int = 50) -> Dict[str, Any]:
                jobs.completed_at, jobs.timestamp, rewards.reward_hai
         FROM jobs
         LEFT JOIN rewards ON rewards.task_id = jobs.id
-        WHERE UPPER(jobs.task_type)=?
+        WHERE UPPER(jobs.task_type) IN (?, ?)
         ORDER BY jobs.timestamp DESC
         LIMIT {limit_int}
         """,
-        (CREATOR_TASK_TYPE,),
+        tracked_types,
     ).fetchall()
     feed = []
     for row in rows:
@@ -778,7 +779,11 @@ def get_job_summary(limit: int = 50) -> Dict[str, Any]:
             if completed_at
             else None
         )
-        image_filename = f"{row['id']}.png"
+        task_type = str(row["task_type"] or CREATOR_TASK_TYPE).upper()
+        if task_type == "FACE_SWAP":
+            image_filename = f"swapped_{row['id']}.png"
+        else:
+            image_filename = f"{row['id']}.png"
         image_path = OUTPUTS_DIR / image_filename
         has_image = image_path.exists()
         image_url = f"/static/outputs/{image_filename}" if has_image else None

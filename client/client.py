@@ -771,16 +771,23 @@ def load_image_source(value: Any, target_size: Optional[Tuple[int, int]] = None)
         except Exception:
             return None
     else:
+        treat_as_b64 = False
         if text.startswith("data:"):
             parts = text.split(",", 1)
             text = parts[1] if len(parts) > 1 else ""
-        path = Path(text).expanduser()
-        if path.exists():
+            treat_as_b64 = True
+        if not treat_as_b64:
             try:
-                img = Image.open(path)
-            except Exception:
-                return None
-        else:
+                path = Path(text).expanduser()
+                if path.exists():
+                    try:
+                        img = Image.open(path)
+                    except Exception:
+                        return None
+            except OSError:
+                # Fall back to base64 decode when path lookup fails (e.g., very long strings).
+                img = None
+        if img is None:
             raw = None
             try:
                 raw = base64.b64decode(text, validate=True)
@@ -1519,6 +1526,11 @@ def run_animatediff_generation(
             pipe.set_progress_bar_config(disable=True)
 
         pipe = pipe.to(device)
+        if hasattr(pipe, "image_proj_model") and pipe.image_proj_model is not None:
+            try:
+                pipe.image_proj_model.to(device=device, dtype=dtype)
+            except Exception:
+                pipe.image_proj_model.to(device)
         load_ms = int((time.time() - load_t0) * 1000)
         log(f"AnimateDiff pipeline ready in {load_ms}ms", prefix="✅")
 
@@ -1662,9 +1674,6 @@ def run_faceswap_generation(
             raise RuntimeError("opencv-python and numpy are required for face swap")
         if FaceAnalysis is None:
             raise RuntimeError("insightface is required for face swap")
-        if hf_hub_download is None:
-            raise RuntimeError("huggingface_hub is required for face swap")
-
         from diffusers import ControlNetModel  # type: ignore
         from pipeline_stable_diffusion_xl_instantid_inpaint import (  # type: ignore
             StableDiffusionXLInstantIDInpaintPipeline,
@@ -1704,12 +1713,23 @@ def run_faceswap_generation(
         device = "cuda" if torch.cuda.is_available() else "cpu"
         dtype = torch.float16 if device == "cuda" else torch.float32
 
-        controlnet = ControlNetModel.from_pretrained(
-            INSTANTID_REPO,
-            subfolder=INSTANTID_CONTROLNET_SUBFOLDER,
-            torch_dtype=dtype,
-            cache_dir=str(INSTANTID_CACHE_DIR),
-        )
+        instantid_repo = INSTANTID_REPO
+        local_repo_path = Path(instantid_repo).expanduser()
+        use_local_repo = local_repo_path.exists()
+        if hf_hub_download is None and not use_local_repo:
+            raise RuntimeError("huggingface_hub is required for face swap")
+
+        if use_local_repo:
+            controlnet_path = local_repo_path / INSTANTID_CONTROLNET_SUBFOLDER
+            controlnet_source = str(controlnet_path if controlnet_path.exists() else local_repo_path)
+            controlnet = ControlNetModel.from_pretrained(controlnet_source, torch_dtype=dtype)
+        else:
+            controlnet = ControlNetModel.from_pretrained(
+                instantid_repo,
+                subfolder=INSTANTID_CONTROLNET_SUBFOLDER,
+                torch_dtype=dtype,
+                cache_dir=str(INSTANTID_CACHE_DIR),
+            )
 
         pipe = None
         if hasattr(StableDiffusionXLInstantIDInpaintPipeline, "from_single_file") and model_path.is_file():
@@ -1729,12 +1749,25 @@ def run_faceswap_generation(
                     str(model_path), controlnet=controlnet, torch_dtype=dtype
                 )
 
-        adapter_path = hf_hub_download(
-            INSTANTID_REPO,
-            filename=INSTANTID_IP_ADAPTER_FILE,
-            cache_dir=str(INSTANTID_CACHE_DIR),
-        )
+        pipe = pipe.to(device)
+
+        if use_local_repo:
+            adapter_path = local_repo_path / INSTANTID_IP_ADAPTER_FILE
+            if not adapter_path.exists():
+                raise RuntimeError(f"InstantID ip-adapter not found at {adapter_path}")
+            adapter_path = str(adapter_path)
+        else:
+            adapter_path = hf_hub_download(
+                instantid_repo,
+                filename=INSTANTID_IP_ADAPTER_FILE,
+                cache_dir=str(INSTANTID_CACHE_DIR),
+            )
         pipe.load_ip_adapter_instantid(adapter_path, scale=strength)
+        if hasattr(pipe, "image_proj_model") and pipe.image_proj_model is not None:
+            try:
+                pipe.image_proj_model.to(device=device, dtype=dtype)
+            except Exception:
+                pipe.image_proj_model.to(device)
 
         requested = settings.get("loras") or []
         model_hint = f"{entry.name} sdxl"
@@ -1778,7 +1811,6 @@ def run_faceswap_generation(
             pipe.enable_attention_slicing("max")
         if hasattr(pipe, "set_progress_bar_config"):
             pipe.set_progress_bar_config(disable=True)
-        pipe = pipe.to(device)
 
         seed = settings.get("seed")
         try:
@@ -1793,10 +1825,11 @@ def run_faceswap_generation(
         neg_text = negative_prompt or ""
         guidance_scale = 5.0 if prompt_text else 0.0
 
+        face_emb_tensor = torch.tensor(face_emb, device=device, dtype=pipe.unet.dtype)
         result = pipe(
             prompt=prompt_text,
             negative_prompt=neg_text or None,
-            image_embeds=face_emb,
+            image_embeds=face_emb_tensor,
             control_image=control_image,
             image=pose_image_preprocessed,
             mask_image=mask,

@@ -214,6 +214,8 @@ INSTANTID_CACHE_DIR = (HAVNAI_HOME / "instantid").resolve()
 INSTANTID_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 _FACE_ANALYSIS: Optional["FaceAnalysis"] = None
+_INSTANTID_PIPELINE_CACHE: Dict[Tuple[str, str, str, str, str], Any] = {}
+_INSTANTID_PIPELINE_LOCK = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -1722,55 +1724,80 @@ def run_faceswap_generation(
         if use_local_repo:
             controlnet_path = local_repo_path / INSTANTID_CONTROLNET_SUBFOLDER
             controlnet_source = str(controlnet_path if controlnet_path.exists() else local_repo_path)
-            controlnet = ControlNetModel.from_pretrained(controlnet_source, torch_dtype=dtype)
+            adapter_source = str(local_repo_path / INSTANTID_IP_ADAPTER_FILE)
         else:
-            controlnet = ControlNetModel.from_pretrained(
-                instantid_repo,
-                subfolder=INSTANTID_CONTROLNET_SUBFOLDER,
-                torch_dtype=dtype,
-                cache_dir=str(INSTANTID_CACHE_DIR),
-            )
+            controlnet_source = f"{instantid_repo}::{INSTANTID_CONTROLNET_SUBFOLDER}"
+            adapter_source = f"{instantid_repo}::{INSTANTID_IP_ADAPTER_FILE}"
 
-        pipe = None
-        if hasattr(StableDiffusionXLInstantIDInpaintPipeline, "from_single_file") and model_path.is_file():
-            try:
-                pipe = StableDiffusionXLInstantIDInpaintPipeline.from_single_file(
-                    str(model_path), controlnet=controlnet, torch_dtype=dtype, safety_checker=None
-                )
-            except Exception as exc:
-                log(f"InstantID from_single_file failed: {exc}", prefix="⚠️")
+        cache_key = (str(model_path), controlnet_source, adapter_source, device, str(dtype))
+        with _INSTANTID_PIPELINE_LOCK:
+            pipe = _INSTANTID_PIPELINE_CACHE.get(cache_key)
+
         if pipe is None:
-            if model_path.is_dir():
-                pipe = StableDiffusionXLInstantIDInpaintPipeline.from_pretrained(
-                    str(model_path), controlnet=controlnet, torch_dtype=dtype
-                )
+            if use_local_repo:
+                controlnet = ControlNetModel.from_pretrained(controlnet_source, torch_dtype=dtype)
             else:
-                pipe = StableDiffusionXLInstantIDInpaintPipeline.from_pretrained(
-                    str(model_path), controlnet=controlnet, torch_dtype=dtype
+                controlnet = ControlNetModel.from_pretrained(
+                    instantid_repo,
+                    subfolder=INSTANTID_CONTROLNET_SUBFOLDER,
+                    torch_dtype=dtype,
+                    cache_dir=str(INSTANTID_CACHE_DIR),
                 )
 
-        pipe = pipe.to(device)
+            pipe = None
+            if hasattr(StableDiffusionXLInstantIDInpaintPipeline, "from_single_file") and model_path.is_file():
+                try:
+                    pipe = StableDiffusionXLInstantIDInpaintPipeline.from_single_file(
+                        str(model_path), controlnet=controlnet, torch_dtype=dtype, safety_checker=None
+                    )
+                except Exception as exc:
+                    log(f"InstantID from_single_file failed: {exc}", prefix="⚠️")
+            if pipe is None:
+                if model_path.is_dir():
+                    pipe = StableDiffusionXLInstantIDInpaintPipeline.from_pretrained(
+                        str(model_path), controlnet=controlnet, torch_dtype=dtype
+                    )
+                else:
+                    pipe = StableDiffusionXLInstantIDInpaintPipeline.from_pretrained(
+                        str(model_path), controlnet=controlnet, torch_dtype=dtype
+                    )
 
-        if use_local_repo:
-            adapter_path = local_repo_path / INSTANTID_IP_ADAPTER_FILE
-            if not adapter_path.exists():
-                raise RuntimeError(f"InstantID ip-adapter not found at {adapter_path}")
-            adapter_path = str(adapter_path)
+            pipe = pipe.to(device)
+
+            if use_local_repo:
+                adapter_path = Path(adapter_source)
+                if not adapter_path.exists():
+                    raise RuntimeError(f"InstantID ip-adapter not found at {adapter_path}")
+                adapter_path = str(adapter_path)
+            else:
+                adapter_path = hf_hub_download(
+                    instantid_repo,
+                    filename=INSTANTID_IP_ADAPTER_FILE,
+                    cache_dir=str(INSTANTID_CACHE_DIR),
+                )
+            pipe.load_ip_adapter_instantid(adapter_path, scale=strength)
+            if hasattr(pipe, "image_proj_model") and pipe.image_proj_model is not None:
+                try:
+                    pipe.image_proj_model.to(device=device, dtype=dtype)
+                except Exception:
+                    pipe.image_proj_model.to(device)
+            with _INSTANTID_PIPELINE_LOCK:
+                _INSTANTID_PIPELINE_CACHE[cache_key] = pipe
+            log("Cached InstantID pipeline", prefix="♻️", model=str(model_path))
         else:
-            adapter_path = hf_hub_download(
-                instantid_repo,
-                filename=INSTANTID_IP_ADAPTER_FILE,
-                cache_dir=str(INSTANTID_CACHE_DIR),
-            )
-        pipe.load_ip_adapter_instantid(adapter_path, scale=strength)
-        if hasattr(pipe, "image_proj_model") and pipe.image_proj_model is not None:
             try:
-                pipe.image_proj_model.to(device=device, dtype=dtype)
+                pipe = pipe.to(device)
             except Exception:
-                pipe.image_proj_model.to(device)
+                pass
+            log("Using cached InstantID pipeline", prefix="♻️", model=str(model_path))
 
         requested = settings.get("loras") or []
         model_hint = f"{entry.name} sdxl"
+        if hasattr(pipe, "unload_lora_weights"):
+            try:
+                pipe.unload_lora_weights()
+            except Exception:
+                pass
         lora_entries = collect_lora_entries(requested, model_hint)
         if lora_entries:
             lora_summary = ", ".join(

@@ -210,12 +210,21 @@ ANIMATEDIFF_DEFAULTS: Dict[str, Any] = {
 INSTANTID_REPO = os.environ.get("INSTANTID_REPO", "instantx/InstantID-XL")
 INSTANTID_CONTROLNET_SUBFOLDER = os.environ.get("INSTANTID_CONTROLNET_SUBFOLDER", "ControlNetModel")
 INSTANTID_IP_ADAPTER_FILE = os.environ.get("INSTANTID_IP_ADAPTER_FILE", "ip-adapter.bin")
+INSTANTID_CACHE_ENABLED = os.environ.get("INSTANTID_CACHE_ENABLED", "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 INSTANTID_CACHE_DIR = (HAVNAI_HOME / "instantid").resolve()
 INSTANTID_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 _FACE_ANALYSIS: Optional["FaceAnalysis"] = None
 _INSTANTID_PIPELINE_CACHE: Dict[Tuple[str, str, str, str, str], Any] = {}
 _INSTANTID_PIPELINE_LOCK = threading.Lock()
+_IMAGE_PIPELINE_CACHE: Dict[str, Any] = {}
+_IMAGE_PIPELINE_LOCK = threading.RLock()
+_GPU_TOTAL_VRAM_GB: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +342,232 @@ def ensure_model_path(entry: ModelEntry) -> Path:
     return path
 
 
+def _env_truthy(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        raw = ENV_VARS.get(name, "")
+    if raw == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _get_total_vram_gb() -> Optional[float]:
+    global _GPU_TOTAL_VRAM_GB
+    if _GPU_TOTAL_VRAM_GB is not None:
+        return _GPU_TOTAL_VRAM_GB
+    if torch is None or not torch.cuda.is_available():
+        _GPU_TOTAL_VRAM_GB = None
+        return None
+    try:
+        props = torch.cuda.get_device_properties(0)
+        _GPU_TOTAL_VRAM_GB = round(props.total_memory / (1024**3), 2)
+    except Exception:
+        _GPU_TOTAL_VRAM_GB = None
+    return _GPU_TOTAL_VRAM_GB
+
+
+def _should_enable_attention_slicing(device: str) -> bool:
+    if device != "cuda":
+        return False
+    vram_gb = _get_total_vram_gb()
+    if vram_gb is None:
+        return True
+    return vram_gb <= 12.0
+
+
+def _maybe_enable_xformers(pipe: Any, device: str) -> bool:
+    if device != "cuda":
+        return False
+    if not hasattr(pipe, "enable_xformers_memory_efficient_attention"):
+        return False
+    try:
+        pipe.enable_xformers_memory_efficient_attention()
+        log("xFormers attention enabled", prefix="✅")
+        return True
+    except Exception as exc:
+        log(f"xFormers enable failed: {exc}", prefix="⚠️")
+        return False
+
+
+def _maybe_compile_unet(pipe: Any) -> bool:
+    if torch is None or not hasattr(torch, "compile"):
+        return False
+    if not _env_truthy("HAI_TORCH_COMPILE", False):
+        return False
+    try:
+        pipe.unet = torch.compile(pipe.unet, mode="reduce-overhead")
+        log("torch.compile enabled for UNet", prefix="✅")
+        return True
+    except Exception as exc:
+        log(f"torch.compile failed: {exc}", prefix="⚠️")
+        return False
+
+
+def _build_text2image_pipeline(
+    entry: ModelEntry,
+    model_path: Path,
+    device: str,
+    dtype: "torch.dtype",
+) -> Tuple[Any, Dict[str, Any]]:
+    pipe = None
+    pipeline_name = (getattr(entry, "pipeline", "") or "sd15").lower()
+    if pipeline_name in {"sdxl"}:
+        if _SDXLPipe is not None:
+            try:
+                pipe = _SDXLPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
+            except Exception as exc:
+                log(f"StableDiffusionXLPipeline load failed: {exc}", prefix="⚠️")
+        auto_from_single = getattr(_AutoPipe, "from_single_file", None) if _AutoPipe is not None else None
+        if pipe is None and callable(auto_from_single):
+            try:
+                pipe = auto_from_single(str(model_path), torch_dtype=dtype, safety_checker=None)
+            except Exception as exc:
+                log(f"AutoPipeline load failed: {exc}", prefix="⚠️")
+    if pipe is None and _SDPipe is not None:
+        pipe = _SDPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
+    if pipe is None:
+        raise RuntimeError("Failed to construct a text2image pipeline for model.")
+    if getattr(entry, "vae_path", "") and pipeline_name != "sdxl":
+        vae_path = Path(str(getattr(entry, "vae_path", ""))).expanduser()
+        if vae_path.exists() and _AutoencoderKL is not None:
+            try:
+                custom_vae = _AutoencoderKL.from_single_file(str(vae_path), torch_dtype=dtype)
+                pipe.vae = custom_vae
+                log(f"Loaded custom VAE for {entry.name}", prefix="✅", vae=str(vae_path))
+            except Exception as exc:
+                log(f"Custom VAE load failed for {entry.name}: {exc}", prefix="⚠️", vae=str(vae_path))
+    if hasattr(pipe, "set_progress_bar_config"):
+        pipe.set_progress_bar_config(disable=True)
+    if "_DPMSolver" in globals() and _DPMSolver is not None and hasattr(pipe, "scheduler"):
+        try:
+            pipe.scheduler = _DPMSolver.from_config(pipe.scheduler.config)
+        except Exception as exc:
+            log(f"DPM scheduler setup failed: {exc}", prefix="⚠️")
+    pipe = pipe.to(device)
+    xformers_enabled = _maybe_enable_xformers(pipe, device)
+    attention_slicing_enabled = False
+    enable_slicing = _should_enable_attention_slicing(device)
+    if hasattr(pipe, "enable_attention_slicing") and enable_slicing and not xformers_enabled:
+        pipe.enable_attention_slicing("max")
+        attention_slicing_enabled = True
+    elif device == "cuda" and not enable_slicing:
+        vram_gb = _get_total_vram_gb()
+        if vram_gb is not None:
+            log(f"Attention slicing disabled (VRAM {vram_gb}GB)", prefix="ℹ️")
+    compiled = _maybe_compile_unet(pipe)
+    return pipe, {
+        "pipeline_name": pipeline_name,
+        "xformers_enabled": xformers_enabled,
+        "attention_slicing_enabled": attention_slicing_enabled,
+        "compiled": compiled,
+    }
+
+
+def _get_cached_text2image_pipeline(
+    entry: ModelEntry,
+    model_path: Path,
+    device: str,
+    dtype: "torch.dtype",
+) -> Tuple[Any, Dict[str, Any], bool]:
+    cache_key = (str(model_path), (getattr(entry, "pipeline", "") or "sd15").lower(), device, str(dtype))
+    with _IMAGE_PIPELINE_LOCK:
+        cached = _IMAGE_PIPELINE_CACHE.get("pipe")
+        if cached is not None and _IMAGE_PIPELINE_CACHE.get("cache_key") == cache_key:
+            return cached, _IMAGE_PIPELINE_CACHE, True
+        if cached is not None:
+            _IMAGE_PIPELINE_CACHE.clear()
+            if torch is not None and torch.cuda.is_available():
+                del cached
+                torch.cuda.empty_cache()
+        log("Loading text2image pipeline…", prefix="ℹ️", device=device, model=entry.name)
+        load_t0 = time.time()
+        pipe, info = _build_text2image_pipeline(entry, model_path, device, dtype)
+        load_ms = int((time.time() - load_t0) * 1000)
+        log(f"Pipeline ready in {load_ms}ms", prefix="✅", model=entry.name)
+        _IMAGE_PIPELINE_CACHE.update(
+            {
+                "cache_key": cache_key,
+                "pipe": pipe,
+                "model_path": str(model_path),
+                "pipeline_name": info.get("pipeline_name"),
+                "device": device,
+                "dtype": str(dtype),
+                "lora_signature": None,
+                "loaded_adapters": {},
+                "xformers_enabled": info.get("xformers_enabled", False),
+                "attention_slicing_enabled": info.get("attention_slicing_enabled", False),
+                "compiled": info.get("compiled", False),
+            }
+        )
+        return pipe, _IMAGE_PIPELINE_CACHE, False
+
+
+def _apply_loras(
+    pipe: Any,
+    entry_name: str,
+    lora_entries: List[Tuple[Path, float, str]],
+    cache_state: Dict[str, Any],
+) -> bool:
+    adapter_names = [adapter for _, _, adapter in lora_entries]
+    adapter_weights = [float(weight) for _, weight, _ in lora_entries]
+    signature = tuple(zip(adapter_names, adapter_weights))
+    if signature == cache_state.get("lora_signature"):
+        return False
+    if not lora_entries:
+        if hasattr(pipe, "set_adapters"):
+            try:
+                pipe.set_adapters([])
+            except Exception:
+                pass
+        elif hasattr(pipe, "unload_lora_weights"):
+            try:
+                pipe.unload_lora_weights()
+            except Exception as exc:
+                log(f"LoRA unload failed for {entry_name}: {exc}", prefix="⚠️")
+        cache_state["lora_signature"] = signature
+        return False
+    if not hasattr(pipe, "set_adapters") and cache_state.get("lora_signature"):
+        return True
+    if not hasattr(pipe, "load_lora_weights"):
+        log("Pipeline does not support LoRA loading", prefix="⚠️")
+        cache_state["lora_signature"] = signature
+        return False
+    loaded_adapters: Dict[str, str] = cache_state.get("loaded_adapters", {})
+    loaded_adapter_names: List[str] = []
+    loaded_adapter_weights: List[float] = []
+    for lora_path, lora_weight, adapter_name in lora_entries:
+        existing_path = loaded_adapters.get(adapter_name)
+        if existing_path == str(lora_path):
+            loaded_adapter_names.append(adapter_name)
+            loaded_adapter_weights.append(lora_weight)
+            continue
+        try:
+            pipe.load_lora_weights(str(lora_path), adapter_name=adapter_name)
+        except TypeError:
+            pipe.load_lora_weights(str(lora_path))
+        except Exception as exc:
+            log(f"LoRA load failed for {entry_name}: {exc}", prefix="⚠️", lora=str(lora_path))
+            continue
+        loaded_adapters[adapter_name] = str(lora_path)
+        loaded_adapter_names.append(adapter_name)
+        loaded_adapter_weights.append(lora_weight)
+        log(f"Loaded LoRA for {entry_name}", prefix="✅", lora=str(lora_path), weight=lora_weight)
+    cache_state["loaded_adapters"] = loaded_adapters
+    if loaded_adapter_names:
+        if hasattr(pipe, "set_adapters"):
+            try:
+                pipe.set_adapters(loaded_adapter_names, loaded_adapter_weights)
+            except TypeError:
+                pipe.set_adapters(loaded_adapter_names)
+        elif hasattr(pipe, "fuse_lora"):
+            try:
+                pipe.fuse_lora()
+            except Exception as exc:
+                log(f"LoRA fuse failed for {entry_name}: {exc}", prefix="⚠️")
+    cache_state["lora_signature"] = signature
+    return False
+
+
 def discover_capabilities() -> Dict[str, List[str]]:
     pipelines: set[str] = set()
     models: List[str] = []
@@ -344,6 +579,32 @@ def discover_capabilities() -> Dict[str, List[str]]:
         pipelines.add(entry.pipeline)
         models.append(entry.name)
     return {"pipelines": sorted(pipelines), "models": sorted(models)}
+
+
+def warmup_image_pipeline() -> None:
+    if FAST_PREVIEW or torch is None or diffusers is None:
+        return
+    if not _env_truthy("HAI_WARMUP_IMAGE_PIPELINE", True):
+        log("Image pipeline warmup disabled", prefix="ℹ️")
+        return
+    if not torch.cuda.is_available():
+        return
+    device = "cuda"
+    dtype = torch.float16
+    for entry in REGISTRY.list_entries():
+        if str(getattr(entry, "task_type", "")).upper() != "IMAGE_GEN":
+            continue
+        try:
+            model_path = ensure_model_path(entry)
+        except Exception:
+            continue
+        try:
+            _get_cached_text2image_pipeline(entry, model_path, device, dtype)
+            log("Image pipeline warmup complete", prefix="✅", model=entry.name)
+            return
+        except Exception as exc:
+            log(f"Image pipeline warmup failed: {exc}", prefix="⚠️", model=entry.name)
+    log("Image pipeline warmup skipped (no local IMAGE_GEN models)", prefix="⚠️")
 
 
 # ---------------------------------------------------------------------------
@@ -979,15 +1240,51 @@ def clamp_lora_weight(weight: Optional[float], role: str) -> float:
     return max(min_w, min(max_w, value))
 
 
+def pick_lora_weight_file(lora_dir: Path) -> Optional[Path]:
+    if not lora_dir.is_dir():
+        return None
+    preferred = (
+        "pytorch_lora_weights.safetensors",
+        "pytorch_lora_weights.bin",
+        "adapter_model.safetensors",
+        "adapter_model.bin",
+    )
+    for name in preferred:
+        candidate = lora_dir / name
+        if candidate.is_file():
+            return candidate
+    for ext in (".safetensors", ".bin"):
+        candidates = sorted(lora_dir.glob(f"*{ext}"))
+        if candidates:
+            return candidates[0]
+    return None
+
+
+def lora_adapter_name(role: str, lora_name: str) -> str:
+    base = normalize_lora_name(lora_name)
+    safe = re.sub(r"[^a-zA-Z0-9_\\-]+", "_", base).strip("_")
+    if not safe:
+        safe = "lora"
+    return f"lora_{role}_{safe}"
+
+
 def resolve_lora_path(lora_name: str) -> Optional[Path]:
     candidate = Path(lora_name).expanduser()
     if candidate.is_file():
         return candidate
+    if candidate.is_dir():
+        picked = pick_lora_weight_file(candidate)
+        if picked is not None:
+            return picked
     if candidate.suffix == "":
         candidate = candidate.with_suffix(".safetensors")
     fallback = LORA_DIR / candidate.name
-    if fallback.exists():
+    if fallback.is_file():
         return fallback
+    if fallback.is_dir():
+        picked = pick_lora_weight_file(fallback)
+        if picked is not None:
+            return picked
     return None
 
 
@@ -1001,14 +1298,14 @@ def find_auto_anatomy_lora(model_is_sdxl: bool, seen: Set[str]) -> Optional[Tupl
             if normalized in seen:
                 continue
             weight = clamp_lora_weight(AUTO_ANATOMY_WEIGHT_SDXL, "anatomy")
-            return (path, weight, f"lora_anatomy_{path.stem}")
+            return (path, weight, lora_adapter_name("anatomy", candidate))
         for path in sorted(LORA_DIR.glob("*.safetensors")):
             normalized = normalize_lora_name(path.name)
             if normalized in seen:
                 continue
             if any(normalized.startswith(prefix) for prefix in ANATOMY_LORA_PREFIXES):
                 weight = clamp_lora_weight(AUTO_ANATOMY_WEIGHT_SDXL, "anatomy")
-                return (path, weight, f"lora_anatomy_{path.stem}")
+                return (path, weight, lora_adapter_name("anatomy", path.name))
         return None
 
     for candidate in AUTO_ANATOMY_SD15_CANDIDATES:
@@ -1019,7 +1316,7 @@ def find_auto_anatomy_lora(model_is_sdxl: bool, seen: Set[str]) -> Optional[Tupl
         if normalized in seen:
             continue
         weight = clamp_lora_weight(AUTO_ANATOMY_WEIGHT_SD15, "anatomy")
-        return (path, weight, f"lora_anatomy_{path.stem}")
+        return (path, weight, lora_adapter_name("anatomy", candidate))
     return None
 
 
@@ -1033,7 +1330,7 @@ def find_auto_style_lora(model_is_sdxl: bool, seen: Set[str]) -> Optional[Tuple[
         if normalized in seen:
             continue
         weight = clamp_lora_weight(AUTO_STYLE_WEIGHT, "style")
-        return (path, weight, f"lora_style_{path.stem}")
+        return (path, weight, lora_adapter_name("style", candidate))
     return None
 
 
@@ -1073,7 +1370,7 @@ def select_lora_entries(
         lora_path = resolve_lora_path(name)
         if not lora_path:
             continue
-        adapter_name = f"lora_{role}_{lora_path.stem}"
+        adapter_name = lora_adapter_name(role, name)
         entry = (lora_path, weight, adapter_name)
         if role == "position":
             positions.append(entry)
@@ -1143,7 +1440,7 @@ def collect_lora_entries(requested: Any, model_hint: str) -> List[Tuple[Path, fl
             continue
         role = classify_lora_role(normalized)
         weight = clamp_lora_weight(raw_weight, role)
-        adapter_name = f"lora_{role}_{lora_path.stem}"
+        adapter_name = lora_adapter_name(role, name)
         lora_entries.append((lora_path, weight, adapter_name))
         seen.add(normalized)
     return lora_entries
@@ -1522,7 +1819,7 @@ def run_animatediff_generation(
         elif lora_entries:
             log("Pipeline does not support LoRA loading", prefix="⚠️")
 
-        if hasattr(pipe, "enable_attention_slicing"):
+        if hasattr(pipe, "enable_attention_slicing") and _should_enable_attention_slicing(device):
             pipe.enable_attention_slicing("max")
         if hasattr(pipe, "set_progress_bar_config"):
             pipe.set_progress_bar_config(disable=True)
@@ -1729,9 +2026,15 @@ def run_faceswap_generation(
             controlnet_source = f"{instantid_repo}::{INSTANTID_CONTROLNET_SUBFOLDER}"
             adapter_source = f"{instantid_repo}::{INSTANTID_IP_ADAPTER_FILE}"
 
+        cache_enabled = INSTANTID_CACHE_ENABLED
         cache_key = (str(model_path), controlnet_source, adapter_source, device, str(dtype))
-        with _INSTANTID_PIPELINE_LOCK:
-            pipe = _INSTANTID_PIPELINE_CACHE.get(cache_key)
+        if cache_enabled:
+            with _INSTANTID_PIPELINE_LOCK:
+                pipe = _INSTANTID_PIPELINE_CACHE.get(cache_key)
+        else:
+            with _INSTANTID_PIPELINE_LOCK:
+                _INSTANTID_PIPELINE_CACHE.clear()
+            pipe = None
 
         if pipe is None:
             if use_local_repo:
@@ -1781,10 +2084,11 @@ def run_faceswap_generation(
                     pipe.image_proj_model.to(device=device, dtype=dtype)
                 except Exception:
                     pipe.image_proj_model.to(device)
-            with _INSTANTID_PIPELINE_LOCK:
-                _INSTANTID_PIPELINE_CACHE[cache_key] = pipe
-            log("Cached InstantID pipeline", prefix="♻️", model=str(model_path))
-        else:
+            if cache_enabled:
+                with _INSTANTID_PIPELINE_LOCK:
+                    _INSTANTID_PIPELINE_CACHE[cache_key] = pipe
+                log("Cached InstantID pipeline", prefix="♻️", model=str(model_path))
+        elif cache_enabled:
             try:
                 pipe = pipe.to(device)
             except Exception:
@@ -1834,7 +2138,7 @@ def run_faceswap_generation(
         elif lora_entries:
             log("Pipeline does not support LoRA loading", prefix="⚠️")
 
-        if hasattr(pipe, "enable_attention_slicing"):
+        if hasattr(pipe, "enable_attention_slicing") and _should_enable_attention_slicing(device):
             pipe.enable_attention_slicing("max")
         if hasattr(pipe, "set_progress_bar_config"):
             pipe.set_progress_bar_config(disable=True)
@@ -1911,7 +2215,6 @@ def run_image_generation(
     negative_prompt: str,
     job_settings: Optional[Dict[str, Any]] = None,
 ) -> (Dict[str, Any], int, Optional[str]):
-
     start_stats = read_gpu_stats()
     started = time.time()
     status = "success"
@@ -1923,167 +2226,108 @@ def run_image_generation(
         if not FAST_PREVIEW and torch is not None and diffusers is not None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
             dtype = torch.float16 if device == "cuda" else torch.float32
-            log("Loading text2image pipeline…", prefix="ℹ️", device=device)
-            load_t0 = time.time()
-            pipe = None
-            # For SD1.5-style checkpoints (triomerge, etc.) use StableDiffusionPipeline
-            # to match direct test behavior; reserve AutoPipeline/SDXL pipeline for SDXL types.
             pipeline_name = (getattr(entry, "pipeline", "") or "sd15").lower()
-            if pipeline_name in {"sdxl"}:
-                if _SDXLPipe is not None:
-                    try:
-                        pipe = _SDXLPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
-                    except Exception as exc:
-                        log(f"StableDiffusionXLPipeline load failed: {exc}", prefix="⚠️")
-                auto_from_single = getattr(_AutoPipe, "from_single_file", None) if _AutoPipe is not None else None
-                if pipe is None and callable(auto_from_single):
-                    try:
-                        pipe = auto_from_single(str(model_path), torch_dtype=dtype, safety_checker=None)
-                    except Exception as exc:  # fallback to SD1.5 pipe
-                        log(f"AutoPipeline load failed: {exc}", prefix="⚠️")
-            if pipe is None and _SDPipe is not None:
-                pipe = _SDPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
-            if pipe is None:
-                raise RuntimeError("Failed to construct a text2image pipeline for model.")
-            # Optionally swap in a custom VAE for SD1.5-style checkpoints
-            if pipe is not None and getattr(entry, "vae_path", "") and pipeline_name != "sdxl":
-                vae_path = Path(str(getattr(entry, "vae_path", ""))).expanduser()
-                if vae_path.exists() and _AutoencoderKL is not None:
-                    try:
-                        custom_vae = _AutoencoderKL.from_single_file(str(vae_path), torch_dtype=dtype)
-                        pipe.vae = custom_vae
-                        log(f"Loaded custom VAE for {entry.name}", prefix="✅", vae=str(vae_path))
-                    except Exception as exc:
-                        log(f"Custom VAE load failed for {entry.name}: {exc}", prefix="⚠️", vae=str(vae_path))
-            # Optional LoRA attachment with safe stacking and role-aware weights.
-            requested: List[Any] = []
-            if job_settings and isinstance(job_settings, dict):
-                requested = job_settings.get("loras") or []
-            model_hint = f"{entry.name} {pipeline_name}".strip()
-            lora_entries = collect_lora_entries(requested, model_hint)
-            if lora_entries:
-                lora_summary = ", ".join(
-                    f"{adapter}:{weight:.2f} ({path.name})" for path, weight, adapter in lora_entries
-                )
-            else:
-                lora_summary = "none"
-            log(f"Loading LoRAs: {lora_summary}", prefix="🎛️")
-            if lora_entries:
-                adapter_names: List[str] = []
-                adapter_weights: List[float] = []
-                if hasattr(pipe, "load_lora_weights"):
-                    for lora_path, lora_weight, adapter_name in lora_entries:
-                        adapter = adapter_name
-                        try:
-                            pipe.load_lora_weights(str(lora_path), adapter_name=adapter)
-                        except TypeError:
-                            pipe.load_lora_weights(str(lora_path))
-                        except Exception as exc:
-                            log(f"LoRA load failed for {entry.name}: {exc}", prefix="⚠️", lora=str(lora_path))
-                            continue
-                        adapter_names.append(adapter)
-                        adapter_weights.append(lora_weight)
-                        log(f"Loaded LoRA for {entry.name}", prefix="✅", lora=str(lora_path), weight=lora_weight)
-                if adapter_names:
-                    if hasattr(pipe, "set_adapters"):
-                        try:
-                            pipe.set_adapters(adapter_names, adapter_weights)
-                        except TypeError:
-                            pipe.set_adapters(adapter_names)
-                    elif hasattr(pipe, "fuse_lora"):
-                        try:
-                            pipe.fuse_lora()
-                        except Exception as exc:
-                            log(f"LoRA fuse failed for {entry.name}: {exc}", prefix="⚠️")
-                else:
-                    log("Pipeline does not support LoRA loading", prefix="⚠️")
-            if hasattr(pipe, "enable_attention_slicing"):
-                pipe.enable_attention_slicing("max")
-            if hasattr(pipe, "set_progress_bar_config"):
-                pipe.set_progress_bar_config(disable=True)
-            if "_DPMSolver" in globals() and _DPMSolver is not None and hasattr(pipe, "scheduler"):
-                try:
-                    pipe.scheduler = _DPMSolver.from_config(pipe.scheduler.config)
-                except Exception as exc:
-                    log(f"DPM scheduler setup failed: {exc}", prefix="⚠️")
-            pipe = pipe.to(device)
-            load_ms = int((time.time() - load_t0) * 1000)
-            log(f"Pipeline ready in {load_ms}ms", prefix="✅")
-
-            seed = None
-            if job_settings and isinstance(job_settings, dict):
-                seed = job_settings.get("seed")
-            try:
-                seed = int(seed) if seed is not None else None
-            except (TypeError, ValueError):
-                seed = None
-            if seed is None:
-                seed = int(time.time()) & 0x7FFFFFFF
-            generator = torch.Generator(device=device).manual_seed(seed)
-            pos_text = prompt or "a high quality photo of a golden retriever on a beach at sunset"
-            neg_text = negative_prompt or ""
-            # Merge per-job overrides with model defaults from manifest
-            steps = IMAGE_STEPS
-            guidance = IMAGE_GUIDANCE
-            height = IMAGE_HEIGHT
-            width = IMAGE_WIDTH
-            sampler = None
-            if job_settings and isinstance(job_settings, dict):
-                steps = int(job_settings.get("steps", steps) or steps)
-                guidance = float(job_settings.get("guidance", guidance) or guidance)
-                height = int(job_settings.get("height", height) or height)
-                width = int(job_settings.get("width", width) or width)
-                sampler = str(job_settings.get("sampler") or "").strip().lower() or None
-                if job_settings.get("negative_prompt"):
-                    neg_text = str(job_settings.get("negative_prompt") or "")
-            # clamp to sane ranges
-            steps = max(5, min(50, steps))
-            guidance = max(1.0, min(15.0, guidance))
-            height = max(256, min(1536, height))
-            width = max(256, min(1536, width))
-            # Proactively truncate to CLIP token limit to avoid noisy warnings
-            if hasattr(pipe, "tokenizer") and hasattr(pipe.tokenizer, "model_max_length"):
-                try:
-                    encoded = pipe.tokenizer(
-                        pos_text,
-                        max_length=pipe.tokenizer.model_max_length,
-                        truncation=True,
-                        return_tensors="pt",
+            with _IMAGE_PIPELINE_LOCK:
+                pipe, cache_state, cache_hit = _get_cached_text2image_pipeline(entry, model_path, device, dtype)
+                if cache_hit:
+                    log("Using cached text2image pipeline", prefix="♻️", model=entry.name)
+                requested: List[Any] = []
+                if job_settings and isinstance(job_settings, dict):
+                    requested = job_settings.get("loras") or []
+                model_hint = f"{entry.name} {pipeline_name}".strip()
+                lora_entries = collect_lora_entries(requested, model_hint)
+                if lora_entries:
+                    lora_summary = ", ".join(
+                        f"{adapter}:{weight:.2f} ({path.name})" for path, weight, adapter in lora_entries
                     )
-                    pos_text = pipe.tokenizer.batch_decode(
-                        encoded.input_ids, skip_special_tokens=True
-                    )[0]
-                    if neg_text:
-                        encoded_neg = pipe.tokenizer(
-                            neg_text,
+                else:
+                    lora_summary = "none"
+                log(f"Loading LoRAs: {lora_summary}", prefix="🎛️")
+                reload_needed = _apply_loras(pipe, entry.name, lora_entries, cache_state)
+                if reload_needed:
+                    log("Reloading pipeline to apply new LoRAs", prefix="⚠️", model=entry.name)
+                    old_pipe = cache_state.get("pipe")
+                    _IMAGE_PIPELINE_CACHE.clear()
+                    del old_pipe
+                    if torch is not None and torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    pipe, cache_state, _ = _get_cached_text2image_pipeline(entry, model_path, device, dtype)
+                    _apply_loras(pipe, entry.name, lora_entries, cache_state)
+
+                seed = None
+                if job_settings and isinstance(job_settings, dict):
+                    seed = job_settings.get("seed")
+                try:
+                    seed = int(seed) if seed is not None else None
+                except (TypeError, ValueError):
+                    seed = None
+                if seed is None:
+                    seed = int(time.time()) & 0x7FFFFFFF
+                generator = torch.Generator(device=device).manual_seed(seed)
+                pos_text = prompt or "a high quality photo of a golden retriever on a beach at sunset"
+                neg_text = negative_prompt or ""
+                # Merge per-job overrides with model defaults from manifest
+                steps = IMAGE_STEPS
+                guidance = IMAGE_GUIDANCE
+                height = IMAGE_HEIGHT
+                width = IMAGE_WIDTH
+                sampler = None
+                if job_settings and isinstance(job_settings, dict):
+                    steps = int(job_settings.get("steps", steps) or steps)
+                    guidance = float(job_settings.get("guidance", guidance) or guidance)
+                    height = int(job_settings.get("height", height) or height)
+                    width = int(job_settings.get("width", width) or width)
+                    sampler = str(job_settings.get("sampler") or "").strip().lower() or None
+                    if job_settings.get("negative_prompt"):
+                        neg_text = str(job_settings.get("negative_prompt") or "")
+                # clamp to sane ranges
+                steps = max(5, min(50, steps))
+                guidance = max(1.0, min(15.0, guidance))
+                height = max(256, min(1536, height))
+                width = max(256, min(1536, width))
+                # Proactively truncate to CLIP token limit to avoid noisy warnings
+                if hasattr(pipe, "tokenizer") and hasattr(pipe.tokenizer, "model_max_length"):
+                    try:
+                        encoded = pipe.tokenizer(
+                            pos_text,
                             max_length=pipe.tokenizer.model_max_length,
                             truncation=True,
                             return_tensors="pt",
                         )
-                        neg_text = pipe.tokenizer.batch_decode(
-                            encoded_neg.input_ids, skip_special_tokens=True
+                        pos_text = pipe.tokenizer.batch_decode(
+                            encoded.input_ids, skip_special_tokens=True
                         )[0]
-                except Exception as exc:
-                    log(f"Prompt truncation failed: {exc}", prefix="⚠️")
-            gen_t0 = time.time()
-            # Optional sampler switch if supported
-            if sampler and hasattr(pipe, "scheduler") and _DPMSolver is not None:
-                sampler_norm = sampler.replace("+", "p")
-                if "dpmpp" in sampler_norm:
-                    try:
-                        pipe.scheduler = _DPMSolver.from_config(pipe.scheduler.config)
+                        if neg_text:
+                            encoded_neg = pipe.tokenizer(
+                                neg_text,
+                                max_length=pipe.tokenizer.model_max_length,
+                                truncation=True,
+                                return_tensors="pt",
+                            )
+                            neg_text = pipe.tokenizer.batch_decode(
+                                encoded_neg.input_ids, skip_special_tokens=True
+                            )[0]
                     except Exception as exc:
-                        log(f"Sampler switch failed: {exc}", prefix="⚠️", sampler=sampler)
-            with torch.inference_mode():
-                result = pipe(
-                    pos_text,
-                    negative_prompt=neg_text or None,
-                    num_inference_steps=steps,
-                    guidance_scale=guidance,
-                    generator=generator,
-                    height=height,
-                    width=width,
-                )
+                        log(f"Prompt truncation failed: {exc}", prefix="⚠️")
+                gen_t0 = time.time()
+                # Optional sampler switch if supported
+                if sampler and hasattr(pipe, "scheduler") and _DPMSolver is not None:
+                    sampler_norm = sampler.replace("+", "p")
+                    if "dpmpp" in sampler_norm:
+                        try:
+                            pipe.scheduler = _DPMSolver.from_config(pipe.scheduler.config)
+                        except Exception as exc:
+                            log(f"Sampler switch failed: {exc}", prefix="⚠️", sampler=sampler)
+                with torch.inference_mode():
+                    result = pipe(
+                        pos_text,
+                        negative_prompt=neg_text or None,
+                        num_inference_steps=steps,
+                        guidance_scale=guidance,
+                        generator=generator,
+                        height=height,
+                        width=width,
+                    )
             gen_ms = int((time.time() - gen_t0) * 1000)
             log(f"Generated in {gen_ms}ms", prefix="✅")
             img = result.images[0]
@@ -2121,9 +2365,9 @@ def run_image_generation(
     util = int(max(util, 70 if ROLE == "creator" else util))
     metrics = {
         "status": status,
-            "model_name": entry.name,
-            "model_path": str(model_path),
-            "reward_weight": reward_weight,
+        "model_name": entry.name,
+        "model_path": str(model_path),
+        "reward_weight": reward_weight,
         "task_type": "image_gen",
         "inference_time_ms": round(duration * 1000, 3),
         "gpu_util_start": start_stats.get("utilization", 0),
@@ -2202,6 +2446,8 @@ def poll_tasks_loop() -> None:
 if __name__ == "__main__":
     log(f"Node ID: {NODE_NAME} · Role: {ROLE.upper()} · Version: {CLIENT_VERSION}")
     refresh_manifest_with_backoff("startup")
+    if ROLE == "creator":
+        warmup_image_pipeline()
     link_wallet(WALLET)
     # Graceful shutdown hooks
     atexit.register(disconnect)

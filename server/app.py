@@ -979,6 +979,42 @@ def complete_job(job_id: str, node_id: str, status: str) -> bool:
         raise
 
 
+def complete_job_if_queued(job_id: str, node_id: str, status: str) -> bool:
+    """Allow late completion when a running job was reset to queued (e.g., server restart)."""
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT status, node_id, assigned_at, completed_at FROM jobs WHERE id=?",
+            (job_id,),
+        ).fetchone()
+        if not row:
+            conn.rollback()
+            return False
+        current_status = (row["status"] or "").lower()
+        owner = row["node_id"]
+        assigned_at = row["assigned_at"]
+        completed_at = row["completed_at"]
+        if current_status != "queued" or completed_at is not None:
+            conn.rollback()
+            return False
+        if owner and owner != node_id:
+            conn.rollback()
+            return False
+        if assigned_at is None:
+            conn.rollback()
+            return False
+        conn.execute(
+            "UPDATE jobs SET status=?, node_id=?, completed_at=? WHERE id=?",
+            (status, node_id, unix_now(), job_id),
+        )
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def record_reward(wallet: Optional[str], task_id: str, reward: float) -> None:
     if not wallet:
         return
@@ -999,13 +1035,14 @@ def record_reward(wallet: Optional[str], task_id: str, reward: float) -> None:
 
 def get_job_summary(limit: int = 50) -> Dict[str, Any]:
     conn = get_db()
+    summary_types = (CREATOR_TASK_TYPE, "FACE_SWAP")
     queued = conn.execute(
-        "SELECT COUNT(*) FROM jobs WHERE status='queued' AND UPPER(task_type)=?",
-        (CREATOR_TASK_TYPE,),
+        "SELECT COUNT(*) FROM jobs WHERE status='queued' AND UPPER(task_type) IN (?, ?)",
+        summary_types,
     ).fetchone()[0]
     active = conn.execute(
-        "SELECT COUNT(*) FROM jobs WHERE status='running' AND UPPER(task_type)=?",
-        (CREATOR_TASK_TYPE,),
+        "SELECT COUNT(*) FROM jobs WHERE status='running' AND UPPER(task_type) IN (?, ?)",
+        summary_types,
     ).fetchone()[0]
     total_distributed = conn.execute("SELECT COALESCE(SUM(reward_hai),0) FROM rewards").fetchone()[0]
     today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
@@ -1017,9 +1054,9 @@ def get_job_summary(limit: int = 50) -> Dict[str, Any]:
         WHERE status IN ('completed', 'success')
           AND completed_at IS NOT NULL
           AND completed_at >= ?
-          AND UPPER(task_type)=?
+          AND UPPER(task_type) IN (?, ?)
         """,
-        (today_start, CREATOR_TASK_TYPE),
+        (today_start, *summary_types),
     ).fetchone()[0]
     # Avoid binding LIMIT to sidestep driver quirks under concurrency; limit is internal and cast to int.
     limit_int = int(limit)
@@ -1029,11 +1066,11 @@ def get_job_summary(limit: int = 50) -> Dict[str, Any]:
                jobs.completed_at, jobs.timestamp, rewards.reward_hai
         FROM jobs
         LEFT JOIN rewards ON rewards.task_id = jobs.id
-        WHERE UPPER(jobs.task_type)=?
+        WHERE UPPER(jobs.task_type) IN (?, ?)
         ORDER BY jobs.timestamp DESC
         LIMIT {limit_int}
         """,
-        (CREATOR_TASK_TYPE,),
+        summary_types,
     ).fetchall()
     feed = []
     for row in rows:
@@ -1980,14 +2017,22 @@ def submit_results() -> Any:
 
         # Ensure job is still owned/running before completing
         if not complete_job(task_id, node_id, status):
-            log_event(
-                "Results rejected (job not running/owned by node)",
-                level="warning",
-                job_id=task_id,
-                node_id=node_id,
-            )
-            TASKS.pop(task_id, None)
-            return jsonify({"error": "conflict"}), 409
+            if complete_job_if_queued(task_id, node_id, status):
+                log_event(
+                    "Accepted late results for queued job",
+                    level="warning",
+                    job_id=task_id,
+                    node_id=node_id,
+                )
+            else:
+                log_event(
+                    "Results rejected (job not running/owned by node)",
+                    level="warning",
+                    job_id=task_id,
+                    node_id=node_id,
+                )
+                TASKS.pop(task_id, None)
+                return jsonify({"error": "conflict"}), 409
 
         if node:
             node["rewards"] = round(node.get("rewards", 0.0) + reward, 6)

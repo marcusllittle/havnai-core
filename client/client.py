@@ -1062,6 +1062,17 @@ def run_image_generation(task_id: str, model_name: str, model_url: str, reward_w
             seed = int(time.time()) & 0x7FFFFFFF
             generator = torch.Generator(device=device).manual_seed(seed)
             text = prompt or "a high quality photo of a golden retriever on a beach at sunset"
+            if hasattr(pipe, "tokenizer") and hasattr(pipe.tokenizer, "model_max_length"):
+                try:
+                    encoded = pipe.tokenizer(
+                        text,
+                        max_length=pipe.tokenizer.model_max_length,
+                        truncation=True,
+                        return_tensors="pt",
+                    )
+                    text = pipe.tokenizer.batch_decode(encoded.input_ids, skip_special_tokens=True)[0]
+                except Exception as exc:
+                    log(f"Prompt truncation failed: {exc}", prefix="⚠️")
             gen_t0 = time.time()
             with torch.inference_mode():
                 result = pipe(

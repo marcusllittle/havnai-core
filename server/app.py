@@ -1423,14 +1423,20 @@ def _clamp(value: int, min_val: int, max_val: int) -> int:
 def build_faceswap_settings(payload: Dict[str, Any], prompt_text: str) -> Dict[str, Any]:
     base_image_url = str(
         payload.get("base_image_url")
+        or payload.get("base_image_b64")
         or payload.get("base_image")
+        or payload.get("base_image_path")
         or payload.get("image")
+        or payload.get("image_b64")
         or ""
     ).strip()
     face_source_url = str(
         payload.get("face_source_url")
+        or payload.get("face_source_b64")
         or payload.get("face_source")
         or payload.get("face_image")
+        or payload.get("face_image_b64")
+        or payload.get("face_source_path")
         or ""
     ).strip()
     strength = _coerce_float(payload.get("strength", 0.8), 0.8)
@@ -1629,7 +1635,7 @@ def submit_faceswap_job_endpoint() -> Any:
 
     settings = build_faceswap_settings(payload, prompt_text)
     if not settings.get("base_image_url") or not settings.get("face_source_url"):
-        return jsonify({"error": "base_image_url and face_source_url are required"}), 400
+        return jsonify({"error": "base_image and face_source are required"}), 400
 
     load_manifest()
     cfg = get_model_config(model_name)
@@ -2570,5 +2576,6 @@ def root() -> Any:
 
 if __name__ == "__main__":
     host = os.getenv("SERVER_BIND", "0.0.0.0")
-    port = int(os.getenv("SERVER_PORT", "5001"))
+    port_raw = os.getenv("SERVER_PORT") or os.getenv("PORT") or "5001"
+    port = int(port_raw)
     app.run(host=host, port=port)

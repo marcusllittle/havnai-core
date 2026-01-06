@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 from pathlib import Path
 import atexit
 import signal
@@ -441,22 +442,62 @@ def coerce_float(value: Any, default: float) -> float:
         return default
 
 
-def load_image_source(value: Any, target_size: Optional[Tuple[int, int]] = None) -> Optional["Image.Image"]:
-    if not value or Image is None:
-        return None
+def _normalize_image_path(text: str) -> str:
+    if text.startswith("file://"):
+        parsed = urllib.parse.urlparse(text)
+        path = urllib.parse.unquote(parsed.path or "")
+        if path.startswith("/") and len(path) > 3 and path[2] == ":":
+            drive = path[1].lower()
+            rest = path[3:].lstrip("/")
+            return f"/mnt/{drive}/{rest}"
+        return path
+    if len(text) >= 2 and text[1] == ":" and text[0].isalpha():
+        drive = text[0].lower()
+        rest = text[2:].lstrip("\\/")
+        rest = rest.replace("\\", "/")
+        return f"/mnt/{drive}/{rest}"
+    return text
+
+
+def _describe_image_source(value: Any) -> str:
+    if value is None:
+        return "missing"
     if not isinstance(value, str):
-        return None
+        return f"{type(value).__name__}"
     text = value.strip()
     if not text:
-        return None
+        return "empty"
+    if text.startswith("http://") or text.startswith("https://"):
+        return f"url:{text[:120]}"
+    if text.startswith("data:"):
+        return f"data-uri ({len(text)} chars)"
+    if text.startswith("file://"):
+        return "file-url"
+    if len(text) > 120:
+        return f"string ({len(text)} chars)"
+    return f"path:{text}"
+
+
+def load_image_source_with_error(
+    value: Any, target_size: Optional[Tuple[int, int]] = None
+) -> Tuple[Optional["Image.Image"], Optional[str]]:
+    if Image is None:
+        return None, "PIL is not available"
+    if not value:
+        return None, "missing image source"
+    if not isinstance(value, str):
+        return None, "image source must be a string"
+    text = value.strip()
+    if not text:
+        return None, "image source is empty"
     img = None
     if text.startswith("http://") or text.startswith("https://"):
         try:
-            resp = requests.get(text, timeout=30)
+            resp = requests.get(text, timeout=30, headers={"User-Agent": "HavnAI/1.0"})
             resp.raise_for_status()
             img = Image.open(io.BytesIO(resp.content))
-        except Exception:
-            return None
+        except Exception as exc:
+            return None, f"http fetch failed: {exc}"
     else:
         treat_as_b64 = False
         if text.startswith("data:"):
@@ -464,15 +505,25 @@ def load_image_source(value: Any, target_size: Optional[Tuple[int, int]] = None)
             text = parts[1] if len(parts) > 1 else ""
             treat_as_b64 = True
         if not treat_as_b64:
+            normalized = _normalize_image_path(text)
             try:
-                path = Path(text).expanduser()
-                if path.exists():
-                    try:
-                        img = Image.open(path)
-                    except Exception:
-                        return None
-            except OSError:
-                img = None
+                path = Path(normalized).expanduser()
+            except OSError as exc:
+                path = None
+                path_error = f"invalid path: {exc}"
+            else:
+                path_error = None
+            path_missing = False
+            if path and path.exists():
+                try:
+                    img = Image.open(path)
+                except Exception as exc:
+                    return None, f"failed to open file {path}: {exc}"
+            else:
+                if path_error:
+                    return None, path_error
+                if path:
+                    path_missing = True
         if img is None:
             raw = None
             try:
@@ -480,17 +531,24 @@ def load_image_source(value: Any, target_size: Optional[Tuple[int, int]] = None)
             except Exception:
                 try:
                     raw = base64.b64decode(text)
-                except Exception:
-                    return None
+                except Exception as exc:
+                    if path_missing:
+                        return None, f"file not found at {path} (base64 decode failed: {exc})"
+                    return None, f"base64 decode failed: {exc}"
             try:
                 img = Image.open(io.BytesIO(raw))
-            except Exception:
-                return None
+            except Exception as exc:
+                return None, f"base64 image decode failed: {exc}"
     if img is None:
-        return None
+        return None, "image decode failed"
     img = img.convert("RGB")
     if target_size and target_size[0] > 0 and target_size[1] > 0:
         img = img.resize(target_size, resample=Image.LANCZOS)
+    return img, None
+
+
+def load_image_source(value: Any, target_size: Optional[Tuple[int, int]] = None) -> Optional["Image.Image"]:
+    img, _ = load_image_source_with_error(value, target_size)
     return img
 
 
@@ -647,8 +705,16 @@ def execute_task(task: Dict[str, Any]) -> None:
             for key in (
                 "base_image_url",
                 "base_image",
+                "base_image_b64",
+                "base_image_path",
+                "image",
+                "image_b64",
                 "face_source_url",
                 "face_source",
+                "face_source_b64",
+                "face_source_path",
+                "face_image",
+                "face_image_b64",
                 "strength",
                 "num_steps",
                 "seed",
@@ -783,20 +849,41 @@ def run_faceswap_generation(
             raise RuntimeError(str(exc)) from exc
 
         settings = job_settings if isinstance(job_settings, dict) else {}
-        base_image_src = settings.get("base_image_url") or settings.get("base_image")
-        face_source_src = settings.get("face_source_url") or settings.get("face_source")
+        base_image_src = (
+            settings.get("base_image_url")
+            or settings.get("base_image")
+            or settings.get("base_image_b64")
+            or settings.get("base_image_path")
+            or settings.get("image")
+            or settings.get("image_b64")
+        )
+        face_source_src = (
+            settings.get("face_source_url")
+            or settings.get("face_source")
+            or settings.get("face_source_b64")
+            or settings.get("face_source_path")
+            or settings.get("face_image")
+            or settings.get("face_image_b64")
+        )
         if not base_image_src or not face_source_src:
-            raise RuntimeError("base_image_url and face_source_url required")
+            raise RuntimeError("base_image and face_source are required for face swap")
 
         strength = coerce_float(settings.get("strength", 0.8), 0.8)
         num_steps = coerce_int(settings.get("num_steps", 20), 20)
         strength = max(0.0, min(1.0, strength))
         num_steps = max(5, min(60, num_steps))
 
-        base_image = load_image_source(str(base_image_src))
-        face_image = load_image_source(str(face_source_src))
+        base_image, base_error = load_image_source_with_error(str(base_image_src))
+        face_image, face_error = load_image_source_with_error(str(face_source_src))
         if base_image is None or face_image is None:
-            raise RuntimeError("Failed to load base or face source image")
+            base_desc = _describe_image_source(base_image_src)
+            face_desc = _describe_image_source(face_source_src)
+            base_msg = base_error or "unknown error"
+            face_msg = face_error or "unknown error"
+            raise RuntimeError(
+                f"Failed to load base image ({base_desc}): {base_msg}; "
+                f"face image ({face_desc}): {face_msg}"
+            )
 
         app = get_face_analysis()
         face_infos = app.get(cv2.cvtColor(np.array(face_image), cv2.COLOR_RGB2BGR))

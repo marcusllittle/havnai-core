@@ -16,6 +16,7 @@ pillow
 scipy
 huggingface-hub
 insightface
+albumentations<2
 
 # For our manual checkpoint → pipeline code
 einops
@@ -24,7 +25,7 @@ einops
 filelock
 
 # For image saving
-opencv-python
+opencv-python-headless
 
 # Optional / GPU optimization (pip will skip if not available)
 xformers

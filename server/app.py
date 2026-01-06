@@ -927,7 +927,7 @@ def fetch_next_job_for_node(node_id: str) -> Optional[Dict[str, Any]]:
     for row in rows:
         task_type = (row["task_type"] or CREATOR_TASK_TYPE).upper()
         # Support standard IMAGE_GEN, WAN video jobs, and AnimateDiff video jobs.
-        if task_type not in {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF"}:
+        if task_type not in {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP"}:
             continue
         if role != "creator":
             continue
@@ -1129,7 +1129,7 @@ def pending_tasks_for_node(node_id: str) -> List[Dict[str, Any]]:
         if task.get("status") not in relevant_status:
             continue
         task_type = (task.get("task_type") or CREATOR_TASK_TYPE).upper()
-        if task_type not in {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF"}:
+        if task_type not in {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP"}:
             continue
         tasks.append(task)
     return tasks
@@ -1365,6 +1365,58 @@ def installer_assets(filename: str) -> Any:
 # ---------------------------------------------------------------------------
 
 
+def _coerce_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _clamp(value: int, min_val: int, max_val: int) -> int:
+    return max(min_val, min(max_val, value))
+
+
+def build_faceswap_settings(payload: Dict[str, Any], prompt_text: str) -> Dict[str, Any]:
+    base_image_url = str(
+        payload.get("base_image_url")
+        or payload.get("base_image")
+        or payload.get("image")
+        or ""
+    ).strip()
+    face_source_url = str(
+        payload.get("face_source_url")
+        or payload.get("face_source")
+        or payload.get("face_image")
+        or ""
+    ).strip()
+    strength = _coerce_float(payload.get("strength", 0.8), 0.8)
+    num_steps = _coerce_int(payload.get("num_steps", payload.get("steps", 20)), 20)
+    strength = max(0.0, min(1.0, strength))
+    num_steps = _clamp(num_steps, 5, 60)
+    settings: Dict[str, Any] = {
+        "prompt": prompt_text,
+        "base_image_url": base_image_url,
+        "face_source_url": face_source_url,
+        "strength": strength,
+        "num_steps": num_steps,
+    }
+    seed = payload.get("seed")
+    try:
+        seed = int(seed) if seed is not None else None
+    except (TypeError, ValueError):
+        seed = None
+    if seed is not None:
+        settings["seed"] = seed
+    return settings
+
+
 @app.route("/submit-job", methods=["POST"])
 def submit_job() -> Any:
     if not rate_limit(f"submit-job:{request.remote_addr}", limit=30):
@@ -1522,6 +1574,42 @@ def submit_job() -> Any:
     with LOCK:
         job_id = enqueue_job(wallet, cfg.get("name", model_name), task_type, job_data, float(weight))
     log_event("Public job queued", wallet=wallet, model=model_name, job_id=job_id)
+    return jsonify({"status": "queued", "job_id": job_id}), 200
+
+
+@app.route("/submit-faceswap-job", methods=["POST"])
+def submit_faceswap_job_endpoint() -> Any:
+    if not rate_limit(f"submit-faceswap-job:{request.remote_addr}", limit=30):
+        return jsonify({"error": "rate limit"}), 429
+    payload = request.get_json() or {}
+    wallet = str(payload.get("wallet", "")).strip()
+    model_name_raw = str(payload.get("model") or "epicrealismxl_vxviicrystalclear").strip()
+    model_name = model_name_raw.lower()
+    prompt_text = str(payload.get("prompt") or "").strip()
+
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+
+    settings = build_faceswap_settings(payload, prompt_text)
+    if not settings.get("base_image_url") or not settings.get("face_source_url"):
+        return jsonify({"error": "base_image_url and face_source_url are required"}), 400
+
+    load_manifest()
+    cfg = get_model_config(model_name)
+    if not cfg:
+        return jsonify({"error": "unknown model"}), 400
+    pipeline_norm = str(cfg.get("pipeline", "")).lower()
+    if "sdxl" not in pipeline_norm:
+        return jsonify({"error": "faceswap requires an SDXL base model"}), 400
+
+    weight = payload.get("weight")
+    if weight is None:
+        weight = cfg.get("reward_weight", resolve_weight(model_name, 10.0))
+
+    job_data = json.dumps(settings)
+    with LOCK:
+        job_id = enqueue_job(wallet, cfg.get("name", model_name), "FACE_SWAP", job_data, float(weight))
+    log_event("Face-swap job queued", wallet=wallet, model=model_name, job_id=job_id)
     return jsonify({"status": "queued", "job_id": job_id}), 200
 
 
@@ -1812,6 +1900,24 @@ def get_creator_tasks() -> Any:
                     ):
                         if key in ad_settings and ad_settings[key] is not None:
                             task_payload[key] = ad_settings[key]
+            if task_payload["type"].upper() == "FACE_SWAP":
+                try:
+                    raw_fs = task.get("data") or ""
+                    fs_settings = json.loads(raw_fs) if isinstance(raw_fs, str) else {}
+                except Exception:
+                    fs_settings = {}
+                if isinstance(fs_settings, dict):
+                    for key in (
+                        "prompt",
+                        "negative_prompt",
+                        "base_image_url",
+                        "face_source_url",
+                        "strength",
+                        "num_steps",
+                        "seed",
+                    ):
+                        if key in fs_settings and fs_settings[key] is not None:
+                            task_payload[key] = fs_settings[key]
             response_tasks.append(task_payload)
     return jsonify({"tasks": response_tasks}), 200
 

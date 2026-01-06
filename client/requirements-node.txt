@@ -15,6 +15,7 @@ safetensors
 pillow
 scipy
 huggingface-hub
+insightface
 
 # For our manual checkpoint → pipeline code
 einops

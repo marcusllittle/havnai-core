@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 import atexit
 import signal
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import base64
 import io
 
@@ -62,6 +62,18 @@ try:
     from PIL import Image  # type: ignore
 except Exception:  # pragma: no cover
     Image = None  # type: ignore
+try:
+    import cv2  # type: ignore
+except Exception:  # pragma: no cover
+    cv2 = None  # type: ignore
+try:
+    from insightface.app import FaceAnalysis  # type: ignore
+except Exception:  # pragma: no cover
+    FaceAnalysis = None  # type: ignore
+try:
+    from huggingface_hub import hf_hub_download  # type: ignore
+except Exception:  # pragma: no cover
+    hf_hub_download = None  # type: ignore
 
 try:
     import psutil  # type: ignore
@@ -125,6 +137,23 @@ LOGGER = setup_logging()
 
 def log(message: str, prefix: str = "ℹ️", **extra: Any) -> None:
     LOGGER.info(f"{prefix} {message}", extra={"node": socket.gethostname(), **extra})
+
+
+INSTANTID_REPO = os.environ.get("INSTANTID_REPO", "instantx/InstantID-XL")
+INSTANTID_CONTROLNET_SUBFOLDER = os.environ.get("INSTANTID_CONTROLNET_SUBFOLDER", "ControlNetModel")
+INSTANTID_IP_ADAPTER_FILE = os.environ.get("INSTANTID_IP_ADAPTER_FILE", "ip-adapter.bin")
+INSTANTID_CACHE_ENABLED = os.environ.get("INSTANTID_CACHE_ENABLED", "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+INSTANTID_CACHE_DIR = (HAVNAI_HOME / "instantid").resolve()
+INSTANTID_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+_FACE_ANALYSIS: Optional["FaceAnalysis"] = None
+_INSTANTID_PIPELINE_CACHE: Dict[Tuple[str, str, str, str, str], Any] = {}
+_INSTANTID_PIPELINE_LOCK = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -398,6 +427,191 @@ def random_input(shape: List[int]) -> np.ndarray:
     return (np.random.rand(*dims).astype(np.float32) * 2.0) - 1.0
 
 
+def coerce_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def coerce_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def load_image_source(value: Any, target_size: Optional[Tuple[int, int]] = None) -> Optional["Image.Image"]:
+    if not value or Image is None:
+        return None
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    img = None
+    if text.startswith("http://") or text.startswith("https://"):
+        try:
+            resp = requests.get(text, timeout=30)
+            resp.raise_for_status()
+            img = Image.open(io.BytesIO(resp.content))
+        except Exception:
+            return None
+    else:
+        treat_as_b64 = False
+        if text.startswith("data:"):
+            parts = text.split(",", 1)
+            text = parts[1] if len(parts) > 1 else ""
+            treat_as_b64 = True
+        if not treat_as_b64:
+            try:
+                path = Path(text).expanduser()
+                if path.exists():
+                    try:
+                        img = Image.open(path)
+                    except Exception:
+                        return None
+            except OSError:
+                img = None
+        if img is None:
+            raw = None
+            try:
+                raw = base64.b64decode(text, validate=True)
+            except Exception:
+                try:
+                    raw = base64.b64decode(text)
+                except Exception:
+                    return None
+            try:
+                img = Image.open(io.BytesIO(raw))
+            except Exception:
+                return None
+    if img is None:
+        return None
+    img = img.convert("RGB")
+    if target_size and target_size[0] > 0 and target_size[1] > 0:
+        img = img.resize(target_size, resample=Image.LANCZOS)
+    return img
+
+
+def get_face_analysis() -> "FaceAnalysis":
+    global _FACE_ANALYSIS
+    if _FACE_ANALYSIS is not None:
+        return _FACE_ANALYSIS
+    if FaceAnalysis is None:
+        raise RuntimeError("insightface is required for face swap")
+    providers = ["CPUExecutionProvider"]
+    ctx_id = -1
+    if torch is not None and torch.cuda.is_available():
+        available_providers = []
+        try:
+            available_providers = ort.get_available_providers()
+        except Exception:
+            available_providers = []
+        if "CUDAExecutionProvider" in available_providers:
+            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            ctx_id = 0
+    app = FaceAnalysis(name="antelopev2", root=str(INSTANTID_CACHE_DIR), providers=providers)
+    app.prepare(ctx_id=ctx_id, det_size=(640, 640))
+    _FACE_ANALYSIS = app
+    return app
+
+
+def pick_primary_face(face_infos: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not face_infos:
+        return None
+    return sorted(
+        face_infos,
+        key=lambda info: (info["bbox"][2] - info["bbox"][0]) * (info["bbox"][3] - info["bbox"][1]),
+    )[-1]
+
+
+def resize_img(
+    input_image: "Image.Image",
+    max_side: int = 1280,
+    min_side: int = 1024,
+    size: Optional[Tuple[int, int]] = None,
+    pad_to_max_side: bool = False,
+    mode: int = Image.BILINEAR if Image is not None else 2,
+    base_pixel_number: int = 64,
+) -> "Image.Image":
+    if np is None:
+        raise RuntimeError("NumPy required for face swap preprocessing")
+    w, h = input_image.size
+    if size is not None:
+        w_resize_new, h_resize_new = size
+    else:
+        ratio = min_side / min(h, w)
+        w, h = round(ratio * w), round(ratio * h)
+        ratio = max_side / max(h, w)
+        input_image = input_image.resize([round(ratio * w), round(ratio * h)], mode)
+        w_resize_new = (round(ratio * w) // base_pixel_number) * base_pixel_number
+        h_resize_new = (round(ratio * h) // base_pixel_number) * base_pixel_number
+    input_image = input_image.resize([w_resize_new, h_resize_new], mode)
+
+    if pad_to_max_side:
+        res = np.ones([max_side, max_side, 3], dtype=np.uint8) * 255
+        offset_x = (max_side - w_resize_new) // 2
+        offset_y = (max_side - h_resize_new) // 2
+        res[offset_y : offset_y + h_resize_new, offset_x : offset_x + w_resize_new] = np.array(input_image)
+        input_image = Image.fromarray(res)
+    return input_image
+
+
+def prepare_mask_and_pose_control(
+    pose_image: "Image.Image",
+    face_info: Dict[str, Any],
+    padding: int = 60,
+    mask_grow: int = 40,
+    resize: bool = True,
+) -> Tuple[Tuple["Image.Image", "Image.Image", "Image.Image"], Tuple[int, int, int, int]]:
+    if np is None or cv2 is None:
+        raise RuntimeError("opencv + numpy required for face swap preprocessing")
+    if padding < mask_grow:
+        raise ValueError("mask_grow cannot be greater than padding")
+
+    from pipeline_stable_diffusion_xl_instantid import draw_kps  # type: ignore
+
+    kps = np.array(face_info["kps"])
+    width, height = pose_image.size
+
+    x1, y1, x2, y2 = face_info["bbox"]
+    x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+
+    m_x1 = max(0, x1 - mask_grow)
+    m_y1 = max(0, y1 - mask_grow)
+    m_x2 = min(width, x2 + mask_grow)
+    m_y2 = min(height, y2 + mask_grow)
+
+    m_x1, m_y1, m_x2, m_y2 = int(m_x1), int(m_y1), int(m_x2), int(m_y2)
+
+    p_x1 = max(0, x1 - padding)
+    p_y1 = max(0, y1 - padding)
+    p_x2 = min(width, x2 + padding)
+    p_y2 = min(height, y2 + padding)
+
+    p_x1, p_y1, p_x2, p_y2 = int(p_x1), int(p_y1), int(p_x2), int(p_y2)
+
+    mask = np.zeros([height, width, 3])
+    mask[m_y1:m_y2, m_x1:m_x2] = 255
+    mask = mask[p_y1:p_y2, p_x1:p_x2]
+    mask = Image.fromarray(mask.astype(np.uint8))
+
+    image = np.array(pose_image)[p_y1:p_y2, p_x1:p_x2]
+    image = Image.fromarray(image.astype(np.uint8))
+
+    original_width, original_height = image.size
+    kps -= [p_x1, p_y1]
+    if resize:
+        mask = resize_img(mask)
+        image = resize_img(image)
+        new_width, new_height = image.size
+        kps *= [new_width / original_width, new_height / original_height]
+    control_image = draw_kps(image, kps)
+
+    return (mask, image, control_image), (p_x1, p_y1, original_width, original_height)
+
+
 def execute_task(task: Dict[str, Any]) -> None:
     global utilization_hint
 
@@ -427,6 +641,29 @@ def execute_task(task: Dict[str, Any]) -> None:
     image_b64: Optional[str] = None
     if task_type == "image_gen":
         metrics, util, image_b64 = run_image_generation(task_id, model_name, model_url, reward_weight, prompt)
+    elif task_type == "face_swap":
+        job_settings: Dict[str, Any] = {}
+        if isinstance(task, dict):
+            for key in (
+                "base_image_url",
+                "base_image",
+                "face_source_url",
+                "face_source",
+                "strength",
+                "num_steps",
+                "seed",
+            ):
+                if key in task and task[key] is not None:
+                    job_settings[key] = task[key]
+        metrics, util, image_b64 = run_faceswap_generation(
+            task_id,
+            model_name,
+            model_url,
+            reward_weight,
+            prompt,
+            "",
+            job_settings,
+        )
     else:
         metrics, util = run_ai_inference(model_name, model_url, input_shape, reward_weight)
 
@@ -509,6 +746,225 @@ def run_ai_inference(model_name: str, model_url: str, input_shape: List[int], re
     if status == "failed":
         metrics["error"] = error_msg or "inference error"
     return metrics, int(util)
+
+
+def run_faceswap_generation(
+    task_id: str,
+    model_name: str,
+    model_url: str,
+    reward_weight: float,
+    prompt: str,
+    negative_prompt: str,
+    job_settings: Optional[Dict[str, Any]] = None,
+) -> (Dict[str, Any], int, Optional[str]):
+    start_stats = read_gpu_stats()
+    started = time.time()
+    status = "success"
+    error_msg = ""
+
+    image_b64: Optional[str] = None
+    output_path = OUTPUTS_DIR / f"{task_id}.png"
+    try:
+        if torch is None or diffusers is None:
+            raise RuntimeError("diffusers/torch required for face swap")
+        if Image is None or np is None or cv2 is None:
+            raise RuntimeError("opencv-python and numpy are required for face swap")
+        if FaceAnalysis is None:
+            raise RuntimeError("insightface is required for face swap")
+
+        from diffusers import ControlNetModel  # type: ignore
+        from pipeline_stable_diffusion_xl_instantid_inpaint import (  # type: ignore
+            StableDiffusionXLInstantIDInpaintPipeline,
+        )
+
+        try:
+            model_path = resolve_model_path(model_name, model_url, filename_hint=f"{model_name}.safetensors")
+        except Exception as exc:
+            raise RuntimeError(str(exc)) from exc
+
+        settings = job_settings if isinstance(job_settings, dict) else {}
+        base_image_src = settings.get("base_image_url") or settings.get("base_image")
+        face_source_src = settings.get("face_source_url") or settings.get("face_source")
+        if not base_image_src or not face_source_src:
+            raise RuntimeError("base_image_url and face_source_url required")
+
+        strength = coerce_float(settings.get("strength", 0.8), 0.8)
+        num_steps = coerce_int(settings.get("num_steps", 20), 20)
+        strength = max(0.0, min(1.0, strength))
+        num_steps = max(5, min(60, num_steps))
+
+        base_image = load_image_source(str(base_image_src))
+        face_image = load_image_source(str(face_source_src))
+        if base_image is None or face_image is None:
+            raise RuntimeError("Failed to load base or face source image")
+
+        app = get_face_analysis()
+        face_infos = app.get(cv2.cvtColor(np.array(face_image), cv2.COLOR_RGB2BGR))
+        face_info = pick_primary_face(face_infos)
+        if not face_info:
+            raise RuntimeError("No face detected in face_source_url image")
+        face_emb = face_info["embedding"]
+
+        target_infos = app.get(cv2.cvtColor(np.array(base_image), cv2.COLOR_RGB2BGR))
+        target_face = pick_primary_face(target_infos)
+        if not target_face:
+            raise RuntimeError("No face detected in base_image_url image")
+
+        images, position = prepare_mask_and_pose_control(base_image, target_face)
+        mask, pose_image_preprocessed, control_image = images
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        dtype = torch.float16 if device == "cuda" else torch.float32
+
+        instantid_repo = INSTANTID_REPO
+        local_repo_path = Path(instantid_repo).expanduser()
+        use_local_repo = local_repo_path.exists()
+        if hf_hub_download is None and not use_local_repo:
+            raise RuntimeError("huggingface_hub is required for face swap")
+
+        if use_local_repo:
+            controlnet_path = local_repo_path / INSTANTID_CONTROLNET_SUBFOLDER
+            controlnet_source = str(controlnet_path if controlnet_path.exists() else local_repo_path)
+            adapter_source = str(local_repo_path / INSTANTID_IP_ADAPTER_FILE)
+        else:
+            controlnet_source = f"{instantid_repo}::{INSTANTID_CONTROLNET_SUBFOLDER}"
+            adapter_source = f"{instantid_repo}::{INSTANTID_IP_ADAPTER_FILE}"
+
+        cache_enabled = INSTANTID_CACHE_ENABLED
+        cache_key = (str(model_path), controlnet_source, adapter_source, device, str(dtype))
+        if cache_enabled:
+            with _INSTANTID_PIPELINE_LOCK:
+                pipe = _INSTANTID_PIPELINE_CACHE.get(cache_key)
+        else:
+            with _INSTANTID_PIPELINE_LOCK:
+                _INSTANTID_PIPELINE_CACHE.clear()
+            pipe = None
+
+        if pipe is None:
+            if use_local_repo:
+                controlnet = ControlNetModel.from_pretrained(controlnet_source, torch_dtype=dtype)
+            else:
+                controlnet = ControlNetModel.from_pretrained(
+                    instantid_repo,
+                    subfolder=INSTANTID_CONTROLNET_SUBFOLDER,
+                    torch_dtype=dtype,
+                    cache_dir=str(INSTANTID_CACHE_DIR),
+                )
+
+            pipe = None
+            if hasattr(StableDiffusionXLInstantIDInpaintPipeline, "from_single_file") and model_path.is_file():
+                try:
+                    pipe = StableDiffusionXLInstantIDInpaintPipeline.from_single_file(
+                        str(model_path), controlnet=controlnet, torch_dtype=dtype, safety_checker=None
+                    )
+                except Exception as exc:
+                    log(f"InstantID from_single_file failed: {exc}", prefix="⚠️")
+            if pipe is None:
+                if model_path.is_dir():
+                    pipe = StableDiffusionXLInstantIDInpaintPipeline.from_pretrained(
+                        str(model_path), controlnet=controlnet, torch_dtype=dtype
+                    )
+                else:
+                    pipe = StableDiffusionXLInstantIDInpaintPipeline.from_pretrained(
+                        str(model_path), controlnet=controlnet, torch_dtype=dtype
+                    )
+
+            pipe = pipe.to(device)
+
+            if use_local_repo:
+                adapter_path = Path(adapter_source)
+                if not adapter_path.exists():
+                    raise RuntimeError(f"InstantID ip-adapter not found at {adapter_path}")
+                adapter_path = str(adapter_path)
+            else:
+                adapter_path = hf_hub_download(
+                    instantid_repo,
+                    filename=INSTANTID_IP_ADAPTER_FILE,
+                    cache_dir=str(INSTANTID_CACHE_DIR),
+                )
+            pipe.load_ip_adapter_instantid(adapter_path, scale=strength)
+            if hasattr(pipe, "image_proj_model") and pipe.image_proj_model is not None:
+                try:
+                    pipe.image_proj_model.to(device=device, dtype=dtype)
+                except Exception:
+                    pipe.image_proj_model.to(device)
+            if cache_enabled:
+                with _INSTANTID_PIPELINE_LOCK:
+                    _INSTANTID_PIPELINE_CACHE[cache_key] = pipe
+                log("Cached InstantID pipeline", prefix="♻️", model=str(model_path))
+        elif cache_enabled:
+            try:
+                pipe = pipe.to(device)
+            except Exception:
+                pass
+            log("Using cached InstantID pipeline", prefix="♻️", model=str(model_path))
+
+        if hasattr(pipe, "enable_attention_slicing"):
+            pipe.enable_attention_slicing("max")
+        if hasattr(pipe, "set_progress_bar_config"):
+            pipe.set_progress_bar_config(disable=True)
+
+        seed = settings.get("seed")
+        try:
+            seed = int(seed) if seed is not None else None
+        except (TypeError, ValueError):
+            seed = None
+        if seed is None:
+            seed = int(time.time()) & 0x7FFFFFFF
+        generator = torch.Generator(device=device).manual_seed(seed)
+
+        prompt_text = prompt or ""
+        neg_text = negative_prompt or ""
+        guidance_scale = 5.0 if prompt_text else 0.0
+
+        face_emb_tensor = torch.tensor(face_emb, device=device, dtype=pipe.unet.dtype)
+        result = pipe(
+            prompt=prompt_text,
+            negative_prompt=neg_text or None,
+            image_embeds=face_emb_tensor,
+            control_image=control_image,
+            image=pose_image_preprocessed,
+            mask_image=mask,
+            strength=strength,
+            controlnet_conditioning_scale=strength,
+            ip_adapter_scale=strength,
+            num_inference_steps=num_steps,
+            guidance_scale=guidance_scale,
+            generator=generator,
+        )
+
+        face_patch = result.images[0]
+        x, y, w, h = position
+        face_patch = face_patch.resize((w, h))
+        base_image.paste(face_patch, (x, y))
+        base_image.save(output_path)
+        with output_path.open("rb") as fh:
+            image_b64 = base64.b64encode(fh.read()).decode("utf-8")
+    except Exception as exc:
+        status = "failed"
+        error_msg = str(exc)
+        log(f"Face swap failed: {error_msg}", prefix="🚫")
+
+    duration = time.time() - started
+    end_stats = read_gpu_stats()
+    util = max(start_stats.get("utilization", 0), end_stats.get("utilization", 0), utilization_hint)
+    util = int(max(util, 70 if ROLE == "creator" else util))
+    metrics = {
+        "status": status,
+        "model_name": model_name,
+        "model_path": str(model_path) if "model_path" in locals() else "",
+        "reward_weight": reward_weight,
+        "task_type": "face_swap",
+        "inference_time_ms": round(duration * 1000, 3),
+        "gpu_util_start": start_stats.get("utilization", 0),
+        "gpu_util_end": end_stats.get("utilization", 0),
+        "strength": strength if "strength" in locals() else None,
+        "num_steps": num_steps if "num_steps" in locals() else None,
+        "output_path": str(output_path) if output_path else None,
+    }
+    if status == "failed":
+        metrics["error"] = error_msg or "face swap error"
+    return metrics, util, image_b64
 
 
 def run_image_generation(task_id: str, model_name: str, model_url: str, reward_weight: float, prompt: str) -> (Dict[str, Any], int, Optional[str]):

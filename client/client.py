@@ -541,17 +541,11 @@ def _apply_loras(
             loaded_adapter_names.append(adapter_name)
             loaded_adapter_weights.append(lora_weight)
             continue
-        try:
-            pipe.load_lora_weights(str(lora_path), adapter_name=adapter_name)
-        except TypeError:
-            pipe.load_lora_weights(str(lora_path))
-        except Exception as exc:
-            log(f"LoRA load failed for {entry_name}: {exc}", prefix="⚠️", lora=str(lora_path))
+        if not load_lora_weights_safe(pipe, lora_path, adapter_name, entry_name):
             continue
         loaded_adapters[adapter_name] = str(lora_path)
         loaded_adapter_names.append(adapter_name)
         loaded_adapter_weights.append(lora_weight)
-        log(f"Loaded LoRA for {entry_name}", prefix="✅", lora=str(lora_path), weight=lora_weight)
     cache_state["loaded_adapters"] = loaded_adapters
     if loaded_adapter_names:
         if hasattr(pipe, "set_adapters"):
@@ -1268,6 +1262,57 @@ def lora_adapter_name(role: str, lora_name: str) -> str:
     return f"lora_{role}_{safe}"
 
 
+def load_lora_weights_safe(pipe: Any, lora_path: Path, adapter_name: str, entry_name: str) -> bool:
+    def _try_load(path: str, weight_name: Optional[str], use_adapter: bool) -> None:
+        kwargs: Dict[str, Any] = {}
+        if weight_name:
+            kwargs["weight_name"] = weight_name
+        if use_adapter:
+            kwargs["adapter_name"] = adapter_name
+        pipe.load_lora_weights(path, **kwargs)
+
+    try:
+        _try_load(str(lora_path), None, True)
+        log(f"Loaded LoRA for {entry_name}", prefix="✅", lora=str(lora_path))
+        return True
+    except TypeError:
+        try:
+            _try_load(str(lora_path), None, False)
+            log(f"Loaded LoRA for {entry_name}", prefix="✅", lora=str(lora_path))
+            return True
+        except Exception as exc:
+            error = exc
+    except Exception as exc:
+        error = exc
+
+    error_msg = str(error).lower()
+    if "offline mode" in error_msg and lora_path.is_file():
+        try:
+            _try_load(str(lora_path.parent), lora_path.name, True)
+            log(
+                f"Loaded LoRA for {entry_name} (weight_name fallback)",
+                prefix="✅",
+                lora=str(lora_path),
+            )
+            return True
+        except TypeError:
+            try:
+                _try_load(str(lora_path.parent), lora_path.name, False)
+                log(
+                    f"Loaded LoRA for {entry_name} (weight_name fallback)",
+                    prefix="✅",
+                    lora=str(lora_path),
+                )
+                return True
+            except Exception as exc:
+                error = exc
+        except Exception as exc:
+            error = exc
+
+    log(f"LoRA load failed for {entry_name}: {error}", prefix="⚠️", lora=str(lora_path))
+    return False
+
+
 def resolve_lora_path(lora_name: str) -> Optional[Path]:
     candidate = Path(lora_name).expanduser()
     if candidate.is_file():
@@ -1795,16 +1840,10 @@ def run_animatediff_generation(
             adapter_names: List[str] = []
             adapter_weights: List[float] = []
             for lora_path, lora_weight, adapter_name in lora_entries:
-                try:
-                    pipe.load_lora_weights(str(lora_path), adapter_name=adapter_name)
-                except TypeError:
-                    pipe.load_lora_weights(str(lora_path))
-                except Exception as exc:
-                    log(f"LoRA load failed for {base_entry.name}: {exc}", prefix="⚠️", lora=str(lora_path))
+                if not load_lora_weights_safe(pipe, lora_path, adapter_name, base_entry.name):
                     continue
                 adapter_names.append(adapter_name)
                 adapter_weights.append(lora_weight)
-                log(f"Loaded LoRA for {base_entry.name}", prefix="✅", lora=str(lora_path), weight=lora_weight)
             if adapter_names:
                 if hasattr(pipe, "set_adapters"):
                     try:
@@ -2114,16 +2153,10 @@ def run_faceswap_generation(
             adapter_names: List[str] = []
             adapter_weights: List[float] = []
             for lora_path, lora_weight, adapter_name in lora_entries:
-                try:
-                    pipe.load_lora_weights(str(lora_path), adapter_name=adapter_name)
-                except TypeError:
-                    pipe.load_lora_weights(str(lora_path))
-                except Exception as exc:
-                    log(f"LoRA load failed for {entry.name}: {exc}", prefix="⚠️", lora=str(lora_path))
+                if not load_lora_weights_safe(pipe, lora_path, adapter_name, entry.name):
                     continue
                 adapter_names.append(adapter_name)
                 adapter_weights.append(lora_weight)
-                log(f"Loaded LoRA for {entry.name}", prefix="✅", lora=str(lora_path), weight=lora_weight)
             if adapter_names:
                 if hasattr(pipe, "set_adapters"):
                     try:

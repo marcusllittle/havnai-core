@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -456,10 +457,22 @@ def _normalize_loras(raw_loras: Any) -> List[Dict[str, Any]]:
     normalized: List[Dict[str, Any]] = []
     for entry in raw_loras:
         if isinstance(entry, dict):
-            name = str(entry.get("name") or "").strip()
+            filename = str(entry.get("filename") or "").strip()
+            name = str(entry.get("name") or filename or "").strip()
             if not name:
                 continue
             item: Dict[str, Any] = {"name": name}
+            if filename:
+                item["filename"] = filename
+            url = str(entry.get("url") or "").strip()
+            if url:
+                item["url"] = url
+            strength = entry.get("strength")
+            if strength is not None:
+                try:
+                    item["strength"] = float(strength)
+                except (TypeError, ValueError):
+                    pass
             weight = entry.get("weight")
             if weight is not None:
                 try:
@@ -497,6 +510,43 @@ def _resolve_lora_path(name: str) -> Optional[Path]:
     return None
 
 
+def _download_lora_spec(lora: Dict[str, Any]) -> Path:
+    filename = str(lora.get("filename") or lora.get("name") or "").strip()
+    if not filename:
+        raise RuntimeError("LoRA filename missing")
+    local_path = LORA_DIR / filename
+    if local_path.exists():
+        return local_path
+    url = str(lora.get("url") or "").strip()
+    if not url:
+        raise RuntimeError(f"LoRA url missing for {filename}")
+    LORA_DIR.mkdir(parents=True, exist_ok=True)
+    temp_path = local_path.with_suffix(local_path.suffix + ".part")
+    last_error: Optional[Exception] = None
+    for attempt in range(2):
+        try:
+            resp = requests.get(url, stream=True, timeout=120, headers={"User-Agent": "HavnAI/1.0"})
+            resp.raise_for_status()
+            with temp_path.open("wb") as handle:
+                for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        handle.write(chunk)
+            temp_path.replace(local_path)
+            return local_path
+        except Exception as exc:
+            last_error = exc
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+            except Exception:
+                pass
+            log(f"LoRA download failed (attempt {attempt + 1}/2): {exc}", prefix="⚠️")
+            if attempt == 0:
+                time.sleep(1)
+    log(f"LoRA download failed after retry: {last_error}", prefix="⚠️")
+    raise RuntimeError(f"LoRA download failed: {last_error}")
+
+
 def _apply_loras_to_pipe(pipe: Any, raw_loras: Any) -> List[str]:
     loras = _normalize_loras(raw_loras)
     if not loras or not hasattr(pipe, "load_lora_weights"):
@@ -508,21 +558,40 @@ def _apply_loras_to_pipe(pipe: Any, raw_loras: Any) -> List[str]:
         name = str(entry.get("name") or "").strip()
         if not name:
             continue
-        path = _resolve_lora_path(name)
+        if entry.get("url") or entry.get("filename"):
+            path = _download_lora_spec(entry)
+        else:
+            path = _resolve_lora_path(name)
         if not path:
             log(f"LoRA not found: {name}", prefix="⚠️")
             continue
         adapter_name = path.stem
         last_error: Optional[Exception] = None
         loaded = False
+        strength = entry.get("strength")
+        weight = entry.get("weight")
+        scale = strength if strength is not None else weight
+        if scale is None:
+            scale = 1.0
         try:
             if path.is_file():
                 try:
-                    pipe.load_lora_weights(str(path.parent), weight_name=path.name, adapter_name=adapter_name)
+                    pipe.load_lora_weights(
+                        str(path.parent),
+                        weight_name=path.name,
+                        adapter_name=adapter_name,
+                        strength=scale,
+                    )
                 except TypeError:
-                    pipe.load_lora_weights(str(path.parent), weight_name=path.name)
+                    try:
+                        pipe.load_lora_weights(str(path.parent), weight_name=path.name, adapter_name=adapter_name)
+                    except TypeError:
+                        pipe.load_lora_weights(str(path.parent), weight_name=path.name)
             else:
-                pipe.load_lora_weights(str(path), adapter_name=adapter_name)
+                try:
+                    pipe.load_lora_weights(str(path), adapter_name=adapter_name, strength=scale)
+                except TypeError:
+                    pipe.load_lora_weights(str(path), adapter_name=adapter_name)
             loaded = True
         except Exception as exc:
             last_error = exc
@@ -539,18 +608,17 @@ def _apply_loras_to_pipe(pipe: Any, raw_loras: Any) -> List[str]:
                 except Exception as exc_inner:
                     last_error = exc_inner
             except Exception as exc_inner:
-                last_error = exc_inner
+                    last_error = exc_inner
         if not loaded:
             log(f"LoRA load failed: {last_error}", prefix="⚠️")
             continue
         loaded_paths.append(str(path))
         adapter_names.append(adapter_name)
-        weight = entry.get("weight")
-        if weight is None:
+        if scale is None:
             adapter_weights.append(1.0)
         else:
             try:
-                adapter_weights.append(float(weight))
+                adapter_weights.append(float(scale))
             except (TypeError, ValueError):
                 adapter_weights.append(1.0)
     if not adapter_names:
@@ -828,7 +896,17 @@ def execute_task(task: Dict[str, Any]) -> None:
     image_b64: Optional[str] = None
     if task_type == "image_gen":
         loras = task.get("loras") if isinstance(task.get("loras"), list) else None
-        metrics, util, image_b64 = run_image_generation(task_id, model_name, model_url, reward_weight, prompt, loras)
+        model_spec = task.get("model") if isinstance(task.get("model"), dict) else None
+        model_lora = model_spec.get("lora") if isinstance(model_spec, dict) else None
+        metrics, util, image_b64 = run_image_generation(
+            task_id,
+            model_name,
+            model_url,
+            reward_weight,
+            prompt,
+            loras,
+            model_lora,
+        )
     elif task_type == "face_swap":
         job_settings: Dict[str, Any] = {}
         if isinstance(task, dict):
@@ -1191,6 +1269,7 @@ def run_image_generation(
     reward_weight: float,
     prompt: str,
     loras: Optional[List[Dict[str, Any]]] = None,
+    model_lora: Optional[Any] = None,
 ) -> (Dict[str, Any], int, Optional[str]):
     """Run SD image generation with explicit pipeline and env-driven settings."""
 
@@ -1216,6 +1295,7 @@ def run_image_generation(
 
     steps = _env_int("HAI_STEPS", 65)
     guidance = _env_float("HAI_GUIDANCE", 8.2)
+    clip_skip = _env_int("HAI_CLIP_SKIP", 0)
     width = _env_int("HAI_WIDTH", 512)
     height = _env_int("HAI_HEIGHT", 512)
     width = max(64, width - (width % 8))
@@ -1263,8 +1343,29 @@ def run_image_generation(
             if pipe is None:
                 raise RuntimeError("Failed to construct a text2image pipeline for model.")
 
+            if clip_skip > 0:
+                if hasattr(pipe, "set_clip_skip"):
+                    try:
+                        pipe.set_clip_skip(clip_skip)
+                        log(f"Clip skip set to {clip_skip}", prefix="✅")
+                    except Exception as exc:
+                        log(f"Clip skip set failed: {exc}", prefix="⚠️")
+                elif hasattr(pipe, "clip_skip"):
+                    try:
+                        pipe.clip_skip = clip_skip
+                        log(f"Clip skip set to {clip_skip}", prefix="✅")
+                    except Exception as exc:
+                        log(f"Clip skip set failed: {exc}", prefix="⚠️")
+
+            combined_loras: List[Any] = []
+            if isinstance(model_lora, list):
+                combined_loras.extend(model_lora)
+            elif isinstance(model_lora, dict):
+                combined_loras.append(model_lora)
             if loras:
-                loaded_loras = _apply_loras_to_pipe(pipe, loras)
+                combined_loras.extend(loras)
+            if combined_loras:
+                loaded_loras = _apply_loras_to_pipe(pipe, combined_loras)
                 if loaded_loras:
                     log(f"Attached {len(loaded_loras)} LoRA(s)", prefix="✅")
 
@@ -1304,15 +1405,21 @@ def run_image_generation(
                 except Exception as exc:
                     log(f"Prompt truncation failed: {exc}", prefix="⚠️")
             gen_t0 = time.time()
+            call_kwargs = {
+                "num_inference_steps": steps,
+                "guidance_scale": guidance,
+                "generator": generator,
+                "height": height,
+                "width": width,
+            }
+            if clip_skip > 0:
+                try:
+                    if "clip_skip" in inspect.signature(pipe.__call__).parameters:
+                        call_kwargs["clip_skip"] = clip_skip
+                except (TypeError, ValueError):
+                    pass
             with torch.inference_mode():
-                result = pipe(
-                    text,
-                    num_inference_steps=steps,
-                    guidance_scale=guidance,
-                    generator=generator,
-                    height=height,
-                    width=width,
-                )
+                result = pipe(text, **call_kwargs)
             gen_ms = int((time.time() - gen_t0) * 1000)
             log(
                 f"Generated in {gen_ms}ms",

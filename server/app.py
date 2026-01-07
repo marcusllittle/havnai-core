@@ -12,6 +12,7 @@ import threading
 import time
 import uuid
 import random
+import requests
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -642,6 +643,56 @@ def _safety_block_reason(prompt: str, negative_prompt: str) -> Optional[str]:
     if _matches_any(combined, SEXUAL_PATTERNS) and _matches_any(combined, AMBIGUOUS_YOUTH_PATTERNS):
         return "ambiguous_age_in_sexual_context"
     return None
+
+
+def _download_lora_asset(lora: Dict[str, Any], dest_dir: Path) -> Path:
+    filename = str(lora.get("filename") or lora.get("name") or "").strip()
+    if not filename:
+        raise RuntimeError("lora filename missing")
+    local_path = dest_dir / filename
+    if local_path.exists():
+        return local_path
+    url = str(lora.get("url") or "").strip()
+    if not url:
+        raise RuntimeError(f"lora url missing for {filename}")
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    temp_path = local_path.with_suffix(local_path.suffix + ".part")
+    last_error: Optional[Exception] = None
+    for attempt in range(2):
+        try:
+            resp = requests.get(url, stream=True, timeout=120, headers={"User-Agent": "HavnAI/1.0"})
+            resp.raise_for_status()
+            with temp_path.open("wb") as handle:
+                for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        handle.write(chunk)
+            temp_path.replace(local_path)
+            return local_path
+        except Exception as exc:
+            last_error = exc
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+            except Exception:
+                pass
+            log_event(
+                "LoRA download failed",
+                level="warning",
+                filename=filename,
+                url=url,
+                attempt=attempt + 1,
+                error=str(exc),
+            )
+            if attempt == 0:
+                time.sleep(1)
+    log_event(
+        "LoRA download failed after retry",
+        level="error",
+        filename=filename,
+        url=url,
+        error=str(last_error),
+    )
+    raise RuntimeError(f"LoRA download failed: {last_error}")
 
 
 # ---------------------------------------------------------------------------
@@ -1820,6 +1871,16 @@ def generate_video() -> Any:
     lora_list = data.get("lora_list") or []
     if not isinstance(lora_list, list):
         return jsonify({"error": "lora_list must be an array"}), 400
+    normalized_loras: List[str] = []
+    for entry in lora_list:
+        if isinstance(entry, dict):
+            local_path = _download_lora_asset(entry, VIDEO_ENGINE.registry.paths.loras_dir)
+            normalized_loras.append(local_path.stem)
+            continue
+        if isinstance(entry, str):
+            name = entry.strip()
+            if name:
+                normalized_loras.append(name)
 
     duration = float(data.get("duration", 4.0) or 4.0)
     fps = int(data.get("fps", 24) or 24)
@@ -1831,7 +1892,7 @@ def generate_video() -> Any:
         prompt=prompt,
         negative_prompt=negative_prompt,
         motion_type=motion_type,
-        lora_list=[str(item) for item in lora_list],
+        lora_list=normalized_loras,
         init_image_b64=data.get("init_image"),
         duration=duration,
         fps=fps,
@@ -1988,6 +2049,9 @@ def get_creator_tasks() -> Any:
             if job:
                 cfg = get_model_config(job["model"])
                 if cfg:
+                    model_spec: Optional[Dict[str, Any]] = None
+                    if isinstance(cfg, dict) and cfg.get("lora") is not None:
+                        model_spec = {"name": job["model"], "lora": cfg.get("lora")}
                     # Decode prompt/negative_prompt for standard IMAGE_GEN jobs stored as JSON
                     raw_data = job.get("data")
                     prompt_text = raw_data or ""
@@ -2016,6 +2080,7 @@ def get_creator_tasks() -> Any:
                             "task_id": job["id"],
                             "task_type": job_task_type,
                             "model_name": job["model"],
+                            "model": model_spec,
                             "model_path": cfg.get("path", ""),
                             "pipeline": cfg.get("pipeline", "sd15"),
                             "input_shape": cfg.get("input_shape", []),
@@ -2053,6 +2118,7 @@ def get_creator_tasks() -> Any:
                 "task_id": task["task_id"],
                 "type": task.get("task_type", CREATOR_TASK_TYPE),
                 "model_name": task["model_name"],
+                "model": task.get("model"),
                 "model_path": task.get("model_path", ""),
                 "pipeline": pipeline,
                 "input_shape": task.get("input_shape", []),

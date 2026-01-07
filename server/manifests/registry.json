@@ -46,6 +46,90 @@
       "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, action wrist hyperflex, prop-hand glow fusion, twisted ankles, malformed feet, duplicate people, background ghosts, clothing merging, bad anatomy, low quality, blurry"
     },
     {
+      "name": "babesByStableYogiPony_xlV4",
+      "pipeline": "sdxl",
+      "path": "/mnt/d/havnai-storage/models/creator/babesByStableYogiPony_xlV4.safetensors",
+      "type": "checkpoint",
+      "tags": [
+        "stylized",
+        "experimental"
+      ],
+      "task_type": "IMAGE_GEN",
+      "weight": 3,
+      "reward_weight": 3,
+      "strengths": "Experimental SDXL checkpoint for evaluation.",
+      "weaknesses": "Needs testing before wider rollout.",
+      "sampler": "dpmpp_2m_karras",
+      "steps": 28,
+      "guidance": 6.0,
+      "width": 768,
+      "height": 1152,
+      "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, action wrist hyperflex, prop-hand glow fusion, twisted ankles, malformed feet, duplicate people, background ghosts, clothing merging, bad anatomy, low quality, blurry"
+    },
+    {
+      "name": "epicrealismXL_purefix",
+      "pipeline": "sdxl",
+      "path": "/mnt/d/havnai-storage/models/creator/epicrealismXL_purefix.safetensors",
+      "type": "checkpoint",
+      "tags": [
+        "realism",
+        "experimental"
+      ],
+      "task_type": "IMAGE_GEN",
+      "weight": 3,
+      "reward_weight": 3,
+      "strengths": "Experimental SDXL checkpoint for evaluation.",
+      "weaknesses": "Needs testing before wider rollout.",
+      "sampler": "dpmpp_2m_karras",
+      "steps": 28,
+      "guidance": 6.0,
+      "width": 768,
+      "height": 1152,
+      "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, action wrist hyperflex, prop-hand glow fusion, twisted ankles, malformed feet, duplicate people, background ghosts, clothing merging, bad anatomy, low quality, blurry"
+    },
+    {
+      "name": "perfectdeliberate_v60",
+      "pipeline": "sdxl",
+      "path": "/mnt/d/havnai-storage/models/creator/perfectdeliberate_v60.safetensors",
+      "type": "checkpoint",
+      "tags": [
+        "realism",
+        "experimental"
+      ],
+      "task_type": "IMAGE_GEN",
+      "weight": 3,
+      "reward_weight": 3,
+      "strengths": "Experimental SDXL checkpoint for evaluation.",
+      "weaknesses": "Needs testing before wider rollout.",
+      "sampler": "dpmpp_2m_karras",
+      "steps": 28,
+      "guidance": 6.0,
+      "width": 768,
+      "height": 1152,
+      "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, action wrist hyperflex, prop-hand glow fusion, twisted ankles, malformed feet, duplicate people, background ghosts, clothing merging, bad anatomy, low quality, blurry"
+    },
+    {
+      "name": "zavychromaxl_v100",
+      "pipeline": "sdxl",
+      "path": "/mnt/d/havnai-storage/models/creator/zavychromaxl_v100.safetensors",
+      "type": "checkpoint",
+      "tags": [
+        "realism",
+        "experimental"
+      ],
+      "task_type": "IMAGE_GEN",
+      "weight": 3,
+      "reward_weight": 3,
+      "strengths": "Experimental SDXL checkpoint for evaluation.",
+      "weaknesses": "Needs testing before wider rollout.",
+      "sampler": "dpmpp_2m_karras",
+      "steps": 28,
+      "guidance": 6.0,
+      "width": 768,
+      "height": 1152,
+      "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, action wrist hyperflex, prop-hand glow fusion, twisted ankles, malformed feet, duplicate people, background ghosts, clothing merging, bad anatomy, low quality, blurry"
+    },
+    {
       "name": "perfectdeliberate_v5SD15",
       "pipeline": "sd15",
       "path": "/mnt/d/havnai-storage/models/creator/perfectdeliberate_v5SD15.safetensors",
@@ -61,6 +145,29 @@
       "reward_weight": 10,
       "strengths": "Solid realism when hands are not visible.",
       "weaknesses": "Hands deform frequently (SD1.5 weakness).",
+      "sampler": "euler_a",
+      "steps": 23,
+      "guidance": 6.3,
+      "width": 576,
+      "height": 768,
+      "negative_prompt_default": "duplicate face, multiple faces, extra hands, extra fingers, deformed hands, merged limbs, bad anatomy, mangled"
+    },
+    {
+      "name": "divineelegancemix_V10",
+      "pipeline": "sd15",
+      "path": "/mnt/d/havnai-storage/models/creator/divineelegancemix_V10.safetensors",
+      "vae_path": "/mnt/d/havnai-storage/models/creator/clearvaeSD15_v23.safetensors",
+      "controlnet_path": "/mnt/d/havnai-storage/models/controlnet/control_v11p_sd15_openpose.pth",
+      "type": "checkpoint",
+      "tags": [
+        "realism",
+        "experimental"
+      ],
+      "task_type": "IMAGE_GEN",
+      "weight": 3,
+      "reward_weight": 3,
+      "strengths": "Experimental SD1.5 checkpoint for evaluation.",
+      "weaknesses": "Needs testing before wider rollout.",
       "sampler": "euler_a",
       "steps": 23,
       "guidance": 6.3,
@@ -182,6 +289,32 @@
       "width": 576,
       "height": 768,
       "negative_prompt_default": "extra limbs, extra fingers, bad hands, bad anatomy, distorted face"
+    },
+    {
+      "id": "wan_dr34ml4y_nsfw",
+      "name": "WAN-Dr34mL4y All-in-One NSFW",
+      "description": "Single powerful LoRA for high-quality NSFW image-to-video with dozens of positions and concepts.",
+      "type": "wan_i2v",
+      "pipeline": "image_to_video",
+      "base_model": "wan_2.2",
+      "lora": {
+        "url": "https://civitai.com/api/download/models/2036932",
+        "filename": "DR34ML4Y_I2V_14B_HIGH_v2.safetensors",
+        "strength": 1.0,
+        "trigger_words": []
+      },
+      "weight": 9.0,
+      "nsfw": true,
+      "recommended_params": {
+        "steps": 28,
+        "cfg": 7.0,
+        "sampler": "dpm++_2m_karras",
+        "resolution": [768, 768],
+        "motion_bucket_id": 127,
+        "fps": 16,
+        "augmentation_level": 0.0
+      },
+      "tags": ["nsfw", "video", "wan", "lora", "all-in-one", "i2v"]
     },
     {
       "name": "wan_t2v_a14b",

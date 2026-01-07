@@ -392,6 +392,147 @@ GLOBAL_NEGATIVE_PROMPT = ", ".join(
     ]
 )
 
+LORA_MAPPING = {
+    # Quality & fixes - always useful
+    "detailed skin": {"name": "skintexturestylev5.safetensors", "weight": 0.8},
+    "realistic skin": {"name": "skintexturestylev5.safetensors", "weight": 0.8},
+    "skin texture": {"name": "skintexturestylev5.safetensors", "weight": 0.8},
+    "hyper detailed": {"name": "HyperLoRA_SDXL.safetensors", "weight": 0.6},
+    "better hands": {"name": "Handv2.safetensors", "weight": 0.9},
+    "good hands": {"name": "Handv2.safetensors", "weight": 0.9},
+    "fix anatomy": {"name": "badanatomy.safetensors", "weight": -0.7},  # negative if it's a fixer
+    "perfect": {"name": "perfectionstyle.safetensors", "weight": 0.7},
+    "glamorous": {"name": "perfectionstylev2d.safetensors", "weight": 0.7},
+
+    # === NSFW POSE TRIGGERS ===
+    "reverse cowgirl": {"name": "POVReverseCowgirl.safetensors", "weight": 0.95},
+    "reversecowgirl": {"name": "POVReverseCowgirl.safetensors", "weight": 0.95},
+    "doggy": {"name": "POVDoggy.safetensors", "weight": 0.95},
+    "doggystyle": {"name": "POVDoggy.safetensors", "weight": 0.95},
+    "cowgirl": {"name": "PSCowgirl.safetensors", "weight": 0.9},
+    "riding": {"name": "PSCowgirl.safetensors", "weight": 0.85},
+    "missionary": {"name": "MissionaryVaginal-v2.safetensors", "weight": 0.9},
+    "fellatio": {"name": "reversefellatio.safetensors", "weight": 0.9},
+    "blowjob": {"name": "reversefellatio.safetensors", "weight": 0.9},
+    "oral": {"name": "reversefellatio.safetensors", "weight": 0.85},
+    "bdsm": {"name": "bdsm_SDXL_1_.safetensors", "weight": 0.8},
+    "bondage": {"name": "bdsm_SDXL_1_.safetensors", "weight": 0.8},
+    "sweat": {"name": "Sweatingmyballsofmate.safetensors", "weight": 0.7},
+    "sweating": {"name": "Sweatingmyballsofmate.safetensors", "weight": 0.7},
+    "intense": {"name": "Sweatingmyballsofmate.safetensors", "weight": 0.6},
+}
+
+
+def _compile_lora_trigger_patterns() -> List[tuple]:
+    patterns: List[tuple] = []
+    for phrase, meta in LORA_MAPPING.items():
+        phrase_text = str(phrase).strip()
+        if not phrase_text:
+            continue
+        escaped = re.escape(phrase_text).replace(r"\ ", r"\s+")
+        pattern = re.compile(rf"(?<!\w){escaped}(?!\w)", re.IGNORECASE)
+        patterns.append((pattern, meta))
+    return patterns
+
+
+LORA_TRIGGER_PATTERNS = _compile_lora_trigger_patterns()
+
+
+def _normalize_loras(raw_loras: Any) -> List[Dict[str, Any]]:
+    if not raw_loras or not isinstance(raw_loras, list):
+        return []
+    normalized: List[Dict[str, Any]] = []
+    for entry in raw_loras:
+        if isinstance(entry, dict):
+            name = str(entry.get("name") or "").strip()
+            if not name:
+                continue
+            item: Dict[str, Any] = {"name": name}
+            weight = entry.get("weight")
+            if weight is not None:
+                try:
+                    item["weight"] = float(weight)
+                except (TypeError, ValueError):
+                    pass
+            normalized.append(item)
+            continue
+        if isinstance(entry, str):
+            name = entry.strip()
+            if name:
+                normalized.append({"name": name})
+    return normalized
+
+
+def _merge_loras(primary: List[Dict[str, Any]], secondary: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    index: Dict[str, Dict[str, Any]] = {}
+    for entry in primary:
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            continue
+        key = name.lower()
+        if key in index:
+            continue
+        merged.append(entry)
+        index[key] = entry
+    for entry in secondary:
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            continue
+        key = name.lower()
+        existing = index.get(key)
+        if not existing:
+            merged.append(entry)
+            index[key] = entry
+            continue
+        if "weight" not in existing and "weight" in entry:
+            existing["weight"] = entry["weight"]
+    return merged
+
+
+def _extract_loras_from_prompt(prompt_text: str) -> List[Dict[str, Any]]:
+    if not prompt_text:
+        return []
+    matches = []
+    for pattern, meta in LORA_TRIGGER_PATTERNS:
+        for match in pattern.finditer(prompt_text):
+            matches.append((match.start(), match.end(), meta))
+    if not matches:
+        return []
+    matches.sort(key=lambda item: (-(item[1] - item[0]), item[0]))
+    selected = []
+    spans = []
+    for start, end, meta in matches:
+        if any(start >= span_start and end <= span_end for span_start, span_end in spans):
+            continue
+        spans.append((start, end))
+        selected.append(meta)
+    resolved: List[Dict[str, Any]] = []
+    seen = set()
+    for meta in selected:
+        name = str(meta.get("name") or "").strip()
+        if not name:
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        item: Dict[str, Any] = {"name": name}
+        weight = meta.get("weight")
+        if weight is not None:
+            try:
+                item["weight"] = float(weight)
+            except (TypeError, ValueError):
+                pass
+        resolved.append(item)
+    return resolved
+
+
+def _resolve_loras_for_prompt(payload: Dict[str, Any], prompt_text: str) -> List[Dict[str, Any]]:
+    explicit = _normalize_loras(payload.get("loras") or payload.get("lora_list") or [])
+    triggered = _extract_loras_from_prompt(prompt_text)
+    return _merge_loras(explicit, triggered)
+
 # ---------------------------------------------------------------------------
 # Version helpers
 # ---------------------------------------------------------------------------
@@ -1457,6 +1598,9 @@ def build_faceswap_settings(payload: Dict[str, Any], prompt_text: str) -> Dict[s
         seed = None
     if seed is not None:
         settings["seed"] = seed
+    loras = _resolve_loras_for_prompt(payload, prompt_text)
+    if loras:
+        settings["loras"] = loras
     return settings
 
 
@@ -1578,13 +1722,17 @@ def submit_job() -> Any:
         job_data = json.dumps(settings)
         task_type = "ANIMATEDIFF"
     else:
-        prompt_text = str(payload.get("prompt") or payload.get("data") or "")
+        raw_prompt_text = str(payload.get("prompt") or payload.get("data") or "")
+        prompt_text = raw_prompt_text
         if prompt_text:
             prompt_text = f"{prompt_text}, {GLOBAL_POSITIVE_SUFFIX}"
         else:
             prompt_text = GLOBAL_POSITIVE_SUFFIX
         negative_prompt = str(payload.get("negative_prompt") or "").strip()
         job_settings: Dict[str, Any] = {"prompt": prompt_text}
+        loras = _resolve_loras_for_prompt(payload, raw_prompt_text)
+        if loras:
+            job_settings["loras"] = loras
         base_negative = str(cfg.get("negative_prompt_default") or "").strip() if cfg else ""
         combined_negative = ", ".join(
             filter(None, [negative_prompt or base_negative, GLOBAL_NEGATIVE_PROMPT])
@@ -1842,6 +1990,7 @@ def get_creator_tasks() -> Any:
                     raw_data = job.get("data")
                     prompt_text = raw_data or ""
                     negative_prompt = ""
+                    loras: List[Dict[str, Any]] = []
                     try:
                         parsed = json.loads(raw_data) if isinstance(raw_data, str) else None
                     except Exception:
@@ -1849,6 +1998,9 @@ def get_creator_tasks() -> Any:
                     if isinstance(parsed, dict):
                         prompt_text = str(parsed.get("prompt") or "")
                         negative_prompt = str(parsed.get("negative_prompt") or "")
+                        loras_value = parsed.get("loras")
+                        if isinstance(loras_value, list):
+                            loras = loras_value
                     # Always send plain prompt text to the node (avoid passing raw JSON)
                     prompt_for_node = prompt_text
 
@@ -1873,6 +2025,7 @@ def get_creator_tasks() -> Any:
                             "data": raw_data,
                             "prompt": prompt_for_node,
                             "negative_prompt": negative_prompt,
+                            "loras": loras,
                             "queued_at": job.get("timestamp"),
                         }
                     ]
@@ -1908,6 +2061,8 @@ def get_creator_tasks() -> Any:
                 "queued_at": task.get("queued_at"),
                 "assigned_at": task.get("assigned_at"),
             }
+            if task.get("loras"):
+                task_payload["loras"] = task["loras"]
             # If this is a WAN I2V video job, attempt to expose structured settings to the node
             if task_payload["type"].upper() == "VIDEO_GEN":
                 try:
@@ -1958,6 +2113,7 @@ def get_creator_tasks() -> Any:
                         "strength",
                         "num_steps",
                         "seed",
+                        "loras",
                     ):
                         if key in fs_settings and fs_settings[key] is not None:
                             task_payload[key] = fs_settings[key]

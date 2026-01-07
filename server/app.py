@@ -1420,6 +1420,31 @@ def _clamp(value: int, min_val: int, max_val: int) -> int:
     return max(min_val, min(max_val, value))
 
 
+def _normalize_loras(raw_loras: Any) -> List[Dict[str, Any]]:
+    if not raw_loras or not isinstance(raw_loras, list):
+        return []
+    normalized: List[Dict[str, Any]] = []
+    for entry in raw_loras:
+        if isinstance(entry, dict):
+            name = str(entry.get("name") or "").strip()
+            if not name:
+                continue
+            item: Dict[str, Any] = {"name": name}
+            weight = entry.get("weight")
+            if weight is not None:
+                try:
+                    item["weight"] = float(weight)
+                except (TypeError, ValueError):
+                    pass
+            normalized.append(item)
+            continue
+        if isinstance(entry, str):
+            name = entry.strip()
+            if name:
+                normalized.append({"name": name})
+    return normalized
+
+
 def build_faceswap_settings(payload: Dict[str, Any], prompt_text: str) -> Dict[str, Any]:
     base_image_url = str(
         payload.get("base_image_url")
@@ -1585,6 +1610,9 @@ def submit_job() -> Any:
             prompt_text = GLOBAL_POSITIVE_SUFFIX
         negative_prompt = str(payload.get("negative_prompt") or "").strip()
         job_settings: Dict[str, Any] = {"prompt": prompt_text}
+        loras = _normalize_loras(payload.get("loras") or payload.get("lora_list") or [])
+        if loras:
+            job_settings["loras"] = loras
         base_negative = str(cfg.get("negative_prompt_default") or "").strip() if cfg else ""
         combined_negative = ", ".join(
             filter(None, [negative_prompt or base_negative, GLOBAL_NEGATIVE_PROMPT])
@@ -1842,6 +1870,7 @@ def get_creator_tasks() -> Any:
                     raw_data = job.get("data")
                     prompt_text = raw_data or ""
                     negative_prompt = ""
+                    loras: List[Dict[str, Any]] = []
                     try:
                         parsed = json.loads(raw_data) if isinstance(raw_data, str) else None
                     except Exception:
@@ -1849,6 +1878,9 @@ def get_creator_tasks() -> Any:
                     if isinstance(parsed, dict):
                         prompt_text = str(parsed.get("prompt") or "")
                         negative_prompt = str(parsed.get("negative_prompt") or "")
+                        parsed_loras = parsed.get("loras")
+                        if isinstance(parsed_loras, list):
+                            loras = parsed_loras
                     # Always send plain prompt text to the node (avoid passing raw JSON)
                     prompt_for_node = prompt_text
 
@@ -1873,6 +1905,7 @@ def get_creator_tasks() -> Any:
                             "data": raw_data,
                             "prompt": prompt_for_node,
                             "negative_prompt": negative_prompt,
+                            "loras": loras,
                             "queued_at": job.get("timestamp"),
                         }
                     ]
@@ -1908,6 +1941,8 @@ def get_creator_tasks() -> Any:
                 "queued_at": task.get("queued_at"),
                 "assigned_at": task.get("assigned_at"),
             }
+            if task.get("loras"):
+                task_payload["loras"] = task.get("loras")
             # If this is a WAN I2V video job, attempt to expose structured settings to the node
             if task_payload["type"].upper() == "VIDEO_GEN":
                 try:

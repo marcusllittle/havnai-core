@@ -91,6 +91,12 @@ CREATOR_SCAN_DIR = HAVNAI_HOME / "models" / "creator"
 DOWNLOAD_DIR = HAVNAI_HOME / "downloads"
 LOGS_DIR = HAVNAI_HOME / "logs"
 OUTPUTS_DIR = HAVNAI_HOME / "outputs"
+LORA_DIR = Path(
+    os.environ.get("HAVNAI_LORA_DIR")
+    or os.environ.get("HAI_LORA_DIR")
+    or os.environ.get("LORA_DIR")
+    or (HAVNAI_HOME / "loras")
+)
 VERSION_SEARCH_PATHS = [HAVNAI_HOME / "VERSION", Path(__file__).resolve().parent / "VERSION"]
 
 HAVNAI_HOME.mkdir(parents=True, exist_ok=True)
@@ -98,8 +104,10 @@ CREATOR_SCAN_DIR.mkdir(parents=True, exist_ok=True)
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+LORA_DIR.mkdir(parents=True, exist_ok=True)
 
 SUPPORTED_MODEL_EXTS = {".onnx", ".safetensors", ".ckpt"}
+SUPPORTED_LORA_EXTS = {".safetensors", ".pt", ".bin"}
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -442,6 +450,108 @@ def coerce_float(value: Any, default: float) -> float:
         return default
 
 
+def _normalize_loras(raw_loras: Any) -> List[Dict[str, Any]]:
+    if not raw_loras or not isinstance(raw_loras, list):
+        return []
+    normalized: List[Dict[str, Any]] = []
+    for entry in raw_loras:
+        if isinstance(entry, dict):
+            name = str(entry.get("name") or "").strip()
+            if not name:
+                continue
+            item: Dict[str, Any] = {"name": name}
+            weight = entry.get("weight")
+            if weight is not None:
+                try:
+                    item["weight"] = float(weight)
+                except (TypeError, ValueError):
+                    pass
+            normalized.append(item)
+            continue
+        if isinstance(entry, str):
+            name = entry.strip()
+            if name:
+                normalized.append({"name": name})
+    return normalized
+
+
+def _resolve_lora_path(name: str) -> Optional[Path]:
+    raw = str(name or "").strip()
+    if not raw:
+        return None
+    candidate = Path(raw)
+    candidates: List[Path] = []
+    if candidate.is_absolute():
+        candidates.append(candidate)
+    if candidate.suffix:
+        candidates.append(LORA_DIR / raw)
+    else:
+        for ext in SUPPORTED_LORA_EXTS:
+            candidates.append(LORA_DIR / f"{raw}{ext}")
+        candidates.append(LORA_DIR / raw)
+    for path in candidates:
+        if path.exists():
+            return path
+    if candidate.exists():
+        return candidate
+    return None
+
+
+def _apply_loras_to_pipe(pipe: Any, raw_loras: Any) -> List[str]:
+    loras = _normalize_loras(raw_loras)
+    if not loras or not hasattr(pipe, "load_lora_weights"):
+        return []
+    adapter_names: List[str] = []
+    adapter_weights: List[float] = []
+    loaded_paths: List[str] = []
+    for entry in loras:
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            continue
+        path = _resolve_lora_path(name)
+        if not path:
+            log(f"LoRA not found: {name}", prefix="⚠️")
+            continue
+        adapter_name = path.stem
+        try:
+            pipe.load_lora_weights(str(path), adapter_name=adapter_name)
+        except TypeError:
+            try:
+                pipe.load_lora_weights(str(path))
+            except Exception as exc:
+                log(f"LoRA load failed: {exc}", prefix="⚠️")
+                continue
+        except Exception as exc:
+            log(f"LoRA load failed: {exc}", prefix="⚠️")
+            continue
+        loaded_paths.append(str(path))
+        adapter_names.append(adapter_name)
+        weight = entry.get("weight")
+        if weight is None:
+            adapter_weights.append(1.0)
+        else:
+            try:
+                adapter_weights.append(float(weight))
+            except (TypeError, ValueError):
+                adapter_weights.append(1.0)
+    if not adapter_names:
+        return loaded_paths
+    if hasattr(pipe, "set_adapters"):
+        try:
+            pipe.set_adapters(adapter_names, adapter_weights=adapter_weights)
+        except Exception as exc:
+            log(f"LoRA adapter weights failed: {exc}", prefix="⚠️")
+    elif hasattr(pipe, "fuse_lora"):
+        if len(adapter_names) == 1:
+            try:
+                pipe.fuse_lora(lora_scale=adapter_weights[0])
+            except Exception as exc:
+                log(f"LoRA fuse failed: {exc}", prefix="⚠️")
+        else:
+            log("Multiple LoRAs loaded; per-LoRA weights unsupported on this pipeline", prefix="⚠️")
+    return loaded_paths
+
+
 def _normalize_image_path(text: str) -> str:
     if text.startswith("file://"):
         parsed = urllib.parse.urlparse(text)
@@ -698,7 +808,8 @@ def execute_task(task: Dict[str, Any]) -> None:
 
     image_b64: Optional[str] = None
     if task_type == "image_gen":
-        metrics, util, image_b64 = run_image_generation(task_id, model_name, model_url, reward_weight, prompt)
+        loras = task.get("loras") if isinstance(task.get("loras"), list) else None
+        metrics, util, image_b64 = run_image_generation(task_id, model_name, model_url, reward_weight, prompt, loras)
     elif task_type == "face_swap":
         job_settings: Dict[str, Any] = {}
         if isinstance(task, dict):
@@ -1054,7 +1165,14 @@ def run_faceswap_generation(
     return metrics, util, image_b64
 
 
-def run_image_generation(task_id: str, model_name: str, model_url: str, reward_weight: float, prompt: str) -> (Dict[str, Any], int, Optional[str]):
+def run_image_generation(
+    task_id: str,
+    model_name: str,
+    model_url: str,
+    reward_weight: float,
+    prompt: str,
+    loras: Optional[List[Dict[str, Any]]] = None,
+) -> (Dict[str, Any], int, Optional[str]):
     """Run SD image generation with explicit pipeline and env-driven settings."""
 
     def _env_int(name: str, default: int) -> int:
@@ -1091,6 +1209,7 @@ def run_image_generation(task_id: str, model_name: str, model_url: str, reward_w
     error_msg = ""
 
     image_b64: Optional[str] = None
+    loaded_loras: List[str] = []
     output_path = OUTPUTS_DIR / f"{task_id}.png"
     try:
         if not FAST_PREVIEW and torch is not None and diffusers is not None:
@@ -1124,6 +1243,11 @@ def run_image_generation(task_id: str, model_name: str, model_url: str, reward_w
                     raise
             if pipe is None:
                 raise RuntimeError("Failed to construct a text2image pipeline for model.")
+
+            if loras:
+                loaded_loras = _apply_loras_to_pipe(pipe, loras)
+                if loaded_loras:
+                    log(f"Attached {len(loaded_loras)} LoRA(s)", prefix="✅")
 
             pipe.scheduler = _DPMSolver.from_config(
                 pipe.scheduler.config,
@@ -1224,6 +1348,8 @@ def run_image_generation(task_id: str, model_name: str, model_url: str, reward_w
         "width": width,
         "height": height,
     }
+    if loaded_loras:
+        metrics["loras"] = loaded_loras
     if status == "failed":
         metrics["error"] = error_msg or "image generation error"
     return metrics, util, image_b64

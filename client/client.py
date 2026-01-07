@@ -513,16 +513,35 @@ def _apply_loras_to_pipe(pipe: Any, raw_loras: Any) -> List[str]:
             log(f"LoRA not found: {name}", prefix="⚠️")
             continue
         adapter_name = path.stem
+        last_error: Optional[Exception] = None
+        loaded = False
         try:
-            pipe.load_lora_weights(str(path), adapter_name=adapter_name)
-        except TypeError:
-            try:
-                pipe.load_lora_weights(str(path))
-            except Exception as exc:
-                log(f"LoRA load failed: {exc}", prefix="⚠️")
-                continue
+            if path.is_file():
+                try:
+                    pipe.load_lora_weights(str(path.parent), weight_name=path.name, adapter_name=adapter_name)
+                except TypeError:
+                    pipe.load_lora_weights(str(path.parent), weight_name=path.name)
+            else:
+                pipe.load_lora_weights(str(path), adapter_name=adapter_name)
+            loaded = True
         except Exception as exc:
-            log(f"LoRA load failed: {exc}", prefix="⚠️")
+            last_error = exc
+        if not loaded:
+            try:
+                pipe.load_lora_weights(str(path), adapter_name=adapter_name)
+                loaded = True
+                last_error = None
+            except TypeError:
+                try:
+                    pipe.load_lora_weights(str(path))
+                    loaded = True
+                    last_error = None
+                except Exception as exc_inner:
+                    last_error = exc_inner
+            except Exception as exc_inner:
+                last_error = exc_inner
+        if not loaded:
+            log(f"LoRA load failed: {last_error}", prefix="⚠️")
             continue
         loaded_paths.append(str(path))
         adapter_names.append(adapter_name)

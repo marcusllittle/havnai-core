@@ -200,7 +200,7 @@ Recent creator jobs with reward info and optional output URLs.
       {
         "job_id": "job-...",
         "wallet": "0x...",
-        "model": "majicmixrealistic_v7",
+        "model": "epicrealismXL_vxviiCrystalclear",
         "task_type": "IMAGE_GEN",
         "status": "SUCCESS",
         "weight": 25.0,
@@ -270,7 +270,7 @@ Sent periodically by each node with GPU stats and capabilities.
     "role": "creator",
     "version": "stage7",
     "node_name": "my-havnai-node",
-    "models": ["juggernautXL_ragnarokBy", "majicmixRealistic_v7"],
+    "models": ["juggernautXL_ragnarokBy", "epicrealismXL_vxviiCrystalclear"],
     "pipelines": ["sdxl", "sd15"]
   }
   ```
@@ -501,4 +501,3 @@ Contributions are welcome. To work on HavnAI Core:
 ---
 
 HavnAI Core is evolving quickly; treat this README as the canonical reference for the current coordinator behavior. For anything unclear, consult `server/app.py` and `client/client.py` or open an issue. 
-

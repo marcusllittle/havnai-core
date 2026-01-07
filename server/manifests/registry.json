@@ -1,58 +1,6 @@
 {
   "models": [
     {
-      "name": "majicmixRealistic_v7",
-      "pipeline": "sd15",
-      "path": "/mnt/d/havnai-storage/models/creator/majicmixRealistic_v7.safetensors",
-      "vae_path": "/mnt/d/havnai-storage/models/creator/clearvaeSD15_v23.safetensors",
-      "controlnet_path": "/mnt/d/havnai-storage/models/controlnet/control_v11p_sd15_openpose.pth",
-      "type": "checkpoint",
-      "tags": [
-        "realism",
-        "all_rounder",
-        "low_light",
-        "daylight",
-        "hands_strong",
-        "fabric_detail"
-      ],
-      "task_type": "IMAGE_GEN",
-      "weight": 25,
-      "reward_weight": 25,
-      "strengths": "Best all-around realistic model. Extremely consistent. Excellent low-light and daylight performance.",
-      "weaknesses": "Sometimes too clean/perfect under bright lighting.",
-      "sampler": "euler_a",
-      "steps": 25,
-      "guidance": 6.8,
-      "width": 640,
-      "height": 832,
-      "negative_prompt_default": "extra limbs, extra fingers, bad hands, bad anatomy, disfigured face, distorted, blurry, artifact"
-    },
-    {
-      "name": "lazymixRealAmateur_v40",
-      "pipeline": "sd15",
-      "path": "/mnt/d/havnai-storage/models/creator/lazymixRealAmateur_v40.safetensors",
-      "vae_path": "/mnt/d/havnai-storage/models/creator/clearvaeSD15_v23.safetensors",
-      "controlnet_path": "/mnt/d/havnai-storage/models/controlnet/control_v11p_sd15_openpose.pth",
-      "type": "checkpoint",
-      "tags": [
-        "realism",
-        "phone_photo_style",
-        "selfie",
-        "natural_light"
-      ],
-      "task_type": "IMAGE_GEN",
-      "weight": 25,
-      "reward_weight": 25,
-      "strengths": "Most authentic phone-photo style realism. Very strong across lighting scenarios.",
-      "weaknesses": "Slightly less fabric/metallic pop compared to majicmix.",
-      "sampler": "euler_a",
-      "steps": 23,
-      "guidance": 6.8,
-      "width": 576,
-      "height": 768,
-      "negative_prompt_default": "extra limbs, extra fingers, bad hands, bad anatomy, disfigured face, distorted, blurry, artifact"
-    },
-    {
       "name": "juggernautXL_ragnarokBy",
       "pipeline": "sdxl",
       "path": "/mnt/d/havnai-storage/models/creator/juggernautXL_ragnarokBy.safetensors",

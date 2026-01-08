@@ -1804,6 +1804,31 @@ def submit_job() -> Any:
             if cfg.get("sampler"):
                 job_settings["sampler"] = cfg["sampler"]
 
+        overrides: Dict[str, Any] = {}
+        if payload.get("steps") is not None:
+            overrides["steps"] = _coerce_int(payload.get("steps"), int(job_settings.get("steps", 20)))
+        if payload.get("guidance") is not None:
+            overrides["guidance"] = _coerce_float(
+                payload.get("guidance"),
+                float(job_settings.get("guidance", 7.0)),
+            )
+        if payload.get("width") is not None:
+            overrides["width"] = _coerce_int(payload.get("width"), int(job_settings.get("width", 512)))
+        if payload.get("height") is not None:
+            overrides["height"] = _coerce_int(payload.get("height"), int(job_settings.get("height", 512)))
+        sampler_override = payload.get("sampler")
+        if sampler_override is not None and str(sampler_override).strip():
+            overrides["sampler"] = str(sampler_override).strip()
+        seed = payload.get("seed")
+        try:
+            seed = int(seed) if seed is not None else None
+        except (TypeError, ValueError):
+            seed = None
+        if seed is not None:
+            overrides["seed"] = seed
+        if overrides:
+            job_settings["overrides"] = overrides
+
         job_data = json.dumps(job_settings)
         task_type = CREATOR_TASK_TYPE
 
@@ -2050,13 +2075,16 @@ def get_creator_tasks() -> Any:
                 cfg = get_model_config(job["model"])
                 if cfg:
                     model_spec: Optional[Dict[str, Any]] = None
-                    if isinstance(cfg, dict) and cfg.get("lora") is not None:
-                        model_spec = {"name": job["model"], "lora": cfg.get("lora")}
+                    if isinstance(cfg, dict):
+                        model_spec = {"name": job["model"], "pipeline": cfg.get("pipeline")}
+                        if cfg.get("lora") is not None:
+                            model_spec["lora"] = cfg.get("lora")
                     # Decode prompt/negative_prompt for standard IMAGE_GEN jobs stored as JSON
                     raw_data = job.get("data")
                     prompt_text = raw_data or ""
                     negative_prompt = ""
                     loras: List[Dict[str, Any]] = []
+                    image_settings: Dict[str, Any] = {}
                     try:
                         parsed = json.loads(raw_data) if isinstance(raw_data, str) else None
                     except Exception:
@@ -2067,6 +2095,11 @@ def get_creator_tasks() -> Any:
                         parsed_loras = parsed.get("loras")
                         if isinstance(parsed_loras, list):
                             loras = parsed_loras
+                        overrides = parsed.get("overrides")
+                        if isinstance(overrides, dict):
+                            for key in ("steps", "guidance", "width", "height", "sampler", "seed"):
+                                if key in overrides and overrides[key] is not None:
+                                    image_settings[key] = overrides[key]
                     # Always send plain prompt text to the node (avoid passing raw JSON)
                     prompt_for_node = prompt_text
 
@@ -2075,27 +2108,28 @@ def get_creator_tasks() -> Any:
                     log_event("Job claimed by node", job_id=job["id"], node_id=node_id)
                     reward_weight = float(job["weight"] or cfg.get("reward_weight", resolve_weight(job["model"], 10.0)))
                     job_task_type = (job.get("task_type") or CREATOR_TASK_TYPE).upper()
-                    pending = [
-                        {
-                            "task_id": job["id"],
-                            "task_type": job_task_type,
-                            "model_name": job["model"],
-                            "model": model_spec,
-                            "model_path": cfg.get("path", ""),
-                            "pipeline": cfg.get("pipeline", "sd15"),
-                            "input_shape": cfg.get("input_shape", []),
-                            "reward_weight": reward_weight,
-                            "status": "pending",
-                            "wallet": job["wallet"],
-                            "assigned_to": node_id,
-                            "job_id": job["id"],
-                            "data": raw_data,
-                            "prompt": prompt_for_node,
-                            "negative_prompt": negative_prompt,
-                            "loras": loras,
-                            "queued_at": job.get("timestamp"),
-                        }
-                    ]
+                    pending_entry = {
+                        "task_id": job["id"],
+                        "task_type": job_task_type,
+                        "model_name": job["model"],
+                        "model": model_spec,
+                        "model_path": cfg.get("path", ""),
+                        "pipeline": cfg.get("pipeline", "sd15"),
+                        "input_shape": cfg.get("input_shape", []),
+                        "reward_weight": reward_weight,
+                        "status": "pending",
+                        "wallet": job["wallet"],
+                        "assigned_to": node_id,
+                        "job_id": job["id"],
+                        "data": raw_data,
+                        "prompt": prompt_for_node,
+                        "negative_prompt": negative_prompt,
+                        "loras": loras,
+                        "queued_at": job.get("timestamp"),
+                    }
+                    if image_settings:
+                        pending_entry.update(image_settings)
+                    pending = [pending_entry]
                     node_info["current_task"] = {
                         "task_id": job["id"],
                         "model_name": job["model"],
@@ -2129,6 +2163,9 @@ def get_creator_tasks() -> Any:
                 "queued_at": task.get("queued_at"),
                 "assigned_at": task.get("assigned_at"),
             }
+            for key in ("steps", "guidance", "width", "height", "sampler", "seed"):
+                if key in task and task[key] is not None:
+                    task_payload[key] = task[key]
             if task.get("loras"):
                 task_payload["loras"] = task.get("loras")
             # If this is a WAN I2V video job, attempt to expose structured settings to the node

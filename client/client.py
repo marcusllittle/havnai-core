@@ -54,12 +54,22 @@ try:
     except Exception:  # pragma: no cover
         _SDXLPipe = None  # type: ignore
     from diffusers import DPMSolverMultistepScheduler as _DPMSolver  # type: ignore
+    try:
+        from diffusers import EulerAncestralDiscreteScheduler as _EulerA  # type: ignore
+    except Exception:  # pragma: no cover
+        _EulerA = None  # type: ignore
+    try:
+        from diffusers import EulerDiscreteScheduler as _Euler  # type: ignore
+    except Exception:  # pragma: no cover
+        _Euler = None  # type: ignore
 except ImportError:  # pragma: no cover
     diffusers = None
     _AutoPipe = None  # type: ignore
     _SDPipe = None  # type: ignore
     _SDXLPipe = None  # type: ignore
     _DPMSolver = None  # type: ignore
+    _EulerA = None  # type: ignore
+    _Euler = None  # type: ignore
 try:
     from PIL import Image  # type: ignore
 except Exception:  # pragma: no cover
@@ -898,14 +908,21 @@ def execute_task(task: Dict[str, Any]) -> None:
         loras = task.get("loras") if isinstance(task.get("loras"), list) else None
         model_spec = task.get("model") if isinstance(task.get("model"), dict) else None
         model_lora = model_spec.get("lora") if isinstance(model_spec, dict) else None
+        model_pipeline = model_spec.get("pipeline") if isinstance(model_spec, dict) else None
+        image_settings = {}
+        for key in ("steps", "guidance", "width", "height", "sampler", "seed"):
+            if key in task and task[key] is not None:
+                image_settings[key] = task[key]
         metrics, util, image_b64 = run_image_generation(
             task_id,
             model_name,
             model_url,
             reward_weight,
             prompt,
-            loras,
-            model_lora,
+            loras=loras,
+            model_lora=model_lora,
+            pipeline_hint=model_pipeline,
+            image_settings=image_settings or None,
         )
     elif task_type == "face_swap":
         job_settings: Dict[str, Any] = {}
@@ -1270,6 +1287,8 @@ def run_image_generation(
     prompt: str,
     loras: Optional[List[Dict[str, Any]]] = None,
     model_lora: Optional[Any] = None,
+    pipeline_hint: Optional[str] = None,
+    image_settings: Optional[Dict[str, Any]] = None,
 ) -> (Dict[str, Any], int, Optional[str]):
     """Run SD image generation with explicit pipeline and env-driven settings."""
 
@@ -1287,6 +1306,26 @@ def run_image_generation(
             return float(raw)
         except Exception:
             return default
+    def _override_int(name: str) -> Optional[int]:
+        if not image_settings or name not in image_settings:
+            return None
+        try:
+            return int(image_settings[name])
+        except (TypeError, ValueError):
+            return None
+
+    def _override_float(name: str) -> Optional[float]:
+        if not image_settings or name not in image_settings:
+            return None
+        try:
+            return float(image_settings[name])
+        except (TypeError, ValueError):
+            return None
+
+    def _override_str(name: str) -> str:
+        if not image_settings or name not in image_settings:
+            return ""
+        return str(image_settings[name] or "").strip()
 
     try:
         model_path = resolve_model_path(model_name, model_url, filename_hint=f"{model_name}.safetensors")
@@ -1298,9 +1337,24 @@ def run_image_generation(
     clip_skip = _env_int("HAI_CLIP_SKIP", 0)
     width = _env_int("HAI_WIDTH", 512)
     height = _env_int("HAI_HEIGHT", 512)
+    override_steps = _override_int("steps")
+    if override_steps is not None:
+        steps = override_steps
+    override_guidance = _override_float("guidance")
+    if override_guidance is not None:
+        guidance = override_guidance
+    override_width = _override_int("width")
+    if override_width is not None:
+        width = override_width
+    override_height = _override_int("height")
+    if override_height is not None:
+        height = override_height
+    sampler_name = _override_str("sampler")
+    seed_override = _override_int("seed")
     width = max(64, width - (width % 8))
     height = max(64, height - (height % 8))
-    is_xl = "xl" in model_name.lower()
+    pipeline_hint_norm = str(pipeline_hint or "").lower()
+    is_xl = "sdxl" in pipeline_hint_norm or ("xl" in pipeline_hint_norm if pipeline_hint_norm else "xl" in model_name.lower())
 
     start_stats = read_gpu_stats()
     started = time.time()
@@ -1369,11 +1423,23 @@ def run_image_generation(
                 if loaded_loras:
                     log(f"Attached {len(loaded_loras)} LoRA(s)", prefix="✅")
 
-            pipe.scheduler = _DPMSolver.from_config(
-                pipe.scheduler.config,
-                algorithm_type="dpmsolver++",
-                use_karras_sigmas=True,
-            )  # type: ignore[attr-defined]
+            scheduler_set = False
+            sampler = sampler_name.lower() if sampler_name else "dpmpp_2m_karras"
+            if sampler in {"euler_a", "euler-ancestral", "euler_ancestral"} and _EulerA is not None:
+                pipe.scheduler = _EulerA.from_config(pipe.scheduler.config)  # type: ignore[attr-defined]
+                scheduler_set = True
+            elif sampler in {"euler", "euler_discrete"} and _Euler is not None:
+                pipe.scheduler = _Euler.from_config(pipe.scheduler.config)  # type: ignore[attr-defined]
+                scheduler_set = True
+            elif _DPMSolver is not None:
+                pipe.scheduler = _DPMSolver.from_config(
+                    pipe.scheduler.config,
+                    algorithm_type="dpmsolver++",
+                    use_karras_sigmas="karras" in sampler,
+                )  # type: ignore[attr-defined]
+                scheduler_set = True
+            if not scheduler_set and sampler_name:
+                log(f"Sampler '{sampler_name}' unsupported; using default scheduler", prefix="⚠️")
             LOGGER.info(
                 "Scheduler=%s, use_karras_sigmas=%s",
                 type(pipe.scheduler).__name__,
@@ -1384,13 +1450,21 @@ def run_image_generation(
             if hasattr(pipe, "set_progress_bar_config"):
                 pipe.set_progress_bar_config(disable=True)
             pipe = pipe.to(device)
+            if not is_xl and hasattr(pipe, "vae") and pipe.vae is not None:
+                try:
+                    pipe.vae.to(device=device, dtype=torch.float32)
+                    if hasattr(pipe.vae, "config") and hasattr(pipe.vae.config, "force_upcast"):
+                        pipe.vae.config.force_upcast = True
+                    log("Upcasted VAE to fp32 for SD1.5 stability", prefix="✅")
+                except Exception as exc:
+                    log(f"VAE upcast failed: {exc}", prefix="⚠️")
             load_ms = int((time.time() - load_t0) * 1000)
             log(
                 f"Pipeline ready in {load_ms}ms · {pipe.__class__.__name__}",
                 prefix="✅",
             )
 
-            seed = int(time.time()) & 0x7FFFFFFF
+            seed = seed_override if seed_override is not None else (int(time.time()) & 0x7FFFFFFF)
             generator = torch.Generator(device=device).manual_seed(seed)
             text = prompt or "a high quality photo of a golden retriever on a beach at sunset"
             if hasattr(pipe, "tokenizer") and hasattr(pipe.tokenizer, "model_max_length"):

@@ -39,8 +39,11 @@ CLIENT_PATH = BASE_DIR / "client" / "client.py"
 CLIENT_REGISTRY = BASE_DIR / "client" / "registry.py"
 CLIENT_REQUIREMENTS = BASE_DIR / "client" / "requirements-node.txt"
 VERSION_FILE = BASE_DIR / "VERSION"
+LORA_STORAGE_DIR = Path(os.getenv("HAVNAI_LORA_STORAGE_DIR", "/mnt/d/havnai-storage/models/loras"))
 
 CREATOR_TASK_TYPE = "IMAGE_GEN"
+
+SUPPORTED_LORA_EXTS = {".safetensors", ".ckpt", ".pt", ".bin"}
 
 # Ensure local packages (e.g., havnai.video_engine) are importable when running server/app.py directly
 if str(BASE_DIR) not in sys.path:
@@ -1542,6 +1545,20 @@ def favicon() -> Any:
 def list_models() -> Any:
     load_manifest()
     return jsonify({"models": list(MANIFEST_MODELS.values())})
+
+
+@app.route("/loras/list")
+def list_loras() -> Any:
+    loras: List[Dict[str, Any]] = []
+    path = LORA_STORAGE_DIR
+    if path.exists():
+        for entry in sorted(path.iterdir()):
+            if not entry.is_file():
+                continue
+            if entry.suffix.lower() not in SUPPORTED_LORA_EXTS:
+                continue
+            loras.append({"name": entry.name, "filename": entry.name})
+    return jsonify({"loras": loras, "path": str(path)})
 
 
 @app.route("/installers/<path:filename>")

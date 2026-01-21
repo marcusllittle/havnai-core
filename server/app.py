@@ -928,6 +928,7 @@ def load_nodes() -> Dict[str, Dict[str, Any]]:
         node.setdefault("gpu", {})
         node.setdefault("pipelines", [])
         node.setdefault("models", [])
+        node.setdefault("loras", [])
         node.setdefault("rewards", 0.0)
         node.setdefault("utilization", 0.0)
         node.setdefault("avg_utilization", node.get("utilization", 0.0))
@@ -976,6 +977,7 @@ def load_node_wallets() -> None:
             "start_time": unix_now(),
             "role": "worker",
             "last_seen": iso_now(),
+            "loras": [],
         })
         node["wallet"] = row["wallet"]
         if row["node_name"]:
@@ -1547,9 +1549,54 @@ def list_models() -> Any:
     return jsonify({"models": list(MANIFEST_MODELS.values())})
 
 
+def _normalize_lora_catalog(raw_loras: Any) -> List[Dict[str, Any]]:
+    if not raw_loras or not isinstance(raw_loras, list):
+        return []
+    normalized: List[Dict[str, Any]] = []
+    for entry in raw_loras:
+        if isinstance(entry, dict):
+            name = str(entry.get("name") or "").strip()
+            filename = str(entry.get("filename") or "").strip()
+            label = str(entry.get("label") or "").strip()
+            if not name and filename:
+                name = Path(filename).stem or filename
+            if not name:
+                continue
+            item: Dict[str, Any] = {"name": name}
+            if filename:
+                item["filename"] = filename
+            if label:
+                item["label"] = label
+            normalized.append(item)
+            continue
+        if isinstance(entry, str):
+            name = entry.strip()
+            if name:
+                normalized.append({"name": name})
+    return normalized
+
+
 @app.route("/loras/list")
 def list_loras() -> Any:
     loras: List[Dict[str, Any]] = []
+    nodes_with_loras: List[str] = []
+    with LOCK:
+        for node_id, node in NODES.items():
+            node_loras = _normalize_lora_catalog(node.get("loras"))
+            if node_loras:
+                nodes_with_loras.append(node_id)
+                loras.extend(node_loras)
+    if loras:
+        seen = set()
+        deduped: List[Dict[str, Any]] = []
+        for entry in loras:
+            key = str(entry.get("filename") or entry.get("name") or "").strip().lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(entry)
+        deduped.sort(key=lambda item: str(item.get("label") or item.get("name") or "").lower())
+        return jsonify({"loras": deduped, "nodes": nodes_with_loras, "source": "nodes"})
     path = LORA_STORAGE_DIR
     if path.exists():
         for entry in sorted(path.iterdir()):
@@ -1557,8 +1604,9 @@ def list_loras() -> Any:
                 continue
             if entry.suffix.lower() not in SUPPORTED_LORA_EXTS:
                 continue
-            loras.append({"name": entry.name, "filename": entry.name})
-    return jsonify({"loras": loras, "path": str(path)})
+            loras.append({"name": entry.stem, "filename": entry.name})
+    loras.sort(key=lambda item: str(item.get("name") or "").lower())
+    return jsonify({"loras": loras, "path": str(path), "source": "local"})
 
 
 @app.route("/installers/<path:filename>")
@@ -1993,6 +2041,7 @@ def register() -> Any:
                 "start_time": data.get("start_time", unix_now()),
                 "role": data.get("role", "worker"),
                 "node_name": data.get("node_name") or node_id,
+                "loras": [],
             }
             NODES[node_id] = node
             log_event("Node registered", node_id=node_id, role=node["role"], version=data.get("version"))
@@ -2005,6 +2054,8 @@ def register() -> Any:
         node["pipelines"] = data.get("pipelines", node.get("pipelines", []))
         node["models"] = data.get("models", node.get("models", []))
         node["supports"] = data.get("supports", node.get("supports", []))
+        if "loras" in data:
+            node["loras"] = _normalize_lora_catalog(data.get("loras"))
         util = data.get("gpu", {}).get("utilization") if isinstance(data.get("gpu"), dict) else data.get("utilization")
         util = float(util or node.get("utilization", 0.0))
         node["utilization"] = util

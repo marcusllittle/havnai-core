@@ -499,6 +499,22 @@ def _normalize_loras(raw_loras: Any) -> List[Dict[str, Any]]:
     return normalized
 
 
+def list_local_loras() -> List[Dict[str, str]]:
+    loras: List[Dict[str, str]] = []
+    try:
+        if not LORA_DIR.exists():
+            return loras
+        for entry in sorted(LORA_DIR.iterdir()):
+            if not entry.is_file():
+                continue
+            if entry.suffix.lower() not in SUPPORTED_LORA_EXTS:
+                continue
+            loras.append({"name": entry.stem, "filename": entry.name})
+    except Exception as exc:
+        log(f"Failed to scan LoRA directory: {exc}", prefix="⚠️")
+    return loras
+
+
 def _resolve_lora_path(name: str) -> Optional[Path]:
     raw = str(name or "").strip()
     if not raw:
@@ -1594,6 +1610,7 @@ def run_image_generation(
 def heartbeat_loop() -> None:
     backoff = BACKOFF_BASE
     while True:
+        local_loras = list_local_loras()
         payload = {
             "node_id": NODE_NAME,
             "os": os.uname().sysname if hasattr(os, "uname") else os.name,
@@ -1603,6 +1620,7 @@ def heartbeat_loop() -> None:
             "role": ROLE,
             "version": CLIENT_VERSION,
             "node_name": NODE_NAME,
+            "loras": local_loras,
         }
         try:
             resp = SESSION.post(endpoint("/register"), data=json.dumps(payload), timeout=5)

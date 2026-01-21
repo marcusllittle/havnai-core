@@ -9,6 +9,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import os
 import random
+import re
 import socket
 import subprocess
 import sys
@@ -557,6 +558,22 @@ def _download_lora_spec(lora: Dict[str, Any]) -> Path:
     raise RuntimeError(f"LoRA download failed: {last_error}")
 
 
+_ADAPTER_SAFE_RE = re.compile(r"[^A-Za-z0-9_]+")
+
+
+def _safe_adapter_name(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "lora"
+    safe = _ADAPTER_SAFE_RE.sub("_", raw).strip("_")
+    if not safe:
+        safe = "lora"
+    if safe != raw:
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:6]
+        safe = f"{safe}_{digest}"
+    return safe
+
+
 def _apply_loras_to_pipe(pipe: Any, raw_loras: Any) -> List[str]:
     loras = _normalize_loras(raw_loras)
     if not loras or not hasattr(pipe, "load_lora_weights"):
@@ -575,7 +592,7 @@ def _apply_loras_to_pipe(pipe: Any, raw_loras: Any) -> List[str]:
         if not path:
             log(f"LoRA not found: {name}", prefix="⚠️")
             continue
-        adapter_name = path.stem
+        adapter_name = _safe_adapter_name(path.stem)
         last_error: Optional[Exception] = None
         loaded = False
         strength = entry.get("strength")
@@ -1492,8 +1509,22 @@ def run_image_generation(
                         call_kwargs["clip_skip"] = clip_skip
                 except (TypeError, ValueError):
                     pass
-            with torch.inference_mode():
-                result = pipe(text, **call_kwargs)
+            def _run_pipe() -> Any:
+                with torch.inference_mode():
+                    return pipe(text, **call_kwargs)
+
+            try:
+                result = _run_pipe()
+            except RuntimeError as exc:
+                msg = str(exc)
+                if not is_xl and "bias type" in msg and ("Half" in msg or "float" in msg):
+                    log("Retrying with fp32 pipeline due to dtype mismatch", prefix="⚠️")
+                    pipe = pipe.to(device=device, dtype=torch.float32)
+                    generator = torch.Generator(device=device).manual_seed(seed)
+                    call_kwargs["generator"] = generator
+                    result = _run_pipe()
+                else:
+                    raise
             gen_ms = int((time.time() - gen_t0) * 1000)
             log(
                 f"Generated in {gen_ms}ms",

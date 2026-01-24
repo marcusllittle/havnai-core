@@ -185,7 +185,7 @@ Internally this:
 
 1. Validates the wallet format.
 2. Resolves the model config (or picks one via weighted routing when `model="auto"`).
-3. Serializes the job payload (with special handling for WAN I2V and AnimateDiff).
+3. Serializes the job payload (with special handling for AnimateDiff).
 4. Enqueues a row into the `jobs` table with status `queued`.
 
 ### `GET /jobs/recent`

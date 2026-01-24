@@ -54,6 +54,10 @@ try:
         from diffusers import StableDiffusionXLPipeline as _SDXLPipe  # type: ignore
     except Exception:  # pragma: no cover
         _SDXLPipe = None  # type: ignore
+    try:
+        from diffusers import LattePipeline as _LattePipe  # type: ignore
+    except Exception:  # pragma: no cover
+        _LattePipe = None  # type: ignore
     from diffusers import DPMSolverMultistepScheduler as _DPMSolver  # type: ignore
     try:
         from diffusers import EulerAncestralDiscreteScheduler as _EulerA  # type: ignore
@@ -68,6 +72,7 @@ except ImportError:  # pragma: no cover
     _AutoPipe = None  # type: ignore
     _SDPipe = None  # type: ignore
     _SDXLPipe = None  # type: ignore
+    _LattePipe = None  # type: ignore
     _DPMSolver = None  # type: ignore
     _EulerA = None  # type: ignore
     _Euler = None  # type: ignore
@@ -237,6 +242,8 @@ FAST_PREVIEW = (
     os.environ.get("HAI_FAST_PREVIEW", ENV_VARS.get("HAI_FAST_PREVIEW", "")).lower()
     in {"1", "true", "yes"}
 )
+LTX2_MODEL_ID = os.environ.get("LTX2_MODEL_ID") or ENV_VARS.get("LTX2_MODEL_ID") or "maxin-cn/Latte-1"
+LTX2_MODEL_PATH = os.environ.get("LTX2_MODEL_PATH") or ENV_VARS.get("LTX2_MODEL_PATH", "")
 
 HEARTBEAT_INTERVAL = 30
 TASK_POLL_INTERVAL = 15
@@ -252,9 +259,83 @@ SESSION.headers.update({"Content-Type": "application/json"})
 if JOIN_TOKEN:
     SESSION.headers["X-Join-Token"] = JOIN_TOKEN
 
+_LTX2_LAST_READY: Optional[bool] = None
+_LTX2_LAST_REASON: str = ""
+
 
 def endpoint(path: str) -> str:
     return f"{SERVER_BASE}{path}"
+
+
+# ---------------------------------------------------------------------------
+# Capability helpers
+# ---------------------------------------------------------------------------
+
+
+def _hf_cache_root() -> Path:
+    cache_root = (
+        os.environ.get("HUGGINGFACE_HUB_CACHE")
+        or os.environ.get("HF_HUB_CACHE")
+        or os.environ.get("HF_HOME")
+        or str(Path.home() / ".cache" / "huggingface")
+    )
+    root = Path(cache_root).expanduser()
+    if root.name != "hub":
+        root = root / "hub"
+    return root
+
+
+def _hf_model_cached(repo_id: str) -> bool:
+    if not repo_id:
+        return False
+    cache_dir = _hf_cache_root() / f"models--{repo_id.replace('/', '--')}"
+    return cache_dir.exists()
+
+
+def check_ltx2_ready() -> (bool, str):
+    if ROLE != "creator":
+        return False, "role"
+    if diffusers is None or torch is None:
+        return False, "deps_missing"
+    if _LattePipe is None:
+        return False, "latte_missing"
+    try:
+        if not torch.cuda.is_available():
+            return False, "cuda_unavailable"
+    except Exception:
+        return False, "cuda_unavailable"
+    if LTX2_MODEL_PATH:
+        model_path = Path(LTX2_MODEL_PATH).expanduser()
+        if not model_path.exists():
+            return False, "model_path_missing"
+        return True, "ok"
+    repo_id = (LTX2_MODEL_ID or "").strip()
+    if not repo_id:
+        return False, "missing_model_id"
+    if not _hf_model_cached(repo_id):
+        return False, "model_cache_missing"
+    return True, "ok"
+
+
+def build_node_capabilities() -> (List[str], List[str]):
+    pipelines: List[str] = []
+    supports: List[str] = []
+    if ROLE == "creator":
+        supports.append("image")
+        pipelines.extend(["sd15", "sdxl"])
+        ready, reason = check_ltx2_ready()
+        global _LTX2_LAST_READY, _LTX2_LAST_REASON
+        if _LTX2_LAST_READY is None or ready != _LTX2_LAST_READY or reason != _LTX2_LAST_REASON:
+            if ready:
+                log("LTX2 ready; advertising ltx2 pipeline", prefix="✅")
+            else:
+                log(f"LTX2 not ready; skipping ltx2 advertise ({reason})", prefix="ℹ️")
+            _LTX2_LAST_READY = ready
+            _LTX2_LAST_REASON = reason
+        if ready:
+            pipelines.append("ltx2")
+            supports.append("video")
+    return pipelines, supports
 
 
 # ---------------------------------------------------------------------------
@@ -930,13 +1011,14 @@ def execute_task(task: Dict[str, Any]) -> None:
     if assigned_at:
         assign_to_start_ms = int((task_started_at - assigned_at) * 1000)
 
-    if task_type == "image_gen" and ROLE != "creator":
+    if task_type in {"image_gen", "video_gen"} and ROLE != "creator":
         log(f"Skipping creator task {task_id[:8]} — node not in creator mode", prefix="⚠️")
         return
 
     log(f"Executing {task_type} task {task_id[:8]} · {model_name}", prefix="🚀")
 
     image_b64: Optional[str] = None
+    video_b64: Optional[str] = None
     if task_type == "image_gen":
         loras = task.get("loras") if isinstance(task.get("loras"), list) else None
         model_spec = task.get("model") if isinstance(task.get("model"), dict) else None
@@ -957,6 +1039,20 @@ def execute_task(task: Dict[str, Any]) -> None:
             pipeline_hint=model_pipeline,
             image_settings=image_settings or None,
         )
+    elif task_type == "video_gen" or str(task.get("pipeline") or "").lower() == "ltx2" or str(task.get("engine") or "").lower() == "ltx2":
+        from engines.ltx2.ltx2_runner import run_ltx2, video_to_b64
+
+        model_ref = LTX2_MODEL_PATH or LTX2_MODEL_ID or "maxin-cn/Latte-1"
+        metrics, util, video_path = run_ltx2(
+            task,
+            log_fn=lambda message: log(message, prefix="🎬"),
+            outputs_dir=OUTPUTS_DIR,
+            read_gpu_stats=read_gpu_stats,
+            utilization_hint=utilization_hint,
+            model_id=model_ref,
+        )
+        if video_path is not None:
+            video_b64 = video_to_b64(video_path)
     elif task_type == "face_swap":
         job_settings: Dict[str, Any] = {}
         if isinstance(task, dict):
@@ -1011,6 +1107,8 @@ def execute_task(task: Dict[str, Any]) -> None:
     }
     if image_b64:
         payload["image_b64"] = image_b64
+    if video_b64:
+        payload["video_b64"] = video_b64
 
     try:
         resp = SESSION.post(endpoint("/results"), data=json.dumps(payload), timeout=15)
@@ -1611,6 +1709,7 @@ def heartbeat_loop() -> None:
     backoff = BACKOFF_BASE
     while True:
         local_loras = list_local_loras()
+        pipelines, supports = build_node_capabilities()
         payload = {
             "node_id": NODE_NAME,
             "os": os.uname().sysname if hasattr(os, "uname") else os.name,
@@ -1622,6 +1721,10 @@ def heartbeat_loop() -> None:
             "node_name": NODE_NAME,
             "loras": local_loras,
         }
+        if pipelines:
+            payload["pipelines"] = pipelines
+        if supports:
+            payload["supports"] = supports
         try:
             resp = SESSION.post(endpoint("/register"), data=json.dumps(payload), timeout=5)
             resp.raise_for_status()

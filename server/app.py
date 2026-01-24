@@ -45,11 +45,9 @@ CREATOR_TASK_TYPE = "IMAGE_GEN"
 
 SUPPORTED_LORA_EXTS = {".safetensors", ".ckpt", ".pt", ".bin"}
 
-# Ensure local packages (e.g., havnai.video_engine) are importable when running server/app.py directly
+# Ensure local packages (e.g., havnai.*) are importable when running server/app.py directly
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
-
-from havnai.video_engine.gguf_wan2_2 import VideoEngine, VideoJobRequest
 
 # Reward weights bootstrap – enriched at runtime via registration
 MODEL_WEIGHTS: Dict[str, float] = {
@@ -79,6 +77,7 @@ REWARD_CONFIG: Dict[str, float] = {
     "sdxl_factor": float(os.getenv("REWARD_SDXL_FACTOR", "1.5")),
     "sd15_factor": float(os.getenv("REWARD_SD15_FACTOR", "1.0")),
     "anime_factor": float(os.getenv("REWARD_ANIME_FACTOR", "0.7")),
+    "ltx2_factor": float(os.getenv("REWARD_LTX2_FACTOR", "2.0")),
     "base_reward": float(os.getenv("REWARD_BASE_HAI", "0.05")),
 }
 
@@ -711,64 +710,6 @@ def ensure_directories() -> None:
 ensure_directories()
 
 # ---------------------------------------------------------------------------
-# WAN 2.2 GGUF video worker
-# ---------------------------------------------------------------------------
-
-VIDEO_ENGINE = VideoEngine()
-VIDEO_EXECUTOR = ThreadPoolExecutor(max_workers=int(os.getenv("WAN_W2V_WORKERS", "1")) or 1)
-VIDEO_JOBS: Dict[str, Dict[str, Any]] = {}
-VIDEO_JOB_LOCK = threading.Lock()
-
-
-def submit_video_job(job_request: VideoJobRequest) -> str:
-    """Queue a WAN GGUF video generation job."""
-
-    job_id = job_request.job_id or f"wan-video-{uuid.uuid4().hex[:8]}"
-    job_request.job_id = job_id
-    mode = "i2v" if job_request.init_image_b64 else "t2v"
-    record = {
-        "job_id": job_id,
-        "status": "queued",
-        "prompt": job_request.prompt,
-        "negative_prompt": job_request.negative_prompt,
-        "mode": mode,
-        "loras": job_request.lora_list,
-        "motion_type": job_request.motion_type,
-        "duration": job_request.duration,
-        "fps": job_request.fps,
-        "created_at": iso_now(),
-        "frames_dir": str(VIDEO_ENGINE.registry.paths.frames_dir),
-        "videos_dir": str(VIDEO_ENGINE.registry.paths.videos_dir),
-    }
-    with VIDEO_JOB_LOCK:
-        VIDEO_JOBS[job_id] = record
-    VIDEO_EXECUTOR.submit(_run_video_job, job_id, job_request)
-    return job_id
-
-
-def _run_video_job(job_id: str, job_request: VideoJobRequest) -> None:
-    with VIDEO_JOB_LOCK:
-        if job_id in VIDEO_JOBS:
-            VIDEO_JOBS[job_id]["status"] = "running"
-            VIDEO_JOBS[job_id]["started_at"] = iso_now()
-    result = VIDEO_ENGINE.generate(job_request)
-    with VIDEO_JOB_LOCK:
-        payload = VIDEO_JOBS.get(job_id, {})
-        payload["status"] = result.status
-        payload["completed_at"] = iso_now()
-        payload["video_path"] = result.video_path
-        payload["frame_paths"] = result.frame_paths
-        payload["error"] = result.error
-        payload["metadata"] = result.metadata
-        VIDEO_JOBS[job_id] = payload
-
-
-def get_video_job(job_id: str) -> Optional[Dict[str, Any]]:
-    with VIDEO_JOB_LOCK:
-        job = VIDEO_JOBS.get(job_id)
-        return dict(job) if job else None
-
-# ---------------------------------------------------------------------------
 # Database helpers
 # ---------------------------------------------------------------------------
 
@@ -1032,6 +973,8 @@ def compute_reward(
             compute_cost_factor = float(REWARD_CONFIG.get("sdxl_factor", 1.5))
         elif pipeline_norm == "sd15":
             compute_cost_factor = float(REWARD_CONFIG.get("sd15_factor", 1.0))
+        elif pipeline_norm == "ltx2":
+            compute_cost_factor = float(REWARD_CONFIG.get("ltx2_factor", 2.0))
         elif pipeline_norm in {"anime", "cartoon"}:
             compute_cost_factor = float(REWARD_CONFIG.get("anime_factor", 0.7))
         else:
@@ -1091,14 +1034,17 @@ def fetch_next_job_for_node(node_id: str) -> Optional[Dict[str, Any]]:
     node_supports = {s.lower() for s in node.get("supports", []) if isinstance(s, str)}
     for row in rows:
         task_type = (row["task_type"] or CREATOR_TASK_TYPE).upper()
-        # Support standard IMAGE_GEN, WAN video jobs, and AnimateDiff video jobs.
+        # Support standard IMAGE_GEN, LTX2 video jobs, AnimateDiff video jobs, and face swap.
         if task_type not in {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP"}:
             continue
         if role != "creator":
             continue
-        required_support = "image"
-        if task_type in {"VIDEO_GEN", "ANIMATEDIFF"}:
-            required_support = "animatediff" if task_type == "ANIMATEDIFF" else "image"
+        if task_type == "ANIMATEDIFF":
+            required_support = "animatediff"
+        elif task_type == "VIDEO_GEN":
+            required_support = "video"
+        else:
+            required_support = "image"
         if node_supports and required_support not in node_supports:
             continue
         model_name = row["model"].lower()
@@ -1441,12 +1387,6 @@ def join_page() -> Any:
         <li>Python 3.10 or newer, curl, and a GPU driver/runtime</li>
         <li>$HAI wallet address (EVM compatible)</li>
       </ul>
-      <h2>Optional – WAN I2V Video Support</h2>
-      <ul>
-        <li><code>ffmpeg</code> installed and on <code>PATH</code> (e.g. <code>sudo apt-get install -y ffmpeg</code> on Debian/Ubuntu)</li>
-        <li>WAN I2V safetensor checkpoint(s) downloaded to the paths referenced by the coordinator manifest (for example <code>/mnt/d/havnai-storage/models/video/wan-i2v/wan_2.2_lightning.safetensors</code>)</li>
-        <li><code>CREATOR_MODE=true</code> in <code>~/.havnai/.env</code> if you want this node to accept WAN video jobs</li>
-      </ul>
       <h2>What happens next?</h2>
       <ol>
         <li>Installer prepares <code>~/.havnai</code>, Python venv, and the node binary</li>
@@ -1754,25 +1694,49 @@ def submit_job() -> Any:
     if weight is None:
         weight = cfg.get("reward_weight", resolve_weight(model_name, 10.0))
 
-    # Special-case WAN I2V video jobs so we preserve structured settings
-    is_wan_i2v = model_name == "wan-i2v" or str(cfg.get("pipeline", "")).lower() == "wan-i2v"
+    # Special-case LTX2 video jobs with structured payload
+    pipeline_name = str(cfg.get("pipeline", "")).lower()
+    is_ltx2 = model_name == "ltx2" or pipeline_name == "ltx2"
 
     # Special-case AnimateDiff video jobs with rich structured payload
-    is_animatediff = model_name == "animatediff" or str(cfg.get("pipeline", "")).lower() == "animatediff"
+    is_animatediff = model_name == "animatediff" or pipeline_name == "animatediff"
 
-    if is_wan_i2v:
-        # Persist all WAN-specific controls inside the job data blob as JSON
-        prompt_text = str(payload.get("prompt") or "")
-        settings: Dict[str, Any] = {
+    if is_ltx2:
+        prompt_text = str(payload.get("prompt") or "").strip()
+        if not prompt_text:
+            return jsonify({"error": "missing prompt"}), 400
+        negative_prompt = str(payload.get("negative_prompt") or "").strip()
+
+        seed = payload.get("seed")
+        try:
+            seed = int(seed)
+        except (TypeError, ValueError):
+            return jsonify({"error": "missing seed"}), 400
+
+        def _clamp_int(value: Any, default: int, min_v: int, max_v: int) -> int:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                parsed = default
+            return max(min_v, min(parsed, max_v))
+
+        def _clamp_float(value: Any, default: float, min_v: float, max_v: float) -> float:
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                parsed = default
+            return max(min_v, min(parsed, max_v))
+
+        settings = {
             "prompt": prompt_text,
-            "init_image": payload.get("init_image") or None,
-            "steps_high": int(payload.get("steps_high", 2)),
-            "steps_low": int(payload.get("steps_low", 2)),
-            "sampler": str(payload.get("sampler") or "euler"),
-            "cfg": float(payload.get("cfg", 1.0)),
-            "num_frames": int(payload.get("num_frames", 32)),
-            "fps": int(payload.get("fps", 24)),
-            "resolution": str(payload.get("resolution") or "720x512"),
+            "negative_prompt": negative_prompt,
+            "seed": seed,
+            "steps": _clamp_int(payload.get("steps", 25), 25, 1, 50),
+            "guidance": _clamp_float(payload.get("guidance", 6.0), 6.0, 0.0, 12.0),
+            "width": _clamp_int(payload.get("width", 512), 512, 256, 512),
+            "height": _clamp_int(payload.get("height", 512), 512, 256, 512),
+            "frames": _clamp_int(payload.get("frames", 48), 48, 1, 48),
+            "fps": _clamp_int(payload.get("fps", 8), 8, 1, 8),
         }
         job_data = json.dumps(settings)
         task_type = "VIDEO_GEN"
@@ -1941,75 +1905,6 @@ def submit_faceswap_job_endpoint() -> Any:
         job_id = enqueue_job(wallet, cfg.get("name", model_name), "FACE_SWAP", job_data, float(weight))
     log_event("Face-swap job queued", wallet=wallet, model=model_name, job_id=job_id)
     return jsonify({"status": "queued", "job_id": job_id}), 200
-
-
-@app.route("/generate-video", methods=["POST"])
-def generate_video() -> Any:
-    """Trigger a WAN 2.2 GGUF T2V/I2V job via background worker."""
-
-    data = request.get_json() or {}
-    prompt = str(data.get("prompt", "")).strip()
-    negative_raw = str(data.get("negative_prompt") or "")
-    block_reason = _safety_block_reason(prompt, negative_raw)
-    if block_reason:
-        return jsonify({"error": "prompt_blocked", "reason": block_reason}), 400
-    if not prompt:
-        return jsonify({"error": "prompt is required"}), 400
-
-    negative_prompt = str(data.get("negative_prompt", "")).strip()
-    motion_type = str(data.get("motion_type", "high")).strip().lower() or "high"
-    lora_list = data.get("lora_list") or []
-    if not isinstance(lora_list, list):
-        return jsonify({"error": "lora_list must be an array"}), 400
-    normalized_loras: List[str] = []
-    for entry in lora_list:
-        if isinstance(entry, dict):
-            local_path = _download_lora_asset(entry, VIDEO_ENGINE.registry.paths.loras_dir)
-            normalized_loras.append(local_path.stem)
-            continue
-        if isinstance(entry, str):
-            name = entry.strip()
-            if name:
-                normalized_loras.append(name)
-
-    duration = float(data.get("duration", 4.0) or 4.0)
-    fps = int(data.get("fps", 24) or 24)
-    fps = max(1, min(fps, 60))
-    width = int(data.get("width", 720) or 720)
-    height = int(data.get("height", 512) or 512)
-
-    job_request = VideoJobRequest(
-        prompt=prompt,
-        negative_prompt=negative_prompt,
-        motion_type=motion_type,
-        lora_list=normalized_loras,
-        init_image_b64=data.get("init_image"),
-        duration=duration,
-        fps=fps,
-        width=width,
-        height=height,
-    )
-    job_id = submit_video_job(job_request)
-    job = get_video_job(job_id) or {}
-    response = {
-        "job_id": job_id,
-        "status": job.get("status", "queued"),
-        "mode": job.get("mode"),
-        "fps": fps,
-        "duration": duration,
-        "frames_dir": job.get("frames_dir"),
-        "videos_dir": job.get("videos_dir"),
-        "engine": VIDEO_ENGINE.describe(),
-    }
-    return jsonify(response), 202
-
-
-@app.route("/generate-video/<job_id>", methods=["GET"])
-def video_job_status(job_id: str) -> Any:
-    job = get_video_job(job_id)
-    if not job:
-        return jsonify({"error": "job not found"}), 404
-    return jsonify(job), 200
 
 
 @app.route("/register", methods=["POST"])
@@ -2236,17 +2131,17 @@ def get_creator_tasks() -> Any:
                     task_payload[key] = task[key]
             if task.get("loras"):
                 task_payload["loras"] = task.get("loras")
-            # If this is a WAN I2V video job, attempt to expose structured settings to the node
+            # If this is an LTX2 job, surface structured controls directly on the task payload
             if task_payload["type"].upper() == "VIDEO_GEN":
                 try:
-                    raw = task.get("data") or ""
-                    settings = json.loads(raw) if isinstance(raw, str) else {}
+                    raw_ltx2 = task.get("data") or ""
+                    ltx2_settings = json.loads(raw_ltx2) if isinstance(raw_ltx2, str) else {}
                 except Exception:
-                    settings = {}
-                if isinstance(settings, dict):
-                    for key in ("num_frames", "fps", "steps_high", "steps_low", "cfg", "sampler", "resolution", "init_image"):
-                        if key in settings:
-                            task_payload[key] = settings[key]
+                    ltx2_settings = {}
+                if isinstance(ltx2_settings, dict):
+                    for key in ("prompt", "negative_prompt", "seed", "steps", "guidance", "width", "height", "frames", "fps"):
+                        if key in ltx2_settings and ltx2_settings[key] is not None:
+                            task_payload[key] = ltx2_settings[key]
             # If this is an AnimateDiff job, surface rich controls directly on the task payload
             if task_payload["type"].upper() == "ANIMATEDIFF":
                 try:
@@ -2791,7 +2686,7 @@ def get_result(job_id: str) -> Any:
     """
     Return a simple JSON payload describing where the result artifact lives.
 
-    For video jobs (WAN I2V or AnimateDiff), this exposes the MP4 download URL
+    For video jobs (LTX2/AnimateDiff), this exposes the MP4 download URL
     under ``/static/outputs/videos/<job_id>.mp4`` if it exists.
     """
     if not job_id:

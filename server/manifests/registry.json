@@ -291,91 +291,17 @@
       "negative_prompt_default": "extra limbs, extra fingers, bad hands, bad anatomy, distorted face"
     },
     {
-      "id": "wan_dr34ml4y_nsfw",
-      "name": "WAN-Dr34mL4y All-in-One NSFW",
-      "description": "Single powerful LoRA for high-quality NSFW image-to-video with dozens of positions and concepts.",
-      "type": "wan_i2v",
-      "pipeline": "image_to_video",
-      "base_model": "wan_2.2",
-      "lora": {
-        "url": "https://civitai.com/api/download/models/2036932",
-        "filename": "DR34ML4Y_I2V_14B_HIGH_v2.safetensors",
-        "strength": 1.0,
-        "trigger_words": []
-      },
-      "weight": 9.0,
-      "nsfw": true,
-      "recommended_params": {
-        "steps": 28,
-        "cfg": 7.0,
-        "sampler": "dpm++_2m_karras",
-        "resolution": [768, 768],
-        "motion_bucket_id": 127,
-        "fps": 16,
-        "augmentation_level": 0.0
-      },
-      "tags": ["nsfw", "video", "wan", "lora", "all-in-one", "i2v"]
-    },
-    {
-      "name": "wan_t2v_a14b",
-      "pipeline": "wan",
-      "path": "/mnt/d/havnai-storage/models/video/wan-2.2/T2V-A14B",
+      "name": "ltx2",
+      "pipeline": "ltx2",
+      "path": "maxin-cn/Latte-1",
       "type": "diffusers",
       "tags": [
         "video",
-        "text2video"
+        "ltx2",
+        "latte"
       ],
       "task_type": "VIDEO_GEN",
       "reward_weight": 20.0
-    },
-    {
-      "name": "wan_ti2v_5b_diffusers",
-      "pipeline": "wan",
-      "path": "/mnt/d/havnai-storage/models/video/wan-2.2/TI2V-5B-Diffusers",
-      "type": "diffusers",
-      "tags": [
-        "video",
-        "text2video"
-      ],
-      "task_type": "VIDEO_GEN",
-      "reward_weight": 20.0
-    },
-    {
-      "name": "wan22_ti2v_5b",
-      "pipeline": "wan",
-      "path": "/mnt/d/havnai-storage/models/video/wan-2.2/Wan2.2-TI2V-5B",
-      "type": "diffusers",
-      "tags": [
-        "video",
-        "text2video"
-      ],
-      "task_type": "VIDEO_GEN",
-      "reward_weight": 22.0
-    },
-    {
-      "name": "wan22_enhanced_camera_prompt",
-      "pipeline": "wan",
-      "path": "/mnt/d/havnai-storage/models/video/wan-2.2/wan22EnhancedCameraPrompt_t2vHIGH.safetensors",
-      "type": "checkpoint",
-      "tags": [
-        "video",
-        "prompt"
-      ],
-      "task_type": "VIDEO_GEN",
-      "reward_weight": 5.0
-    },
-    {
-      "name": "wan-i2v",
-      "pipeline": "wan-i2v",
-      "path": "/mnt/d/havnai-storage/models/video/wan-i2v/wan_2.2_lightning.safetensors",
-      "type": "checkpoint",
-      "tags": [
-        "video",
-        "i2v",
-        "t2v"
-      ],
-      "task_type": "VIDEO_GEN",
-      "reward_weight": 22.0
     },
     {
       "name": "animatediff",

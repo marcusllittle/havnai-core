@@ -12,8 +12,8 @@ class JobSpec:
     wallet: str
     model: str
     prompt: str
-    # Optional structured fields for richer job types such as WAN video
-    # and AnimateDiff video generation. Coordinators and nodes may choose
+    # Optional structured fields for richer job types such as AnimateDiff video generation.
+    # Coordinators and nodes may choose
     # to use these directly or pass them through inside ``settings``.
     negative_prompt: str = ""
     frames: int = 0

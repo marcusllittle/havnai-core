@@ -311,9 +311,4 @@ To tail logs (Linux systemd):
 
 Creator mode: set CREATOR_MODE=true in $ENV_FILE and place models in $HAVNAI_HOME/models/creator
 
-WAN I2V (optional, for video jobs):
-- Ensure ffmpeg is installed and on PATH (e.g. 'sudo apt-get install -y ffmpeg' on Debian/Ubuntu).
-- Download any WAN I2V safetensor checkpoints to the paths referenced in your coordinator manifest
-  (for example: /mnt/d/havnai-storage/models/video/wan-i2v/wan_2.2_lightning.safetensors).
-- Keep this node in CREATOR_MODE=true if you want it to process WAN video tasks.
 SUMMARY

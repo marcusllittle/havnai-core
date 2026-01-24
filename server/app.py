@@ -1381,17 +1381,19 @@ def join_page() -> Any:
       <h1>Join the HavnAI GPU Grid</h1>
       <p>Run the installer on your GPU machine:</p>
       <pre><code>{install_cmd}</code></pre>
+      <p>If you have a join token, append <code>--token &lt;TOKEN&gt;</code>. To prefill a wallet, add <code>--wallet 0x...</code>.</p>
       <h2>Prerequisites</h2>
       <ul>
-        <li>64-bit Linux (Ubuntu/Debian/RHEL) or macOS (12+)</li>
-        <li>Python 3.10 or newer, curl, and a GPU driver/runtime</li>
-        <li>$HAI wallet address (EVM compatible)</li>
+        <li>64-bit Linux (Ubuntu/Debian/RHEL) or macOS 12+</li>
+        <li>Python 3.10+, curl, and a GPU driver/runtime (NVIDIA + CUDA recommended)</li>
+        <li>12 GB+ NVIDIA GPU recommended for creator/video workloads (CPU nodes still supported)</li>
+        <li>EVM wallet address (simulated rewards in Alpha)</li>
       </ul>
       <h2>What happens next?</h2>
       <ol>
-        <li>Installer prepares <code>~/.havnai</code>, Python venv, and the node binary</li>
-        <li>Configure your wallet inside <code>~/.havnai/.env</code></li>
-        <li>Enable the service (systemd or launchd)</li>
+        <li>Installer prepares <code>~/.havnai</code>, Python venv, and the node client</li>
+        <li>Configure <code>WALLET</code> / <code>JOIN_TOKEN</code> inside <code>~/.havnai/.env</code> (or pass flags)</li>
+        <li>Start the service (systemd or launchd) or run directly</li>
         <li>Monitor progress via <a href=\"/dashboard\">dashboard</a> and <a href=\"/network/leaderboard\">leaderboard</a></li>
       </ol>
       <p>Need the join token or help? Contact the grid operator.</p>

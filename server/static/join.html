@@ -14,9 +14,23 @@
 <body>
   <h1>Join the HavnAI GPU Grid</h1>
   <p>Run this installer on your GPU machine. Replace <code>&lt;server&gt;</code> with your coordinator address if different.</p>
-  <pre>curl -fsSL http://&lt;server&gt;:5001/static/install-node.sh | bash -s -- --server http://&lt;server&gt;:5001</pre>
-  <p>If you have a join token, append <code>--token &lt;TOKEN&gt;</code>.</p>
+  <pre>curl -fsSL http://&lt;server&gt;:5001/installers/install-node.sh | bash -s -- --server http://&lt;server&gt;:5001</pre>
+  <p>If you have a join token, append <code>--token &lt;TOKEN&gt;</code>. To prefill a wallet, add <code>--wallet 0x...</code>.</p>
+  <h2>Prerequisites</h2>
+  <ul>
+    <li>64-bit Linux (Ubuntu/Debian/RHEL) or macOS 12+</li>
+    <li>Python 3.10+, curl, and a GPU driver/runtime (NVIDIA + CUDA recommended)</li>
+    <li>12 GB+ NVIDIA GPU recommended for creator/video workloads (CPU nodes still supported)</li>
+    <li>EVM wallet address (simulated rewards in Alpha)</li>
+  </ul>
+  <h2>What happens next?</h2>
+  <ol>
+    <li>Installer prepares <code>~/.havnai</code>, Python venv, and the node client</li>
+    <li>Configure <code>WALLET</code> / <code>JOIN_TOKEN</code> inside <code>~/.havnai/.env</code> (or pass flags)</li>
+    <li>Start the service (systemd or launchd) or run directly</li>
+    <li>Monitor progress via <a href="/dashboard">dashboard</a> and <a href="/network/leaderboard">leaderboard</a></li>
+  </ol>
   <p>To disconnect later:</p>
-  <pre>curl -X DELETE http://&lt;server&gt;:5001/unregister -H 'Content-Type: application/json' -d '{"node_id":"&lt;your-hostname&gt;"}'</pre>
+  <pre>curl -X POST http://&lt;server&gt;:5001/disconnect -H 'Content-Type: application/json' -d '{"node_id":"&lt;your-hostname&gt;"}'</pre>
 </body>
 </html>

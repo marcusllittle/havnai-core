@@ -90,6 +90,34 @@ def _save_video_frames(frames_np: Any, output_path: Path, fps: int, log_fn: LogF
         writer.release()
 
 
+def _normalize_video_frames(frames_np: Any) -> Any:
+    """Ensure frames are shaped (F, H, W[, C]) with channels in the last dim."""
+    try:
+        import numpy as np  # type: ignore
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError("numpy is required to normalize LTX2 frames") from exc
+
+    arr = frames_np
+    if not isinstance(arr, np.ndarray):
+        arr = np.array(arr)
+
+    # Drop batch dimension if present.
+    if arr.ndim == 5 and arr.shape[0] == 1:
+        arr = arr[0]
+
+    if arr.ndim == 4:
+        if arr.shape[-1] in {1, 3, 4}:
+            return arr
+        if arr.shape[1] in {1, 3, 4}:
+            return arr.transpose(0, 2, 3, 1)
+        if arr.shape[0] in {1, 3, 4} and arr.shape[-1] not in {1, 3, 4}:
+            return arr.transpose(1, 2, 3, 0)
+    if arr.ndim == 3:
+        return arr
+
+    raise RuntimeError(f"Unexpected LTX2 frame shape: {arr.shape}")
+
+
 def run_ltx2(
     job: Dict[str, Any],
     *,
@@ -147,7 +175,36 @@ def run_ltx2(
             seed=seed,
             model_id=model_ref,
         )
-        frames_np = (video_frames.detach().cpu().numpy() * 255).clip(0, 255).astype("uint8")
+        frames_np = None
+        if torch is not None and isinstance(video_frames, torch.Tensor):
+            frames_np = (video_frames.detach().cpu().numpy() * 255).clip(0, 255).astype("uint8")
+        elif isinstance(video_frames, (list, tuple)):
+            if not video_frames:
+                raise RuntimeError("ltx2 returned empty frame list")
+            first = video_frames[0]
+            if torch is not None and isinstance(first, torch.Tensor):
+                stack = torch.stack(list(video_frames), dim=0)
+                frames_np = (stack.detach().cpu().numpy() * 255).clip(0, 255).astype("uint8")
+            else:
+                try:
+                    import numpy as np  # type: ignore
+                except Exception as exc:
+                    raise RuntimeError("numpy is required to convert LTX2 frames") from exc
+                frames_np = np.stack([np.array(frame) for frame in video_frames])
+                if frames_np.dtype != "uint8":
+                    frames_np = (frames_np * 255).clip(0, 255).astype("uint8")
+        else:
+            try:
+                import numpy as np  # type: ignore
+            except Exception as exc:
+                raise RuntimeError("numpy is required to convert LTX2 frames") from exc
+            if isinstance(video_frames, np.ndarray):
+                frames_np = video_frames
+                if frames_np.dtype != "uint8":
+                    frames_np = (frames_np * 255).clip(0, 255).astype("uint8")
+        if frames_np is None:
+            raise RuntimeError("Unsupported LTX2 frame format")
+        frames_np = _normalize_video_frames(frames_np)
         _save_video_frames(frames_np, output_path, fps, log_fn)
     except RuntimeError as exc:
         status = "failed"

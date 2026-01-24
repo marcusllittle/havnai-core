@@ -1,6 +1,7 @@
 """Latte-1 (LTX2) pipeline helpers."""
 from __future__ import annotations
 
+import inspect
 import threading
 from pathlib import Path
 from typing import Any, Optional
@@ -75,13 +76,26 @@ def generate_video_frames(
         except Exception:
             pass
 
-    result = pipe(
-        prompt=prompt,
-        negative_prompt=negative_prompt,
-        num_inference_steps=steps,
-        guidance_scale=guidance,
-        width=width,
-        height=height,
-        num_frames=frames,
-    )
+    call_kwargs = {
+        "prompt": prompt,
+        "negative_prompt": negative_prompt,
+        "num_inference_steps": steps,
+        "guidance_scale": guidance,
+        "width": width,
+        "height": height,
+    }
+    # Diffusers LattePipeline changed "num_frames" -> "video_length" in newer releases.
+    try:
+        sig = inspect.signature(pipe.__call__)
+        if "num_frames" in sig.parameters:
+            call_kwargs["num_frames"] = frames
+        elif "video_length" in sig.parameters:
+            call_kwargs["video_length"] = frames
+        if "output_type" in sig.parameters:
+            call_kwargs["output_type"] = "pt"
+    except Exception:
+        # Best-effort fallback if signature introspection fails.
+        call_kwargs["num_frames"] = frames
+
+    result = pipe(**call_kwargs)
     return result.frames[0]

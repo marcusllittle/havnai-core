@@ -15,9 +15,9 @@ import random
 import requests
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from flask import abort, Flask, jsonify, request, send_file, send_from_directory, g, has_app_context
 from flask_cors import CORS
@@ -70,6 +70,10 @@ WALLET_REGEX = re.compile(r"^0x[a-fA-F0-9]{40}$")
 SERVER_JOIN_TOKEN = os.getenv("SERVER_JOIN_TOKEN", "").strip()
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "").strip()
 RESET_ON_STARTUP = os.getenv("RESET_ON_STARTUP", "").strip()
+INVITE_CONFIG_PATH = Path(
+    os.getenv("HAVNAI_INVITE_CONFIG", str(BASE_DIR / "server" / "invites.json"))
+)
+INVITE_GATING = os.getenv("HAVNAI_INVITE_GATING", "").strip().lower() in {"1", "true", "yes"}
 
 # Reward configuration (can be overridden via environment variables)
 REWARD_CONFIG: Dict[str, float] = {
@@ -538,6 +542,151 @@ def rate_limit(key: str, limit: int, per_seconds: int = 60) -> bool:
     return True
 
 
+def load_invite_config() -> Dict[str, Dict[str, Any]]:
+    if not INVITE_CONFIG_PATH.exists():
+        return {}
+    try:
+        raw = json.loads(INVITE_CONFIG_PATH.read_text())
+    except Exception as exc:
+        LOGGER.error("Failed to parse invite config: %s", exc)
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    config: Dict[str, Dict[str, Any]] = {}
+    for code, entry in raw.items():
+        if not isinstance(code, str) or not isinstance(entry, dict):
+            continue
+        config[code] = entry
+    return config
+
+
+def invite_gating_enabled(invite_config: Dict[str, Dict[str, Any]]) -> bool:
+    if INVITE_GATING:
+        return True
+    return bool(invite_config)
+
+
+def extract_invite_code(payload: Dict[str, Any]) -> str:
+    header_code = request.headers.get("X-INVITE-CODE", "").strip()
+    body_code = str(payload.get("invite_code") or "").strip()
+    return header_code or body_code
+
+
+def invite_error_response() -> Any:
+    return jsonify({"error": "invite_required", "message": "Invite code required."}), 403
+
+
+def quota_payload(
+    max_daily: int,
+    used_today: int,
+    max_concurrent: int,
+    used_concurrent: int,
+    reset_at: str,
+) -> Dict[str, Any]:
+    return {
+        "max_daily": max_daily,
+        "used_today": used_today,
+        "max_concurrent": max_concurrent,
+        "used_concurrent": used_concurrent,
+        "reset_at": reset_at,
+    }
+
+
+def quota_limit_response(
+    max_daily: int,
+    used_today: int,
+    max_concurrent: int,
+    used_concurrent: int,
+    reset_at: str,
+) -> Any:
+    payload = {
+        "error": "rate_limited",
+        "message": "Invite quota exceeded.",
+    }
+    payload.update(quota_payload(max_daily, used_today, max_concurrent, used_concurrent, reset_at))
+    return jsonify(payload), 429
+
+
+def resolve_invite_limits(
+    invite_code: str, invite_config: Dict[str, Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
+    entry = invite_config.get(invite_code)
+    if not entry:
+        return None
+    if entry.get("enabled") is False:
+        return None
+    return entry
+
+
+def compute_invite_usage(invite_code: str) -> Dict[str, Any]:
+    conn = get_db()
+    now = datetime.now(timezone.utc)
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    midnight_ts = midnight.timestamp()
+    reset_at = (midnight + timedelta(days=1)).isoformat().replace("+00:00", "Z")
+
+    statuses = ("queued", "running", "assigned", "uploading")
+    concurrent = conn.execute(
+        f"""
+        SELECT COUNT(*) FROM jobs
+        WHERE invite_code=?
+          AND status IN ({",".join("?" for _ in statuses)})
+        """,
+        (invite_code, *statuses),
+    ).fetchone()[0]
+    used_today = conn.execute(
+        """
+        SELECT COUNT(*) FROM jobs
+        WHERE invite_code=?
+          AND timestamp >= ?
+        """,
+        (invite_code, midnight_ts),
+    ).fetchone()[0]
+    return {
+        "used_today": int(used_today or 0),
+        "used_concurrent": int(concurrent or 0),
+        "reset_at": reset_at,
+    }
+
+
+def enforce_invite_quota(
+    payload: Dict[str, Any]
+) -> Tuple[Optional[str], Optional[Dict[str, Any]], Optional[Any]]:
+    invite_config = load_invite_config()
+    if not invite_gating_enabled(invite_config):
+        return None, None, None
+
+    invite_code = extract_invite_code(payload)
+    if not invite_code:
+        return None, None, invite_error_response()
+
+    limits = resolve_invite_limits(invite_code, invite_config)
+    if not limits:
+        return None, None, invite_error_response()
+
+    usage = compute_invite_usage(invite_code)
+    max_daily = int(limits.get("max_daily") or 0)
+    max_concurrent = int(limits.get("max_concurrent") or 0)
+    used_today = usage["used_today"]
+    used_concurrent = usage["used_concurrent"]
+    reset_at = usage["reset_at"]
+
+    if max_daily > 0 and used_today >= max_daily:
+        return invite_code, usage, quota_limit_response(
+            max_daily, used_today, max_concurrent, used_concurrent, reset_at
+        )
+    if max_concurrent > 0 and used_concurrent >= max_concurrent:
+        return invite_code, usage, quota_limit_response(
+            max_daily, used_today, max_concurrent, used_concurrent, reset_at
+        )
+    return invite_code, usage, None
+
+
+def enforce_invite_limits(payload: Dict[str, Any]) -> Tuple[Optional[str], Optional[Any]]:
+    invite_code, _usage, error = enforce_invite_quota(payload)
+    return invite_code, error
+
+
 def _compile_phrase_patterns(phrases: List[str]) -> List[re.Pattern]:
     patterns: List[re.Pattern] = []
     for phrase in phrases:
@@ -759,10 +908,14 @@ def init_db() -> None:
             node_id TEXT,
             timestamp REAL NOT NULL,
             assigned_at REAL,
-            completed_at REAL
+            completed_at REAL,
+            invite_code TEXT
         )
         """
     )
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+    if "invite_code" not in columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN invite_code TEXT")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS rewards (
@@ -933,16 +1086,23 @@ log_event(f"Telemetry online with {len(NODES)} cached node(s).", version=APP_VER
 # ---------------------------------------------------------------------------
 
 
-def enqueue_job(wallet: str, model: str, task_type: str, data: str, weight: float) -> str:
+def enqueue_job(
+    wallet: str,
+    model: str,
+    task_type: str,
+    data: str,
+    weight: float,
+    invite_code: Optional[str] = None,
+) -> str:
     job_id = f"job-{uuid.uuid4().hex[:12]}"
     task_type = (task_type or CREATOR_TASK_TYPE).upper()
     conn = get_db()
     conn.execute(
         """
-        INSERT INTO jobs (id, wallet, model, data, task_type, weight, status, node_id, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?, 'queued', NULL, ?)
+        INSERT INTO jobs (id, wallet, model, data, task_type, weight, status, node_id, timestamp, invite_code)
+        VALUES (?, ?, ?, ?, ?, ?, 'queued', NULL, ?, ?)
         """,
-        (job_id, wallet, model, data, task_type, float(weight), unix_now()),
+        (job_id, wallet, model, data, task_type, float(weight), unix_now(), invite_code),
     )
     conn.commit()
     return job_id
@@ -1196,6 +1356,10 @@ def get_job_summary(limit: int = 50) -> Dict[str, Any]:
         has_image = image_path.exists()
         image_url = f"/static/outputs/{image_filename}" if has_image else None
         output_path = str(image_path) if has_image else None
+        videos_dir = OUTPUTS_DIR / "videos"
+        video_path = videos_dir / f"{row['id']}.mp4"
+        has_video = video_path.exists()
+        video_url = f"/static/outputs/videos/{row['id']}.mp4" if has_video else None
         timestamp_value = row["timestamp"]
         submitted_iso = (
             datetime.fromtimestamp(timestamp_value, timezone.utc).isoformat().replace("+00:00", "Z")
@@ -1216,6 +1380,7 @@ def get_job_summary(limit: int = 50) -> Dict[str, Any]:
                 "completed_at": completed_iso,
                 "submitted_at": submitted_iso,
                 "image_url": image_url,
+                "video_url": video_url,
                 "output_path": output_path,
             }
         )
@@ -1657,6 +1822,9 @@ def submit_job() -> Any:
     if not rate_limit(f"submit-job:{request.remote_addr}", limit=30):
         return jsonify({"error": "rate limit"}), 429
     payload = request.get_json() or {}
+    invite_code, invite_error = enforce_invite_limits(payload)
+    if invite_error:
+        return invite_error
     prompt_raw = str(payload.get("prompt") or payload.get("data") or "")
     negative_raw = str(payload.get("negative_prompt") or "")
     block_reason = _safety_block_reason(prompt_raw, negative_raw)
@@ -1864,8 +2032,102 @@ def submit_job() -> Any:
         task_type = CREATOR_TASK_TYPE
 
     with LOCK:
-        job_id = enqueue_job(wallet, cfg.get("name", model_name), task_type, job_data, float(weight))
+        job_id = enqueue_job(
+            wallet,
+            cfg.get("name", model_name),
+            task_type,
+            job_data,
+            float(weight),
+            invite_code,
+        )
     log_event("Public job queued", wallet=wallet, model=model_name, job_id=job_id)
+    return jsonify({"status": "queued", "job_id": job_id}), 200
+
+
+@app.route("/generate-video", methods=["POST"])
+def generate_video_job() -> Any:
+    if not rate_limit(f"generate-video:{request.remote_addr}", limit=30):
+        return jsonify({"error": "rate limit"}), 429
+    payload = request.get_json() or {}
+    invite_code, invite_error = enforce_invite_limits(payload)
+    if invite_error:
+        return invite_error
+
+    prompt_text = str(payload.get("prompt") or "").strip()
+    if not prompt_text:
+        return jsonify({"error": "missing prompt"}), 400
+
+    wallet = str(payload.get("wallet", "")).strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+
+    model_name_raw = str(payload.get("model") or "ltx2").strip()
+    model_name = model_name_raw.lower()
+    load_manifest()
+    cfg = get_model_config(model_name)
+    if not cfg:
+        return jsonify({"error": "unknown model"}), 400
+
+    weight = payload.get("weight")
+    if weight is None:
+        weight = cfg.get("reward_weight", resolve_weight(model_name, 10.0))
+
+    seed = payload.get("seed")
+    try:
+        seed = int(seed) if seed is not None else None
+    except (TypeError, ValueError):
+        seed = None
+    if seed is None:
+        seed = random.randint(0, 2**31 - 1)
+
+    fps = _clamp(_coerce_int(payload.get("fps", 8), 8), 1, 8)
+    duration = payload.get("duration")
+    frames = payload.get("frames")
+    if frames is None and duration is not None:
+        try:
+            frames = int(float(duration) * fps)
+        except (TypeError, ValueError):
+            frames = None
+    frames = _clamp(_coerce_int(frames or 48, 48), 1, 48)
+
+    steps = _clamp(_coerce_int(payload.get("steps", 25), 25), 1, 50)
+    guidance = _coerce_float(payload.get("guidance", 6.0), 6.0)
+    guidance = max(0.0, min(guidance, 12.0))
+    width = _clamp(_coerce_int(payload.get("width", 512), 512), 256, 512)
+    height = _clamp(_coerce_int(payload.get("height", 512), 512), 256, 512)
+
+    settings: Dict[str, Any] = {
+        "prompt": prompt_text,
+        "negative_prompt": str(payload.get("negative_prompt") or "").strip(),
+        "seed": seed,
+        "steps": steps,
+        "guidance": guidance,
+        "width": width,
+        "height": height,
+        "frames": frames,
+        "fps": fps,
+    }
+    motion_type = payload.get("motion_type")
+    if motion_type:
+        settings["motion_type"] = motion_type
+    lora_list = payload.get("lora_list")
+    if lora_list:
+        settings["lora_list"] = lora_list
+    init_image = payload.get("init_image")
+    if init_image:
+        settings["init_image"] = init_image
+
+    job_data = json.dumps(settings)
+    with LOCK:
+        job_id = enqueue_job(
+            wallet,
+            cfg.get("name", model_name),
+            "VIDEO_GEN",
+            job_data,
+            float(weight),
+            invite_code,
+        )
+    log_event("Video job queued", wallet=wallet, model=model_name, job_id=job_id)
     return jsonify({"status": "queued", "job_id": job_id}), 200
 
 
@@ -1874,6 +2136,9 @@ def submit_faceswap_job_endpoint() -> Any:
     if not rate_limit(f"submit-faceswap-job:{request.remote_addr}", limit=30):
         return jsonify({"error": "rate limit"}), 429
     payload = request.get_json() or {}
+    invite_code, invite_error = enforce_invite_limits(payload)
+    if invite_error:
+        return invite_error
     wallet = str(payload.get("wallet", "")).strip()
     model_name_raw = str(payload.get("model") or "epicrealismxl_vxviicrystalclear").strip()
     model_name = model_name_raw.lower()
@@ -1904,7 +2169,14 @@ def submit_faceswap_job_endpoint() -> Any:
 
     job_data = json.dumps(settings)
     with LOCK:
-        job_id = enqueue_job(wallet, cfg.get("name", model_name), "FACE_SWAP", job_data, float(weight))
+        job_id = enqueue_job(
+            wallet,
+            cfg.get("name", model_name),
+            "FACE_SWAP",
+            job_data,
+            float(weight),
+            invite_code,
+        )
     log_event("Face-swap job queued", wallet=wallet, model=model_name, job_id=job_id)
     return jsonify({"status": "queued", "job_id": job_id}), 200
 
@@ -2496,6 +2768,34 @@ def job_detail(job_id: str) -> Any:
             "reward_factors": reward_factors,
             "data": payload,
         }
+    )
+
+
+@app.route("/quota", methods=["GET"])
+def quota_status() -> Any:
+    invite_config = load_invite_config()
+    if not invite_gating_enabled(invite_config):
+        return jsonify(
+            quota_payload(0, 0, 0, 0, iso_now())
+        )
+    invite_code = extract_invite_code({})
+    if not invite_code:
+        return invite_error_response()
+    limits = resolve_invite_limits(invite_code, invite_config)
+    if not limits:
+        return invite_error_response()
+
+    usage = compute_invite_usage(invite_code)
+    max_daily = int(limits.get("max_daily") or 0)
+    max_concurrent = int(limits.get("max_concurrent") or 0)
+    return jsonify(
+        quota_payload(
+            max_daily,
+            usage["used_today"],
+            max_concurrent,
+            usage["used_concurrent"],
+            usage["reset_at"],
+        )
     )
 
 

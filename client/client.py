@@ -55,6 +55,10 @@ try:
     except Exception:  # pragma: no cover
         _SDXLPipe = None  # type: ignore
     try:
+        from diffusers import ZImagePipeline as _ZImagePipe  # type: ignore
+    except Exception:  # pragma: no cover
+        _ZImagePipe = None  # type: ignore
+    try:
         from diffusers import LattePipeline as _LattePipe  # type: ignore
     except Exception:  # pragma: no cover
         _LattePipe = None  # type: ignore
@@ -72,6 +76,7 @@ except ImportError:  # pragma: no cover
     _AutoPipe = None  # type: ignore
     _SDPipe = None  # type: ignore
     _SDXLPipe = None  # type: ignore
+    _ZImagePipe = None  # type: ignore
     _LattePipe = None  # type: ignore
     _DPMSolver = None  # type: ignore
     _EulerA = None  # type: ignore
@@ -323,6 +328,8 @@ def build_node_capabilities() -> (List[str], List[str]):
     if ROLE == "creator":
         supports.append("image")
         pipelines.extend(["sd15", "sdxl"])
+        if _ZImagePipe is not None:
+            pipelines.append("zimage")
         ready, reason = check_ltx2_ready()
         global _LTX2_LAST_READY, _LTX2_LAST_REASON
         if _LTX2_LAST_READY is None or ready != _LTX2_LAST_READY or reason != _LTX2_LAST_REASON:
@@ -1038,6 +1045,8 @@ def execute_task(task: Dict[str, Any]) -> None:
             model_lora=model_lora,
             pipeline_hint=model_pipeline,
             image_settings=image_settings or None,
+            negative_prompt=str(task.get("negative_prompt") or ""),
+            model_path_override=str(task.get("model_path") or ""),
         )
     elif task_type == "video_gen" or str(task.get("pipeline") or "").lower() == "ltx2" or str(task.get("engine") or "").lower() == "ltx2":
         from engines.ltx2.ltx2_runner import run_ltx2, video_to_b64
@@ -1420,6 +1429,8 @@ def run_image_generation(
     model_lora: Optional[Any] = None,
     pipeline_hint: Optional[str] = None,
     image_settings: Optional[Dict[str, Any]] = None,
+    negative_prompt: str = "",
+    model_path_override: Optional[str] = None,
 ) -> (Dict[str, Any], int, Optional[str]):
     """Run SD image generation with explicit pipeline and env-driven settings."""
 
@@ -1458,10 +1469,19 @@ def run_image_generation(
             return ""
         return str(image_settings[name] or "").strip()
 
-    try:
-        model_path = resolve_model_path(model_name, model_url, filename_hint=f"{model_name}.safetensors")
-    except Exception as exc:
-        return ({"status": "failed", "error": str(exc), "reward_weight": reward_weight}, utilization_hint, None)
+    model_path: Optional[Path] = None
+    if model_path_override:
+        try:
+            candidate = Path(model_path_override).expanduser()
+            if candidate.exists():
+                model_path = candidate
+        except Exception:
+            model_path = None
+    if model_path is None:
+        try:
+            model_path = resolve_model_path(model_name, model_url, filename_hint=f"{model_name}.safetensors")
+        except Exception as exc:
+            return ({"status": "failed", "error": str(exc), "reward_weight": reward_weight}, utilization_hint, None)
 
     steps = _env_int("HAI_STEPS", 65)
     guidance = _env_float("HAI_GUIDANCE", 8.2)
@@ -1485,6 +1505,7 @@ def run_image_generation(
     width = max(64, width - (width % 8))
     height = max(64, height - (height % 8))
     pipeline_hint_norm = str(pipeline_hint or "").lower()
+    is_zimage = pipeline_hint_norm in {"zimage", "z-image", "z_image"}
     is_xl = "sdxl" in pipeline_hint_norm or ("xl" in pipeline_hint_norm if pipeline_hint_norm else "xl" in model_name.lower())
 
     start_stats = read_gpu_stats()
@@ -1502,10 +1523,30 @@ def run_image_generation(
             log("Loading text2image pipeline…", prefix="ℹ️", device=device)
             load_t0 = time.time()
 
+            z_dtype = dtype
+            if device == "cuda" and hasattr(torch.cuda, "is_bf16_supported"):
+                try:
+                    if torch.cuda.is_bf16_supported():
+                        z_dtype = torch.bfloat16
+                except Exception:
+                    pass
+
             pipe = None
+            if is_zimage:
+                if _ZImagePipe is None and _AutoPipe is None:
+                    raise RuntimeError("ZImage pipeline not available in this diffusers build.")
+                try:
+                    if _ZImagePipe is not None:
+                        pipe = _ZImagePipe.from_pretrained(str(model_path), torch_dtype=z_dtype)
+                    else:
+                        pipe = _AutoPipe.from_pretrained(str(model_path), torch_dtype=z_dtype)
+                except Exception as exc:
+                    log(f"ZImage pipeline load failed: {exc}", prefix="⚠️")
+                    raise
+
             # For XL checkpoints prefer StableDiffusionXLPipeline when
             # available, otherwise fall back to SD1.5 pipeline as a best-effort.
-            if is_xl and _SDXLPipe is not None:
+            if pipe is None and is_xl and _SDXLPipe is not None:
                 try:
                     pipe = _SDXLPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
                 except Exception as exc:
@@ -1554,34 +1595,35 @@ def run_image_generation(
                 if loaded_loras:
                     log(f"Attached {len(loaded_loras)} LoRA(s)", prefix="✅")
 
-            scheduler_set = False
-            sampler = sampler_name.lower() if sampler_name else "dpmpp_2m_karras"
-            if sampler in {"euler_a", "euler-ancestral", "euler_ancestral"} and _EulerA is not None:
-                pipe.scheduler = _EulerA.from_config(pipe.scheduler.config)  # type: ignore[attr-defined]
-                scheduler_set = True
-            elif sampler in {"euler", "euler_discrete"} and _Euler is not None:
-                pipe.scheduler = _Euler.from_config(pipe.scheduler.config)  # type: ignore[attr-defined]
-                scheduler_set = True
-            elif _DPMSolver is not None:
-                pipe.scheduler = _DPMSolver.from_config(
-                    pipe.scheduler.config,
-                    algorithm_type="dpmsolver++",
-                    use_karras_sigmas="karras" in sampler,
-                )  # type: ignore[attr-defined]
-                scheduler_set = True
-            if not scheduler_set and sampler_name:
-                log(f"Sampler '{sampler_name}' unsupported; using default scheduler", prefix="⚠️")
-            LOGGER.info(
-                "Scheduler=%s, use_karras_sigmas=%s",
-                type(pipe.scheduler).__name__,
-                getattr(pipe.scheduler.config, "use_karras_sigmas", None),
-            )
+            if not is_zimage:
+                scheduler_set = False
+                sampler = sampler_name.lower() if sampler_name else "dpmpp_2m_karras"
+                if sampler in {"euler_a", "euler-ancestral", "euler_ancestral"} and _EulerA is not None:
+                    pipe.scheduler = _EulerA.from_config(pipe.scheduler.config)  # type: ignore[attr-defined]
+                    scheduler_set = True
+                elif sampler in {"euler", "euler_discrete"} and _Euler is not None:
+                    pipe.scheduler = _Euler.from_config(pipe.scheduler.config)  # type: ignore[attr-defined]
+                    scheduler_set = True
+                elif _DPMSolver is not None:
+                    pipe.scheduler = _DPMSolver.from_config(
+                        pipe.scheduler.config,
+                        algorithm_type="dpmsolver++",
+                        use_karras_sigmas="karras" in sampler,
+                    )  # type: ignore[attr-defined]
+                    scheduler_set = True
+                if not scheduler_set and sampler_name:
+                    log(f"Sampler '{sampler_name}' unsupported; using default scheduler", prefix="⚠️")
+                LOGGER.info(
+                    "Scheduler=%s, use_karras_sigmas=%s",
+                    type(pipe.scheduler).__name__,
+                    getattr(pipe.scheduler.config, "use_karras_sigmas", None),
+                )
             if hasattr(pipe, "enable_attention_slicing"):
                 pipe.enable_attention_slicing("max")
             if hasattr(pipe, "set_progress_bar_config"):
                 pipe.set_progress_bar_config(disable=True)
             pipe = pipe.to(device)
-            if not is_xl and hasattr(pipe, "vae") and pipe.vae is not None:
+            if not is_zimage and not is_xl and hasattr(pipe, "vae") and pipe.vae is not None:
                 try:
                     pipe.vae.to(device=device, dtype=torch.float32)
                     if hasattr(pipe.vae, "config") and hasattr(pipe.vae.config, "force_upcast"):
@@ -1617,15 +1659,32 @@ def run_image_generation(
                 "height": height,
                 "width": width,
             }
-            if clip_skip > 0:
+            if clip_skip > 0 and not is_zimage:
                 try:
                     if "clip_skip" in inspect.signature(pipe.__call__).parameters:
                         call_kwargs["clip_skip"] = clip_skip
                 except (TypeError, ValueError):
                     pass
-            def _run_pipe() -> Any:
-                with torch.inference_mode():
-                    return pipe(text, **call_kwargs)
+            neg_text = negative_prompt or ""
+            if is_zimage:
+                try:
+                    signature = inspect.signature(pipe.__call__)
+                except (TypeError, ValueError):
+                    signature = None
+                if neg_text and signature and "negative_prompt" in signature.parameters:
+                    call_kwargs["negative_prompt"] = neg_text
+                if signature and "cfg_normalization" in signature.parameters:
+                    call_kwargs["cfg_normalization"] = False
+
+                def _run_pipe() -> Any:
+                    with torch.inference_mode():
+                        if signature and "prompt" in signature.parameters:
+                            return pipe(prompt=text, **call_kwargs)
+                        return pipe(text, **call_kwargs)
+            else:
+                def _run_pipe() -> Any:
+                    with torch.inference_mode():
+                        return pipe(text, **call_kwargs)
 
             try:
                 result = _run_pipe()

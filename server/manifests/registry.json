@@ -291,6 +291,25 @@
       "negative_prompt_default": "extra limbs, extra fingers, bad hands, bad anatomy, distorted face"
     },
     {
+      "name": "zimage",
+      "pipeline": "zimage",
+      "path": "/home/marcus/.cache/huggingface/hub/models--Tongyi-MAI--Z-Image/snapshots/e8fa147e7413241c5aa5146a8ae60dc38ade08ae",
+      "type": "diffusers",
+      "tags": [
+        "zimage",
+        "diffusers"
+      ],
+      "task_type": "IMAGE_GEN",
+      "weight": 15,
+      "reward_weight": 15,
+      "strengths": "Z-Image diffusion transformer (local HF cache).",
+      "weaknesses": "Requires ZImagePipeline in diffusers; heavy VRAM.",
+      "steps": 40,
+      "guidance": 4.0,
+      "width": 1024,
+      "height": 1024
+    },
+    {
       "name": "ltx2",
       "pipeline": "ltx2",
       "path": "maxin-cn/Latte-1",

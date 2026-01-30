@@ -145,10 +145,10 @@ def run_ltx2(
 
     steps = _clamp_int("steps", job.get("steps", 25), 25, 1, 50, log_fn)
     guidance = _clamp_float("guidance", job.get("guidance", 6.0), 6.0, 0.0, 12.0, log_fn)
-    width = _clamp_int("width", job.get("width", 512), 512, 256, 512, log_fn)
-    height = _clamp_int("height", job.get("height", 512), 512, 256, 512, log_fn)
-    frames = _clamp_int("frames", job.get("frames", 48), 48, 1, 48, log_fn)
-    fps = _clamp_int("fps", job.get("fps", 8), 8, 1, 8, log_fn)
+    width = _clamp_int("width", job.get("width", 512), 512, 256, 768, log_fn)
+    height = _clamp_int("height", job.get("height", 512), 512, 256, 768, log_fn)
+    frames = _clamp_int("frames", job.get("frames", 16), 16, 1, 16, log_fn)
+    fps = _clamp_int("fps", job.get("fps", 8), 8, 1, 12, log_fn)
     negative_prompt = str(job.get("negative_prompt") or "").strip()
     model_ref = os.environ.get("LTX2_MODEL_PATH") or os.environ.get("LTX2_MODEL_ID") or model_id
 

@@ -1897,17 +1897,20 @@ def submit_job() -> Any:
                 parsed = default
             return max(min_v, min(parsed, max_v))
 
+        init_image = payload.get("init_image") or payload.get("init_image_url") or payload.get("init_image_b64")
         settings = {
             "prompt": prompt_text,
             "negative_prompt": negative_prompt,
             "seed": seed,
             "steps": _clamp_int(payload.get("steps", 25), 25, 1, 50),
             "guidance": _clamp_float(payload.get("guidance", 6.0), 6.0, 0.0, 12.0),
-            "width": _clamp_int(payload.get("width", 512), 512, 256, 512),
-            "height": _clamp_int(payload.get("height", 512), 512, 256, 512),
-            "frames": _clamp_int(payload.get("frames", 48), 48, 1, 48),
-            "fps": _clamp_int(payload.get("fps", 8), 8, 1, 8),
+            "width": _clamp_int(payload.get("width", 512), 512, 256, 768),
+            "height": _clamp_int(payload.get("height", 512), 512, 256, 768),
+            "frames": _clamp_int(payload.get("frames", 16), 16, 1, 16),
+            "fps": _clamp_int(payload.get("fps", 8), 8, 1, 12),
         }
+        if init_image:
+            settings["init_image"] = init_image
         job_data = json.dumps(settings)
         task_type = "VIDEO_GEN"
     elif is_animatediff:
@@ -2413,7 +2416,7 @@ def get_creator_tasks() -> Any:
                 except Exception:
                     ltx2_settings = {}
                 if isinstance(ltx2_settings, dict):
-                    for key in ("prompt", "negative_prompt", "seed", "steps", "guidance", "width", "height", "frames", "fps"):
+                    for key in ("prompt", "negative_prompt", "seed", "steps", "guidance", "width", "height", "frames", "fps", "init_image"):
                         if key in ltx2_settings and ltx2_settings[key] is not None:
                             task_payload[key] = ltx2_settings[key]
             # If this is an AnimateDiff job, surface rich controls directly on the task payload

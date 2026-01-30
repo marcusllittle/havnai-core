@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import os
 import time
 from pathlib import Path
@@ -13,6 +14,11 @@ except Exception:  # pragma: no cover
     torch = None  # type: ignore
 
 try:
+    from PIL import Image  # type: ignore
+except Exception:  # pragma: no cover
+    Image = None  # type: ignore
+
+try:
     import imageio.v2 as imageio  # type: ignore
 except Exception:  # pragma: no cover
     imageio = None  # type: ignore
@@ -21,6 +27,11 @@ try:
     import cv2  # type: ignore
 except Exception:  # pragma: no cover
     cv2 = None  # type: ignore
+
+try:
+    import requests  # type: ignore
+except Exception:  # pragma: no cover
+    requests = None  # type: ignore
 
 from .ltx2_generator import generate_video_frames
 
@@ -118,6 +129,39 @@ def _normalize_video_frames(frames_np: Any) -> Any:
     raise RuntimeError(f"Unexpected LTX2 frame shape: {arr.shape}")
 
 
+def _load_init_image(source: Any) -> Optional[Any]:
+    """Load an init image from URL, base64 data URL, raw base64, or local path."""
+    if source is None:
+        return None
+    if Image is None:
+        raise RuntimeError("PIL is required for init_image support")
+
+    try:
+        if isinstance(source, Image.Image):
+            return source.convert("RGB")
+        if isinstance(source, bytes):
+            return Image.open(io.BytesIO(source)).convert("RGB")
+        if isinstance(source, str):
+            text = source.strip()
+            if not text:
+                return None
+            if text.startswith("data:image"):
+                header, b64_data = text.split(",", 1)
+                img_bytes = base64.b64decode(b64_data)
+                return Image.open(io.BytesIO(img_bytes)).convert("RGB")
+            if text.startswith("http://") or text.startswith("https://"):
+                if requests is None:
+                    raise RuntimeError("requests is required to fetch init_image URLs")
+                resp = requests.get(text, timeout=20)
+                resp.raise_for_status()
+                return Image.open(io.BytesIO(resp.content)).convert("RGB")
+            # Assume local file path
+            return Image.open(text).convert("RGB")
+    except Exception as exc:
+        raise RuntimeError(f"Failed to load init_image: {exc}") from exc
+    return None
+
+
 def run_ltx2(
     job: Dict[str, Any],
     *,
@@ -150,6 +194,17 @@ def run_ltx2(
     frames = _clamp_int("frames", job.get("frames", 16), 16, 1, 16, log_fn)
     fps = _clamp_int("fps", job.get("fps", 8), 8, 1, 12, log_fn)
     negative_prompt = str(job.get("negative_prompt") or "").strip()
+    init_image_raw = (
+        job.get("init_image")
+        or job.get("init_image_url")
+        or job.get("init_image_b64")
+        or job.get("init_image_path")
+        or job.get("image")
+        or job.get("image_b64")
+    )
+    init_image = None
+    if init_image_raw:
+        init_image = _load_init_image(init_image_raw)
     model_ref = os.environ.get("LTX2_MODEL_PATH") or os.environ.get("LTX2_MODEL_ID") or model_id
 
     output_path = outputs_dir / f"video_{job_id}.mp4"
@@ -174,6 +229,7 @@ def run_ltx2(
             frames=frames,
             seed=seed,
             model_id=model_ref,
+            init_image=init_image,
         )
         frames_np = None
         if torch is not None and isinstance(video_frames, torch.Tensor):

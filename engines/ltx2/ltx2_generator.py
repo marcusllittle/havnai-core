@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Any, Optional
 
 try:
+    from PIL import Image  # type: ignore
+except Exception:  # pragma: no cover
+    Image = None  # type: ignore
+
+try:
     import torch  # type: ignore
 except Exception:  # pragma: no cover
     torch = None  # type: ignore
@@ -64,6 +69,7 @@ def generate_video_frames(
     frames: int,
     seed: int,
     model_id: str,
+    init_image: Optional[Any] = None,
 ) -> Any:
     if torch is None:
         raise RuntimeError("torch is required for LTX2 generation")
@@ -85,6 +91,7 @@ def generate_video_frames(
         "height": height,
     }
     # Diffusers LattePipeline changed "num_frames" -> "video_length" in newer releases.
+    supports_image = True
     try:
         sig = inspect.signature(pipe.__call__)
         if "num_frames" in sig.parameters:
@@ -93,9 +100,18 @@ def generate_video_frames(
             call_kwargs["video_length"] = frames
         if "output_type" in sig.parameters:
             call_kwargs["output_type"] = "pt"
+        supports_image = "image" in sig.parameters
     except Exception:
         # Best-effort fallback if signature introspection fails.
         call_kwargs["num_frames"] = frames
+
+    if init_image is not None:
+        if not supports_image:
+            raise RuntimeError("LTX2 pipeline does not support init_image")
+        prepared_image = init_image
+        if Image is not None and isinstance(init_image, Image.Image):
+            prepared_image = init_image.convert("RGB").resize((width, height), resample=Image.LANCZOS)
+        call_kwargs["image"] = prepared_image
 
     result = pipe(**call_kwargs)
     return result.frames[0]

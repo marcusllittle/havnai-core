@@ -317,6 +317,15 @@ def check_ltx2_ready() -> (bool, str):
     return True, "ok"
 
 
+def check_animatediff_ready() -> (bool, str):
+    try:
+        if not torch.cuda.is_available():
+            return False, "cuda_unavailable"
+    except Exception:
+        return False, "cuda_unavailable"
+    return True, "ok"
+
+
 def build_node_capabilities() -> (List[str], List[str]):
     pipelines: List[str] = []
     supports: List[str] = []
@@ -335,6 +344,12 @@ def build_node_capabilities() -> (List[str], List[str]):
         if ready:
             pipelines.append("ltx2")
             supports.append("video")
+        ad_ready, ad_reason = check_animatediff_ready()
+        if ad_ready:
+            pipelines.append("animatediff")
+            supports.append("animatediff")
+        else:
+            log(f"AnimateDiff not ready; skipping animatediff advertise ({ad_reason})", prefix="ℹ️")
     return pipelines, supports
 
 
@@ -1011,7 +1026,7 @@ def execute_task(task: Dict[str, Any]) -> None:
     if assigned_at:
         assign_to_start_ms = int((task_started_at - assigned_at) * 1000)
 
-    if task_type in {"image_gen", "video_gen"} and ROLE != "creator":
+    if task_type in {"image_gen", "video_gen", "animatediff"} and ROLE != "creator":
         log(f"Skipping creator task {task_id[:8]} — node not in creator mode", prefix="⚠️")
         return
 
@@ -1039,6 +1054,20 @@ def execute_task(task: Dict[str, Any]) -> None:
             pipeline_hint=model_pipeline,
             image_settings=image_settings or None,
         )
+    elif task_type == "animatediff" or str(task.get("pipeline") or "").lower() == "animatediff" or str(task.get("engine") or "").lower() == "animatediff":
+        from engines.animatediff.animatediff_runner import run_animatediff, video_to_b64
+
+        model_ref = model_url or model_name
+        metrics, util, video_path = run_animatediff(
+            task,
+            model_ref,
+            outputs_dir=OUTPUTS_DIR,
+            log_fn=lambda message: log(message, prefix="🎞️"),
+            read_gpu_stats=read_gpu_stats,
+            utilization_hint=utilization_hint,
+        )
+        if video_path is not None:
+            video_b64 = video_to_b64(video_path)
     elif task_type == "video_gen" or str(task.get("pipeline") or "").lower() == "ltx2" or str(task.get("engine") or "").lower() == "ltx2":
         from engines.ltx2.ltx2_runner import run_ltx2, video_to_b64
 

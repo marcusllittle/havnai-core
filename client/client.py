@@ -1057,7 +1057,7 @@ def execute_task(task: Dict[str, Any]) -> None:
     elif task_type == "animatediff" or str(task.get("pipeline") or "").lower() == "animatediff" or str(task.get("engine") or "").lower() == "animatediff":
         from engines.animatediff.animatediff_runner import run_animatediff, video_to_b64
 
-        model_ref = model_url or model_name
+        model_ref = model_url or os.environ.get("ANIMATEDIFF_MODEL_PATH") or model_name
         metrics, util, video_path = run_animatediff(
             task,
             model_ref,

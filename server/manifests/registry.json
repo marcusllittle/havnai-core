@@ -291,29 +291,6 @@
       "negative_prompt_default": "extra limbs, extra fingers, bad hands, bad anatomy, distorted face"
     },
     {
-      "name": "beastGirlSD15",
-      "pipeline": "sd15",
-      "path": "/mnt/d/havnai-storage/models/creator/beastGirlSD15.safetensors",
-      "vae_path": "/mnt/d/havnai-storage/models/creator/clearvaeSD15_v23.safetensors",
-      "controlnet_path": "/mnt/d/havnai-storage/models/controlnet/control_v11p_sd15_openpose.pth",
-      "type": "checkpoint",
-      "tags": [
-        "sd15",
-        "custom"
-      ],
-      "task_type": "IMAGE_GEN",
-      "weight": 8,
-      "reward_weight": 8,
-      "strengths": "Custom SD1.5 checkpoint.",
-      "weaknesses": "Needs evaluation.",
-      "sampler": "euler_a",
-      "steps": 23,
-      "guidance": 6.3,
-      "width": 576,
-      "height": 768,
-      "negative_prompt_default": "extra limbs, bad hands, bad anatomy, distorted face"
-    },
-    {
       "name": "aMixIllustrious_aMix",
       "pipeline": "sdxl",
       "path": "/mnt/d/havnai-storage/models/creator/aMixIllustrious_aMix.safetensors",
@@ -355,23 +332,26 @@
     },
     {
       "name": "ponyDiffusionV6XL_v615",
-      "pipeline": "sdxl",
+      "pipeline": "sd15",
       "path": "/mnt/d/havnai-storage/models/creator/ponyDiffusionV6XL_v615.safetensors",
+      "vae_path": "/mnt/d/havnai-storage/models/creator/clearvaeSD15_v23.safetensors",
+      "controlnet_path": "/mnt/d/havnai-storage/models/controlnet/control_v11p_sd15_openpose.pth",
       "type": "checkpoint",
       "tags": [
-        "sdxl",
+        "sd15",
         "stylized"
       ],
       "task_type": "IMAGE_GEN",
       "weight": 8,
       "reward_weight": 8,
-      "strengths": "Custom SDXL checkpoint.",
+      "strengths": "Stylized SD1.5 checkpoint.",
       "weaknesses": "Needs evaluation.",
-      "sampler": "dpmpp_2m_karras",
-      "steps": 28,
-      "guidance": 6.0,
-      "width": 768,
-      "height": 1152
+      "sampler": "euler_a",
+      "steps": 20,
+      "guidance": 6.3,
+      "width": 576,
+      "height": 768,
+      "negative_prompt_default": "extra limbs, bad hands, bad anatomy, distorted face"
     },
     {
       "name": "realisticVisionV60B1_v51HyperVAE",

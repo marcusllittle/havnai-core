@@ -182,6 +182,11 @@ def run_animatediff(
         or job.get("motion_adapter")
         or "guoyww/animatediff-motion-adapter-v1-5-2"
     )
+    strength = job.get("strength")
+    try:
+        strength = float(strength) if strength is not None else None
+    except (TypeError, ValueError):
+        strength = None
 
     output_path = outputs_dir / f"animatediff_{job_id}.mp4"
 
@@ -204,10 +209,11 @@ def run_animatediff(
                 height=height,
                 frames=frames,
                 seed=seed,
-                model_id=model_id,
-                adapter_id=adapter_id,
-                init_image=init_image,
-            )
+            model_id=model_id,
+            adapter_id=adapter_id,
+            init_image=init_image,
+            strength=strength,
+        )
         except RuntimeError as exc:
             if init_image is not None and "init_image" in str(exc) and "support" in str(exc).lower():
                 log_fn("AnimateDiff pipeline does not support init_image; retrying without init image.")
@@ -223,6 +229,7 @@ def run_animatediff(
                     model_id=model_id,
                     adapter_id=adapter_id,
                     init_image=None,
+                    strength=None,
                 )
             else:
                 raise

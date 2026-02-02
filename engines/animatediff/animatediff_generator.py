@@ -133,6 +133,7 @@ def generate_animatediff_frames(
     model_id: str,
     adapter_id: str,
     init_image: Optional[Any] = None,
+    strength: Optional[float] = None,
 ) -> Any:
     if torch is None:
         raise RuntimeError("torch is required for AnimateDiff generation")
@@ -154,12 +155,15 @@ def generate_animatediff_frames(
         "height": height,
         "num_frames": frames,
     }
+    if init_image is not None:
+        call_kwargs["strength"] = 0.55 if strength is None else strength
 
     supports_image = False
     image_param = None
-    is_video_to_video = "VideoToVideo" in pipe.__class__.__name__
+    sig_params = None
     try:
         sig = inspect.signature(pipe.__call__)
+        sig_params = set(sig.parameters.keys())
         if "image" in sig.parameters:
             supports_image = True
             image_param = "image"
@@ -176,9 +180,8 @@ def generate_animatediff_frames(
             call_kwargs["output_type"] = "pt"
     except Exception:
         pass
-    if is_video_to_video:
-        call_kwargs["video_length"] = frames
-        call_kwargs.pop("num_frames", None)
+    if sig_params is not None:
+        call_kwargs = {k: v for k, v in call_kwargs.items() if k in sig_params}
 
     if init_image is not None:
         if not supports_image:
@@ -189,7 +192,7 @@ def generate_animatediff_frames(
                 (width, height), resample=Image.LANCZOS
             )
         if image_param == "video":
-            call_kwargs[image_param] = [prepared_image]
+            call_kwargs[image_param] = [prepared_image] * max(1, frames)
         elif image_param:
             call_kwargs[image_param] = prepared_image
         else:

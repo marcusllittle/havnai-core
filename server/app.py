@@ -1949,6 +1949,11 @@ def submit_job() -> Any:
             lora_strength = float(lora_strength) if lora_strength is not None else None
         except (TypeError, ValueError):
             lora_strength = None
+        strength = payload.get("strength")
+        try:
+            strength = float(strength) if strength is not None else None
+        except (TypeError, ValueError):
+            strength = None
         init_image = (
             payload.get("init_image")
             or payload.get("init_image_url")
@@ -1980,6 +1985,7 @@ def submit_job() -> Any:
             "lora_strength": lora_strength,
             "init_image": init_image,
             "scheduler": scheduler,
+            "strength": strength,
             "extend_remaining": extend_chunks,
             "extend_total": extend_chunks,
         }
@@ -2455,6 +2461,7 @@ def get_creator_tasks() -> Any:
                         "seed",
                         "lora_strength",
                         "init_image",
+                        "strength",
                         "scheduler",
                     ):
                         if key in ad_settings and ad_settings[key] is not None:

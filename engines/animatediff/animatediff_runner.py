@@ -280,7 +280,14 @@ def run_animatediff(
         metrics["error"] = error_msg or "animatediff generation error"
         return metrics, utilization_hint, None
 
-    utilization = utilization_hint.copy()
+    if isinstance(utilization_hint, dict):
+        utilization = utilization_hint.copy()
+    else:
+        try:
+            utilization_val = float(utilization_hint)
+        except (TypeError, ValueError):
+            utilization_val = 0.0
+        utilization = {"utilization": utilization_val}
     utilization.update({"gpu_start": start_stats, "gpu_end": end_stats})
     return metrics, utilization, output_path
 

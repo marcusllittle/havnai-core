@@ -6,6 +6,7 @@ from logging.handlers import RotatingFileHandler
 import os
 import re
 import sqlite3
+import shutil
 import subprocess
 import sys
 import threading
@@ -1954,6 +1955,14 @@ def submit_job() -> Any:
             or payload.get("init_image_b64")
             or None
         )
+        extend_raw = payload.get("extend_chunks")
+        if extend_raw is None:
+            extend_raw = payload.get("extend") or payload.get("extend_video")
+        try:
+            extend_chunks = int(extend_raw) if extend_raw is not None else 0
+        except (TypeError, ValueError):
+            extend_chunks = 1 if bool(extend_raw) else 0
+        extend_chunks = max(0, min(extend_chunks, 6))
         scheduler = str(payload.get("scheduler") or "DDIM").upper()
         if scheduler not in {"DDIM", "EULER", "HEUN"}:
             scheduler = "DDIM"
@@ -1971,6 +1980,8 @@ def submit_job() -> Any:
             "lora_strength": lora_strength,
             "init_image": init_image,
             "scheduler": scheduler,
+            "extend_remaining": extend_chunks,
+            "extend_total": extend_chunks,
         }
         job_data = json.dumps(settings)
         task_type = "ANIMATEDIFF"
@@ -2481,6 +2492,28 @@ def tasks_ai_alias() -> Any:
     return get_creator_tasks()
 
 
+def _extract_last_frame(video_path: Path, output_path: Path) -> bool:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return False
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-sseof",
+        "-0.1",
+        "-i",
+        str(video_path),
+        "-vframes",
+        "1",
+        str(output_path),
+    ]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except Exception:
+        return False
+    return output_path.exists()
+
+
 @app.route("/results", methods=["POST"])
 def submit_results() -> Any:
     data = request.get_json() or {}
@@ -2564,6 +2597,7 @@ def submit_results() -> Any:
             # If an image or video was uploaded, persist to outputs dir
             image_url = None
             video_url = None
+            video_path_saved: Optional[Path] = None
             if image_b64:
                 try:
                     import base64
@@ -2584,6 +2618,7 @@ def submit_results() -> Any:
                     video_path = videos_dir / f"{task_id}.mp4"
                     with video_path.open("wb") as fh:
                         fh.write(video_bytes)
+                    video_path_saved = video_path
                     # Stored at: STATIC_DIR / outputs / videos / <job_id>.mp4
                     video_url = f"/static/outputs/videos/{task_id}.mp4"
                 except Exception:
@@ -2657,6 +2692,55 @@ def submit_results() -> Any:
                 except Exception:
                     conn.rollback()
             wallet = wallet or job.get("wallet")
+            task_type = task.get("task_type", CREATOR_TASK_TYPE)
+            if (
+                status == "success"
+                and str(task_type).upper() == "ANIMATEDIFF"
+                and isinstance(payload, dict)
+            ):
+                try:
+                    remaining = int(payload.get("extend_remaining") or 0)
+                except (TypeError, ValueError):
+                    remaining = 0
+                if remaining > 0:
+                    videos_dir = OUTPUTS_DIR / "videos"
+                    video_path = video_path_saved or (videos_dir / f"{task_id}.mp4")
+                    if video_path.exists():
+                        last_frame_path = videos_dir / f"{task_id}_last.png"
+                        if _extract_last_frame(video_path, last_frame_path):
+                            next_payload = dict(payload)
+                            next_payload["extend_remaining"] = remaining - 1
+                            next_payload["extend_parent"] = task_id
+                            next_payload["init_image"] = str(last_frame_path)
+                            next_payload["init_image_path"] = str(last_frame_path)
+                            try:
+                                invite_code = job.get("invite_code")
+                            except Exception:
+                                invite_code = None
+                            weight_value = float(job.get("weight") or resolve_weight(model_name, 10.0))
+                            next_job_id = enqueue_job(
+                                wallet,
+                                model_name,
+                                "ANIMATEDIFF",
+                                json.dumps(next_payload),
+                                weight_value,
+                                invite_code,
+                            )
+                            log_event(
+                                "Auto-extended job queued",
+                                job_id=next_job_id,
+                                parent_job_id=task_id,
+                            )
+                        else:
+                            log_event(
+                                "Auto-extend skipped (last frame extract failed)",
+                                job_id=task_id,
+                            )
+                    else:
+                        log_event(
+                            "Auto-extend skipped (video missing)",
+                            job_id=task_id,
+                        )
 
         record_reward(wallet, task_id, reward)
 

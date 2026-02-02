@@ -15,14 +15,18 @@ except Exception:  # pragma: no cover
 try:
     from diffusers import (  # type: ignore
         AnimateDiffPipeline,
+        AnimateDiffVideoToVideoPipeline,
         MotionAdapter,
         StableDiffusionPipeline,
+        StableDiffusionImg2ImgPipeline,
         DDIMScheduler,
     )
 except Exception:  # pragma: no cover
     AnimateDiffPipeline = None  # type: ignore
+    AnimateDiffVideoToVideoPipeline = None  # type: ignore
     MotionAdapter = None  # type: ignore
     StableDiffusionPipeline = None  # type: ignore
+    StableDiffusionImg2ImgPipeline = None  # type: ignore
     DDIMScheduler = None  # type: ignore
 
 try:
@@ -34,12 +38,14 @@ _PIPE_LOCK = threading.Lock()
 _PIPE: Optional[Any] = None
 _PIPE_ID: Optional[str] = None
 _ADAPTER_ID: Optional[str] = None
+_PIPE_MODE: Optional[str] = None
 _LOGGER = logging.getLogger(__name__)
 
 
 def load_animatediff_pipeline(
     model_id: str,
     adapter_id: str,
+    use_init_image: bool = False,
     device: str = "cuda",
 ) -> Any:
     """Load and cache AnimateDiff pipeline with a motion adapter."""
@@ -51,9 +57,10 @@ def load_animatediff_pipeline(
     ):
         raise RuntimeError("AnimateDiff dependencies are unavailable")
 
-    global _PIPE, _PIPE_ID, _ADAPTER_ID
+    global _PIPE, _PIPE_ID, _ADAPTER_ID, _PIPE_MODE
     with _PIPE_LOCK:
-        if _PIPE is None or _PIPE_ID != model_id or _ADAPTER_ID != adapter_id:
+        mode = "i2v" if use_init_image else "t2v"
+        if _PIPE is None or _PIPE_ID != model_id or _ADAPTER_ID != adapter_id or _PIPE_MODE != mode:
             model_path = Path(model_id).expanduser()
             base_kwargs = {
                 "torch_dtype": torch.float16,
@@ -61,16 +68,31 @@ def load_animatediff_pipeline(
                 "requires_safety_checker": False,
                 "feature_extractor": None,
             }
-            if model_path.exists() and model_path.is_file() and hasattr(StableDiffusionPipeline, "from_single_file"):
-                base = StableDiffusionPipeline.from_single_file(
-                    str(model_path), **base_kwargs
-                )
+            if use_init_image:
+                if AnimateDiffVideoToVideoPipeline is None or StableDiffusionImg2ImgPipeline is None:
+                    raise RuntimeError("AnimateDiff init_image requires AnimateDiffVideoToVideoPipeline")
+                if model_path.exists() and model_path.is_file() and hasattr(StableDiffusionImg2ImgPipeline, "from_single_file"):
+                    base = StableDiffusionImg2ImgPipeline.from_single_file(
+                        str(model_path), **base_kwargs
+                    )
+                else:
+                    base = StableDiffusionImg2ImgPipeline.from_pretrained(
+                        model_id, **base_kwargs
+                    )
             else:
-                base = StableDiffusionPipeline.from_pretrained(
-                    model_id, **base_kwargs
-                )
+                if model_path.exists() and model_path.is_file() and hasattr(StableDiffusionPipeline, "from_single_file"):
+                    base = StableDiffusionPipeline.from_single_file(
+                        str(model_path), **base_kwargs
+                    )
+                else:
+                    base = StableDiffusionPipeline.from_pretrained(
+                        model_id, **base_kwargs
+                    )
             adapter = MotionAdapter.from_pretrained(adapter_id, torch_dtype=torch.float16)
-            pipe = AnimateDiffPipeline.from_pipe(base, motion_adapter=adapter)
+            if use_init_image and AnimateDiffVideoToVideoPipeline is not None:
+                pipe = AnimateDiffVideoToVideoPipeline.from_pipe(base, motion_adapter=adapter)
+            else:
+                pipe = AnimateDiffPipeline.from_pipe(base, motion_adapter=adapter)
             if DDIMScheduler is not None:
                 try:
                     pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
@@ -95,6 +117,7 @@ def load_animatediff_pipeline(
                 _PIPE = pipe
             _PIPE_ID = model_id
             _ADAPTER_ID = adapter_id
+            _PIPE_MODE = mode
         return _PIPE
 
 
@@ -114,7 +137,7 @@ def generate_animatediff_frames(
     if torch is None:
         raise RuntimeError("torch is required for AnimateDiff generation")
 
-    pipe = load_animatediff_pipeline(model_id, adapter_id)
+    pipe = load_animatediff_pipeline(model_id, adapter_id, use_init_image=init_image is not None)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         try:
@@ -134,6 +157,7 @@ def generate_animatediff_frames(
 
     supports_image = False
     image_param = None
+    is_video_to_video = "VideoToVideo" in pipe.__class__.__name__
     try:
         sig = inspect.signature(pipe.__call__)
         if "image" in sig.parameters:
@@ -142,6 +166,9 @@ def generate_animatediff_frames(
         elif "init_image" in sig.parameters:
             supports_image = True
             image_param = "init_image"
+        elif "video" in sig.parameters:
+            supports_image = True
+            image_param = "video"
         if "num_frames" not in sig.parameters and "video_length" in sig.parameters:
             call_kwargs["video_length"] = frames
             call_kwargs.pop("num_frames", None)
@@ -149,6 +176,9 @@ def generate_animatediff_frames(
             call_kwargs["output_type"] = "pt"
     except Exception:
         pass
+    if is_video_to_video:
+        call_kwargs["video_length"] = frames
+        call_kwargs.pop("num_frames", None)
 
     if init_image is not None:
         if not supports_image:
@@ -158,7 +188,9 @@ def generate_animatediff_frames(
             prepared_image = init_image.convert("RGB").resize(
                 (width, height), resample=Image.LANCZOS
             )
-        if image_param:
+        if image_param == "video":
+            call_kwargs[image_param] = [prepared_image]
+        elif image_param:
             call_kwargs[image_param] = prepared_image
         else:
             _LOGGER.warning("AnimateDiff init_image provided but no supported image param found.")

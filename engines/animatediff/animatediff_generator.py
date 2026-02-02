@@ -53,13 +53,19 @@ def load_animatediff_pipeline(
     with _PIPE_LOCK:
         if _PIPE is None or _PIPE_ID != model_id or _ADAPTER_ID != adapter_id:
             model_path = Path(model_id).expanduser()
+            base_kwargs = {
+                "torch_dtype": torch.float16,
+                "safety_checker": None,
+                "requires_safety_checker": False,
+                "feature_extractor": None,
+            }
             if model_path.exists() and model_path.is_file() and hasattr(StableDiffusionPipeline, "from_single_file"):
                 base = StableDiffusionPipeline.from_single_file(
-                    str(model_path), torch_dtype=torch.float16
+                    str(model_path), **base_kwargs
                 )
             else:
                 base = StableDiffusionPipeline.from_pretrained(
-                    model_id, torch_dtype=torch.float16
+                    model_id, **base_kwargs
                 )
             adapter = MotionAdapter.from_pretrained(adapter_id, torch_dtype=torch.float16)
             pipe = AnimateDiffPipeline.from_pipe(base, motion_adapter=adapter)

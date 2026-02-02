@@ -712,6 +712,18 @@ def _apply_loras_to_pipe(pipe: Any, raw_loras: Any) -> List[str]:
         scale = strength if strength is not None else weight
         if scale is None:
             scale = 1.0
+        weight_name = str(entry.get("filename") or "").strip()
+        if not weight_name and path.is_dir():
+            # Try to locate a single weight file in the directory for offline mode.
+            candidates = [p for p in path.iterdir() if p.suffix.lower() in SUPPORTED_LORA_EXTS]
+            if len(candidates) == 1:
+                weight_name = candidates[0].name
+            else:
+                for ext in SUPPORTED_LORA_EXTS:
+                    candidate = path / f"{name}{ext}"
+                    if candidate.exists():
+                        weight_name = candidate.name
+                        break
         try:
             if path.is_file():
                 try:
@@ -728,20 +740,37 @@ def _apply_loras_to_pipe(pipe: Any, raw_loras: Any) -> List[str]:
                         pipe.load_lora_weights(str(path.parent), weight_name=path.name)
             else:
                 try:
-                    pipe.load_lora_weights(str(path), adapter_name=adapter_name, strength=scale)
+                    if weight_name:
+                        pipe.load_lora_weights(
+                            str(path),
+                            weight_name=weight_name,
+                            adapter_name=adapter_name,
+                            strength=scale,
+                        )
+                    else:
+                        pipe.load_lora_weights(str(path), adapter_name=adapter_name, strength=scale)
                 except TypeError:
-                    pipe.load_lora_weights(str(path), adapter_name=adapter_name)
+                    if weight_name:
+                        pipe.load_lora_weights(str(path), weight_name=weight_name, adapter_name=adapter_name)
+                    else:
+                        pipe.load_lora_weights(str(path), adapter_name=adapter_name)
             loaded = True
         except Exception as exc:
             last_error = exc
         if not loaded:
             try:
-                pipe.load_lora_weights(str(path), adapter_name=adapter_name)
+                if weight_name:
+                    pipe.load_lora_weights(str(path), weight_name=weight_name, adapter_name=adapter_name)
+                else:
+                    pipe.load_lora_weights(str(path), adapter_name=adapter_name)
                 loaded = True
                 last_error = None
             except TypeError:
                 try:
-                    pipe.load_lora_weights(str(path))
+                    if weight_name:
+                        pipe.load_lora_weights(str(path), weight_name=weight_name)
+                    else:
+                        pipe.load_lora_weights(str(path))
                     loaded = True
                     last_error = None
                 except Exception as exc_inner:
@@ -1012,7 +1041,7 @@ def execute_task(task: Dict[str, Any]) -> None:
     task_id = task.get("task_id", "unknown")
     task_type = (task.get("type") or "IMAGE_GEN").lower()
     model_name = (task.get("model_name") or "model").lower()
-    model_url = task.get("model_url", "")
+    model_url = task.get("model_url", "") or task.get("model_path", "")
     reward_weight = float(task.get("reward_weight", 1.0))
     input_shape = task.get("input_shape") or []
     prompt = task.get("prompt") or ""
@@ -1557,6 +1586,30 @@ def run_image_generation(
             if pipe is None:
                 raise RuntimeError("Failed to construct a text2image pipeline for model.")
 
+            if is_xl:
+                needs_tokenizers = (
+                    not hasattr(pipe, "tokenizer")
+                    or pipe.tokenizer is None
+                    or not hasattr(pipe, "tokenizer_2")
+                    or pipe.tokenizer_2 is None
+                )
+                if needs_tokenizers:
+                    base_id = os.environ.get("SDXL_BASE_MODEL") or os.environ.get("SDXL_BASE_PATH")
+                    if not base_id:
+                        raise RuntimeError(
+                            "SDXL tokenizers missing. Set SDXL_BASE_MODEL or SDXL_BASE_PATH to a cached SDXL base."
+                        )
+                    try:
+                        base_pipe = _SDXLPipe.from_pretrained(
+                            base_id, torch_dtype=dtype, safety_checker=None
+                        )
+                        pipe.tokenizer = base_pipe.tokenizer
+                        pipe.tokenizer_2 = base_pipe.tokenizer_2
+                        pipe.text_encoder = base_pipe.text_encoder
+                        pipe.text_encoder_2 = base_pipe.text_encoder_2
+                    except Exception as exc:
+                        raise RuntimeError(f"Failed to load SDXL base components: {exc}") from exc
+
             if clip_skip > 0:
                 if hasattr(pipe, "set_clip_skip"):
                     try:
@@ -1627,7 +1680,7 @@ def run_image_generation(
             seed = seed_override if seed_override is not None else (int(time.time()) & 0x7FFFFFFF)
             generator = torch.Generator(device=device).manual_seed(seed)
             text = prompt or "a high quality photo of a golden retriever on a beach at sunset"
-            if hasattr(pipe, "tokenizer") and hasattr(pipe.tokenizer, "model_max_length"):
+            if getattr(pipe, "tokenizer", None) is not None and hasattr(pipe.tokenizer, "model_max_length"):
                 try:
                     encoded = pipe.tokenizer(
                         text,

@@ -1948,7 +1948,12 @@ def submit_job() -> Any:
             lora_strength = float(lora_strength) if lora_strength is not None else None
         except (TypeError, ValueError):
             lora_strength = None
-        init_image = payload.get("init_image") or None
+        init_image = (
+            payload.get("init_image")
+            or payload.get("init_image_url")
+            or payload.get("init_image_b64")
+            or None
+        )
         scheduler = str(payload.get("scheduler") or "DDIM").upper()
         if scheduler not in {"DDIM", "EULER", "HEUN"}:
             scheduler = "DDIM"

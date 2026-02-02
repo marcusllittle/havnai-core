@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import threading
 from pathlib import Path
 from typing import Any, Optional
@@ -33,6 +34,7 @@ _PIPE_LOCK = threading.Lock()
 _PIPE: Optional[Any] = None
 _PIPE_ID: Optional[str] = None
 _ADAPTER_ID: Optional[str] = None
+_LOGGER = logging.getLogger(__name__)
 
 
 def load_animatediff_pipeline(
@@ -74,15 +76,23 @@ def load_animatediff_pipeline(
                     pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
                 except Exception:
                     pass
+            offload_enabled = False
             try:
                 pipe.enable_model_cpu_offload()
+                offload_enabled = True
             except Exception:
                 pass
             try:
-                pipe.enable_vae_slicing()
+                if hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_slicing"):
+                    pipe.vae.enable_slicing()
+                else:
+                    pipe.enable_vae_slicing()
             except Exception:
                 pass
-            _PIPE = pipe.to(device)
+            if not offload_enabled:
+                _PIPE = pipe.to(device)
+            else:
+                _PIPE = pipe
             _PIPE_ID = model_id
             _ADAPTER_ID = adapter_id
         return _PIPE
@@ -123,9 +133,15 @@ def generate_animatediff_frames(
     }
 
     supports_image = False
+    image_param = None
     try:
         sig = inspect.signature(pipe.__call__)
-        supports_image = "image" in sig.parameters
+        if "image" in sig.parameters:
+            supports_image = True
+            image_param = "image"
+        elif "init_image" in sig.parameters:
+            supports_image = True
+            image_param = "init_image"
         if "num_frames" not in sig.parameters and "video_length" in sig.parameters:
             call_kwargs["video_length"] = frames
             call_kwargs.pop("num_frames", None)
@@ -142,7 +158,10 @@ def generate_animatediff_frames(
             prepared_image = init_image.convert("RGB").resize(
                 (width, height), resample=Image.LANCZOS
             )
-        call_kwargs["image"] = prepared_image
+        if image_param:
+            call_kwargs[image_param] = prepared_image
+        else:
+            _LOGGER.warning("AnimateDiff init_image provided but no supported image param found.")
 
     result = pipe(**call_kwargs)
     return result.frames[0]

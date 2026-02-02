@@ -194,19 +194,38 @@ def run_animatediff(
             raise RuntimeError("torch is not available")
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA is not available")
-        video_frames = generate_animatediff_frames(
-            prompt=prompt,
-            negative_prompt=negative_prompt,
-            steps=steps,
-            guidance=guidance,
-            width=width,
-            height=height,
-            frames=frames,
-            seed=seed,
-            model_id=model_id,
-            adapter_id=adapter_id,
-            init_image=init_image,
-        )
+        try:
+            video_frames = generate_animatediff_frames(
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                steps=steps,
+                guidance=guidance,
+                width=width,
+                height=height,
+                frames=frames,
+                seed=seed,
+                model_id=model_id,
+                adapter_id=adapter_id,
+                init_image=init_image,
+            )
+        except RuntimeError as exc:
+            if init_image is not None and "init_image" in str(exc) and "support" in str(exc).lower():
+                log_fn("AnimateDiff pipeline does not support init_image; retrying without init image.")
+                video_frames = generate_animatediff_frames(
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    steps=steps,
+                    guidance=guidance,
+                    width=width,
+                    height=height,
+                    frames=frames,
+                    seed=seed,
+                    model_id=model_id,
+                    adapter_id=adapter_id,
+                    init_image=None,
+                )
+            else:
+                raise
         frames_np = None
         if torch is not None and isinstance(video_frames, torch.Tensor):
             frames_np = (video_frames.detach().cpu().numpy() * 255).clip(0, 255).astype("uint8")

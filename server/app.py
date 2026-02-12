@@ -67,6 +67,7 @@ RATE_LIMIT_BUCKETS: Dict[str, deque] = defaultdict(deque)
 
 ONLINE_THRESHOLD = 120  # seconds before a node is considered offline
 WALLET_REGEX = re.compile(r"^0x[a-fA-F0-9]{40}$")
+JOB_ID_REGEX = re.compile(r"^[A-Za-z0-9_-]+$")
 
 SERVER_JOIN_TOKEN = os.getenv("SERVER_JOIN_TOKEN", "").strip()
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "").strip()
@@ -3106,6 +3107,60 @@ def get_result(job_id: str) -> Any:
     if "image_url" not in payload and "video_url" not in payload:
         return jsonify({"error": "result_not_found", "job_id": job_id}), 404
     return jsonify(payload), 200
+
+
+@app.route("/videos/stitch", methods=["POST"])
+def stitch_videos() -> Any:
+    payload = request.get_json() or {}
+    job_ids = payload.get("job_ids")
+    if not isinstance(job_ids, list) or not job_ids:
+        return jsonify({"error": "job_ids_required"}), 400
+    if shutil.which("ffmpeg") is None:
+        return jsonify({"error": "ffmpeg_missing"}), 400
+
+    videos_dir = OUTPUTS_DIR / "videos"
+    videos_dir.mkdir(parents=True, exist_ok=True)
+    input_paths: List[Path] = []
+    for raw_id in job_ids:
+        if not isinstance(raw_id, str) or not JOB_ID_REGEX.match(raw_id):
+            return jsonify({"error": "invalid_job_id"}), 400
+        path = videos_dir / f"{raw_id}.mp4"
+        if not path.exists():
+            return jsonify({"error": "video_not_found", "job_id": raw_id}), 404
+        input_paths.append(path)
+
+    output_name = str(payload.get("output_name") or f"stitched_{int(time.time())}.mp4")
+    output_name = Path(output_name).name
+    output_path = videos_dir / output_name
+
+    concat_path = videos_dir / f"concat_{uuid.uuid4().hex}.txt"
+    try:
+        with concat_path.open("w", encoding="utf-8") as handle:
+            for path in input_paths:
+                handle.write(f"file '{path.as_posix()}'\n")
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_path),
+            "-c",
+            "copy",
+            str(output_path),
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            return jsonify({"error": "ffmpeg_failed", "detail": proc.stderr.strip()}), 500
+    finally:
+        try:
+            concat_path.unlink()
+        except Exception:
+            pass
+
+    return jsonify({"video_url": f"/static/outputs/videos/{output_name}"}), 200
 
 
 @app.route("/nodes", methods=["GET"])

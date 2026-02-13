@@ -1068,6 +1068,7 @@ def execute_task(task: Dict[str, Any]) -> None:
         model_spec = task.get("model") if isinstance(task.get("model"), dict) else None
         model_lora = model_spec.get("lora") if isinstance(model_spec, dict) else None
         model_pipeline = model_spec.get("pipeline") if isinstance(model_spec, dict) else None
+        negative_prompt = str(task.get("negative_prompt") or "").strip()
         image_settings = {}
         for key in ("steps", "guidance", "width", "height", "sampler", "seed"):
             if key in task and task[key] is not None:
@@ -1078,6 +1079,7 @@ def execute_task(task: Dict[str, Any]) -> None:
             model_url,
             reward_weight,
             prompt,
+            negative_prompt=negative_prompt,
             loras=loras,
             model_lora=model_lora,
             pipeline_hint=model_pipeline,
@@ -1474,6 +1476,7 @@ def run_image_generation(
     model_url: str,
     reward_weight: float,
     prompt: str,
+    negative_prompt: str = "",
     loras: Optional[List[Dict[str, Any]]] = None,
     model_lora: Optional[Any] = None,
     pipeline_hint: Optional[str] = None,
@@ -1521,8 +1524,8 @@ def run_image_generation(
     except Exception as exc:
         return ({"status": "failed", "error": str(exc), "reward_weight": reward_weight}, utilization_hint, None)
 
-    steps = _env_int("HAI_STEPS", 65)
-    guidance = _env_float("HAI_GUIDANCE", 8.2)
+    steps = _env_int("HAI_STEPS", 28)
+    guidance = _env_float("HAI_GUIDANCE", 6.0)
     clip_skip = _env_int("HAI_CLIP_SKIP", 0)
     width = _env_int("HAI_WIDTH", 512)
     height = _env_int("HAI_HEIGHT", 512)
@@ -1680,6 +1683,9 @@ def run_image_generation(
             seed = seed_override if seed_override is not None else (int(time.time()) & 0x7FFFFFFF)
             generator = torch.Generator(device=device).manual_seed(seed)
             text = prompt or "a high quality photo of a golden retriever on a beach at sunset"
+            log(f"Generation: {steps} steps, guidance {guidance}, {width}x{height}, seed {seed}", prefix="🎨")
+            if negative_prompt:
+                log(f"Negative prompt: {negative_prompt[:120]}{'…' if len(negative_prompt) > 120 else ''}", prefix="🚫")
             if getattr(pipe, "tokenizer", None) is not None and hasattr(pipe.tokenizer, "model_max_length"):
                 try:
                     encoded = pipe.tokenizer(
@@ -1699,6 +1705,8 @@ def run_image_generation(
                 "height": height,
                 "width": width,
             }
+            if negative_prompt:
+                call_kwargs["negative_prompt"] = negative_prompt
             if clip_skip > 0:
                 try:
                     if "clip_skip" in inspect.signature(pipe.__call__).parameters:

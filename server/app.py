@@ -24,7 +24,11 @@ from flask import abort, Flask, jsonify, request, send_file, send_from_directory
 from flask_cors import CORS
 
 # Import our local modules
-from server import safety, credits, invite, rewards, job_helpers
+import safety
+import credits
+import invite
+import rewards
+import job_helpers
 
 # ---------------------------------------------------------------------------
 # Paths & constants

@@ -2516,6 +2516,13 @@ def get_creator_tasks() -> Any:
                             for key in ("steps", "guidance", "width", "height", "sampler", "seed"):
                                 if key in overrides and overrides[key] is not None:
                                     image_settings[key] = overrides[key]
+                        # Pass init_image and strength for img2img
+                        init_img = parsed.get("init_image") or parsed.get("init_image_b64") or ""
+                        if init_img:
+                            image_settings["init_image"] = init_img
+                        init_strength = parsed.get("strength")
+                        if init_strength is not None:
+                            image_settings["strength"] = init_strength
                     # Always send plain prompt text to the node (avoid passing raw JSON)
                     prompt_for_node = prompt_text
 
@@ -2579,7 +2586,7 @@ def get_creator_tasks() -> Any:
                 "queued_at": task.get("queued_at"),
                 "assigned_at": task.get("assigned_at"),
             }
-            for key in ("steps", "guidance", "width", "height", "sampler", "seed"):
+            for key in ("steps", "guidance", "width", "height", "sampler", "seed", "init_image", "strength"):
                 if key in task and task[key] is not None:
                     task_payload[key] = task[key]
             if task.get("loras"):

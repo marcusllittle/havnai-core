@@ -55,6 +55,14 @@ try:
     except Exception:  # pragma: no cover
         _SDXLPipe = None  # type: ignore
     try:
+        from diffusers import StableDiffusionImg2ImgPipeline as _SDImg2Img  # type: ignore
+    except Exception:  # pragma: no cover
+        _SDImg2Img = None  # type: ignore
+    try:
+        from diffusers import StableDiffusionXLImg2ImgPipeline as _SDXLImg2Img  # type: ignore
+    except Exception:  # pragma: no cover
+        _SDXLImg2Img = None  # type: ignore
+    try:
         from diffusers import LattePipeline as _LattePipe  # type: ignore
     except Exception:  # pragma: no cover
         _LattePipe = None  # type: ignore
@@ -1070,7 +1078,7 @@ def execute_task(task: Dict[str, Any]) -> None:
         model_pipeline = model_spec.get("pipeline") if isinstance(model_spec, dict) else None
         negative_prompt = str(task.get("negative_prompt") or "").strip()
         image_settings = {}
-        for key in ("steps", "guidance", "width", "height", "sampler", "seed"):
+        for key in ("steps", "guidance", "width", "height", "sampler", "seed", "init_image", "strength"):
             if key in task and task[key] is not None:
                 image_settings[key] = task[key]
         metrics, util, image_b64 = run_image_generation(
@@ -1543,6 +1551,13 @@ def run_image_generation(
         height = override_height
     sampler_name = _override_str("sampler")
     seed_override = _override_int("seed")
+    init_image_raw = _override_str("init_image")
+    img2img_strength = _override_float("strength")
+    if img2img_strength is None:
+        img2img_strength = 0.65  # sensible default for img2img
+    else:
+        img2img_strength = max(0.1, min(1.0, img2img_strength))
+    use_img2img = bool(init_image_raw)
     width = max(64, width - (width % 8))
     height = max(64, height - (height % 8))
     pipeline_hint_norm = str(pipeline_hint or "").lower()
@@ -1560,34 +1575,80 @@ def run_image_generation(
         if not FAST_PREVIEW and torch is not None and diffusers is not None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
             dtype = torch.float16 if device == "cuda" else torch.float32
-            log("Loading text2image pipeline…", prefix="ℹ️", device=device)
+            # Load init image for img2img if provided
+            init_pil = None
+            if use_img2img and init_image_raw:
+                try:
+                    from PIL import Image as _PILImage
+                    import io
+                    if init_image_raw.startswith("data:"):
+                        # data URL: strip prefix and decode
+                        b64_part = init_image_raw.split(",", 1)[-1]
+                        import base64 as _b64
+                        img_bytes = _b64.b64decode(b64_part)
+                        init_pil = _PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
+                    elif init_image_raw.startswith(("http://", "https://", "/")):
+                        # URL or API path: download
+                        img_resp = requests.get(init_image_raw, timeout=30)
+                        img_resp.raise_for_status()
+                        init_pil = _PILImage.open(io.BytesIO(img_resp.content)).convert("RGB")
+                    elif os.path.isfile(init_image_raw):
+                        init_pil = _PILImage.open(init_image_raw).convert("RGB")
+                    else:
+                        # Try base64 directly
+                        import base64 as _b64
+                        img_bytes = _b64.b64decode(init_image_raw)
+                        init_pil = _PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
+                    if init_pil:
+                        init_pil = init_pil.resize((width, height))
+                        log(f"Init image loaded for img2img (strength={img2img_strength})", prefix="🖼️")
+                except Exception as exc:
+                    log(f"Failed to load init image, falling back to txt2img: {exc}", prefix="⚠️")
+                    init_pil = None
+
+            pipe_mode = "img2img" if init_pil is not None else "txt2img"
+            log(f"Loading {pipe_mode} pipeline…", prefix="ℹ️", device=device)
             load_t0 = time.time()
 
             pipe = None
-            # For XL checkpoints prefer StableDiffusionXLPipeline when
-            # available, otherwise fall back to SD1.5 pipeline as a best-effort.
-            if is_xl and _SDXLPipe is not None:
-                try:
-                    pipe = _SDXLPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
-                except Exception as exc:
-                    log(f"StableDiffusionXLPipeline load failed: {exc}", prefix="⚠️")
+            if init_pil is not None:
+                # img2img pipeline
+                if is_xl and _SDXLImg2Img is not None:
+                    try:
+                        pipe = _SDXLImg2Img.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
+                    except Exception as exc:
+                        log(f"SDXLImg2Img load failed: {exc}", prefix="⚠️")
+                if pipe is None and _SDImg2Img is not None:
+                    try:
+                        pipe = _SDImg2Img.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
+                    except Exception as exc:
+                        log(f"SDImg2Img load failed, falling back to txt2img: {exc}", prefix="⚠️")
+                        init_pil = None  # fall back to txt2img
 
-            if pipe is None and _SDPipe is not None:
-                try:
-                    pipe = _SDPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
-                except Exception as exc:
-                    log(f"StableDiffusionPipeline load failed: {exc}", prefix="⚠️")
-
-            # AutoPipeline is truly optional; only use it when the expected
-            # helper is present in this diffusers version.
-            if pipe is None and _AutoPipe is not None and hasattr(_AutoPipe, "from_single_file"):
-                try:
-                    pipe = _AutoPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
-                except Exception as exc_auto:
-                    log(f"AutoPipeline load failed: {exc_auto}", prefix="🚫")
-                    raise
             if pipe is None:
-                raise RuntimeError("Failed to construct a text2image pipeline for model.")
+                # txt2img pipeline (normal path or img2img fallback)
+                if is_xl and _SDXLPipe is not None:
+                    try:
+                        pipe = _SDXLPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
+                    except Exception as exc:
+                        log(f"StableDiffusionXLPipeline load failed: {exc}", prefix="⚠️")
+
+                if pipe is None and _SDPipe is not None:
+                    try:
+                        pipe = _SDPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
+                    except Exception as exc:
+                        log(f"StableDiffusionPipeline load failed: {exc}", prefix="⚠️")
+
+                # AutoPipeline is truly optional; only use it when the expected
+                # helper is present in this diffusers version.
+                if pipe is None and _AutoPipe is not None and hasattr(_AutoPipe, "from_single_file"):
+                    try:
+                        pipe = _AutoPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
+                    except Exception as exc_auto:
+                        log(f"AutoPipeline load failed: {exc_auto}", prefix="🚫")
+                        raise
+            if pipe is None:
+                raise RuntimeError("Failed to construct a pipeline for model.")
 
             if is_xl:
                 needs_tokenizers = (
@@ -1663,6 +1724,13 @@ def run_image_generation(
             )
             if hasattr(pipe, "enable_attention_slicing"):
                 pipe.enable_attention_slicing("max")
+            # xformers: ~30-40% VRAM reduction when available
+            if hasattr(pipe, "enable_xformers_memory_efficient_attention"):
+                try:
+                    pipe.enable_xformers_memory_efficient_attention()
+                    log("xformers memory-efficient attention enabled", prefix="✅")
+                except Exception as exc:
+                    log(f"xformers not available, using default attention: {exc}", prefix="ℹ️")
             if hasattr(pipe, "set_progress_bar_config"):
                 pipe.set_progress_bar_config(disable=True)
             pipe = pipe.to(device)
@@ -1702,9 +1770,16 @@ def run_image_generation(
                 "num_inference_steps": steps,
                 "guidance_scale": guidance,
                 "generator": generator,
-                "height": height,
-                "width": width,
             }
+            if init_pil is not None:
+                # img2img: pass image and strength, no explicit width/height
+                call_kwargs["image"] = init_pil
+                call_kwargs["strength"] = img2img_strength
+                log(f"img2img: strength={img2img_strength}", prefix="🖼️")
+            else:
+                # txt2img: pass dimensions
+                call_kwargs["height"] = height
+                call_kwargs["width"] = width
             if negative_prompt:
                 call_kwargs["negative_prompt"] = negative_prompt
             if clip_skip > 0:

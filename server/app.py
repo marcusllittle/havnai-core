@@ -851,7 +851,9 @@ def save_nodes() -> None:
         json.dump(payload, f, indent=2)
 
 
-NODES = load_nodes()
+# Keep the original dict object so injected module references stay valid.
+NODES.clear()
+NODES.update(load_nodes())
 
 
 def load_node_wallets() -> None:

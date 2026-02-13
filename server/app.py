@@ -23,6 +23,9 @@ from typing import Any, Dict, List, Optional, Tuple
 from flask import abort, Flask, jsonify, request, send_file, send_from_directory, g, has_app_context
 from flask_cors import CORS
 
+# Import our local modules
+from server import safety, credits, invite, rewards, job_helpers
+
 # ---------------------------------------------------------------------------
 # Paths & constants
 # ---------------------------------------------------------------------------
@@ -477,6 +480,39 @@ def log_event(message: str, level: str = "info", **extra: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Dependency injection for modules
+# ---------------------------------------------------------------------------
+
+def _inject_module_dependencies() -> None:
+    """Inject app dependencies into extracted modules."""
+    # Invite module
+    invite.get_db = get_db  # type: ignore[attr-defined]
+    invite.request = request  # type: ignore[attr-defined]
+    invite.jsonify = jsonify  # type: ignore[attr-defined]
+    invite.INVITE_CONFIG_PATH = INVITE_CONFIG_PATH  # type: ignore[attr-defined]
+    invite.INVITE_GATING = INVITE_GATING  # type: ignore[attr-defined]
+    invite.LOGGER = LOGGER  # type: ignore[attr-defined]
+
+    # Credits module
+    credits.get_db = get_db  # type: ignore[attr-defined]
+    credits.log_event = log_event  # type: ignore[attr-defined]
+    credits.CREDITS_ENABLED = CREDITS_ENABLED  # type: ignore[attr-defined]
+    # get_model_config will be injected after it's defined
+
+    # Rewards module
+    rewards.get_db = get_db  # type: ignore[attr-defined]
+    rewards.LOGGER = LOGGER  # type: ignore[attr-defined]
+    rewards.MODEL_WEIGHTS = MODEL_WEIGHTS  # type: ignore[attr-defined]
+    rewards.REWARD_CONFIG = REWARD_CONFIG  # type: ignore[attr-defined]
+
+    # Job helpers module
+    job_helpers.get_db = get_db  # type: ignore[attr-defined]
+    job_helpers.NODES = NODES  # type: ignore[attr-defined]
+    job_helpers.CREATOR_TASK_TYPE = CREATOR_TASK_TYPE  # type: ignore[attr-defined]
+    # get_model_config will be injected after it's defined
+
+
+# ---------------------------------------------------------------------------
 # Utility helpers
 # ---------------------------------------------------------------------------
 
@@ -518,10 +554,6 @@ def format_duration(seconds: float) -> str:
     return " ".join(parts)
 
 
-def resolve_weight(model_name: str, default: float = 1.0) -> float:
-    return float(MODEL_WEIGHTS.get(model_name, default))
-
-
 def check_join_token() -> bool:
     if not SERVER_JOIN_TOKEN:
         return True
@@ -545,258 +577,10 @@ def rate_limit(key: str, limit: int, per_seconds: int = 60) -> bool:
     return True
 
 
-def load_invite_config() -> Dict[str, Dict[str, Any]]:
-    if not INVITE_CONFIG_PATH.exists():
-        return {}
-    try:
-        raw = json.loads(INVITE_CONFIG_PATH.read_text())
-    except Exception as exc:
-        LOGGER.error("Failed to parse invite config: %s", exc)
-        return {}
-    if not isinstance(raw, dict):
-        return {}
-    config: Dict[str, Dict[str, Any]] = {}
-    for code, entry in raw.items():
-        if not isinstance(code, str) or not isinstance(entry, dict):
-            continue
-        config[code] = entry
-    return config
+# Invite management moved to server/invite.py
 
 
-def invite_gating_enabled(invite_config: Dict[str, Dict[str, Any]]) -> bool:
-    if INVITE_GATING:
-        return True
-    return bool(invite_config)
-
-
-def extract_invite_code(payload: Dict[str, Any]) -> str:
-    header_code = request.headers.get("X-INVITE-CODE", "").strip()
-    body_code = str(payload.get("invite_code") or "").strip()
-    return header_code or body_code
-
-
-def invite_error_response() -> Any:
-    return jsonify({"error": "invite_required", "message": "Invite code required."}), 403
-
-
-def quota_payload(
-    max_daily: int,
-    used_today: int,
-    max_concurrent: int,
-    used_concurrent: int,
-    reset_at: str,
-) -> Dict[str, Any]:
-    return {
-        "max_daily": max_daily,
-        "used_today": used_today,
-        "max_concurrent": max_concurrent,
-        "used_concurrent": used_concurrent,
-        "reset_at": reset_at,
-    }
-
-
-def quota_limit_response(
-    max_daily: int,
-    used_today: int,
-    max_concurrent: int,
-    used_concurrent: int,
-    reset_at: str,
-) -> Any:
-    payload = {
-        "error": "rate_limited",
-        "message": "Invite quota exceeded.",
-    }
-    payload.update(quota_payload(max_daily, used_today, max_concurrent, used_concurrent, reset_at))
-    return jsonify(payload), 429
-
-
-def resolve_invite_limits(
-    invite_code: str, invite_config: Dict[str, Dict[str, Any]]
-) -> Optional[Dict[str, Any]]:
-    entry = invite_config.get(invite_code)
-    if not entry:
-        return None
-    if entry.get("enabled") is False:
-        return None
-    return entry
-
-
-def compute_invite_usage(invite_code: str) -> Dict[str, Any]:
-    conn = get_db()
-    now = datetime.now(timezone.utc)
-    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    midnight_ts = midnight.timestamp()
-    reset_at = (midnight + timedelta(days=1)).isoformat().replace("+00:00", "Z")
-
-    statuses = ("queued", "running", "assigned", "uploading")
-    concurrent = conn.execute(
-        f"""
-        SELECT COUNT(*) FROM jobs
-        WHERE invite_code=?
-          AND status IN ({",".join("?" for _ in statuses)})
-        """,
-        (invite_code, *statuses),
-    ).fetchone()[0]
-    used_today = conn.execute(
-        """
-        SELECT COUNT(*) FROM jobs
-        WHERE invite_code=?
-          AND timestamp >= ?
-        """,
-        (invite_code, midnight_ts),
-    ).fetchone()[0]
-    return {
-        "used_today": int(used_today or 0),
-        "used_concurrent": int(concurrent or 0),
-        "reset_at": reset_at,
-    }
-
-
-def enforce_invite_quota(
-    payload: Dict[str, Any]
-) -> Tuple[Optional[str], Optional[Dict[str, Any]], Optional[Any]]:
-    invite_config = load_invite_config()
-    if not invite_gating_enabled(invite_config):
-        return None, None, None
-
-    invite_code = extract_invite_code(payload)
-    if not invite_code:
-        return None, None, invite_error_response()
-
-    limits = resolve_invite_limits(invite_code, invite_config)
-    if not limits:
-        return None, None, invite_error_response()
-
-    usage = compute_invite_usage(invite_code)
-    max_daily = int(limits.get("max_daily") or 0)
-    max_concurrent = int(limits.get("max_concurrent") or 0)
-    used_today = usage["used_today"]
-    used_concurrent = usage["used_concurrent"]
-    reset_at = usage["reset_at"]
-
-    if max_daily > 0 and used_today >= max_daily:
-        return invite_code, usage, quota_limit_response(
-            max_daily, used_today, max_concurrent, used_concurrent, reset_at
-        )
-    if max_concurrent > 0 and used_concurrent >= max_concurrent:
-        return invite_code, usage, quota_limit_response(
-            max_daily, used_today, max_concurrent, used_concurrent, reset_at
-        )
-    return invite_code, usage, None
-
-
-def enforce_invite_limits(payload: Dict[str, Any]) -> Tuple[Optional[str], Optional[Any]]:
-    invite_code, _usage, error = enforce_invite_quota(payload)
-    return invite_code, error
-
-
-def _compile_phrase_patterns(phrases: List[str]) -> List[re.Pattern]:
-    patterns: List[re.Pattern] = []
-    for phrase in phrases:
-        text = str(phrase).strip()
-        if not text:
-            continue
-        escaped = re.escape(text).replace(r"\ ", r"\s+")
-        patterns.append(re.compile(rf"(?<!\w){escaped}(?!\w)", re.IGNORECASE))
-    return patterns
-
-
-MINOR_PHRASES = [
-    "child",
-    "children",
-    "kid",
-    "kids",
-    "toddler",
-    "infant",
-    "newborn",
-    "preteen",
-    "pre-teen",
-    "underage",
-    "minor",
-    "teen",
-    "teenage",
-    "teenager",
-    "schoolgirl",
-    "schoolboy",
-    "loli",
-    "lolita",
-    "shota",
-    "lolicon",
-    "high school",
-    "middle school",
-    "junior high",
-    "elementary school",
-    "barely legal",
-]
-
-AMBIGUOUS_YOUTH_PHRASES = [
-    "girl",
-    "boy",
-    "young",
-    "youthful",
-]
-
-SEXUAL_PHRASES = [
-    "sex",
-    "sexual",
-    "sexy",
-    "nude",
-    "naked",
-    "porn",
-    "pornographic",
-    "erotic",
-    "nsfw",
-    "topless",
-    "bottomless",
-    "breasts",
-    "boobs",
-    "ass",
-    "butt",
-    "genitals",
-    "penis",
-    "vagina",
-    "vaginal",
-    "anal",
-    "oral",
-    "blowjob",
-    "handjob",
-    "fellatio",
-    "cum",
-    "cumshot",
-    "sperm",
-    "masturbate",
-    "masturbation",
-    "orgasm",
-    "intercourse",
-]
-
-MINOR_PATTERNS = _compile_phrase_patterns(MINOR_PHRASES)
-AMBIGUOUS_YOUTH_PATTERNS = _compile_phrase_patterns(AMBIGUOUS_YOUTH_PHRASES)
-SEXUAL_PATTERNS = _compile_phrase_patterns(SEXUAL_PHRASES)
-
-AGE_PATTERNS = [
-    re.compile(r"\b(?:age|aged)\s*(?:of\s*)?(?:1[0-7]|[0-9])\b", re.IGNORECASE),
-    re.compile(r"\b(?:1[0-7]|[0-9])\s*(?:yo|y/o|yrs?|years?\s*old|year[- ]?old)\b", re.IGNORECASE),
-    re.compile(r"\b(?:under|below)\s*18\b", re.IGNORECASE),
-]
-
-
-def _matches_any(text: str, patterns: List[re.Pattern]) -> bool:
-    if not text:
-        return False
-    for pattern in patterns:
-        if pattern.search(text):
-            return True
-    return False
-
-
-def _safety_block_reason(prompt: str, negative_prompt: str) -> Optional[str]:
-    combined = " ".join([segment for segment in (prompt, negative_prompt) if segment])
-    if _matches_any(combined, MINOR_PATTERNS) or _matches_any(combined, AGE_PATTERNS):
-        return "minor_content_detected"
-    if _matches_any(combined, SEXUAL_PATTERNS) and _matches_any(combined, AMBIGUOUS_YOUTH_PATTERNS):
-        return "ambiguous_age_in_sexual_context"
-    return None
+# Safety filtering moved to server/safety.py
 
 
 def _download_lora_asset(lora: Dict[str, Any], dest_dir: Path) -> Path:
@@ -957,6 +741,9 @@ def init_db() -> None:
 
 init_db()
 
+# Inject dependencies into extracted modules (initial injection)
+_inject_module_dependencies()
+
 # Optional: clear database and in-memory state on startup for a fresh dashboard
 if RESET_ON_STARTUP:
     try:
@@ -1100,346 +887,12 @@ log_event(f"Telemetry online with {len(NODES)} cached node(s).", version=APP_VER
 # ---------------------------------------------------------------------------
 
 
-def enqueue_job(
-    wallet: str,
-    model: str,
-    task_type: str,
-    data: str,
-    weight: float,
-    invite_code: Optional[str] = None,
-) -> str:
-    job_id = f"job-{uuid.uuid4().hex[:12]}"
-    task_type = (task_type or CREATOR_TASK_TYPE).upper()
-    conn = get_db()
-    conn.execute(
-        """
-        INSERT INTO jobs (id, wallet, model, data, task_type, weight, status, node_id, timestamp, invite_code)
-        VALUES (?, ?, ?, ?, ?, ?, 'queued', NULL, ?, ?)
-        """,
-        (job_id, wallet, model, data, task_type, float(weight), unix_now(), invite_code),
-    )
-    conn.commit()
-    return job_id
-
-
-def compute_reward(
-    model_name: str,
-    pipeline: str,
-    metrics: Dict[str, Any],
-    status: str,
-) -> Tuple[float, Dict[str, Any]]:
-    """Compute dynamic reward for a completed job.
-
-    Formula:
-        reward = base_reward * weight_factor * compute_cost_factor
-                  * runtime_factor * success_factor
-    """
-
-    try:
-        base_reward = float(REWARD_CONFIG.get("base_reward", 0.05))
-        # Weight factor based on manifest/model weight
-        model_weight = resolve_weight(model_name, 10.0)
-        weight_factor = model_weight / 10.0
-
-        # Compute-cost factor based on pipeline family
-        pipeline_norm = (pipeline or "sd15").lower()
-        if pipeline_norm == "sdxl":
-            compute_cost_factor = float(REWARD_CONFIG.get("sdxl_factor", 1.5))
-        elif pipeline_norm == "sd15":
-            compute_cost_factor = float(REWARD_CONFIG.get("sd15_factor", 1.0))
-        elif pipeline_norm == "ltx2":
-            compute_cost_factor = float(REWARD_CONFIG.get("ltx2_factor", 2.0))
-        elif pipeline_norm in {"anime", "cartoon"}:
-            compute_cost_factor = float(REWARD_CONFIG.get("anime_factor", 0.7))
-        else:
-            compute_cost_factor = 1.0
-
-        # Runtime factor from actual runtime vs baseline
-        baseline_runtime = float(REWARD_CONFIG.get("baseline_runtime", 8.0)) or 8.0
-        runtime_sec = 0.0
-        inf_ms = metrics.get("inference_time_ms")
-        if isinstance(inf_ms, (int, float)) and inf_ms > 0:
-            runtime_sec = float(inf_ms) / 1000.0
-        else:
-            dur = metrics.get("duration")
-            if isinstance(dur, (int, float)) and dur > 0:
-                runtime_sec = float(dur)
-        runtime_sec = max(0.0, runtime_sec)
-        runtime_factor = max(1.0, runtime_sec / baseline_runtime) if baseline_runtime > 0 else 1.0
-
-        # Success / failure factor
-        status_norm = (status or "").lower()
-        success_factor = 1.0 if status_norm == "success" else 0.0
-
-        reward = base_reward * weight_factor * compute_cost_factor * runtime_factor * success_factor
-        reward = round(float(reward), 6)
-
-        factors = {
-            "base_reward": base_reward,
-            "weight_factor": weight_factor,
-            "compute_cost_factor": compute_cost_factor,
-            "runtime_factor": runtime_factor,
-            "success_factor": success_factor,
-            "runtime_seconds": runtime_sec,
-            "model_weight": model_weight,
-            "pipeline": pipeline_norm,
-            # TODO: future quality verification boost
-            # "quality_factor": 1.0,
-        }
-        return reward, factors
-    except Exception as exc:  # pragma: no cover - defensive
-        LOGGER.exception("Reward computation failed for %s: %s", model_name, exc)
-        return 0.0, {
-            "base_reward": float(REWARD_CONFIG.get("base_reward", 0.05)),
-            "weight_factor": 0.0,
-            "compute_cost_factor": 1.0,
-            "runtime_factor": 1.0,
-            "success_factor": 0.0,
-            "runtime_seconds": 0.0,
-            "error": str(exc),
-        }
-
-
-def fetch_next_job_for_node(node_id: str) -> Optional[Dict[str, Any]]:
-    conn = get_db()
-    rows = conn.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY timestamp ASC").fetchall()
-    node = NODES.get(node_id, {})
-    role = node.get("role", "worker")
-    node_supports = {s.lower() for s in node.get("supports", []) if isinstance(s, str)}
-    for row in rows:
-        task_type = (row["task_type"] or CREATOR_TASK_TYPE).upper()
-        # Support standard IMAGE_GEN, LTX2 video jobs, AnimateDiff video jobs, and face swap.
-        if task_type not in {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP"}:
-            continue
-        if role != "creator":
-            continue
-        if task_type == "ANIMATEDIFF":
-            required_support = "animatediff"
-        elif task_type == "VIDEO_GEN":
-            required_support = "video"
-        else:
-            required_support = "image"
-        if node_supports and required_support not in node_supports:
-            continue
-        model_name = row["model"].lower()
-        cfg = get_model_config(model_name)
-        if not cfg:
-            continue
-        node_models = {m.lower() for m in node.get("models", []) if isinstance(m, str)}
-        if node_models and model_name not in node_models:
-            continue
-        required_pipeline = (cfg.get("pipeline") or "sd15").lower()
-        node_pipelines = {p.lower() for p in node.get("pipelines", []) if isinstance(p, str)}
-        if node_pipelines and required_pipeline not in node_pipelines:
-            continue
-        return dict(row)
-    return None
-
-
-def assign_job_to_node(job_id: str, node_id: str) -> None:
-    conn = get_db()
-    conn.execute("UPDATE jobs SET status='running', node_id=?, assigned_at=? WHERE id=?", (node_id, unix_now(), job_id))
-    conn.commit()
-
-
-def complete_job(job_id: str, node_id: str, status: str) -> bool:
-    """Mark a job complete only if it is still running for the given node."""
-    conn = get_db()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute("SELECT status, node_id FROM jobs WHERE id=?", (job_id,)).fetchone()
-        current_status = (row["status"] or "").lower() if row else ""
-        owner = row["node_id"] if row else None
-        if not row or current_status != "running" or (owner and owner != node_id):
-            conn.rollback()
-            return False
-        conn.execute(
-            "UPDATE jobs SET status=?, node_id=?, completed_at=? WHERE id=?",
-            (status, node_id, unix_now(), job_id),
-        )
-        conn.commit()
-        return True
-    except Exception:
-        conn.rollback()
-        raise
-
-
-def complete_job_if_queued(job_id: str, node_id: str, status: str) -> bool:
-    """Allow late completion when a running job was reset to queued (e.g., server restart)."""
-    conn = get_db()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute(
-            "SELECT status, node_id, assigned_at, completed_at FROM jobs WHERE id=?",
-            (job_id,),
-        ).fetchone()
-        if not row:
-            conn.rollback()
-            return False
-        current_status = (row["status"] or "").lower()
-        owner = row["node_id"]
-        assigned_at = row["assigned_at"]
-        completed_at = row["completed_at"]
-        if current_status != "queued" or completed_at is not None:
-            conn.rollback()
-            return False
-        if owner and owner != node_id:
-            conn.rollback()
-            return False
-        if assigned_at is None:
-            conn.rollback()
-            return False
-        conn.execute(
-            "UPDATE jobs SET status=?, node_id=?, completed_at=? WHERE id=?",
-            (status, node_id, unix_now(), job_id),
-        )
-        conn.commit()
-        return True
-    except Exception:
-        conn.rollback()
-        raise
-
-
-def record_reward(wallet: Optional[str], task_id: str, reward: float) -> None:
-    if not wallet:
-        return
-    conn = get_db()
-    conn.execute(
-        """
-        INSERT INTO rewards (wallet, task_id, reward_hai, timestamp)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(task_id) DO UPDATE SET
-            wallet=excluded.wallet,
-            reward_hai=excluded.reward_hai,
-            timestamp=excluded.timestamp
-        """,
-        (wallet, task_id, reward, unix_now()),
-    )
-    conn.commit()
+# Job queue and reward management moved to server/job_helpers.py and server/rewards.py
 
 
 # ---------------------------------------------------------------------------
-# Credits helpers
+# Credits helpers (moved to server/credits.py)
 # ---------------------------------------------------------------------------
-
-# Default credit costs per pipeline family.  Override per-model via
-# "credit_cost" in registry.json.
-DEFAULT_CREDIT_COSTS: Dict[str, float] = {
-    "sdxl": 1.0,
-    "sd15": 0.5,
-    "ltx2": 3.0,
-    "animatediff": 2.0,
-    "face_swap": 1.5,
-}
-
-
-def resolve_credit_cost(model_name: str, task_type: str = "") -> float:
-    """Return the credit cost for a job.
-
-    Priority: manifest credit_cost → pipeline default → 1.0 fallback.
-    """
-    cfg = get_model_config(model_name)
-    if cfg:
-        explicit = cfg.get("credit_cost")
-        if explicit is not None:
-            try:
-                return float(explicit)
-            except (TypeError, ValueError):
-                pass
-        pipeline = str(cfg.get("pipeline", "")).lower()
-        if pipeline in DEFAULT_CREDIT_COSTS:
-            return DEFAULT_CREDIT_COSTS[pipeline]
-    # Fall back on task_type for non-manifest models
-    tt = (task_type or "").upper()
-    if tt == "FACE_SWAP":
-        return DEFAULT_CREDIT_COSTS.get("face_swap", 1.5)
-    if tt in ("VIDEO_GEN", "ANIMATEDIFF"):
-        return DEFAULT_CREDIT_COSTS.get("ltx2", 3.0)
-    return 1.0
-
-
-def get_credit_balance(wallet: str) -> float:
-    """Return current credit balance for a wallet."""
-    conn = get_db()
-    row = conn.execute(
-        "SELECT balance FROM credits WHERE wallet=?", (wallet,)
-    ).fetchone()
-    return float(row["balance"]) if row else 0.0
-
-
-def deposit_credits(wallet: str, amount: float, reason: str = "") -> float:
-    """Add credits to a wallet.  Returns new balance."""
-    if amount <= 0:
-        return get_credit_balance(wallet)
-    conn = get_db()
-    conn.execute(
-        """
-        INSERT INTO credits (wallet, balance, total_deposited, total_spent, updated_at)
-        VALUES (?, ?, ?, 0.0, ?)
-        ON CONFLICT(wallet) DO UPDATE SET
-            balance = balance + excluded.balance,
-            total_deposited = total_deposited + excluded.total_deposited,
-            updated_at = excluded.updated_at
-        """,
-        (wallet, amount, amount, unix_now()),
-    )
-    conn.commit()
-    new_balance = get_credit_balance(wallet)
-    log_event("Credits deposited", wallet=wallet, amount=amount, new_balance=new_balance, reason=reason)
-    return new_balance
-
-
-def deduct_credits(wallet: str, amount: float, job_id: str = "") -> Tuple[bool, float]:
-    """Deduct credits from a wallet.  Returns (success, remaining_balance).
-
-    Fails if balance is insufficient – never goes negative.
-    """
-    conn = get_db()
-    row = conn.execute("SELECT balance FROM credits WHERE wallet=?", (wallet,)).fetchone()
-    current = float(row["balance"]) if row else 0.0
-    if current < amount:
-        return False, current
-    conn.execute(
-        """
-        UPDATE credits
-        SET balance = balance - ?,
-            total_spent = total_spent + ?,
-            updated_at = ?
-        WHERE wallet = ?
-        """,
-        (amount, amount, unix_now(), wallet),
-    )
-    conn.commit()
-    remaining = get_credit_balance(wallet)
-    log_event("Credits deducted", wallet=wallet, amount=amount, remaining=remaining, job_id=job_id)
-    return True, remaining
-
-
-def check_and_deduct_credits(wallet: str, model_name: str, task_type: str = "") -> Optional[Any]:
-    """If credits are enabled, check balance and deduct.
-
-    Returns a Flask error response if insufficient, or None if OK / credits disabled.
-    """
-    if not CREDITS_ENABLED:
-        return None
-    cost = resolve_credit_cost(model_name, task_type)
-    balance = get_credit_balance(wallet)
-    if balance < cost:
-        return jsonify({
-            "error": "insufficient_credits",
-            "balance": balance,
-            "cost": cost,
-            "message": f"This job costs {cost} credits but you only have {balance}.",
-        }), 402
-    # Deduction happens at enqueue time (not completion) so the slot is reserved.
-    ok, remaining = deduct_credits(wallet, cost)
-    if not ok:
-        return jsonify({
-            "error": "insufficient_credits",
-            "balance": remaining,
-            "cost": cost,
-        }), 402
-    return None
 
 
 def get_job_summary(limit: int = 50) -> Dict[str, Any]:
@@ -1550,13 +1003,18 @@ def get_model_config(model_name: str) -> Optional[Dict[str, Any]]:
     return dict(entry)
 
 
+# Inject get_model_config into modules that need it
+credits.get_model_config = get_model_config  # type: ignore[attr-defined]
+job_helpers.get_model_config = get_model_config  # type: ignore[attr-defined]
+
+
 def build_models_catalog() -> List[Dict[str, Any]]:
     catalog: List[Dict[str, Any]] = []
     for name, meta in MANIFEST_MODELS.items():
         catalog.append(
             {
                 "model": name,
-                "weight": resolve_weight(name, meta.get("reward_weight", 5.0)),
+                "weight": rewards.resolve_weight(name, meta.get("reward_weight", 5.0)),
                 "source": "manifest",
                 "nodes": [],
                 "tags": meta.get("tags", []),
@@ -1960,12 +1418,12 @@ def submit_job() -> Any:
     if not rate_limit(f"submit-job:{request.remote_addr}", limit=30):
         return jsonify({"error": "rate limit"}), 429
     payload = request.get_json() or {}
-    invite_code, invite_error = enforce_invite_limits(payload)
+    invite_code, invite_error = invite.enforce_invite_limits(payload)
     if invite_error:
         return invite_error
     prompt_raw = str(payload.get("prompt") or payload.get("data") or "")
     negative_raw = str(payload.get("negative_prompt") or "")
-    block_reason = _safety_block_reason(prompt_raw, negative_raw)
+    block_reason = safety.check_safety(prompt_raw, negative_raw)
     if block_reason:
         return jsonify({"error": "prompt_blocked", "reason": block_reason}), 400
     wallet = str(payload.get("wallet", "")).strip()
@@ -1987,7 +1445,7 @@ def submit_job() -> Any:
         if not candidates:
             return jsonify({"error": "no_creator_models"}), 400
         names = [meta["name"] for meta in candidates]
-        weights = [resolve_weight(meta["name"].lower(), meta.get("reward_weight", 10.0)) for meta in candidates]
+        weights = [rewards.resolve_weight(meta["name"].lower(), meta.get("reward_weight", 10.0)) for meta in candidates]
         chosen = random.choices(names, weights=weights, k=1)[0]
         model_name_raw = chosen
         model_name = chosen.lower()
@@ -2000,7 +1458,7 @@ def submit_job() -> Any:
         return jsonify({"error": "unknown model"}), 400
 
     if weight is None:
-        weight = cfg.get("reward_weight", resolve_weight(model_name, 10.0))
+        weight = cfg.get("reward_weight", rewards.resolve_weight(model_name, 10.0))
 
     # Special-case LTX2 video jobs with structured payload
     pipeline_name = str(cfg.get("pipeline", "")).lower()
@@ -2194,12 +1652,12 @@ def submit_job() -> Any:
         task_type = CREATOR_TASK_TYPE
 
     # Credit gate — only active when HAVNAI_CREDITS_ENABLED=true
-    credit_err = check_and_deduct_credits(wallet, cfg.get("name", model_name), task_type)
+    credit_err = credits.check_and_deduct_credits(wallet, cfg.get("name", model_name), task_type)
     if credit_err:
         return credit_err
 
     with LOCK:
-        job_id = enqueue_job(
+        job_id = job_helpers.enqueue_job(
             wallet,
             cfg.get("name", model_name),
             task_type,
@@ -2216,7 +1674,7 @@ def generate_video_job() -> Any:
     if not rate_limit(f"generate-video:{request.remote_addr}", limit=30):
         return jsonify({"error": "rate limit"}), 429
     payload = request.get_json() or {}
-    invite_code, invite_error = enforce_invite_limits(payload)
+    invite_code, invite_error = invite.enforce_invite_limits(payload)
     if invite_error:
         return invite_error
 
@@ -2237,7 +1695,7 @@ def generate_video_job() -> Any:
 
     weight = payload.get("weight")
     if weight is None:
-        weight = cfg.get("reward_weight", resolve_weight(model_name, 10.0))
+        weight = cfg.get("reward_weight", rewards.resolve_weight(model_name, 10.0))
 
     seed = payload.get("seed")
     try:
@@ -2287,12 +1745,12 @@ def generate_video_job() -> Any:
     job_data = json.dumps(settings)
 
     # Credit gate — only active when HAVNAI_CREDITS_ENABLED=true
-    credit_err = check_and_deduct_credits(wallet, cfg.get("name", model_name), "VIDEO_GEN")
+    credit_err = credits.check_and_deduct_credits(wallet, cfg.get("name", model_name), "VIDEO_GEN")
     if credit_err:
         return credit_err
 
     with LOCK:
-        job_id = enqueue_job(
+        job_id = job_helpers.enqueue_job(
             wallet,
             cfg.get("name", model_name),
             "VIDEO_GEN",
@@ -2309,7 +1767,7 @@ def submit_faceswap_job_endpoint() -> Any:
     if not rate_limit(f"submit-faceswap-job:{request.remote_addr}", limit=30):
         return jsonify({"error": "rate limit"}), 429
     payload = request.get_json() or {}
-    invite_code, invite_error = enforce_invite_limits(payload)
+    invite_code, invite_error = invite.enforce_invite_limits(payload)
     if invite_error:
         return invite_error
     wallet = str(payload.get("wallet", "")).strip()
@@ -2317,7 +1775,7 @@ def submit_faceswap_job_endpoint() -> Any:
     model_name = model_name_raw.lower()
     prompt_text = str(payload.get("prompt") or "").strip()
     negative_raw = str(payload.get("negative_prompt") or "")
-    block_reason = _safety_block_reason(prompt_text, negative_raw)
+    block_reason = safety.check_safety(prompt_text, negative_raw)
     if block_reason:
         return jsonify({"error": "prompt_blocked", "reason": block_reason}), 400
 
@@ -2338,17 +1796,17 @@ def submit_faceswap_job_endpoint() -> Any:
 
     weight = payload.get("weight")
     if weight is None:
-        weight = cfg.get("reward_weight", resolve_weight(model_name, 10.0))
+        weight = cfg.get("reward_weight", rewards.resolve_weight(model_name, 10.0))
 
     job_data = json.dumps(settings)
 
     # Credit gate — only active when HAVNAI_CREDITS_ENABLED=true
-    credit_err = check_and_deduct_credits(wallet, cfg.get("name", model_name), "FACE_SWAP")
+    credit_err = credits.check_and_deduct_credits(wallet, cfg.get("name", model_name), "FACE_SWAP")
     if credit_err:
         return credit_err
 
     with LOCK:
-        job_id = enqueue_job(
+        job_id = job_helpers.enqueue_job(
             wallet,
             cfg.get("name", model_name),
             "FACE_SWAP",
@@ -2486,7 +1944,7 @@ def get_creator_tasks() -> Any:
 
         pending = pending_tasks_for_node(node_id)
         if not pending:
-            job = fetch_next_job_for_node(node_id)
+            job = job_helpers.fetch_next_job_for_node(node_id)
             if job:
                 cfg = get_model_config(job["model"])
                 if cfg:
@@ -2527,9 +1985,9 @@ def get_creator_tasks() -> Any:
                     prompt_for_node = prompt_text
 
                     # Assign under global lock to avoid multiple nodes claiming the same job
-                    assign_job_to_node(job["id"], node_id)
+                    job_helpers.assign_job_to_node(job["id"], node_id)
                     log_event("Job claimed by node", job_id=job["id"], node_id=node_id)
-                    reward_weight = float(job["weight"] or cfg.get("reward_weight", resolve_weight(job["model"], 10.0)))
+                    reward_weight = float(job["weight"] or cfg.get("reward_weight", rewards.resolve_weight(job["model"], 10.0)))
                     job_task_type = (job.get("task_type") or CREATOR_TASK_TYPE).upper()
                     pending_entry = {
                         "task_id": job["id"],
@@ -2562,7 +2020,7 @@ def get_creator_tasks() -> Any:
                     }
                     save_nodes()
                 else:
-                    complete_job(job["id"], node_id, "failed")
+                    job_helpers.complete_job(job["id"], node_id, "failed")
 
         response_tasks = []
         for task in pending:
@@ -2706,7 +2164,7 @@ def submit_results() -> Any:
                 "task_id": job["id"],
                 "task_type": job.get("task_type", CREATOR_TASK_TYPE),
                 "model_name": job["model"],
-                "reward_weight": job.get("weight", resolve_weight(job["model"], 10.0)),
+                "reward_weight": job.get("weight", rewards.resolve_weight(job["model"], 10.0)),
                 "wallet": job.get("wallet"),
                 "prompt": job.get("data"),
             }
@@ -2725,11 +2183,11 @@ def submit_results() -> Any:
         pipeline = cfg.get("pipeline", "sd15") if cfg else "sd15"
 
         # Compute dynamic reward and factors
-        reward, reward_factors = compute_reward(model_name, pipeline, metrics, status)
+        reward, reward_factors = rewards.compute_reward(model_name, pipeline, metrics, status)
 
         # Ensure job is still owned/running before completing
-        if not complete_job(task_id, node_id, status):
-            if complete_job_if_queued(task_id, node_id, status):
+        if not job_helpers.complete_job(task_id, node_id, status):
+            if job_helpers.complete_job_if_queued(task_id, node_id, status):
                 log_event(
                     "Accepted late results for queued job",
                     level="warning",
@@ -2885,8 +2343,8 @@ def submit_results() -> Any:
                                 invite_code = job.get("invite_code")
                             except Exception:
                                 invite_code = None
-                            weight_value = float(job.get("weight") or resolve_weight(model_name, 10.0))
-                            next_job_id = enqueue_job(
+                            weight_value = float(job.get("weight") or rewards.resolve_weight(model_name, 10.0))
+                            next_job_id = job_helpers.enqueue_job(
                                 wallet,
                                 model_name,
                                 "ANIMATEDIFF",
@@ -2910,7 +2368,7 @@ def submit_results() -> Any:
                             job_id=task_id,
                         )
 
-        record_reward(wallet, task_id, reward)
+        rewards.record_reward(wallet, task_id, reward)
 
         stats = MODEL_STATS.setdefault(model_name, {"count": 0.0, "total_time": 0.0})
         if status == "success":
@@ -3035,7 +2493,7 @@ def credits_deposit() -> Any:
     if amount <= 0:
         return jsonify({"error": "amount must be positive"}), 400
     reason = str(data.get("reason", "manual")).strip()
-    new_balance = deposit_credits(wallet, amount, reason=reason)
+    new_balance = credits.deposit_credits(wallet, amount, reason=reason)
     return jsonify({
         "wallet": wallet,
         "deposited": amount,
@@ -3049,7 +2507,7 @@ def credits_cost() -> Any:
     """Return the credit cost for a given model, so the frontend can show prices."""
     model = request.args.get("model", "").strip().lower()
     task_type = request.args.get("task_type", "").strip()
-    cost = resolve_credit_cost(model, task_type)
+    cost = credits.resolve_credit_cost(model, task_type)
     return jsonify({
         "model": model,
         "cost": cost,
@@ -3110,23 +2568,23 @@ def job_detail(job_id: str) -> Any:
 
 @app.route("/quota", methods=["GET"])
 def quota_status() -> Any:
-    invite_config = load_invite_config()
-    if not invite_gating_enabled(invite_config):
+    invite_config = invite.load_invite_config()
+    if not invite.invite_gating_enabled(invite_config):
         return jsonify(
-            quota_payload(0, 0, 0, 0, iso_now())
+            invite.quota_payload(0, 0, 0, 0, iso_now())
         )
-    invite_code = extract_invite_code({})
+    invite_code = invite.extract_invite_code({})
     if not invite_code:
-        return invite_error_response()
-    limits = resolve_invite_limits(invite_code, invite_config)
+        return invite.invite_error_response()
+    limits = invite.resolve_invite_limits(invite_code, invite_config)
     if not limits:
-        return invite_error_response()
+        return invite.invite_error_response()
 
-    usage = compute_invite_usage(invite_code)
+    usage = invite.compute_invite_usage(invite_code)
     max_daily = int(limits.get("max_daily") or 0)
     max_concurrent = int(limits.get("max_concurrent") or 0)
     return jsonify(
-        quota_payload(
+        invite.quota_payload(
             max_daily,
             usage["used_today"],
             max_concurrent,
@@ -3433,7 +2891,7 @@ def nodes_endpoint() -> Any:
             try:
                 weight = float(weight)
             except (TypeError, ValueError):
-                weight = resolve_weight(model_name or "triomerge_v10", 10.0)
+                weight = rewards.resolve_weight(model_name or "triomerge_v10", 10.0)
             payload.append(
                 {
                     "node_id": node_id,

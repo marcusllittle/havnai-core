@@ -76,6 +76,7 @@ INVITE_CONFIG_PATH = Path(
     os.getenv("HAVNAI_INVITE_CONFIG", str(BASE_DIR / "server" / "invites.json"))
 )
 INVITE_GATING = os.getenv("HAVNAI_INVITE_GATING", "").strip().lower() in {"1", "true", "yes"}
+CREDITS_ENABLED = os.getenv("HAVNAI_CREDITS_ENABLED", "").strip().lower() in {"1", "true", "yes"}
 
 # Reward configuration (can be overridden via environment variables)
 REWARD_CONFIG: Dict[str, float] = {
@@ -939,6 +940,17 @@ def init_db() -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS credits (
+            wallet TEXT PRIMARY KEY,
+            balance REAL NOT NULL DEFAULT 0.0,
+            total_deposited REAL NOT NULL DEFAULT 0.0,
+            total_spent REAL NOT NULL DEFAULT 0.0,
+            updated_at REAL NOT NULL
+        )
+        """
+    )
     conn.execute("UPDATE jobs SET status='queued', node_id=NULL WHERE status='running'")
     conn.commit()
 
@@ -1304,6 +1316,130 @@ def record_reward(wallet: Optional[str], task_id: str, reward: float) -> None:
         (wallet, task_id, reward, unix_now()),
     )
     conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Credits helpers
+# ---------------------------------------------------------------------------
+
+# Default credit costs per pipeline family.  Override per-model via
+# "credit_cost" in registry.json.
+DEFAULT_CREDIT_COSTS: Dict[str, float] = {
+    "sdxl": 1.0,
+    "sd15": 0.5,
+    "ltx2": 3.0,
+    "animatediff": 2.0,
+    "face_swap": 1.5,
+}
+
+
+def resolve_credit_cost(model_name: str, task_type: str = "") -> float:
+    """Return the credit cost for a job.
+
+    Priority: manifest credit_cost → pipeline default → 1.0 fallback.
+    """
+    cfg = get_model_config(model_name)
+    if cfg:
+        explicit = cfg.get("credit_cost")
+        if explicit is not None:
+            try:
+                return float(explicit)
+            except (TypeError, ValueError):
+                pass
+        pipeline = str(cfg.get("pipeline", "")).lower()
+        if pipeline in DEFAULT_CREDIT_COSTS:
+            return DEFAULT_CREDIT_COSTS[pipeline]
+    # Fall back on task_type for non-manifest models
+    tt = (task_type or "").upper()
+    if tt == "FACE_SWAP":
+        return DEFAULT_CREDIT_COSTS.get("face_swap", 1.5)
+    if tt in ("VIDEO_GEN", "ANIMATEDIFF"):
+        return DEFAULT_CREDIT_COSTS.get("ltx2", 3.0)
+    return 1.0
+
+
+def get_credit_balance(wallet: str) -> float:
+    """Return current credit balance for a wallet."""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT balance FROM credits WHERE wallet=?", (wallet,)
+    ).fetchone()
+    return float(row["balance"]) if row else 0.0
+
+
+def deposit_credits(wallet: str, amount: float, reason: str = "") -> float:
+    """Add credits to a wallet.  Returns new balance."""
+    if amount <= 0:
+        return get_credit_balance(wallet)
+    conn = get_db()
+    conn.execute(
+        """
+        INSERT INTO credits (wallet, balance, total_deposited, total_spent, updated_at)
+        VALUES (?, ?, ?, 0.0, ?)
+        ON CONFLICT(wallet) DO UPDATE SET
+            balance = balance + excluded.balance,
+            total_deposited = total_deposited + excluded.total_deposited,
+            updated_at = excluded.updated_at
+        """,
+        (wallet, amount, amount, unix_now()),
+    )
+    conn.commit()
+    new_balance = get_credit_balance(wallet)
+    log_event("Credits deposited", wallet=wallet, amount=amount, new_balance=new_balance, reason=reason)
+    return new_balance
+
+
+def deduct_credits(wallet: str, amount: float, job_id: str = "") -> Tuple[bool, float]:
+    """Deduct credits from a wallet.  Returns (success, remaining_balance).
+
+    Fails if balance is insufficient – never goes negative.
+    """
+    conn = get_db()
+    row = conn.execute("SELECT balance FROM credits WHERE wallet=?", (wallet,)).fetchone()
+    current = float(row["balance"]) if row else 0.0
+    if current < amount:
+        return False, current
+    conn.execute(
+        """
+        UPDATE credits
+        SET balance = balance - ?,
+            total_spent = total_spent + ?,
+            updated_at = ?
+        WHERE wallet = ?
+        """,
+        (amount, amount, unix_now(), wallet),
+    )
+    conn.commit()
+    remaining = get_credit_balance(wallet)
+    log_event("Credits deducted", wallet=wallet, amount=amount, remaining=remaining, job_id=job_id)
+    return True, remaining
+
+
+def check_and_deduct_credits(wallet: str, model_name: str, task_type: str = "") -> Optional[Any]:
+    """If credits are enabled, check balance and deduct.
+
+    Returns a Flask error response if insufficient, or None if OK / credits disabled.
+    """
+    if not CREDITS_ENABLED:
+        return None
+    cost = resolve_credit_cost(model_name, task_type)
+    balance = get_credit_balance(wallet)
+    if balance < cost:
+        return jsonify({
+            "error": "insufficient_credits",
+            "balance": balance,
+            "cost": cost,
+            "message": f"This job costs {cost} credits but you only have {balance}.",
+        }), 402
+    # Deduction happens at enqueue time (not completion) so the slot is reserved.
+    ok, remaining = deduct_credits(wallet, cost)
+    if not ok:
+        return jsonify({
+            "error": "insufficient_credits",
+            "balance": remaining,
+            "cost": cost,
+        }), 402
+    return None
 
 
 def get_job_summary(limit: int = 50) -> Dict[str, Any]:
@@ -2057,6 +2193,11 @@ def submit_job() -> Any:
         job_data = json.dumps(job_settings)
         task_type = CREATOR_TASK_TYPE
 
+    # Credit gate — only active when HAVNAI_CREDITS_ENABLED=true
+    credit_err = check_and_deduct_credits(wallet, cfg.get("name", model_name), task_type)
+    if credit_err:
+        return credit_err
+
     with LOCK:
         job_id = enqueue_job(
             wallet,
@@ -2144,6 +2285,12 @@ def generate_video_job() -> Any:
         settings["init_image"] = init_image
 
     job_data = json.dumps(settings)
+
+    # Credit gate — only active when HAVNAI_CREDITS_ENABLED=true
+    credit_err = check_and_deduct_credits(wallet, cfg.get("name", model_name), "VIDEO_GEN")
+    if credit_err:
+        return credit_err
+
     with LOCK:
         job_id = enqueue_job(
             wallet,
@@ -2194,6 +2341,12 @@ def submit_faceswap_job_endpoint() -> Any:
         weight = cfg.get("reward_weight", resolve_weight(model_name, 10.0))
 
     job_data = json.dumps(settings)
+
+    # Credit gate — only active when HAVNAI_CREDITS_ENABLED=true
+    credit_err = check_and_deduct_credits(wallet, cfg.get("name", model_name), "FACE_SWAP")
+    if credit_err:
+        return credit_err
+
     with LOCK:
         job_id = enqueue_job(
             wallet,
@@ -2818,6 +2971,83 @@ def rewards_endpoint() -> Any:
     with LOCK:
         rewards = {node_id: info.get("rewards", 0.0) for node_id, info in NODES.items()}
     return jsonify({"rewards": rewards, "total": job_summary["total_distributed"]})
+
+
+# ---------------------------------------------------------------------------
+# Credits endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.route("/credits/balance", methods=["GET"])
+def credits_balance() -> Any:
+    """Return credit balance for a wallet."""
+    wallet = request.args.get("wallet", "").strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    conn = get_db()
+    row = conn.execute(
+        "SELECT balance, total_deposited, total_spent, updated_at FROM credits WHERE wallet=?",
+        (wallet,),
+    ).fetchone()
+    if not row:
+        return jsonify({
+            "wallet": wallet,
+            "balance": 0.0,
+            "total_deposited": 0.0,
+            "total_spent": 0.0,
+            "credits_enabled": CREDITS_ENABLED,
+        })
+    return jsonify({
+        "wallet": wallet,
+        "balance": float(row["balance"]),
+        "total_deposited": float(row["total_deposited"]),
+        "total_spent": float(row["total_spent"]),
+        "updated_at": row["updated_at"],
+        "credits_enabled": CREDITS_ENABLED,
+    })
+
+
+@app.route("/credits/deposit", methods=["POST"])
+def credits_deposit() -> Any:
+    """Deposit credits to a wallet.
+
+    This is an admin / webhook endpoint.  In production, this will be
+    called by Stripe webhooks or on-chain listeners — never directly by
+    end users.  For now it is gated by the join token.
+    """
+    if not check_join_token():
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json() or {}
+    wallet = str(data.get("wallet", "")).strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    try:
+        amount = float(data.get("amount", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid amount"}), 400
+    if amount <= 0:
+        return jsonify({"error": "amount must be positive"}), 400
+    reason = str(data.get("reason", "manual")).strip()
+    new_balance = deposit_credits(wallet, amount, reason=reason)
+    return jsonify({
+        "wallet": wallet,
+        "deposited": amount,
+        "balance": new_balance,
+        "reason": reason,
+    })
+
+
+@app.route("/credits/cost", methods=["GET"])
+def credits_cost() -> Any:
+    """Return the credit cost for a given model, so the frontend can show prices."""
+    model = request.args.get("model", "").strip().lower()
+    task_type = request.args.get("task_type", "").strip()
+    cost = resolve_credit_cost(model, task_type)
+    return jsonify({
+        "model": model,
+        "cost": cost,
+        "credits_enabled": CREDITS_ENABLED,
+    })
 
 
 @app.route("/jobs/recent", methods=["GET"])

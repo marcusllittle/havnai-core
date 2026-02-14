@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import inspect
+import logging
+import os
 import threading
 from pathlib import Path
 from typing import Any, Optional
@@ -25,6 +27,7 @@ except Exception:  # pragma: no cover
 _PIPE_LOCK = threading.Lock()
 _PIPE: Optional[Any] = None
 _PIPE_ID: Optional[str] = None
+_LOGGER = logging.getLogger(__name__)
 
 
 def load_latte_pipeline(model_id: str, device: str = "cuda") -> Any:
@@ -46,10 +49,16 @@ def load_latte_pipeline(model_id: str, device: str = "cuda") -> Any:
                 torch_dtype=torch.float16,
             ).to(device)
             pipe.vae = vae
-            try:
-                pipe.enable_model_cpu_offload()
-            except Exception:
-                pass
+            # Only enable CPU offload if VRAM is low (< 10GB) or forced via env var
+            force_offload = os.environ.get("LTX2_CPU_OFFLOAD", "").lower() in ("1", "true", "yes")
+            disable_offload = os.environ.get("LTX2_NO_OFFLOAD", "").lower() in ("1", "true", "yes")
+
+            if not disable_offload and (force_offload or (torch.cuda.is_available() and torch.cuda.get_device_properties(0).total_memory < 10 * 1024**3)):
+                try:
+                    pipe.enable_model_cpu_offload()
+                    _LOGGER.info("CPU offload enabled (low VRAM or forced)")
+                except Exception:
+                    pass
             try:
                 pipe.enable_vae_slicing()
             except Exception:

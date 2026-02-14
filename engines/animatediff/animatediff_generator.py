@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import os
 import threading
 from pathlib import Path
 from typing import Any, Optional
@@ -99,11 +100,17 @@ def load_animatediff_pipeline(
                 except Exception:
                     pass
             offload_enabled = False
-            try:
-                pipe.enable_model_cpu_offload()
-                offload_enabled = True
-            except Exception:
-                pass
+            # Only enable CPU offload if VRAM is low (< 10GB) or forced via env var
+            force_offload = os.environ.get("ANIMATEDIFF_CPU_OFFLOAD", "").lower() in ("1", "true", "yes")
+            disable_offload = os.environ.get("ANIMATEDIFF_NO_OFFLOAD", "").lower() in ("1", "true", "yes")
+
+            if not disable_offload and (force_offload or (torch.cuda.is_available() and torch.cuda.get_device_properties(0).total_memory < 10 * 1024**3)):
+                try:
+                    pipe.enable_model_cpu_offload()
+                    offload_enabled = True
+                    _LOGGER.info("CPU offload enabled (low VRAM or forced)")
+                except Exception:
+                    pass
             try:
                 if hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_slicing"):
                     pipe.vae.enable_slicing()

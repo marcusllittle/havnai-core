@@ -101,319 +101,112 @@ REWARD_CONFIG: Dict[str, float] = {
     "base_reward": float(os.getenv("REWARD_BASE_HAI", "0.05")),
 }
 
-# Slight global positive bias to help realism skin detail.
-GLOBAL_POSITIVE_SUFFIX = (
-    "(ultra-realistic 8k:1.05), "
-    "(detailed skin pores:1.03), "
+# Per-pipeline positive suffixes.  SD1.5 realism models benefit from strong
+# hand/anatomy hints; SDXL already handles anatomy well and just needs a
+# light quality push.  Stylized models (anime, cartoon, manhwa) should NOT
+# get the realism suffix — it fights against the art style.
+
+POSITIVE_SUFFIX_SD15_REALISM = (
+    "(ultra-realistic 8k:1.05), (detailed skin pores:1.03), "
     "focused eyes, clear pupils, natural gaze, "
-    "well formed hands, five fingers on each hand, "
+    "(well formed hands:1.1), (five fingers on each hand:1.1), "
     "natural teeth, realistic mouth structure"
 )
 
-# Global negative prompt to discourage common artifacts across all models.
-GLOBAL_NEGATIVE_PROMPT = ", ".join(
-    [
-        "FastNegativeV2",
-        "liquid fingers",
-        "interlocked fingers",
-        "bad teeth",
-        "oversaturated",
-        "scan artifact",
-        "doll skin",
-        "exaggerated features",
-        "unnatural pose",
-        "disembodied limb",
-        "oversized head",
-        "webbed fingers",
-        "bad ears",
-        "bad chin",
-        "bad mouth",
-        "bad eyes",
-        "bad digit",
-        "bad shadow",
-        "bad color",
-        "bad lighting",
-        "bad crop",
-        "bad aspect ratio",
-        "bad vector",
-        "bad lineart",
-        "bad perspective",
-        "bad shading",
-        "bad sketch",
-        "bad trace",
-        "bad typesetting",
-        "color error",
-        "color mismatch",
-        "dirty art",
-        "dirty scan",
-        "dubious anatomy",
-        "exaggerated limbs",
-        "flat colors",
-        "gradient background",
-        "heavily pixelated",
-        "high noise",
-        "image noise",
-        "moire pattern",
-        "motion blur",
-        "muddy colors",
-        "overcompressed",
-        "poor lineart",
-        "scanned with errors",
-        "scan errors",
-        "very low quality",
-        "visible pixels",
-        "aliasing",
-        "anatomy error",
-        "anatomy mistake",
-        "broken anatomy",
-        "broken pose",
-        "camera aberration",
-        "chromatic aberration",
-        "clashing styles",
-        "compression artifacts",
-        "corrupted",
-        "cribbed from",
-        "downsampling",
-        "faded lines",
-        "filter abuse",
-        "grainy",
-        "noise",
-        "noisy background",
-        "pixelation",
-        "pixels",
-        "poor quality",
-        "amateur",
-        "amateur drawing",
-        "bad art",
-        "bad coloring",
-        "bad composition",
-        "bad contrast",
-        "bad drawing",
-        "bad image",
-        "bad photoshop",
-        "bad pose",
-        "bad proportions",
-        "beginner",
-        "black and white",
-        "deformed",
-        "disfigured",
-        "displeasing",
-        "distorted",
-        "distorted proportions",
-        "drawing",
-        "duplicate",
-        "early",
-        "exaggerated pose",
-        "gross proportions",
-        "malformed limbs",
-        "missing arm",
-        "missing leg",
-        "extra arm",
-        "extra leg",
-        "fused fingers",
-        "too many fingers",
-        "extra fingers",
-        "mutated hands",
-        "blurry",
-        "out of frame",
-        "contortionist",
-        "contorted limbs",
-        "disproportionate",
-        "twisted posture",
-        "disconnected",
-        "warped",
-        "misshapen",
-        "out of scale",
-        "score_6",
-        "score_5",
-        "score_4",
-        "tan",
-        "piercing",
-        "3d",
-        "render",
-        "cgi",
-        "doll",
-        "cartoon",
-        "illustration",
-        "painting",
-        "digital art",
-        "anime",
-        "fake",
-        "3d modeling",
-        "old",
-        "asymmetrical features",
-        "unrealistic proportions",
-        "mutated",
-        "unnatural textures",
-        "twisted limbs",
-        "malformed hands",
-        "bad hands",
-        "bad fingers",
-        "split image",
-        "amputee",
-        "mutation",
-        "missing fingers",
-        "extra digit",
-        "fewer digits",
-        "cropped",
-        "worst quality",
-        "low quality",
-        "normal quality",
-        "jpeg artifacts",
-        "signature",
-        "watermark",
-        "username",
-        "artist name",
-        "ugly",
-        "symbol",
-        "hieroglyph",
-        "six fingers per hand",
-        "four fingers per hand",
-        "disfigured hand",
-        "monochrome",
-        "missing limb",
-        "linked limb",
-        "connected limb",
-        "interconnected limb",
-        "broken finger",
-        "broken hand",
-        "broken wrist",
-        "broken leg",
-        "split limbs",
-        "no thumb",
-        "missing hand",
-        "missing arms",
-        "missing legs",
-        "fused digit",
-        "missing digit",
-        "extra knee",
-        "extra elbow",
-        "storyboard",
-        "split arms",
-        "split hands",
-        "split fingers",
-        "twisted fingers",
-        "disfigured butt",
-        "deformed hands",
-        "blurred faces",
-        "irregular face",
-        "irrregular body shape",
-        "ugly eyes",
-        "squint",
-        "tiling",
-        "poorly drawn hands",
-        "poorly drawn feet",
-        "poorly drawn face",
-        "poorly framed",
-        "body out of frame",
-        "cut off",
-        "draft",
-        "grainy",
-        "oversaturated",
-        "teeth",
-        "closed eyes",
-        "weird neck",
-        "long neck",
-        "long body",
-        "disgusting",
-        "childish",
-        "mutilated",
-        "mangled",
-        "surreal",
-        "fuse",
-        "off-center",
-        "text",
-        "logo",
-        "letterbox",
-        "bokeh",
-        "multiple views",
-        "multiple panels",
-        "extra hands",
-        "extra limbs",
-        "mutated fingers",
-        "detached arm",
-        "liquid hand",
-        "inverted hand",
-        "oversized head",
-        "three hands",
-        "three legs",
-        "bad arms",
-        "three crus",
-        "extra crus",
-        "fused crus",
-        "worst feet",
-        "three feet",
-        "fused feet",
-        "fused thigh",
-        "three thigh",
-        "extra thigh",
-        "worst thigh",
-        "ugly fingers",
-        "horn",
-        "realistic photo",
-        "extra eyes",
-        "huge eyes",
-        "2girl",
-        "2boy",
-        "dehydrated",
-        "morbid",
-        "mutation text",
-        "score_6, score_5, score_4",
-        "3d, render, cgi, doll, cartoon, illustration, painting, digital art, anime, fake, 3d modeling, old, bad anatomy, bad proportions, asymmetrical features, disfigured, deformed, malformed, unrealistic proportions, mutated, unnatural textures, fused fingers, extra limbs, extra fingers, distorted, twisted limbs, malformed hands, bad hands, bad fingers, bad eyes, bad teeth, blurry",
-        "split image, out of frame, amputee, mutated, mutation, deformed, severed, dismembered, corpse, photograph, poorly drawn, bad anatomy, blur, blurry, lowres, bad hands, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, artist name, ugly, symbol, hieroglyph, extra fingers, six fingers per hand, four fingers per hand, disfigured hand, monochrome, missing limb, disembodied limb, linked limb, connected limb, interconnected limb, broken finger, broken hand, broken wrist, broken leg, split limbs, no thumb, missing hand, missing arms, missing legs, fused finger, fused digit, missing digit, bad digit, extra knee, extra elbow, storyboard, split arms, split hands, split fingers, twisted fingers, disfigured butt",
-        "deformed hands, watermark, text, deformed fingers, blurred faces, irregular face, irrregular body shape, ugly eyes, deformed face, squint, tiling, poorly drawn hands, poorly drawn feet, poorly drawn face, out of frame, poorly framed, extra limbs, disfigured, deformed, body out of frame, blurry, bad anatomy, blurred, watermark, grainy, signature, cut off, draft",
-        "cartoon, black and white photo, disfigured, kitsch, ugly, oversaturated, grain, low-res, Deformed, blurry, bad anatomy, poorly drawn face, mutation, mutated, extra limb, poorly drawn hands, missing limb, blurry, floating limbs, disconnected limbs, malformed hands, blur, out of focus, long neck, long body, disgusting, poorly drawn, childish, mutilated, mangled, old, surreal",
-        "bad anatomy, fuze, ugly eyes, imperfections, bad finger, off-center, interlocked fingers, text, logo, watermark, signature, letterbox, bokeh, blurry, multiple views, multiple panels, missing limbs, missing fingers, deformed, cropped, extra hands, extra fingers, too many fingers, fused fingers, bad arm, monochrome, distorted arm, extra arms, malformed hands, poorly drawn hands, mutated fingers, extra limbs, poorly drawn face, artist name, fused arms, extra legs, missing leg, disembodied leg, detached arm, liquid hand, inverted hand, disembodied limb, oversized head",
-        "bad anatomy, bad hands, three hands, three legs, bad arms, missing legs, missing arms, poorly drawn face, bad face, fused face, cloned face, worst face, three crus, extra crus, fused crus, worst feet, three feet, fused feet, fused thigh, three thigh, extra thigh, worst thigh, missing fingers, extra fingers, ugly fingers, long fingers, horn, realistic photo, extra eyes, huge eyes, 2girl, amputation, disconnected limbs",
-        "bad anatomy, bad hands, three hands, three legs, bad arms, missing legs, missing arms, poorly drawn face, bad face, fused face, cloned face, worst face, out of frame double, three crus, extra crus, fused crus, worst feet, three feet, fused feet, fused thigh, three thigh, extra thigh, worst thigh, missing fingers, extra fingers, ugly fingers, long fingers, horn, realistic photo, extra eyes, huge eyes, 2girl, 2boy, amputation, disconnected limbs",
-        "mutation, deformed, deformed iris, duplicate, morbid, mutilated, disfigured, poorly drawn hand, poorly drawn face, bad proportions, gross proportions, extra limbs, cloned face, long neck, malformed limbs, missing arm, missing leg, extra arm, extra leg, fused fingers, too many fingers, extra fingers, mutated hands, blurry, bad anatomy, out of frame, contortionist, contorted limbs, exaggerated features, disproportionate, twisted posture, unnatural pose, disconnected, disproportionate, warped, misshapen, out of scale",
-        "3 or 4 ears, never BUT ONE EAR, blurry, bad anatomy, extra limbs, poorly drawn face, poorly drawn hands, missing fingers, mangled teeth, weird teeth, poorly drawn eyes, blurry eyes, tan skin, oversaturated, teeth, poorly drawn, ugly, closed eyes, 3D, weird neck, duplicate, morbid, mutilated, out of frame, extra fingers, mutated hands, poorly drawn hands, poorly drawn face, mutation, deformed, blurry, bad anatomy, bad proportions, extra limbs, cloned face, disfigured, extra limbs, gross proportions, malformed limbs, missing arms, missing legs, extra arms, extra legs, mutated hands, fused finger",
-        "amateur, amateur drawing, bad anatomy, bad art, bad aspect ratio, bad color, bad coloring, bad composition, bad contrast, bad crop, bad drawing, bad image, bad lighting, bad lineart, bad perspective, bad photoshop, bad pose, bad proportions, bad shading, bad sketch, bad trace, bad vector, beginner, black and white, broken anatomy, broken pose, clashing styles, color error, color issues, color mismatch, deformed, dirty art, disfigured, displeasing, distorted, distorted proportions, drawing, dubious anatomy, duplicate, early, exaggerated limbs, exaggerated pose, flat colors, gro",
-        "aliasing, anatomy error, anatomy mistake, artifact, artifacts, broken anatomy, broken pose, camera aberration, chromatic aberration, clashing styles, cloned face, color banding, color error, color issues, color mismatch, compression artifacts, corrupted, cribbed from, cropped, deformed, dirty scan, disfigured, distorted, downsampling, draft, dubious anatomy, emoji, error, exaggerated limbs, exaggerated pose, extra arms, extra digits, extra fingers, extra legs, extra limbs, faded lines, filter abuse, fused fingers, gradient background, grainy, heavily compressed, heavily pixelated, high noise",
-        "ai-generated, artifact, artifacts, bad quality, bad scan, blurred, blurry, compressed, compression artifacts, corrupted, dirty art scan, dirty scan, dithering, downsampling, faded lines, frameborder, grainy, heavily compressed, heavily pixelated, high noise, image noise, low dpi, low fidelity, low resolution, lowres, moire pattern, moiré pattern, motion blur, muddy colors, noise, noisy background, overcompressed, pixelation, pixels, poor quality, poor lineart, scanned with errors, scan artifact, scan errors, very low quality, visible pixels BREAK amateur, amateur drawing, bad anatomy, bad art",
-        "ugly, old, fat, slight, disgusting, Unflattering, Distorted, Poorly lit, Blurry, Grainy, Overexposed, Underexposed, Cluttered background, Distracti",
-        "bad anatomy, bad proportions, blurry, cloned face, cropped, deformed, dehydrated, disfigured, duplicate, error, extra arms, extra fingers, extra legs, extra limbs, fused fingers, gross proportions, jpeg artifacts, long neck, low quality, low-res, malformed limbs, missing arms, missing legs, morbid, mutated hands, mutation,text, signature, ugly, username, watermark, poorly drawn hands, worst quality",
-        "extra fingers, fused fingers, long necks, missing arms, mutated hands, malformed limbs, bad anatomy",
-        "mutations, merged features, gross proportions",
-        "extra wings, disproportionate body parts, random glowing elements, plastic texture, over-saturated colors, deformed legs, asymmetry, misplaced shadows, wrong perspective, poorly blended details",
-        "deformed, asymmetrical, extra eyes, extra limbs, worst quality, blurry, unnatural skin, bad anatomy",
-        "deformed, asymmetrical, extra fingers, extra limbs, fused fingers, unrealistic proportions, bad anatomy",
-        "deformed, asymmetrical, extra eyes, blurry, distorted, bad anatomy, disproportional, unrealistic skin",
-        "blurry, pixelated, noisy, low resolution, JPEG artifacts, lack of focus, grainy textures, over-sharpened edges",
-        "extra fingers, fused fingers, long necks, missing arms, mutated hands, malformed limbs, bad anatomy",
-        "mutations, merged features, gross proportions",
-        "extra breasts",
-        "missing breasts",
-        "deformed breasts",
-        "plastic breasts",
-        "fake breasts",
-        "gravity-defying breasts",
-        "extra nipples",
-        "cloned face",
-        "duplicate body parts",
-        "censored",
-        "clothing on nude body",
-        "smooth featureless crotch",
-        "dildo clipping through body",
-        "merged holes",
-        "plastic skin",
-        "dry skin",
-        "flat chest",
-        "single snake",
-        "few snakes",
-        "bald spots",
-        "horror monster",
-        "lazy eye",
-        "crossed eyes",
-        "missing fingers",
-        "fused fingers",
-        "extra fingers",
-        "malformed teeth",
-        "extra teeth",
-        "bad teeth",
-        "open mouth deformity",
-    ]
+POSITIVE_SUFFIX_SDXL = (
+    "high quality, sharp focus, detailed, professional, "
+    "correct anatomy, proper hands"
 )
+
+POSITIVE_SUFFIX_STYLIZED = (
+    "high quality, masterpiece, detailed, clean lines"
+)
+
+# Tags that indicate a stylized (non-realism) model
+_STYLIZED_TAGS = {"anime", "cartoon", "pixar", "manhwa", "webtoon", "stylized", "fantasy"}
+
+def get_positive_suffix(model_cfg: Optional[Dict[str, Any]] = None) -> str:
+    """Return the appropriate positive suffix based on model config."""
+    if model_cfg is None:
+        return POSITIVE_SUFFIX_SD15_REALISM
+    tags = set(t.lower() for t in (model_cfg.get("tags") or []))
+    pipeline = (model_cfg.get("pipeline") or "sd15").lower()
+    if tags & _STYLIZED_TAGS:
+        return POSITIVE_SUFFIX_STYLIZED
+    if "sdxl" in pipeline or "xl" in pipeline:
+        return POSITIVE_SUFFIX_SDXL
+    return POSITIVE_SUFFIX_SD15_REALISM
+
+# Backward-compatible alias used by older code paths
+GLOBAL_POSITIVE_SUFFIX = POSITIVE_SUFFIX_SD15_REALISM
+
+# Per-pipeline negative prompts — SD1.5 needs much stronger hand/anatomy
+# correction while SDXL handles anatomy natively and just needs lighter cleanup.
+
+_NEGATIVE_HAND_SD15 = (
+    "(worst hands:1.4), (deformed hands:1.4), (wrong number of fingers:1.3), "
+    "(extra fingers:1.3), (missing fingers:1.3), (fused fingers:1.3), "
+    "(too many fingers:1.3), (mutated hands:1.3), (poorly drawn hands:1.3), "
+    "(bad hands:1.3), (extra digit:1.2), (fewer digits:1.2), "
+    "(six fingers:1.3), (four fingers:1.3), "
+    "liquid fingers, interlocked fingers, webbed fingers, broken finger, "
+    "broken hand, broken wrist, twisted fingers, split fingers, "
+    "disfigured hand, inverted hand, liquid hand, three hands, "
+    "no thumb, ugly fingers, long fingers"
+)
+
+_NEGATIVE_ANATOMY_SD15 = (
+    "(bad anatomy:1.3), (extra limbs:1.2), extra arm, extra leg, "
+    "missing arm, missing leg, malformed limbs, fused limbs, "
+    "disconnected limbs, twisted limbs, split limbs, "
+    "duplicate face, multiple faces, extra eyes, huge eyes, "
+    "deformed face, cloned face, asymmetrical features, "
+    "long neck, weird neck, oversized head, "
+    "disproportionate, unrealistic proportions, gross proportions"
+)
+
+_NEGATIVE_QUALITY_COMMON = (
+    "worst quality, low quality, normal quality, jpeg artifacts, "
+    "blurry, out of frame, cropped, watermark, signature, "
+    "text, logo, username, artist name, letterbox, "
+    "draft, grainy, noisy, pixelated, compression artifacts, "
+    "overexposed, underexposed, motion blur"
+)
+
+_NEGATIVE_STYLE_REALISM = (
+    "3d, render, cgi, doll, cartoon, illustration, painting, "
+    "digital art, anime, fake, 3d modeling, drawing, sketch"
+)
+
+GLOBAL_NEGATIVE_SD15 = ", ".join([
+    "FastNegativeV2",
+    _NEGATIVE_HAND_SD15,
+    _NEGATIVE_ANATOMY_SD15,
+    _NEGATIVE_QUALITY_COMMON,
+    _NEGATIVE_STYLE_REALISM,
+    "split image, amputee, mutation, morbid, mutilated, "
+    "deformed, disfigured, bad proportions",
+])
+
+GLOBAL_NEGATIVE_SDXL = ", ".join([
+    "extra fingers, fused fingers, too many fingers, mutated hands, "
+    "bad hands, deformed hands, extra hands, three hands",
+    "extra limbs, missing arm, missing leg, extra arm, extra leg, "
+    "duplicate face, cloned face, extra eyes",
+    _NEGATIVE_QUALITY_COMMON,
+    _NEGATIVE_STYLE_REALISM,
+    "bad anatomy, gross proportions, long neck, oversized head",
+])
+
+# Backward-compatible alias — defaults to SD1.5 (stricter) for safety
+GLOBAL_NEGATIVE_PROMPT = GLOBAL_NEGATIVE_SD15
+
+def get_pipeline_negative(pipeline: str) -> str:
+    """Return the appropriate global negative prompt for a pipeline type."""
+    pipeline = (pipeline or "sd15").lower()
+    if "sdxl" in pipeline or "xl" in pipeline:
+        return GLOBAL_NEGATIVE_SDXL
+    return GLOBAL_NEGATIVE_SD15
 
 # ---------------------------------------------------------------------------
 # Version helpers
@@ -1331,6 +1124,10 @@ def _normalize_lora_catalog(raw_loras: Any) -> List[Dict[str, Any]]:
                 item["filename"] = filename
             if label:
                 item["label"] = label
+            # Preserve pipeline compatibility field (sd15 / sdxl)
+            pipeline = str(entry.get("pipeline") or "").strip().lower()
+            if pipeline:
+                item["pipeline"] = pipeline
             normalized.append(item)
             continue
         if isinstance(entry, str):
@@ -1342,6 +1139,8 @@ def _normalize_lora_catalog(raw_loras: Any) -> List[Dict[str, Any]]:
 
 @app.route("/loras/list")
 def list_loras() -> Any:
+    # Optional pipeline filter: /loras/list?pipeline=sdxl or ?pipeline=sd15
+    pipeline_filter = request.args.get("pipeline", "").strip().lower()
     loras: List[Dict[str, Any]] = []
     nodes_with_loras: List[str] = []
     with LOCK:
@@ -1360,6 +1159,8 @@ def list_loras() -> Any:
             seen.add(key)
             deduped.append(entry)
         deduped.sort(key=lambda item: str(item.get("label") or item.get("name") or "").lower())
+        if pipeline_filter:
+            deduped = [e for e in deduped if _lora_matches_pipeline(e, pipeline_filter)]
         return jsonify({"loras": deduped, "nodes": nodes_with_loras, "source": "nodes"})
     path = LORA_STORAGE_DIR
     if path.exists():
@@ -1370,7 +1171,25 @@ def list_loras() -> Any:
                 continue
             loras.append({"name": entry.stem, "filename": entry.name})
     loras.sort(key=lambda item: str(item.get("name") or "").lower())
+    if pipeline_filter:
+        loras = [e for e in loras if _lora_matches_pipeline(e, pipeline_filter)]
     return jsonify({"loras": loras, "path": str(path), "source": "local"})
+
+
+def _lora_matches_pipeline(lora: Dict[str, Any], target_pipeline: str) -> bool:
+    """Check if a LoRA is compatible with the target pipeline.
+
+    Returns True if the LoRA has no pipeline metadata (unknown = show it)
+    or if the pipeline matches.
+    """
+    lora_pipeline = str(lora.get("pipeline") or "").lower()
+    if not lora_pipeline:
+        return True  # No metadata — show in all pipelines
+    if target_pipeline == "sdxl":
+        return "sdxl" in lora_pipeline or "xl" in lora_pipeline
+    if target_pipeline == "sd15":
+        return lora_pipeline == "sd15" or lora_pipeline == "sd1.5"
+    return True
 
 
 @app.route("/installers/<path:filename>")
@@ -1425,6 +1244,10 @@ def _normalize_loras(raw_loras: Any) -> List[Dict[str, Any]]:
                     item["weight"] = float(weight)
                 except (TypeError, ValueError):
                     pass
+            # Preserve pipeline compatibility field for validation
+            pipeline = str(entry.get("pipeline") or "").strip().lower()
+            if pipeline:
+                item["pipeline"] = pipeline
             normalized.append(item)
             continue
         if isinstance(entry, str):
@@ -1652,18 +1475,45 @@ def submit_job() -> Any:
         task_type = "ANIMATEDIFF"
     else:
         prompt_text = str(payload.get("prompt") or payload.get("data") or "")
+        # Pipeline-aware positive suffix — prevents realism tokens on anime models
+        positive_suffix = get_positive_suffix(cfg)
         if prompt_text:
-            prompt_text = f"{prompt_text}, {GLOBAL_POSITIVE_SUFFIX}"
+            prompt_text = f"{prompt_text}, {positive_suffix}"
         else:
-            prompt_text = GLOBAL_POSITIVE_SUFFIX
+            prompt_text = positive_suffix
         negative_prompt = str(payload.get("negative_prompt") or "").strip()
         job_settings: Dict[str, Any] = {"prompt": prompt_text}
+
+        # LoRA pipeline validation — reject LoRAs incompatible with the model
+        model_pipeline = (cfg.get("pipeline") or "sd15").lower() if cfg else "sd15"
         loras = _normalize_loras(payload.get("loras") or payload.get("lora_list") or [])
         if loras:
-            job_settings["loras"] = loras
+            validated_loras = []
+            for lora_entry in loras:
+                lora_pipeline = str(lora_entry.get("pipeline") or "").lower()
+                # If LoRA declares a pipeline, check compatibility
+                if lora_pipeline and lora_pipeline != model_pipeline:
+                    # SD1.5 LoRA on SDXL model (or vice versa) = skip with warning
+                    is_sd15_on_sdxl = lora_pipeline == "sd15" and "sdxl" in model_pipeline
+                    is_sdxl_on_sd15 = "sdxl" in lora_pipeline and model_pipeline == "sd15"
+                    if is_sd15_on_sdxl or is_sdxl_on_sd15:
+                        log_event(
+                            "LoRA pipeline mismatch, skipping",
+                            level="warning",
+                            lora_name=lora_entry.get("name"),
+                            lora_pipeline=lora_pipeline,
+                            model_pipeline=model_pipeline,
+                        )
+                        continue
+                validated_loras.append(lora_entry)
+            if validated_loras:
+                job_settings["loras"] = validated_loras
+
+        # Pipeline-aware negative prompt — SD1.5 gets much stronger hand correction
+        pipeline_negative = get_pipeline_negative(model_pipeline)
         base_negative = str(cfg.get("negative_prompt_default") or "").strip() if cfg else ""
         combined_negative = ", ".join(
-            filter(None, [negative_prompt or base_negative, GLOBAL_NEGATIVE_PROMPT])
+            filter(None, [negative_prompt or base_negative, pipeline_negative])
         )
         if combined_negative:
             job_settings["negative_prompt"] = combined_negative

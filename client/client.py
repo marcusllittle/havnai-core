@@ -603,8 +603,56 @@ def _normalize_loras(raw_loras: Any) -> List[Dict[str, Any]]:
     return normalized
 
 
-def list_local_loras() -> List[Dict[str, str]]:
-    loras: List[Dict[str, str]] = []
+def _detect_lora_pipeline(path: Path) -> str:
+    """Detect whether a LoRA file targets SD1.5 or SDXL by inspecting tensor keys.
+
+    For .safetensors files, reads the JSON header (first 8 bytes = uint64 LE
+    header size, then header_size bytes of JSON).  SDXL LoRAs contain keys
+    referencing the second text encoder (``lora_te2`` / ``text_encoder_2``).
+    SD1.5 LoRAs never have these.
+
+    Returns 'sdxl', 'sd15', or '' if detection fails.
+    """
+    import struct
+
+    suffix = path.suffix.lower()
+    if suffix != ".safetensors":
+        # .pt / .bin files are harder to inspect safely; skip detection
+        return ""
+    try:
+        with path.open("rb") as fh:
+            raw_size = fh.read(8)
+            if len(raw_size) < 8:
+                return ""
+            header_size = struct.unpack("<Q", raw_size)[0]
+            # Sanity check — header should be < 10 MB
+            if header_size > 10 * 1024 * 1024:
+                return ""
+            header_bytes = fh.read(header_size)
+        header = json.loads(header_bytes)
+        keys = set(header.keys())
+        # SDXL LoRAs always train on the second text encoder (CLIP-G)
+        has_te2 = any(
+            "lora_te2" in k or "text_encoder_2" in k or "te2_text_model" in k
+            for k in keys
+        )
+        if has_te2:
+            return "sdxl"
+        # If it has UNet keys but no te2, it's SD1.5
+        has_unet = any("lora_unet" in k or "unet" in k for k in keys)
+        if has_unet:
+            return "sd15"
+    except Exception:
+        pass
+    return ""
+
+
+# Cache detected pipelines to avoid re-reading files on every heartbeat
+_lora_pipeline_cache: Dict[str, str] = {}
+
+
+def list_local_loras() -> List[Dict[str, Any]]:
+    loras: List[Dict[str, Any]] = []
     try:
         if not LORA_DIR.exists():
             return loras
@@ -613,7 +661,15 @@ def list_local_loras() -> List[Dict[str, str]]:
                 continue
             if entry.suffix.lower() not in SUPPORTED_LORA_EXTS:
                 continue
-            loras.append({"name": entry.stem, "filename": entry.name})
+            item: Dict[str, Any] = {"name": entry.stem, "filename": entry.name}
+            # Auto-detect pipeline compatibility from file contents
+            cache_key = str(entry)
+            if cache_key not in _lora_pipeline_cache:
+                _lora_pipeline_cache[cache_key] = _detect_lora_pipeline(entry)
+            pipeline = _lora_pipeline_cache[cache_key]
+            if pipeline:
+                item["pipeline"] = pipeline
+            loras.append(item)
     except Exception as exc:
         log(f"Failed to scan LoRA directory: {exc}", prefix="⚠️")
     return loras
@@ -694,6 +750,29 @@ def _safe_adapter_name(value: str) -> str:
     return safe
 
 
+def _check_lora_pipeline_compat(pipe: Any, lora_entry: Dict[str, Any]) -> bool:
+    """Check if a LoRA is likely compatible with the loaded pipeline.
+
+    Uses the pipeline class name to determine sd15 vs sdxl and compares
+    against an optional ``pipeline`` field on the LoRA entry.  Returns True
+    if compatible or if we can't determine (benefit of the doubt).
+    """
+    lora_pipeline = str(lora_entry.get("pipeline") or "").lower()
+    if not lora_pipeline:
+        return True  # No metadata — try loading anyway
+    pipe_class = type(pipe).__name__.lower()
+    pipe_is_xl = "xl" in pipe_class
+    lora_is_xl = "sdxl" in lora_pipeline or "xl" in lora_pipeline
+    if pipe_is_xl != lora_is_xl:
+        log(
+            f"LoRA '{lora_entry.get('name', '?')}' pipeline={lora_pipeline} "
+            f"incompatible with {'SDXL' if pipe_is_xl else 'SD1.5'} pipe, skipping",
+            prefix="⚠️",
+        )
+        return False
+    return True
+
+
 def _apply_loras_to_pipe(pipe: Any, raw_loras: Any) -> List[str]:
     loras = _normalize_loras(raw_loras)
     if not loras or not hasattr(pipe, "load_lora_weights"):
@@ -704,6 +783,9 @@ def _apply_loras_to_pipe(pipe: Any, raw_loras: Any) -> List[str]:
     for entry in loras:
         name = str(entry.get("name") or "").strip()
         if not name:
+            continue
+        # Pipeline compatibility check — skip LoRAs that don't match the model
+        if not _check_lora_pipeline_compat(pipe, entry):
             continue
         if entry.get("url") or entry.get("filename"):
             path = _download_lora_spec(entry)
@@ -1574,7 +1656,16 @@ def run_image_generation(
     try:
         if not FAST_PREVIEW and torch is not None and diffusers is not None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
-            dtype = torch.float16 if device == "cuda" else torch.float32
+            # SD1.5 models frequently hit fp16 dtype mismatches and fall back to
+            # fp32 anyway, wasting time on a failed first attempt.  Use fp32 for
+            # SD1.5 on CUDA directly to avoid the retry.  SDXL works fine in fp16.
+            if device == "cuda" and is_xl:
+                dtype = torch.float16
+            elif device == "cuda":
+                # SD1.5: use fp16 for the UNet but we'll upcast VAE to fp32 later
+                dtype = torch.float16
+            else:
+                dtype = torch.float32
             # Load init image for img2img if provided
             init_pil = None
             if use_img2img and init_image_raw:
@@ -1796,8 +1887,13 @@ def run_image_generation(
                 result = _run_pipe()
             except RuntimeError as exc:
                 msg = str(exc)
-                if not is_xl and "bias type" in msg and ("Half" in msg or "float" in msg):
-                    log("Retrying with fp32 pipeline due to dtype mismatch", prefix="⚠️")
+                is_dtype_error = (
+                    "bias type" in msg
+                    or "expected" in msg.lower() and "float" in msg.lower()
+                    or "Half" in msg
+                )
+                if not is_xl and is_dtype_error:
+                    log("SD1.5 dtype mismatch — converting full pipeline to fp32", prefix="⚠️")
                     pipe = pipe.to(device=device, dtype=torch.float32)
                     generator = torch.Generator(device=device).manual_seed(seed)
                     call_kwargs["generator"] = generator

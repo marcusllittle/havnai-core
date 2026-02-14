@@ -209,6 +209,65 @@ def get_pipeline_negative(pipeline: str) -> str:
     return GLOBAL_NEGATIVE_SD15
 
 # ---------------------------------------------------------------------------
+# Video-specific negative prompts
+# ---------------------------------------------------------------------------
+
+_NEGATIVE_VIDEO_COMMON = (
+    "jitter, flicker, frame inconsistency, temporal artifacts, "
+    "blurry motion, ghosting, double exposure, choppy animation, "
+    "static noise, digital compression, low bitrate"
+)
+
+_NEGATIVE_VIDEO_HAND = (
+    "(worst hands:1.3), (deformed hands:1.3), (wrong number of fingers:1.2), "
+    "(extra fingers:1.2), (missing fingers:1.2), (fused fingers:1.2)"
+)
+
+NEGATIVE_VIDEO_LTXL = ", ".join([
+    _NEGATIVE_VIDEO_COMMON,
+    _NEGATIVE_VIDEO_HAND,
+    "distorted faces, inconsistent appearance, morphing face, "
+    "bad anatomy, warped geometry, stretched limbs, "
+    _NEGATIVE_QUALITY_COMMON,
+])
+
+NEGATIVE_VIDEO_ANIMATEDIFF = ", ".join([
+    _NEGATIVE_VIDEO_COMMON,
+    _NEGATIVE_VIDEO_HAND,
+    _NEGATIVE_ANATOMY_SD15,  # Use SD1.5 anatomy since AnimateDiff is based on SD1.5
+    "distorted faces, inconsistent appearance, morphing face, "
+    _NEGATIVE_QUALITY_COMMON,
+])
+
+POSITIVE_VIDEO_LTXL = (
+    "smooth motion, consistent appearance, high quality, cinematic, "
+    "professional, sharp details, (masterpiece:1.1), (best quality:1.1)"
+)
+
+POSITIVE_VIDEO_ANIMATEDIFF = (
+    "smooth motion, consistent appearance, high quality, cinematic, "
+    "professional, sharp details, smooth motion, flowing motion, (best quality:1.1)"
+)
+
+def get_video_negative(model_name: str) -> str:
+    """Return the appropriate negative prompt for a video model."""
+    model_lower = (model_name or "").lower()
+    if "ltx" in model_lower or "latte" in model_lower:
+        return NEGATIVE_VIDEO_LTXL
+    if "animat" in model_lower:
+        return NEGATIVE_VIDEO_ANIMATEDIFF
+    return NEGATIVE_VIDEO_LTXL  # Safe default
+
+def get_video_positive_suffix(model_name: str) -> str:
+    """Return quality tokens to append to video prompts."""
+    model_lower = (model_name or "").lower()
+    if "ltx" in model_lower or "latte" in model_lower:
+        return POSITIVE_VIDEO_LTXL
+    if "animat" in model_lower:
+        return POSITIVE_VIDEO_ANIMATEDIFF
+    return POSITIVE_VIDEO_LTXL
+
+# ---------------------------------------------------------------------------
 # Version helpers
 # ---------------------------------------------------------------------------
 
@@ -1359,6 +1418,14 @@ def submit_job() -> Any:
         if not prompt_text:
             return jsonify({"error": "missing prompt"}), 400
         negative_prompt = str(payload.get("negative_prompt") or "").strip()
+        # Apply default video negative prompt if not provided
+        if not negative_prompt:
+            negative_prompt = get_video_negative(model_name)
+
+        # Append positive quality suffix if prompt doesn't have quality tokens
+        prompt_lower = prompt_text.lower()
+        if "best quality" not in prompt_lower and "masterpiece" not in prompt_lower:
+            prompt_text = f"{prompt_text}, {get_video_positive_suffix(model_name)}"
 
         seed = payload.get("seed")
         try:
@@ -1385,8 +1452,8 @@ def submit_job() -> Any:
             "prompt": prompt_text,
             "negative_prompt": negative_prompt,
             "seed": seed,
-            "steps": _clamp_int(payload.get("steps", 25), 25, 1, 50),
-            "guidance": _clamp_float(payload.get("guidance", 6.0), 6.0, 0.0, 12.0),
+            "steps": _clamp_int(payload.get("steps", 30), 30, 1, 50),  # Increased from 25 to 30 for better quality
+            "guidance": _clamp_float(payload.get("guidance", 7.0), 7.0, 0.0, 12.0),  # Increased from 6.0 to 7.0
             "width": _clamp_int(payload.get("width", 512), 512, 256, 768),
             "height": _clamp_int(payload.get("height", 512), 512, 256, 768),
             "frames": _clamp_int(payload.get("frames", 16), 16, 1, 16),
@@ -1399,6 +1466,15 @@ def submit_job() -> Any:
     elif is_animatediff:
         prompt_text = str(payload.get("prompt") or "")
         negative_prompt = str(payload.get("negative_prompt") or "")
+        # Apply default video negative prompt if not provided
+        if not negative_prompt:
+            negative_prompt = get_video_negative(model_name)
+
+        # Append positive quality suffix if prompt doesn't have quality tokens
+        prompt_lower = prompt_text.lower()
+        if prompt_text and "best quality" not in prompt_lower and "masterpiece" not in prompt_lower:
+            prompt_text = f"{prompt_text}, {get_video_positive_suffix(model_name)}"
+
         # Core AnimateDiff controls – validated/coerced into safe ranges
         try:
             frames = int(payload.get("frames", 16))
@@ -1409,7 +1485,7 @@ def submit_job() -> Any:
         except (TypeError, ValueError):
             fps = 8
         frames = max(1, min(frames, 64))
-        fps = max(1, min(fps, 60))
+        fps = max(1, min(fps, 24))  # Increased max fps from 60 to 24 for realistic smooth video
 
         motion = str(payload.get("motion") or "").strip().lower() or "zoom-in"
         base_model = str(payload.get("base_model") or "realisticVision")

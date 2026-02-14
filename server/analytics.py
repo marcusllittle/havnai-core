@@ -38,11 +38,14 @@ def analytics_jobs(days: int = 30, wallet: Optional[str] = None) -> Dict[str, An
     conn = get_db()
     cutoff = time.time() - (days * 86400)
 
-    # --- By day ---
+    # --- By day (with success/failed breakdown) ---
     if wallet:
         day_rows = conn.execute(
             """
-            SELECT date(timestamp, 'unixepoch') AS day, COUNT(*) AS count
+            SELECT date(timestamp, 'unixepoch') AS day,
+                   COUNT(*) AS count,
+                   SUM(CASE WHEN status IN ('completed', 'success') THEN 1 ELSE 0 END) AS success,
+                   SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
             FROM jobs
             WHERE timestamp >= ? AND wallet = ?
             GROUP BY day ORDER BY day
@@ -52,14 +55,17 @@ def analytics_jobs(days: int = 30, wallet: Optional[str] = None) -> Dict[str, An
     else:
         day_rows = conn.execute(
             """
-            SELECT date(timestamp, 'unixepoch') AS day, COUNT(*) AS count
+            SELECT date(timestamp, 'unixepoch') AS day,
+                   COUNT(*) AS count,
+                   SUM(CASE WHEN status IN ('completed', 'success') THEN 1 ELSE 0 END) AS success,
+                   SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
             FROM jobs
             WHERE timestamp >= ?
             GROUP BY day ORDER BY day
             """,
             (cutoff,),
         ).fetchall()
-    by_day = [{"day": row["day"], "count": row["count"]} for row in day_rows]
+    by_day = [{"date": row["day"], "count": row["count"], "success": row["success"], "failed": row["failed"]} for row in day_rows]
 
     # --- By model ---
     if wallet:
@@ -108,11 +114,9 @@ def analytics_jobs(days: int = 30, wallet: Optional[str] = None) -> Dict[str, An
     by_task_type = [{"task_type": row["task_type"], "count": row["count"]} for row in type_rows]
 
     return {
-        "days": days,
-        "wallet": wallet,
-        "by_day": by_day,
+        "days": by_day,
         "by_model": by_model,
-        "by_task_type": by_task_type,
+        "by_type": by_task_type,
     }
 
 
@@ -136,7 +140,7 @@ def analytics_costs(days: int = 30, wallet: Optional[str] = None) -> Dict[str, A
         row = conn.execute("SELECT COALESCE(SUM(total_spent), 0) AS total FROM credits").fetchone()
         total_spent = float(row["total"]) if row else 0.0
 
-    # Per-model job counts in period (proxy for cost allocation)
+    # Per-model job counts in period
     if wallet:
         model_rows = conn.execute(
             """
@@ -157,11 +161,18 @@ def analytics_costs(days: int = 30, wallet: Optional[str] = None) -> Dict[str, A
             """,
             (cutoff,),
         ).fetchall()
-    by_model = [{"model": row["model"], "job_count": row["job_count"]} for row in model_rows]
+    # Distribute total_spent proportionally across models by job count
+    total_jobs = sum(row["job_count"] for row in model_rows)
+    by_model = [
+        {
+            "model": row["model"],
+            "job_count": row["job_count"],
+            "total_cost": round(total_spent * row["job_count"] / total_jobs, 6) if total_jobs > 0 else 0.0,
+        }
+        for row in model_rows
+    ]
 
     return {
-        "days": days,
-        "wallet": wallet,
         "total_spent": round(total_spent, 6),
         "by_model": by_model,
     }
@@ -214,26 +225,36 @@ def analytics_rewards(days: int = 30) -> Dict[str, Any]:
     conn = get_db()
     cutoff = time.time() - (days * 86400)
 
-    # By wallet
-    wallet_rows = conn.execute(
+    # By node (using node_id from jobs, falling back to wallet)
+    node_rows = conn.execute(
         """
-        SELECT wallet, SUM(reward_hai) AS total, COUNT(*) AS jobs
-        FROM rewards
-        WHERE timestamp >= ?
-        GROUP BY wallet
+        SELECT COALESCE(j.node_id, r.wallet) AS node_id,
+               r.wallet,
+               SUM(r.reward_hai) AS total,
+               COUNT(*) AS count
+        FROM rewards r
+        LEFT JOIN jobs j ON j.id = r.task_id
+        WHERE r.timestamp >= ?
+        GROUP BY node_id
         ORDER BY total DESC
         """,
         (cutoff,),
     ).fetchall()
-    by_wallet = [
-        {"wallet": row["wallet"], "total": round(float(row["total"]), 6), "jobs": row["jobs"]}
-        for row in wallet_rows
-    ]
+    by_node = []
+    for row in node_rows:
+        nid = row["node_id"]
+        node_info = NODES.get(nid, {})
+        by_node.append({
+            "node_id": nid,
+            "node_name": node_info.get("node_name", nid),
+            "total": round(float(row["total"]), 6),
+            "count": row["count"],
+        })
 
     # By model (join with jobs)
     model_rows = conn.execute(
         """
-        SELECT j.model, SUM(r.reward_hai) AS total, COUNT(*) AS jobs
+        SELECT j.model, SUM(r.reward_hai) AS total, COUNT(*) AS count
         FROM rewards r
         JOIN jobs j ON j.id = r.task_id
         WHERE r.timestamp >= ?
@@ -243,14 +264,16 @@ def analytics_rewards(days: int = 30) -> Dict[str, Any]:
         (cutoff,),
     ).fetchall()
     by_model = [
-        {"model": row["model"], "total": round(float(row["total"]), 6), "jobs": row["jobs"]}
+        {"model": row["model"], "total": round(float(row["total"]), 6), "count": row["count"]}
         for row in model_rows
     ]
 
+    grand_total = sum(n["total"] for n in by_node)
+
     return {
-        "days": days,
-        "by_wallet": by_wallet,
+        "by_node": by_node,
         "by_model": by_model,
+        "total": round(grand_total, 6),
     }
 
 
@@ -302,15 +325,23 @@ def analytics_overview() -> Dict[str, Any]:
         "SELECT COUNT(DISTINCT model) FROM jobs"
     ).fetchone()[0]
 
+    # Total credits spent
+    total_credits_spent_row = conn.execute(
+        "SELECT COALESCE(SUM(total_spent), 0) AS total FROM credits"
+    ).fetchone()
+    total_credits_spent = float(total_credits_spent_row["total"]) if total_credits_spent_row else 0.0
+
     return {
         "total_jobs": total_jobs,
         "jobs_today": jobs_today,
         "completed": completed,
         "failed": failed,
-        "success_rate": success_rate,
+        "success_rate": round(completed / finished, 4) if finished > 0 else 0.0,
         "total_rewards": round(float(total_rewards), 6),
+        "active_nodes": online_count,
         "online_nodes": online_count,
         "total_nodes": len(NODES),
         "unique_wallets": unique_wallets,
         "unique_models": unique_models,
+        "total_credits_spent": round(total_credits_spent, 6),
     }

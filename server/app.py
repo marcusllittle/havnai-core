@@ -2758,6 +2758,67 @@ def models_stats_legacy() -> Any:
     return models_stats()
 
 
+@app.route("/api/models/list", methods=["GET"])
+def models_list() -> Any:
+    """
+    Returns the full model registry with metadata for frontend consumption.
+
+    Returns:
+        {
+          "models": [
+            {
+              "name": str,
+              "tier": str,           # S, A, B, C, D
+              "weight": float,
+              "reward_weight": float,
+              "task_type": str,      # IMAGE_GEN, VIDEO_GEN, ANIMATEDIFF
+              "pipeline": str,       # sdxl, sd15, ltx2, animatediff
+              "tags": list[str],
+              "strengths": str | null,
+              "weaknesses": str | null
+            },
+            ...
+          ]
+        }
+    """
+
+    def weight_to_tier(weight: float) -> str:
+        """Map weight to tier label (S/A/B/C/D)."""
+        if weight >= 20:
+            return "S"
+        elif weight >= 10:
+            return "A"
+        elif weight >= 8:
+            return "B"
+        elif weight >= 5:
+            return "C"
+        else:
+            return "D"
+
+    models = []
+    with LOCK:
+        for model_key, model_data in MANIFEST_MODELS.items():
+            weight = float(model_data.get("reward_weight", 10.0))
+            models.append(
+                {
+                    "name": model_data.get("name", model_key),
+                    "tier": weight_to_tier(weight),
+                    "weight": weight,
+                    "reward_weight": weight,
+                    "task_type": model_data.get("task_type", CREATOR_TASK_TYPE),
+                    "pipeline": model_data.get("pipeline", "sd15"),
+                    "tags": model_data.get("tags", []),
+                    "strengths": model_data.get("strengths"),
+                    "weaknesses": model_data.get("weaknesses"),
+                }
+            )
+
+    # Sort by weight descending (highest tier first)
+    models.sort(key=lambda m: m["weight"], reverse=True)
+
+    return jsonify({"models": models})
+
+
 # ---------------------------------------------------------------------------
 # Health and admin utilities
 # ---------------------------------------------------------------------------

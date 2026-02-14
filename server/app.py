@@ -1139,6 +1139,8 @@ def _normalize_lora_catalog(raw_loras: Any) -> List[Dict[str, Any]]:
 
 @app.route("/loras/list")
 def list_loras() -> Any:
+    # Optional pipeline filter: /loras/list?pipeline=sdxl or ?pipeline=sd15
+    pipeline_filter = request.args.get("pipeline", "").strip().lower()
     loras: List[Dict[str, Any]] = []
     nodes_with_loras: List[str] = []
     with LOCK:
@@ -1157,6 +1159,8 @@ def list_loras() -> Any:
             seen.add(key)
             deduped.append(entry)
         deduped.sort(key=lambda item: str(item.get("label") or item.get("name") or "").lower())
+        if pipeline_filter:
+            deduped = [e for e in deduped if _lora_matches_pipeline(e, pipeline_filter)]
         return jsonify({"loras": deduped, "nodes": nodes_with_loras, "source": "nodes"})
     path = LORA_STORAGE_DIR
     if path.exists():
@@ -1167,7 +1171,25 @@ def list_loras() -> Any:
                 continue
             loras.append({"name": entry.stem, "filename": entry.name})
     loras.sort(key=lambda item: str(item.get("name") or "").lower())
+    if pipeline_filter:
+        loras = [e for e in loras if _lora_matches_pipeline(e, pipeline_filter)]
     return jsonify({"loras": loras, "path": str(path), "source": "local"})
+
+
+def _lora_matches_pipeline(lora: Dict[str, Any], target_pipeline: str) -> bool:
+    """Check if a LoRA is compatible with the target pipeline.
+
+    Returns True if the LoRA has no pipeline metadata (unknown = show it)
+    or if the pipeline matches.
+    """
+    lora_pipeline = str(lora.get("pipeline") or "").lower()
+    if not lora_pipeline:
+        return True  # No metadata — show in all pipelines
+    if target_pipeline == "sdxl":
+        return "sdxl" in lora_pipeline or "xl" in lora_pipeline
+    if target_pipeline == "sd15":
+        return lora_pipeline == "sd15" or lora_pipeline == "sd1.5"
+    return True
 
 
 @app.route("/installers/<path:filename>")

@@ -29,6 +29,7 @@ import credits
 import invite
 import rewards
 import job_helpers
+import stripe_payments
 
 # ---------------------------------------------------------------------------
 # Paths & constants

@@ -20,7 +20,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from flask import abort, Flask, jsonify, request, send_file, send_from_directory, g, has_app_context
+from flask import abort, Flask, jsonify, request, Response, send_file, send_from_directory, g, has_app_context
 from flask_cors import CORS
 
 # Import our local modules
@@ -30,6 +30,11 @@ import invite
 import rewards
 import job_helpers
 import stripe_payments
+import sse as sse_module
+import blockchain
+import analytics
+import validators
+import workflows
 
 # ---------------------------------------------------------------------------
 # Paths & constants
@@ -444,6 +449,12 @@ else:
 app.config["APP_VERSION"] = APP_VERSION
 
 # ---------------------------------------------------------------------------
+# SSE (Server-Sent Events) broker
+# ---------------------------------------------------------------------------
+
+sse_broker = sse_module.SSEBroker()
+
+# ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 
@@ -520,6 +531,28 @@ def _inject_module_dependencies() -> None:
     stripe_payments.get_db = get_db  # type: ignore[attr-defined]
     stripe_payments.log_event = log_event  # type: ignore[attr-defined]
     stripe_payments.deposit_credits = credits.deposit_credits  # type: ignore[attr-defined]
+
+    # Blockchain module
+    blockchain.get_db = get_db  # type: ignore[attr-defined]
+    blockchain.log_event = log_event  # type: ignore[attr-defined]
+    blockchain.WALLET_REGEX = WALLET_REGEX  # type: ignore[attr-defined]
+
+    # Analytics module
+    analytics.get_db = get_db  # type: ignore[attr-defined]
+    analytics.log_event = log_event  # type: ignore[attr-defined]
+    analytics.NODES = NODES  # type: ignore[attr-defined]
+    analytics.ONLINE_THRESHOLD = ONLINE_THRESHOLD  # type: ignore[attr-defined]
+    analytics.CREATOR_TASK_TYPE = CREATOR_TASK_TYPE  # type: ignore[attr-defined]
+
+    # Validators module
+    validators.get_db = get_db  # type: ignore[attr-defined]
+    validators.log_event = log_event  # type: ignore[attr-defined]
+    validators.NODES = NODES  # type: ignore[attr-defined]
+
+    # Workflows module
+    workflows.get_db = get_db  # type: ignore[attr-defined]
+    workflows.log_event = log_event  # type: ignore[attr-defined]
+    workflows.WALLET_REGEX = WALLET_REGEX  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
@@ -755,6 +788,11 @@ stripe_payments.init_stripe_tables(get_db())
 # Inject dependencies into extracted modules (initial injection)
 _inject_module_dependencies()
 
+# Initialize tables for new modules (must come after dependency injection)
+blockchain.init_blockchain_tables(get_db())
+validators.init_validator_tables(get_db())
+workflows.init_workflow_tables(get_db())
+
 # Optional: clear database and in-memory state on startup for a fresh dashboard
 if RESET_ON_STARTUP:
     try:
@@ -814,9 +852,18 @@ def load_manifest() -> None:
 load_manifest()
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
+# Manifest TTL cache: only reload from disk at most every 60 seconds
+_MANIFEST_LAST_LOADED: float = time.time()
+_MANIFEST_TTL: float = 60.0  # seconds
+
 
 def refresh_manifest() -> None:
-    load_manifest()
+    """Reload manifest only if the TTL has elapsed since the last load."""
+    global _MANIFEST_LAST_LOADED
+    now = time.time()
+    if (now - _MANIFEST_LAST_LOADED) >= _MANIFEST_TTL:
+        load_manifest()
+        _MANIFEST_LAST_LOADED = now
 
 # ---------------------------------------------------------------------------
 # Node persistence (nodes.json + wallet bindings)
@@ -908,7 +955,7 @@ log_event(f"Telemetry online with {len(NODES)} cached node(s).", version=APP_VER
 # ---------------------------------------------------------------------------
 
 
-def get_job_summary(limit: int = 50) -> Dict[str, Any]:
+def get_job_summary(limit: int = 50, offset: int = 0) -> Dict[str, Any]:
     conn = get_db()
     summary_types = (CREATOR_TASK_TYPE, "FACE_SWAP")
     queued = conn.execute(
@@ -933,8 +980,9 @@ def get_job_summary(limit: int = 50) -> Dict[str, Any]:
         """,
         (today_start, *summary_types),
     ).fetchone()[0]
-    # Avoid binding LIMIT to sidestep driver quirks under concurrency; limit is internal and cast to int.
+    # Avoid binding LIMIT/OFFSET to sidestep driver quirks under concurrency; values are internal and cast to int.
     limit_int = int(limit)
+    offset_int = int(offset)
     rows = conn.execute(
         f"""
         SELECT jobs.id, jobs.wallet, jobs.model, jobs.task_type, jobs.status, jobs.weight,
@@ -943,7 +991,7 @@ def get_job_summary(limit: int = 50) -> Dict[str, Any]:
         LEFT JOIN rewards ON rewards.task_id = jobs.id
         WHERE UPPER(jobs.task_type) IN (?, ?)
         ORDER BY jobs.timestamp DESC
-        LIMIT {limit_int}
+        LIMIT {limit_int} OFFSET {offset_int}
         """,
         summary_types,
     ).fetchall()
@@ -1261,7 +1309,7 @@ def favicon() -> Any:
 
 @app.route("/models/list")
 def list_models() -> Any:
-    load_manifest()
+    refresh_manifest()
     return jsonify({"models": list(MANIFEST_MODELS.values())})
 
 
@@ -1446,9 +1494,12 @@ def submit_job() -> Any:
 
     if not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid wallet"}), 400
+    # Per-wallet rate limiting (20 jobs per 60 seconds per wallet)
+    if not rate_limit(f"submit-job:wallet:{wallet}", limit=20):
+        return jsonify({"error": "rate limit", "detail": "per-wallet limit exceeded"}), 429
     # Allow "auto" model selection based on manifest weights
     if not model_name or model_name in {"auto", "auto_image", "auto-image"}:
-        load_manifest()
+        refresh_manifest()
         # Candidate models: creator IMAGE_GEN only
         candidates = [
             meta
@@ -1679,6 +1730,7 @@ def submit_job() -> Any:
             invite_code,
         )
     log_event("Public job queued", wallet=wallet, model=model_name, job_id=job_id)
+    _emit_job_event("job_queued", job_id, wallet, model=model_name, task_type=task_type)
     return jsonify({"status": "queued", "job_id": job_id}), 200
 
 
@@ -1698,10 +1750,13 @@ def generate_video_job() -> Any:
     wallet = str(payload.get("wallet", "")).strip()
     if not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid wallet"}), 400
+    # Per-wallet rate limiting (10 video jobs per 60 seconds per wallet)
+    if not rate_limit(f"generate-video:wallet:{wallet}", limit=10):
+        return jsonify({"error": "rate limit", "detail": "per-wallet limit exceeded"}), 429
 
     model_name_raw = str(payload.get("model") or "ltx2").strip()
     model_name = model_name_raw.lower()
-    load_manifest()
+    refresh_manifest()
     cfg = get_model_config(model_name)
     if not cfg:
         return jsonify({"error": "unknown model"}), 400
@@ -1772,6 +1827,7 @@ def generate_video_job() -> Any:
             invite_code,
         )
     log_event("Video job queued", wallet=wallet, model=model_name, job_id=job_id)
+    _emit_job_event("job_queued", job_id, wallet, model=model_name, task_type="VIDEO_GEN")
     return jsonify({"status": "queued", "job_id": job_id}), 200
 
 
@@ -1799,7 +1855,7 @@ def submit_faceswap_job_endpoint() -> Any:
     if not settings.get("base_image_url") or not settings.get("face_source_url"):
         return jsonify({"error": "base_image and face_source are required"}), 400
 
-    load_manifest()
+    refresh_manifest()
     cfg = get_model_config(model_name)
     if not cfg:
         return jsonify({"error": "unknown model"}), 400
@@ -1828,6 +1884,7 @@ def submit_faceswap_job_endpoint() -> Any:
             invite_code,
         )
     log_event("Face-swap job queued", wallet=wallet, model=model_name, job_id=job_id)
+    _emit_job_event("job_queued", job_id, wallet, model=model_name, task_type="FACE_SWAP")
     return jsonify({"status": "queued", "job_id": job_id}), 200
 
 
@@ -1887,6 +1944,7 @@ def register() -> Any:
     node["last_seen_unix"] = unix_now()
     save_nodes()
 
+    _emit_node_event("node_heartbeat", node_id, role=node.get("role", "worker"), wallet=node.get("wallet"))
     return jsonify({"status": "ok", "node": node_id}), 200
 
 
@@ -2000,6 +2058,7 @@ def get_creator_tasks() -> Any:
                     # Assign under global lock to avoid multiple nodes claiming the same job
                     job_helpers.assign_job_to_node(job["id"], node_id)
                     log_event("Job claimed by node", job_id=job["id"], node_id=node_id)
+                    _emit_job_event("job_running", job["id"], job.get("wallet", ""), node_id=node_id, model=job["model"])
                     reward_weight = float(job["weight"] or cfg.get("reward_weight", rewards.resolve_weight(job["model"], 10.0)))
                     job_task_type = (job.get("task_type") or CREATOR_TASK_TYPE).upper()
                     pending_entry = {
@@ -2383,6 +2442,15 @@ def submit_results() -> Any:
 
         rewards.record_reward(wallet, task_id, reward)
 
+        # Emit SSE events for job completion and reward
+        _emit_job_event(
+            "job_success" if status == "success" else "job_failed",
+            task_id, wallet or "",
+            node_id=node_id, model=model_name, status=status,
+        )
+        if reward > 0:
+            _emit_job_event("reward_computed", task_id, wallet or "", reward=reward, node_id=node_id)
+
         stats = MODEL_STATS.setdefault(model_name, {"count": 0.0, "total_time": 0.0})
         if status == "success":
             inference_time = float(metrics.get("inference_time_ms", 0))
@@ -2430,6 +2498,7 @@ def disconnect_node() -> Any:
             raise
 
     log_event("Node disconnected", node_id=node_id)
+    _emit_node_event("node_disconnected", node_id)
     return jsonify({"status": "disconnected", "node": node_id, "existed": existed}), 200
 
     log_event(
@@ -2595,14 +2664,16 @@ def payments_history() -> Any:
 
 @app.route("/jobs/recent", methods=["GET"])
 def jobs_recent() -> Any:
-    """Return recent creator jobs with reward information."""
+    """Return recent creator jobs with reward information.
 
-    try:
-        limit = int(request.args.get("limit", 25))
-    except Exception:
-        limit = 25
-    summary = get_job_summary(limit=limit)
-    return jsonify({"jobs": summary.get("feed", []), "summary": summary})
+    Query params:
+        limit  – max jobs to return (default 50, max 200)
+        offset – number of jobs to skip (default 0)
+    """
+    limit = _clamp(_coerce_int(request.args.get("limit"), 50), 1, 200)
+    offset = max(0, _coerce_int(request.args.get("offset"), 0))
+    summary = get_job_summary(limit=limit, offset=offset)
+    return jsonify({"jobs": summary.get("feed", []), "summary": summary, "limit": limit, "offset": offset})
 
 
 @app.route("/jobs/<job_id>", methods=["GET"])
@@ -2817,6 +2888,326 @@ def models_list() -> Any:
     models.sort(key=lambda m: m["weight"], reverse=True)
 
     return jsonify({"models": models})
+
+
+# ---------------------------------------------------------------------------
+# SSE streaming endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.route("/events/jobs", methods=["GET"])
+def sse_jobs() -> Any:
+    """SSE stream for job status updates.
+
+    Optional query param ``wallet`` filters events to a specific wallet.
+    Without a wallet, all job events are streamed.
+    """
+    wallet = request.args.get("wallet", "").strip()
+    channel = f"jobs:{wallet}" if wallet else "jobs:*"
+    return Response(
+        sse_broker.stream(channel),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@app.route("/events/nodes", methods=["GET"])
+def sse_nodes() -> Any:
+    """SSE stream for node heartbeat and status events."""
+    return Response(
+        sse_broker.stream("nodes"),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+def _emit_job_event(event: str, job_id: str, wallet: str, **extra: Any) -> None:
+    """Publish a job event to all relevant SSE channels."""
+    data = {"job_id": job_id, "wallet": wallet, "event": event, **extra}
+    # Broadcast to the wildcard channel (all listeners)
+    sse_broker.publish("jobs:*", event, data)
+    # Broadcast to the wallet-specific channel
+    if wallet:
+        sse_broker.publish(f"jobs:{wallet}", event, data)
+
+
+def _emit_node_event(event: str, node_id: str, **extra: Any) -> None:
+    """Publish a node event to the nodes SSE channel."""
+    data = {"node_id": node_id, "event": event, **extra}
+    sse_broker.publish("nodes", event, data)
+
+
+# ---------------------------------------------------------------------------
+# Blockchain / on-chain integration endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.route("/api/wallet/verify", methods=["GET"])
+def wallet_verify() -> Any:
+    """Placeholder for wallet signature verification."""
+    wallet = request.args.get("wallet", "").strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    result = blockchain.verify_wallet(wallet)
+    return jsonify(result)
+
+
+@app.route("/api/rewards/claimable", methods=["GET"])
+def rewards_claimable() -> Any:
+    """Return unclaimed reward balance for a wallet."""
+    wallet = request.args.get("wallet", "").strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    result = blockchain.get_claimable_rewards(wallet)
+    return jsonify(result)
+
+
+@app.route("/api/rewards/claim", methods=["POST"])
+def rewards_claim() -> Any:
+    """Claim pending rewards (DB-only for now)."""
+    if not rate_limit(f"rewards-claim:{request.remote_addr}", limit=10):
+        return jsonify({"error": "rate limit"}), 429
+    data = request.get_json() or {}
+    wallet = str(data.get("wallet", "")).strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    amount = data.get("amount")
+    if amount is not None:
+        try:
+            amount = float(amount)
+        except (TypeError, ValueError):
+            return jsonify({"error": "invalid amount"}), 400
+    result = blockchain.claim_rewards(wallet, amount)
+    if "error" in result:
+        return jsonify(result), 400
+    return jsonify(result)
+
+
+@app.route("/api/rewards/claims", methods=["GET"])
+def rewards_claim_history() -> Any:
+    """Return claim history for a wallet."""
+    wallet = request.args.get("wallet", "").strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    history = blockchain.get_claim_history(wallet)
+    return jsonify({"wallet": wallet, "claims": history})
+
+
+# ---------------------------------------------------------------------------
+# Analytics endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.route("/api/analytics/jobs", methods=["GET"])
+def api_analytics_jobs() -> Any:
+    """Job counts grouped by day, model, task_type."""
+    days = _clamp(_coerce_int(request.args.get("days"), 30), 1, 365)
+    wallet = request.args.get("wallet", "").strip() or None
+    result = analytics.analytics_jobs(days=days, wallet=wallet)
+    return jsonify(result)
+
+
+@app.route("/api/analytics/costs", methods=["GET"])
+def api_analytics_costs() -> Any:
+    """Credit spend breakdown by model and time period."""
+    days = _clamp(_coerce_int(request.args.get("days"), 30), 1, 365)
+    wallet = request.args.get("wallet", "").strip() or None
+    result = analytics.analytics_costs(days=days, wallet=wallet)
+    return jsonify(result)
+
+
+@app.route("/api/analytics/nodes", methods=["GET"])
+def api_analytics_nodes() -> Any:
+    """Node performance metrics."""
+    result = analytics.analytics_nodes()
+    return jsonify(result)
+
+
+@app.route("/api/analytics/rewards", methods=["GET"])
+def api_analytics_rewards() -> Any:
+    """Reward distribution by node and model."""
+    days = _clamp(_coerce_int(request.args.get("days"), 30), 1, 365)
+    result = analytics.analytics_rewards(days=days)
+    return jsonify(result)
+
+
+@app.route("/api/analytics/overview", methods=["GET"])
+def api_analytics_overview() -> Any:
+    """Combined summary stats for the dashboard."""
+    result = analytics.analytics_overview()
+    return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
+# Validator quorum endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.route("/api/validate", methods=["POST"])
+def api_validate() -> Any:
+    """Submit a validation result for a job."""
+    if not rate_limit(f"validate:{request.remote_addr}", limit=60):
+        return jsonify({"error": "rate limit"}), 429
+    data = request.get_json() or {}
+    job_id = str(data.get("job_id", "")).strip()
+    validator_node_id = str(data.get("validator_node_id", "")).strip()
+    result = str(data.get("result", "")).strip().lower()
+
+    if not job_id:
+        return jsonify({"error": "missing job_id"}), 400
+    if not validator_node_id:
+        return jsonify({"error": "missing validator_node_id"}), 400
+    if result not in ("approve", "reject"):
+        return jsonify({"error": "result must be 'approve' or 'reject'"}), 400
+
+    validation = validators.submit_validation(job_id, validator_node_id, result)
+    return jsonify(validation)
+
+
+@app.route("/api/validators", methods=["GET"])
+def api_validators_list() -> Any:
+    """List active validators."""
+    active = validators.get_active_validators()
+    return jsonify({"validators": active, "quorum_m": validators.QUORUM_M, "quorum_n": validators.QUORUM_N})
+
+
+@app.route("/api/validators/register", methods=["POST"])
+def api_validator_register() -> Any:
+    """Register a node as a validator."""
+    if not check_join_token():
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json() or {}
+    node_id = str(data.get("node_id", "")).strip()
+    wallet = str(data.get("wallet", "")).strip()
+    if not node_id:
+        return jsonify({"error": "missing node_id"}), 400
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    result = validators.register_validator(node_id, wallet)
+    return jsonify(result)
+
+
+@app.route("/api/validations/<job_id>", methods=["GET"])
+def api_validation_history(job_id: str) -> Any:
+    """Get validation history for a job."""
+    history = validators.get_validation_history(job_id)
+    quorum = validators.check_quorum(job_id)
+    return jsonify({"job_id": job_id, "validations": history, "quorum": quorum})
+
+
+# ---------------------------------------------------------------------------
+# Workflow CRUD & marketplace endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.route("/api/workflows", methods=["POST"])
+def api_workflow_create() -> Any:
+    """Create a new workflow."""
+    if not rate_limit(f"workflow-create:{request.remote_addr}", limit=20):
+        return jsonify({"error": "rate limit"}), 429
+    data = request.get_json() or {}
+    wallet = str(data.get("wallet", "")).strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    name = str(data.get("name", "")).strip()
+    if not name:
+        return jsonify({"error": "missing name"}), 400
+    description = str(data.get("description", "")).strip()
+    config = data.get("config") if isinstance(data.get("config"), dict) else {}
+    category = str(data.get("category", "")).strip()
+    tags = data.get("tags") if isinstance(data.get("tags"), list) else []
+
+    result = workflows.create_workflow(
+        creator_wallet=wallet,
+        name=name,
+        description=description,
+        config=config,
+        category=category,
+        tags=tags,
+    )
+    return jsonify(result), 201
+
+
+@app.route("/api/workflows", methods=["GET"])
+def api_workflow_list() -> Any:
+    """List workflows with search, category filter, and pagination."""
+    search = request.args.get("search", "").strip() or None
+    category = request.args.get("category", "").strip() or None
+    wallet = request.args.get("wallet", "").strip() or None
+    limit = _clamp(_coerce_int(request.args.get("limit"), 50), 1, 200)
+    offset = max(0, _coerce_int(request.args.get("offset"), 0))
+    result = workflows.list_workflows(
+        search=search, category=category, creator_wallet=wallet,
+        limit=limit, offset=offset,
+    )
+    return jsonify(result)
+
+
+@app.route("/api/workflows/<int:workflow_id>", methods=["GET"])
+def api_workflow_detail(workflow_id: int) -> Any:
+    """Get workflow details."""
+    workflow = workflows.get_workflow(workflow_id)
+    if not workflow:
+        return jsonify({"error": "workflow_not_found"}), 404
+    return jsonify(workflow)
+
+
+@app.route("/api/workflows/<int:workflow_id>", methods=["PUT"])
+def api_workflow_update(workflow_id: int) -> Any:
+    """Update an existing workflow."""
+    data = request.get_json() or {}
+    wallet = str(data.get("wallet", "")).strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+
+    result = workflows.update_workflow(
+        workflow_id=workflow_id,
+        creator_wallet=wallet,
+        name=data.get("name"),
+        description=data.get("description"),
+        config=data.get("config") if isinstance(data.get("config"), dict) else None,
+        category=data.get("category"),
+        tags=data.get("tags") if isinstance(data.get("tags"), list) else None,
+    )
+    if result is None:
+        return jsonify({"error": "workflow_not_found_or_unauthorized"}), 404
+    return jsonify(result)
+
+
+@app.route("/api/workflows/<int:workflow_id>/publish", methods=["POST"])
+def api_workflow_publish(workflow_id: int) -> Any:
+    """Publish a workflow to the marketplace."""
+    data = request.get_json() or {}
+    wallet = str(data.get("wallet", "")).strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    result = workflows.publish_workflow(workflow_id, wallet)
+    if result is None:
+        return jsonify({"error": "workflow_not_found_or_unauthorized"}), 404
+    return jsonify(result)
+
+
+@app.route("/api/marketplace/browse", methods=["GET"])
+def api_marketplace_browse() -> Any:
+    """Browse published workflows in the marketplace."""
+    search = request.args.get("search", "").strip() or None
+    category = request.args.get("category", "").strip() or None
+    sort = request.args.get("sort", "popular").strip()
+    limit = _clamp(_coerce_int(request.args.get("limit"), 50), 1, 200)
+    offset = max(0, _coerce_int(request.args.get("offset"), 0))
+    result = workflows.browse_marketplace(
+        search=search, category=category, sort=sort,
+        limit=limit, offset=offset,
+    )
+    return jsonify(result)
 
 
 # ---------------------------------------------------------------------------

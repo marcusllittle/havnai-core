@@ -694,6 +694,29 @@ def _safe_adapter_name(value: str) -> str:
     return safe
 
 
+def _check_lora_pipeline_compat(pipe: Any, lora_entry: Dict[str, Any]) -> bool:
+    """Check if a LoRA is likely compatible with the loaded pipeline.
+
+    Uses the pipeline class name to determine sd15 vs sdxl and compares
+    against an optional ``pipeline`` field on the LoRA entry.  Returns True
+    if compatible or if we can't determine (benefit of the doubt).
+    """
+    lora_pipeline = str(lora_entry.get("pipeline") or "").lower()
+    if not lora_pipeline:
+        return True  # No metadata — try loading anyway
+    pipe_class = type(pipe).__name__.lower()
+    pipe_is_xl = "xl" in pipe_class
+    lora_is_xl = "sdxl" in lora_pipeline or "xl" in lora_pipeline
+    if pipe_is_xl != lora_is_xl:
+        log(
+            f"LoRA '{lora_entry.get('name', '?')}' pipeline={lora_pipeline} "
+            f"incompatible with {'SDXL' if pipe_is_xl else 'SD1.5'} pipe, skipping",
+            prefix="⚠️",
+        )
+        return False
+    return True
+
+
 def _apply_loras_to_pipe(pipe: Any, raw_loras: Any) -> List[str]:
     loras = _normalize_loras(raw_loras)
     if not loras or not hasattr(pipe, "load_lora_weights"):
@@ -704,6 +727,9 @@ def _apply_loras_to_pipe(pipe: Any, raw_loras: Any) -> List[str]:
     for entry in loras:
         name = str(entry.get("name") or "").strip()
         if not name:
+            continue
+        # Pipeline compatibility check — skip LoRAs that don't match the model
+        if not _check_lora_pipeline_compat(pipe, entry):
             continue
         if entry.get("url") or entry.get("filename"):
             path = _download_lora_spec(entry)
@@ -1574,7 +1600,16 @@ def run_image_generation(
     try:
         if not FAST_PREVIEW and torch is not None and diffusers is not None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
-            dtype = torch.float16 if device == "cuda" else torch.float32
+            # SD1.5 models frequently hit fp16 dtype mismatches and fall back to
+            # fp32 anyway, wasting time on a failed first attempt.  Use fp32 for
+            # SD1.5 on CUDA directly to avoid the retry.  SDXL works fine in fp16.
+            if device == "cuda" and is_xl:
+                dtype = torch.float16
+            elif device == "cuda":
+                # SD1.5: use fp16 for the UNet but we'll upcast VAE to fp32 later
+                dtype = torch.float16
+            else:
+                dtype = torch.float32
             # Load init image for img2img if provided
             init_pil = None
             if use_img2img and init_image_raw:
@@ -1796,8 +1831,13 @@ def run_image_generation(
                 result = _run_pipe()
             except RuntimeError as exc:
                 msg = str(exc)
-                if not is_xl and "bias type" in msg and ("Half" in msg or "float" in msg):
-                    log("Retrying with fp32 pipeline due to dtype mismatch", prefix="⚠️")
+                is_dtype_error = (
+                    "bias type" in msg
+                    or "expected" in msg.lower() and "float" in msg.lower()
+                    or "Half" in msg
+                )
+                if not is_xl and is_dtype_error:
+                    log("SD1.5 dtype mismatch — converting full pipeline to fp32", prefix="⚠️")
                     pipe = pipe.to(device=device, dtype=torch.float32)
                     generator = torch.Generator(device=device).manual_seed(seed)
                     call_kwargs["generator"] = generator

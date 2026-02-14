@@ -227,7 +227,7 @@ NEGATIVE_VIDEO_LTXL = ", ".join([
     _NEGATIVE_VIDEO_COMMON,
     _NEGATIVE_VIDEO_HAND,
     "distorted faces, inconsistent appearance, morphing face, "
-    "bad anatomy, warped geometry, stretched limbs, "
+    "bad anatomy, warped geometry, stretched limbs",
     _NEGATIVE_QUALITY_COMMON,
 ])
 
@@ -235,7 +235,7 @@ NEGATIVE_VIDEO_ANIMATEDIFF = ", ".join([
     _NEGATIVE_VIDEO_COMMON,
     _NEGATIVE_VIDEO_HAND,
     _NEGATIVE_ANATOMY_SD15,  # Use SD1.5 anatomy since AnimateDiff is based on SD1.5
-    "distorted faces, inconsistent appearance, morphing face, "
+    "distorted faces, inconsistent appearance, morphing face",
     _NEGATIVE_QUALITY_COMMON,
 ])
 

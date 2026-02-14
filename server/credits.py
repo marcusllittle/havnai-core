@@ -86,24 +86,32 @@ def deposit_credits(wallet: str, amount: float, reason: str = "") -> float:
 def deduct_credits(wallet: str, amount: float, job_id: str = "") -> Tuple[bool, float]:
     """Deduct credits from a wallet.  Returns (success, remaining_balance).
 
-    Fails if balance is insufficient – never goes negative.
+    Uses an atomic conditional UPDATE to prevent race conditions —
+    the WHERE clause ensures balance never goes negative.
     """
     conn = get_db()
-    row = conn.execute("SELECT balance FROM credits WHERE wallet=?", (wallet,)).fetchone()
-    current = float(row["balance"]) if row else 0.0
-    if current < amount:
-        return False, current
-    conn.execute(
-        """
-        UPDATE credits
-        SET balance = balance - ?,
-            total_spent = total_spent + ?,
-            updated_at = ?
-        WHERE wallet = ?
-        """,
-        (amount, amount, time.time(), wallet),
-    )
-    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        cur = conn.execute(
+            """
+            UPDATE credits
+            SET balance = balance - ?,
+                total_spent = total_spent + ?,
+                updated_at = ?
+            WHERE wallet = ? AND balance >= ?
+            """,
+            (amount, amount, time.time(), wallet, amount),
+        )
+        if cur.rowcount == 0:
+            conn.rollback()
+            # Either wallet doesn't exist or insufficient balance
+            row = conn.execute("SELECT balance FROM credits WHERE wallet=?", (wallet,)).fetchone()
+            current = float(row["balance"]) if row else 0.0
+            return False, current
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     remaining = get_credit_balance(wallet)
     log_event("Credits deducted", wallet=wallet, amount=amount, remaining=remaining, job_id=job_id)
     return True, remaining

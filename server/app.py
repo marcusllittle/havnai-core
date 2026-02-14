@@ -737,7 +737,7 @@ def init_db() -> None:
         """
         CREATE TABLE IF NOT EXISTS credits (
             wallet TEXT PRIMARY KEY,
-            balance REAL NOT NULL DEFAULT 0.0,
+            balance REAL NOT NULL DEFAULT 0.0 CHECK (balance >= 0),
             total_deposited REAL NOT NULL DEFAULT 0.0,
             total_spent REAL NOT NULL DEFAULT 0.0,
             updated_at REAL NOT NULL

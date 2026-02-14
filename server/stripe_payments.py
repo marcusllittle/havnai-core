@@ -127,16 +127,33 @@ def handle_webhook_event(payload: bytes, sig_header: str) -> Dict[str, Any]:
     """Verify and process a Stripe webhook event.
 
     On ``checkout.session.completed``, deposits credits to the wallet
-    recorded in the session metadata.
+    recorded in the session metadata.  Idempotent — duplicate webhooks
+    for an already-completed session are safely ignored.
     """
     import stripe
     stripe.api_key = STRIPE_SECRET_KEY
 
-    event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+    except stripe.error.SignatureVerificationError:
+        log_event("Stripe webhook: invalid signature", level="warning")
+        raise
 
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
         session_id = session["id"]
+
+        # Verify the payment actually succeeded
+        payment_status = session.get("payment_status", "")
+        if payment_status != "paid":
+            log_event(
+                "Stripe webhook: session completed but payment_status is not 'paid'",
+                level="warning",
+                session_id=session_id,
+                payment_status=payment_status,
+            )
+            return {"status": "ignored", "reason": f"payment_status={payment_status}"}
+
         metadata = session.get("metadata", {})
         wallet = metadata.get("wallet", "")
         package_id = metadata.get("package_id", "")
@@ -150,20 +167,30 @@ def handle_webhook_event(payload: bytes, sig_header: str) -> Dict[str, Any]:
             )
             return {"status": "ignored", "reason": "missing metadata"}
 
-        # Deposit credits
-        new_balance = deposit_credits(wallet, credits_amount, reason=f"stripe:{package_id}:{session_id}")
-
-        # Mark payment complete
+        # Idempotency: only process if this session is still pending.
+        # Use atomic UPDATE ... WHERE status='pending' to prevent double-deposits.
         conn = get_db()
-        conn.execute(
+        cur = conn.execute(
             """
             UPDATE stripe_payments
             SET status = 'completed', completed_at = ?
-            WHERE stripe_session_id = ?
+            WHERE stripe_session_id = ? AND status = 'pending'
             """,
             (time.time(), session_id),
         )
         conn.commit()
+
+        if cur.rowcount == 0:
+            # Already processed or unknown session — skip deposit
+            log_event(
+                "Stripe webhook: duplicate or unknown session, skipping deposit",
+                level="info",
+                session_id=session_id,
+            )
+            return {"status": "already_processed", "session_id": session_id}
+
+        # Deposit credits (only reached once per session)
+        new_balance = deposit_credits(wallet, credits_amount, reason=f"stripe:{package_id}:{session_id}")
 
         log_event(
             "Stripe payment completed",

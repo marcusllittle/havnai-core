@@ -603,8 +603,56 @@ def _normalize_loras(raw_loras: Any) -> List[Dict[str, Any]]:
     return normalized
 
 
-def list_local_loras() -> List[Dict[str, str]]:
-    loras: List[Dict[str, str]] = []
+def _detect_lora_pipeline(path: Path) -> str:
+    """Detect whether a LoRA file targets SD1.5 or SDXL by inspecting tensor keys.
+
+    For .safetensors files, reads the JSON header (first 8 bytes = uint64 LE
+    header size, then header_size bytes of JSON).  SDXL LoRAs contain keys
+    referencing the second text encoder (``lora_te2`` / ``text_encoder_2``).
+    SD1.5 LoRAs never have these.
+
+    Returns 'sdxl', 'sd15', or '' if detection fails.
+    """
+    import struct
+
+    suffix = path.suffix.lower()
+    if suffix != ".safetensors":
+        # .pt / .bin files are harder to inspect safely; skip detection
+        return ""
+    try:
+        with path.open("rb") as fh:
+            raw_size = fh.read(8)
+            if len(raw_size) < 8:
+                return ""
+            header_size = struct.unpack("<Q", raw_size)[0]
+            # Sanity check — header should be < 10 MB
+            if header_size > 10 * 1024 * 1024:
+                return ""
+            header_bytes = fh.read(header_size)
+        header = json.loads(header_bytes)
+        keys = set(header.keys())
+        # SDXL LoRAs always train on the second text encoder (CLIP-G)
+        has_te2 = any(
+            "lora_te2" in k or "text_encoder_2" in k or "te2_text_model" in k
+            for k in keys
+        )
+        if has_te2:
+            return "sdxl"
+        # If it has UNet keys but no te2, it's SD1.5
+        has_unet = any("lora_unet" in k or "unet" in k for k in keys)
+        if has_unet:
+            return "sd15"
+    except Exception:
+        pass
+    return ""
+
+
+# Cache detected pipelines to avoid re-reading files on every heartbeat
+_lora_pipeline_cache: Dict[str, str] = {}
+
+
+def list_local_loras() -> List[Dict[str, Any]]:
+    loras: List[Dict[str, Any]] = []
     try:
         if not LORA_DIR.exists():
             return loras
@@ -613,7 +661,15 @@ def list_local_loras() -> List[Dict[str, str]]:
                 continue
             if entry.suffix.lower() not in SUPPORTED_LORA_EXTS:
                 continue
-            loras.append({"name": entry.stem, "filename": entry.name})
+            item: Dict[str, Any] = {"name": entry.stem, "filename": entry.name}
+            # Auto-detect pipeline compatibility from file contents
+            cache_key = str(entry)
+            if cache_key not in _lora_pipeline_cache:
+                _lora_pipeline_cache[cache_key] = _detect_lora_pipeline(entry)
+            pipeline = _lora_pipeline_cache[cache_key]
+            if pipeline:
+                item["pipeline"] = pipeline
+            loras.append(item)
     except Exception as exc:
         log(f"Failed to scan LoRA directory: {exc}", prefix="⚠️")
     return loras

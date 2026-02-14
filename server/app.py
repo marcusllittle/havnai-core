@@ -24,7 +24,7 @@ from flask import abort, Flask, jsonify, request, send_file, send_from_directory
 from flask_cors import CORS
 
 # Import our local modules
-from server import safety, credits, invite, rewards, job_helpers
+from server import safety, credits, invite, rewards, job_helpers, stripe_payments
 
 # ---------------------------------------------------------------------------
 # Paths & constants
@@ -511,6 +511,11 @@ def _inject_module_dependencies() -> None:
     job_helpers.CREATOR_TASK_TYPE = CREATOR_TASK_TYPE  # type: ignore[attr-defined]
     # get_model_config will be injected after it's defined
 
+    # Stripe payments module
+    stripe_payments.get_db = get_db  # type: ignore[attr-defined]
+    stripe_payments.log_event = log_event  # type: ignore[attr-defined]
+    stripe_payments.deposit_credits = credits.deposit_credits  # type: ignore[attr-defined]
+
 
 # ---------------------------------------------------------------------------
 # Utility helpers
@@ -740,6 +745,7 @@ def init_db() -> None:
 
 
 init_db()
+stripe_payments.init_stripe_tables(get_db())
 
 # Inject dependencies into extracted modules (initial injection)
 _inject_module_dependencies()
@@ -2513,6 +2519,71 @@ def credits_cost() -> Any:
         "cost": cost,
         "credits_enabled": CREDITS_ENABLED,
     })
+
+
+# ---------------------------------------------------------------------------
+# Stripe payment endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.route("/payments/packages", methods=["GET"])
+def payments_packages() -> Any:
+    """Return available credit packages and whether Stripe is enabled."""
+    return jsonify({
+        "packages": stripe_payments.CREDIT_PACKAGES,
+        "stripe_enabled": stripe_payments.STRIPE_ENABLED,
+    })
+
+
+@app.route("/payments/checkout", methods=["POST"])
+def payments_checkout() -> Any:
+    """Create a Stripe Checkout Session for buying credits."""
+    if not stripe_payments.STRIPE_ENABLED:
+        return jsonify({"error": "payments_disabled", "message": "Stripe payments are not enabled."}), 503
+    data = request.get_json() or {}
+    wallet = str(data.get("wallet", "")).strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    package_id = str(data.get("package_id", "")).strip()
+    if not package_id:
+        return jsonify({"error": "missing package_id"}), 400
+    success_url = str(data.get("success_url", "")).strip()
+    cancel_url = str(data.get("cancel_url", "")).strip()
+    if not success_url or not cancel_url:
+        return jsonify({"error": "missing success_url or cancel_url"}), 400
+    try:
+        result = stripe_payments.create_checkout_session(wallet, package_id, success_url, cancel_url)
+        return jsonify(result)
+    except ValueError as exc:
+        return jsonify({"error": "invalid_package", "message": str(exc)}), 400
+    except Exception as exc:
+        log_event("Stripe checkout error", level="error", error=str(exc))
+        return jsonify({"error": "checkout_failed", "message": "Could not create checkout session."}), 500
+
+
+@app.route("/payments/webhook", methods=["POST"])
+def payments_webhook() -> Any:
+    """Handle Stripe webhook events (payment confirmations)."""
+    if not stripe_payments.STRIPE_ENABLED:
+        return jsonify({"error": "payments_disabled"}), 503
+    payload = request.get_data()
+    sig_header = request.headers.get("Stripe-Signature", "")
+    try:
+        result = stripe_payments.handle_webhook_event(payload, sig_header)
+        return jsonify(result)
+    except Exception as exc:
+        log_event("Stripe webhook error", level="error", error=str(exc))
+        return jsonify({"error": "webhook_failed", "message": str(exc)}), 400
+
+
+@app.route("/payments/history", methods=["GET"])
+def payments_history() -> Any:
+    """Return payment history for a wallet."""
+    wallet = request.args.get("wallet", "").strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    history = stripe_payments.get_payment_history(wallet)
+    return jsonify({"wallet": wallet, "payments": history})
 
 
 @app.route("/jobs/recent", methods=["GET"])

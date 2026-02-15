@@ -190,6 +190,11 @@ def run_animatediff(
 
     output_path = outputs_dir / f"animatediff_{job_id}.mp4"
 
+    log_fn(
+        f"[{job_id}] AnimateDiff start: steps={steps}, frames={frames}, "
+        f"fps={fps}, {width}x{height}, guidance={guidance}"
+    )
+
     start_stats = read_gpu_stats()
     started = time.time()
     status = "success"
@@ -216,7 +221,7 @@ def run_animatediff(
         )
         except RuntimeError as exc:
             if init_image is not None and "init_image" in str(exc) and "support" in str(exc).lower():
-                log_fn("AnimateDiff pipeline does not support init_image; retrying without init image.")
+                log_fn(f"[{job_id}] AnimateDiff pipeline does not support init_image; retrying without init image.")
                 video_frames = generate_animatediff_frames(
                     prompt=prompt,
                     negative_prompt=negative_prompt,
@@ -272,21 +277,32 @@ def run_animatediff(
     except Exception as exc:  # pragma: no cover - safety net
         status = "failed"
         error_msg = str(exc)
-        log_fn(f"AnimateDiff generation failed: {error_msg}")
+        log_fn(f"[{job_id}] AnimateDiff generation failed: {error_msg}")
 
-    total_ms = int((time.time() - started) * 1000)
+    duration = time.time() - started
+    total_ms = int(duration * 1000)
+    log_fn(
+        f"[{job_id}] AnimateDiff finished: status={status}, "
+        f"duration={duration:.1f}s"
+    )
     end_stats = read_gpu_stats()
     metrics: Dict[str, Any] = {
         "status": status,
         "model_name": str(job.get("model_name") or "animatediff"),
+        "task_type": "animatediff",
+        "inference_time_ms": round(duration * 1000, 3),
+        "gpu_util_start": start_stats.get("utilization", 0),
+        "gpu_util_end": end_stats.get("utilization", 0),
         "steps": steps,
         "guidance": guidance,
         "width": width,
         "height": height,
         "frames": frames,
         "fps": fps,
+        "seed": seed,
         "elapsed_ms": total_ms,
         "init_image": bool(init_image_raw),
+        "output_path": str(output_path) if status == "success" else None,
     }
     if status != "success":
         metrics["error"] = error_msg or "animatediff generation error"

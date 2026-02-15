@@ -43,6 +43,21 @@ _PIPE_MODE: Optional[str] = None
 _LOGGER = logging.getLogger(__name__)
 
 
+def unload_pipeline() -> None:
+    """Release the cached AnimateDiff pipeline and free GPU memory."""
+    global _PIPE, _PIPE_ID, _ADAPTER_ID, _PIPE_MODE
+    with _PIPE_LOCK:
+        if _PIPE is not None:
+            del _PIPE
+            _PIPE = None
+            _PIPE_ID = None
+            _ADAPTER_ID = None
+            _PIPE_MODE = None
+            if torch is not None and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            _LOGGER.info("AnimateDiff pipeline unloaded")
+
+
 def load_animatediff_pipeline(
     model_id: str,
     adapter_id: str,

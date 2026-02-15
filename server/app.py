@@ -1707,7 +1707,7 @@ def generate_video_job() -> Any:
             frames = int(float(duration) * fps)
         except (TypeError, ValueError):
             frames = None
-    frames = _clamp(_coerce_int(frames or 48, 48), 1, 48)
+    frames = _clamp(_coerce_int(frames or 24, 24), 1, 48)
 
     steps = _clamp(_coerce_int(payload.get("steps", 25), 25), 1, 50)
     guidance = _coerce_float(payload.get("guidance", 6.0), 6.0)

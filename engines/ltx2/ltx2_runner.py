@@ -191,7 +191,7 @@ def run_ltx2(
     guidance = _clamp_float("guidance", job.get("guidance", 6.0), 6.0, 0.0, 12.0, log_fn)
     width = _clamp_int("width", job.get("width", 512), 512, 256, 768, log_fn)
     height = _clamp_int("height", job.get("height", 512), 512, 256, 768, log_fn)
-    frames = _clamp_int("frames", job.get("frames", 16), 16, 1, 16, log_fn)
+    frames = _clamp_int("frames", job.get("frames", 48), 48, 1, 48, log_fn)
     fps = _clamp_int("fps", job.get("fps", 8), 8, 1, 12, log_fn)
     negative_prompt = str(job.get("negative_prompt") or "").strip()
     init_image_raw = (

@@ -263,6 +263,11 @@ def run_animatediff(
     except RuntimeError as exc:
         status = "failed"
         error_msg = str(exc)
+        if "out of memory" in error_msg.lower() and torch is not None:
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
         log_fn(f"AnimateDiff generation failed: {error_msg}")
     except Exception as exc:  # pragma: no cover - safety net
         status = "failed"

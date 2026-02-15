@@ -107,11 +107,12 @@ def load_animatediff_pipeline(
                 except Exception:
                     pass
             offload_enabled = False
-            # Only enable CPU offload if VRAM is low (< 10GB) or forced via env var
+            # Enable CPU offload for GPUs with < 14GB VRAM (covers RTX 3060 12GB).
+            # AnimateDiff + motion adapter need ~10-12GB; without offload, 12GB cards OOM.
             force_offload = os.environ.get("ANIMATEDIFF_CPU_OFFLOAD", "").lower() in ("1", "true", "yes")
             disable_offload = os.environ.get("ANIMATEDIFF_NO_OFFLOAD", "").lower() in ("1", "true", "yes")
 
-            if not disable_offload and (force_offload or (torch.cuda.is_available() and torch.cuda.get_device_properties(0).total_memory < 10 * 1024**3)):
+            if not disable_offload and (force_offload or (torch.cuda.is_available() and torch.cuda.get_device_properties(0).total_memory < 14 * 1024**3)):
                 try:
                     pipe.enable_model_cpu_offload()
                     offload_enabled = True

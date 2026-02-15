@@ -82,6 +82,7 @@ def generate_video_frames(
     seed: int,
     model_id: str,
     init_image: Optional[Any] = None,
+    callback_on_step_end: Optional[Any] = None,
 ) -> Any:
     if torch is None:
         raise RuntimeError("torch is required for LTX2 generation")
@@ -124,6 +125,20 @@ def generate_video_frames(
         if Image is not None and isinstance(init_image, Image.Image):
             prepared_image = init_image.convert("RGB").resize((width, height), resample=Image.LANCZOS)
         call_kwargs["image"] = prepared_image
+
+    # Attach step-progress callback if the pipeline supports it.
+    if callback_on_step_end is not None:
+        try:
+            sig = inspect.signature(pipe.__call__)
+            if "callback_on_step_end" in sig.parameters:
+                call_kwargs["callback_on_step_end"] = callback_on_step_end
+            elif "callback" in sig.parameters:
+                # Older diffusers API uses positional (step, timestep, latents)
+                def _compat_cb(step: int, timestep: Any, latents: Any) -> None:
+                    callback_on_step_end(pipe, step, timestep, {})
+                call_kwargs["callback"] = _compat_cb
+        except Exception:
+            pass  # Skip callback if signature introspection fails
 
     result = pipe(**call_kwargs)
     return result.frames[0]

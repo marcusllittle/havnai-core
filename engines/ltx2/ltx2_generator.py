@@ -38,11 +38,18 @@ def load_latte_pipeline(model_id: str, device: str = "cuda") -> Any:
     global _PIPE, _PIPE_ID
     with _PIPE_LOCK:
         if _PIPE is None or _PIPE_ID != model_id:
-            model_path = Path(model_id).expanduser()
-            if model_path.exists() and model_path.is_file() and hasattr(LattePipeline, "from_single_file"):
-                pipe = LattePipeline.from_single_file(str(model_path), torch_dtype=torch.float16).to(device)
-            else:
-                pipe = LattePipeline.from_pretrained(model_id, torch_dtype=torch.float16).to(device)
+            # Temporarily disable HF_HUB_OFFLINE for model loading so downloads
+            # can succeed when the model isn't cached yet.
+            _offline_was = os.environ.pop("HF_HUB_OFFLINE", None)
+            try:
+                model_path = Path(model_id).expanduser()
+                if model_path.exists() and model_path.is_file() and hasattr(LattePipeline, "from_single_file"):
+                    pipe = LattePipeline.from_single_file(str(model_path), torch_dtype=torch.float16).to(device)
+                else:
+                    pipe = LattePipeline.from_pretrained(model_id, torch_dtype=torch.float16).to(device)
+            finally:
+                if _offline_was is not None:
+                    os.environ["HF_HUB_OFFLINE"] = _offline_was
             vae = AutoencoderKLTemporalDecoder.from_pretrained(
                 model_id,
                 subfolder="vae_temporal_decoder",

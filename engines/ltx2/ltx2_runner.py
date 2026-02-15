@@ -38,9 +38,24 @@ from .ltx2_generator import generate_video_frames
 
 LogFn = Callable[[str], None]
 
-# Hard timeout (seconds) for a single generation.  0 = no limit.
-# Can be set per-job via job["timeout"] or globally via env var.
-LTX2_JOB_TIMEOUT = int(os.environ.get("LTX2_JOB_TIMEOUT", "300"))
+def _read_ltx2_job_timeout() -> int:
+    """Read local timeout floor for LTX2 jobs (0 disables local timeout floor)."""
+    for key in ("LTX2_JOB_TIMEOUT", "HAVNAI_LTX2_JOB_TIMEOUT"):
+        raw = os.environ.get(key)
+        if raw is None:
+            continue
+        text = str(raw).strip()
+        if not text:
+            continue
+        try:
+            return max(0, int(text))
+        except Exception:
+            continue
+    return 300
+
+
+# Local timeout floor (seconds) for a single generation. 0 disables local floor.
+LTX2_JOB_TIMEOUT = _read_ltx2_job_timeout()
 
 
 class _JobTimeout(Exception):
@@ -171,6 +186,18 @@ def _load_init_image(source: Any) -> Optional[Any]:
     return None
 
 
+def _should_retry_with_16_frames(error: Exception, requested_frames: int) -> bool:
+    """Detect Latte-1 frame-shape mismatches and decide whether to retry at 16 frames."""
+    if requested_frames == 16:
+        return False
+    text = str(error).lower()
+    return (
+        "size of tensor a" in text
+        and "size of tensor b (16)" in text
+        and "dimension 1" in text
+    )
+
+
 def run_ltx2(
     job: Dict[str, Any],
     *,
@@ -200,10 +227,22 @@ def run_ltx2(
     guidance = _clamp_float("guidance", job.get("guidance", 7.0), 7.0, 0.0, 12.0, log_fn)
     width = _clamp_int("width", job.get("width", 512), 512, 256, 768, log_fn)
     height = _clamp_int("height", job.get("height", 512), 512, 256, 768, log_fn)
-    frames = _clamp_int("frames", job.get("frames", 16), 16, 1, 16, log_fn)
+    requested_frames = _clamp_int("frames", job.get("frames", 16), 16, 1, 16, log_fn)
+    frames = requested_frames
     fps = _clamp_int("fps", job.get("fps", 8), 8, 1, 12, log_fn)
     negative_prompt = str(job.get("negative_prompt") or "").strip()
-    timeout = int(job.get("timeout", 0) or LTX2_JOB_TIMEOUT)
+    timeout_raw = job.get("timeout", 0)
+    try:
+        timeout = int(timeout_raw or 0)
+    except Exception:
+        timeout = 0
+    if timeout <= 0:
+        timeout = LTX2_JOB_TIMEOUT
+    elif LTX2_JOB_TIMEOUT > 0 and timeout < LTX2_JOB_TIMEOUT:
+        log_fn(
+            f"[{job_id}] Raising timeout from {timeout}s to local minimum {LTX2_JOB_TIMEOUT}s"
+        )
+        timeout = LTX2_JOB_TIMEOUT
     init_image_raw = (
         job.get("init_image")
         or job.get("init_image_url")
@@ -232,12 +271,21 @@ def run_ltx2(
 
     # --- step-level progress callback ---
     _timed_out = threading.Event()
+    progress_started_at: Optional[float] = None
 
     def _step_callback(pipe: Any, step: int, timestep: Any, kwargs: Any) -> Any:
-        elapsed = time.time() - started
+        nonlocal progress_started_at
+        now = time.time()
+        if progress_started_at is None:
+            progress_started_at = now
+            warmup_elapsed = now - started
+            log_fn(
+                f"[{job_id}] First denoise step reached after {warmup_elapsed:.1f}s warmup"
+            )
+        elapsed = now - (progress_started_at or started)
         log_fn(
             f"[{job_id}] step {step + 1}/{steps} "
-            f"({elapsed:.1f}s elapsed)"
+            f"({elapsed:.1f}s elapsed in diffusion)"
         )
         if _timed_out.is_set():
             raise _JobTimeout(
@@ -249,11 +297,14 @@ def run_ltx2(
     def _watchdog() -> None:
         if timeout <= 0:
             return
-        deadline = started + timeout
-        while time.time() < deadline:
+        while True:
             if _timed_out.wait(timeout=1.0):
                 return  # generation finished early
-        _timed_out.set()
+            if progress_started_at is None:
+                continue
+            if time.time() >= progress_started_at + timeout:
+                _timed_out.set()
+                return
 
     watchdog_thread: Optional[threading.Thread] = None
     if timeout > 0:
@@ -265,19 +316,35 @@ def run_ltx2(
             raise RuntimeError("torch is not available")
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA is not available")
-        video_frames = generate_video_frames(
-            prompt=prompt,
-            negative_prompt=negative_prompt,
-            steps=steps,
-            guidance=guidance,
-            width=width,
-            height=height,
-            frames=frames,
-            seed=seed,
-            model_id=model_ref,
-            init_image=init_image,
-            callback_on_step_end=_step_callback,
-        )
+
+        def _generate(run_frames: int) -> Any:
+            return generate_video_frames(
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                steps=steps,
+                guidance=guidance,
+                width=width,
+                height=height,
+                frames=run_frames,
+                seed=seed,
+                model_id=model_ref,
+                init_image=init_image,
+                callback_on_step_end=_step_callback,
+            )
+
+        try:
+            video_frames = _generate(frames)
+        except RuntimeError as exc:
+            if _should_retry_with_16_frames(exc, requested_frames):
+                frames = 16
+                log_fn(
+                    f"[{job_id}] LTX2 frame mismatch for {requested_frames} frames; "
+                    f"retrying with fixed 16-frame generation"
+                )
+                video_frames = _generate(frames)
+            else:
+                raise
+
         frames_np = None
         if torch is not None and isinstance(video_frames, torch.Tensor):
             frames_np = (video_frames.detach().cpu().numpy() * 255).clip(0, 255).astype("uint8")
@@ -308,6 +375,15 @@ def run_ltx2(
         if frames_np is None:
             raise RuntimeError("Unsupported LTX2 frame format")
         frames_np = _normalize_video_frames(frames_np)
+        if frames > requested_frames:
+            try:
+                if getattr(frames_np, "shape", None) is not None and int(frames_np.shape[0]) >= requested_frames:
+                    log_fn(
+                        f"[{job_id}] Trimming output from {frames} to requested {requested_frames} frames"
+                    )
+                    frames_np = frames_np[:requested_frames]
+            except Exception:
+                pass
         _save_video_frames(frames_np, output_path, fps, log_fn)
     except _JobTimeout as exc:
         status = "failed"
@@ -357,7 +433,8 @@ def run_ltx2(
         "guidance": guidance,
         "width": width,
         "height": height,
-        "frames": frames,
+        "frames": requested_frames,
+        "frames_generated": frames,
         "fps": fps,
         "seed": seed,
         "timeout": timeout,

@@ -352,7 +352,31 @@ class TestLTX2ProgressCallback(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 7. GPU profile presets
+# 7. LTX2 frame mismatch fallback
+# ---------------------------------------------------------------------------
+
+class TestLTX2FrameFallback(unittest.TestCase):
+    """Test LTX2 fallback logic for fixed 16-frame models."""
+
+    def test_retry_triggered_for_known_16_frame_shape_error(self):
+        from engines.ltx2.ltx2_runner import _should_retry_with_16_frames
+
+        err = RuntimeError(
+            "The size of tensor a (12) must match the size of tensor b (16) at non-singleton dimension 1"
+        )
+        self.assertTrue(_should_retry_with_16_frames(err, 12))
+
+    def test_no_retry_when_request_already_16(self):
+        from engines.ltx2.ltx2_runner import _should_retry_with_16_frames
+
+        err = RuntimeError(
+            "The size of tensor a (16) must match the size of tensor b (16) at non-singleton dimension 1"
+        )
+        self.assertFalse(_should_retry_with_16_frames(err, 16))
+
+
+# ---------------------------------------------------------------------------
+# 8. GPU profile presets
 # ---------------------------------------------------------------------------
 
 class TestGPUProfiles(unittest.TestCase):

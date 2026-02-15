@@ -173,6 +173,36 @@ def log(message: str, prefix: str = "ℹ️", **extra: Any) -> None:
     LOGGER.info(f"{prefix} {message}", extra={"node": socket.gethostname(), **extra})
 
 
+def _configure_cuda_runtime() -> None:
+    """Prefer stable CUDA attention kernels on consumer GPUs."""
+    if torch is None or not SAFE_CUDA_KERNELS:
+        return
+    try:
+        if not torch.cuda.is_available():
+            return
+        backend = getattr(torch.backends, "cuda", None)
+        if backend is None:
+            return
+        changes: List[str] = []
+        if hasattr(backend, "enable_flash_sdp"):
+            backend.enable_flash_sdp(False)
+            changes.append("flash_sdp=off")
+        if hasattr(backend, "enable_mem_efficient_sdp"):
+            backend.enable_mem_efficient_sdp(False)
+            changes.append("mem_efficient_sdp=off")
+        if hasattr(backend, "enable_math_sdp"):
+            backend.enable_math_sdp(True)
+            changes.append("math_sdp=on")
+        if changes:
+            log(
+                "CUDA safety mode active (" + ", ".join(changes) + "). "
+                "Set HAI_SAFE_CUDA_KERNELS=0 to disable.",
+                prefix="🛡️",
+            )
+    except Exception as exc:
+        log(f"CUDA safety mode setup failed: {exc}", prefix="⚠️")
+
+
 INSTANTID_REPO = os.environ.get("INSTANTID_REPO", "instantx/InstantID-XL")
 INSTANTID_CONTROLNET_SUBFOLDER = os.environ.get("INSTANTID_CONTROLNET_SUBFOLDER", "ControlNetModel")
 INSTANTID_IP_ADAPTER_FILE = os.environ.get("INSTANTID_IP_ADAPTER_FILE", "ip-adapter.bin")
@@ -242,6 +272,16 @@ ENV_VARS = load_env_file()
 # Ensure .env exists on disk
 save_env_file(ENV_VARS)
 
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        raw = ENV_VARS.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
 SERVER_BASE = ENV_VARS.get("SERVER_URL", "http://127.0.0.1:5001").rstrip("/")
 JOIN_TOKEN = ENV_VARS.get("JOIN_TOKEN", "").strip()
 ROLE = "creator" if ENV_VARS.get("CREATOR_MODE", "false").lower() in {"1", "true", "yes"} else "worker"
@@ -252,6 +292,8 @@ FAST_PREVIEW = (
 )
 LTX2_MODEL_ID = os.environ.get("LTX2_MODEL_ID") or ENV_VARS.get("LTX2_MODEL_ID") or "maxin-cn/Latte-1"
 LTX2_MODEL_PATH = os.environ.get("LTX2_MODEL_PATH") or ENV_VARS.get("LTX2_MODEL_PATH", "")
+ENABLE_XFORMERS = _env_flag("HAI_ENABLE_XFORMERS", False)
+SAFE_CUDA_KERNELS = _env_flag("HAI_SAFE_CUDA_KERNELS", True)
 
 HEARTBEAT_INTERVAL = 30
 TASK_POLL_INTERVAL = 15
@@ -269,10 +311,52 @@ if JOIN_TOKEN:
 
 _LTX2_LAST_READY: Optional[bool] = None
 _LTX2_LAST_REASON: str = ""
+_RESTART_LOCK = threading.Lock()
+_RESTART_REQUESTED = False
+_FATAL_CUDA_MARKERS = (
+    "misaligned address",
+    "an illegal memory access was encountered",
+    "device-side assert triggered",
+    "unspecified launch failure",
+)
 
 
 def endpoint(path: str) -> str:
     return f"{SERVER_BASE}{path}"
+
+
+def _is_fatal_cuda_error(error_text: str) -> bool:
+    if not error_text:
+        return False
+    text = error_text.lower()
+    if "cuda" not in text:
+        return False
+    return any(marker in text for marker in _FATAL_CUDA_MARKERS)
+
+
+def _request_self_restart(reason: str) -> None:
+    """Trigger a one-time process restart so systemd can restore a clean CUDA context."""
+    global _RESTART_REQUESTED
+    with _RESTART_LOCK:
+        if _RESTART_REQUESTED:
+            return
+        _RESTART_REQUESTED = True
+
+    def _restart_worker() -> None:
+        log(f"Fatal GPU runtime error detected; restarting node ({reason})", prefix="💥")
+        try:
+            disconnect()
+        except Exception:
+            pass
+        try:
+            if torch is not None and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        time.sleep(0.25)
+        os._exit(86)
+
+    threading.Thread(target=_restart_worker, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
@@ -1243,6 +1327,10 @@ def execute_task(task: Dict[str, Any]) -> None:
         metrics["queue_wait_ms"] = queue_wait_ms
     if assign_to_start_ms is not None:
         metrics["assign_to_start_ms"] = assign_to_start_ms
+    error_text = str(metrics.get("error") or "")
+    fatal_cuda_error = _is_fatal_cuda_error(error_text)
+    if fatal_cuda_error:
+        metrics["fatal_gpu_error"] = True
 
     with lock:
         utilization_hint = util
@@ -1260,10 +1348,28 @@ def execute_task(task: Dict[str, Any]) -> None:
     if video_b64:
         payload["video_b64"] = video_b64
 
-    try:
-        resp = SESSION.post(endpoint("/results"), data=json.dumps(payload), timeout=15)
-        resp.raise_for_status()
-        reward = resp.json().get("reward")
+    submit_error: Optional[Exception] = None
+    reward: Any = None
+    for attempt in range(2):
+        try:
+            resp = SESSION.post(endpoint("/results"), data=json.dumps(payload), timeout=15)
+            resp.raise_for_status()
+            reward = resp.json().get("reward")
+            submit_error = None
+            break
+        except Exception as exc:
+            submit_error = exc
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if status_code == 404 and attempt == 0:
+                log(
+                    f"Result submit returned 404 for {task_id[:8]}; retrying once",
+                    prefix="⚠️",
+                )
+                time.sleep(1.0)
+                continue
+            break
+
+    if submit_error is None:
         prefix = "✅" if payload["status"] == "success" else "⚠️"
         log(
             f"Task {task_id[:8]} {payload['status'].upper()} · reward {reward} HAI",
@@ -1273,8 +1379,10 @@ def execute_task(task: Dict[str, Any]) -> None:
             assign_to_start_ms=assign_to_start_ms,
             inference_ms=metrics.get("inference_time_ms"),
         )
-    except Exception as exc:
-        log(f"Failed to submit result: {exc}", prefix="🚫")
+    else:
+        log(f"Failed to submit result: {submit_error}", prefix="🚫")
+    if fatal_cuda_error:
+        _request_self_restart(f"{task_type}:{task_id[:8]}")
 
 
 def run_ai_inference(model_name: str, model_url: str, input_shape: List[int], reward_weight: float) -> (Dict[str, Any], int):
@@ -1815,13 +1923,16 @@ def run_image_generation(
             )
             if hasattr(pipe, "enable_attention_slicing"):
                 pipe.enable_attention_slicing("max")
-            # xformers: ~30-40% VRAM reduction when available
+            # xformers can crash on some consumer GPUs/drivers; keep it opt-in.
             if hasattr(pipe, "enable_xformers_memory_efficient_attention"):
-                try:
-                    pipe.enable_xformers_memory_efficient_attention()
-                    log("xformers memory-efficient attention enabled", prefix="✅")
-                except Exception as exc:
-                    log(f"xformers not available, using default attention: {exc}", prefix="ℹ️")
+                if ENABLE_XFORMERS:
+                    try:
+                        pipe.enable_xformers_memory_efficient_attention()
+                        log("xformers memory-efficient attention enabled", prefix="✅")
+                    except Exception as exc:
+                        log(f"xformers unavailable, using default attention: {exc}", prefix="ℹ️")
+                else:
+                    log("xformers disabled (set HAI_ENABLE_XFORMERS=1 to enable)", prefix="ℹ️")
             if hasattr(pipe, "set_progress_bar_config"):
                 pipe.set_progress_bar_config(disable=True)
             pipe = pipe.to(device)
@@ -2026,6 +2137,7 @@ def poll_tasks_loop() -> None:
 
 if __name__ == "__main__":
     log(f"Node ID: {NODE_NAME} · Role: {ROLE.upper()} · Version: {CLIENT_VERSION}")
+    _configure_cuda_runtime()
     register_local_models()
     link_wallet(WALLET)
     # Graceful shutdown hooks

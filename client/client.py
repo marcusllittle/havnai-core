@@ -1261,6 +1261,12 @@ def execute_task(task: Dict[str, Any]) -> None:
         )
     elif task_type == "animatediff" or str(task.get("pipeline") or "").lower() == "animatediff" or str(task.get("engine") or "").lower() == "animatediff":
         from engines.animatediff.animatediff_runner import run_animatediff, video_to_b64
+        # Free LTX2 pipeline from GPU before loading AnimateDiff
+        try:
+            from engines.ltx2.ltx2_generator import unload_pipeline as unload_ltx2
+            unload_ltx2()
+        except Exception:
+            pass
 
         model_ref = model_url or os.environ.get("ANIMATEDIFF_MODEL_PATH") or model_name
         metrics, util, video_path = run_animatediff(
@@ -1275,6 +1281,12 @@ def execute_task(task: Dict[str, Any]) -> None:
             video_b64 = video_to_b64(video_path)
     elif task_type == "video_gen" or str(task.get("pipeline") or "").lower() == "ltx2" or str(task.get("engine") or "").lower() == "ltx2":
         from engines.ltx2.ltx2_runner import run_ltx2, video_to_b64
+        # Free AnimateDiff pipeline from GPU before loading LTX2
+        try:
+            from engines.animatediff.animatediff_generator import unload_pipeline as unload_animatediff
+            unload_animatediff()
+        except Exception:
+            pass
 
         model_ref = LTX2_MODEL_PATH or LTX2_MODEL_ID or "maxin-cn/Latte-1"
         metrics, util, video_path = run_ltx2(

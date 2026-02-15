@@ -57,8 +57,11 @@ def load_latte_pipeline(model_id: str, device: str = "cuda") -> Any:
                 try:
                     pipe.enable_model_cpu_offload()
                     _LOGGER.info("CPU offload enabled (low VRAM or forced)")
+                    print("🐌 LTX2 CPU offload ENABLED (this will be slow)")
                 except Exception:
                     pass
+            else:
+                print("⚡ LTX2 CPU offload DISABLED (full GPU mode)")
             try:
                 pipe.enable_vae_slicing()
             except Exception:

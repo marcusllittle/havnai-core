@@ -133,10 +133,10 @@ class TestLTX2ParameterClamping(unittest.TestCase):
     def test_clamp_float_above_max(self):
         self.assertAlmostEqual(self.clamp_float("guidance", 20.0, 6.0, 0.0, 12.0, self.log), 12.0)
 
-    def test_frames_max_is_48(self):
-        """LTX2 max frames should be 48."""
-        result = self.clamp_int("frames", 64, 12, 1, 48, self.log)
-        self.assertEqual(result, 48)
+    def test_frames_max_is_16(self):
+        """LTX2 max frames must be 16 (Latte-1 fixed temporal embeddings)."""
+        result = self.clamp_int("frames", 32, 16, 1, 16, self.log)
+        self.assertEqual(result, 16)
 
     def test_fps_max_is_12(self):
         """LTX2 max fps should be 12."""
@@ -384,7 +384,7 @@ class TestGPUProfiles(unittest.TestCase):
         self.assertIn("fast_3060", profiles)
         p = profiles["fast_3060"]
         self.assertEqual(p["steps"], 20)
-        self.assertEqual(p["frames"], 12)
+        self.assertEqual(p["frames"], 16)
 
     def test_quality_profile_exists(self):
         profiles = self._load_profiles()

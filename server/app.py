@@ -98,7 +98,7 @@ CREDITS_ENABLED = os.getenv("HAVNAI_CREDITS_ENABLED", "").strip().lower() in {"1
 # Individual settings can still be overridden via HAVNAI_LTX2_STEPS, etc.
 # ---------------------------------------------------------------------------
 _GPU_PROFILES: Dict[str, Dict[str, Any]] = {
-    "fast_3060": {"steps": 20, "frames": 12, "fps": 8, "width": 512, "height": 512, "guidance": 7.0},
+    "fast_3060": {"steps": 20, "frames": 16, "fps": 8, "width": 512, "height": 512, "guidance": 7.0},
     "quality":   {"steps": 30, "frames": 16, "fps": 8, "width": 512, "height": 512, "guidance": 7.0},
 }
 _GPU_PROFILE_NAME = os.getenv("HAVNAI_GPU_PROFILE", "fast_3060").strip().lower()
@@ -1480,7 +1480,7 @@ def submit_job() -> Any:
             "guidance": _clamp_float(payload.get("guidance", LTX2_DEFAULT_GUIDANCE), LTX2_DEFAULT_GUIDANCE, 0.0, 12.0),
             "width": _clamp_int(payload.get("width", LTX2_DEFAULT_WIDTH), LTX2_DEFAULT_WIDTH, 256, 768),
             "height": _clamp_int(payload.get("height", LTX2_DEFAULT_HEIGHT), LTX2_DEFAULT_HEIGHT, 256, 768),
-            "frames": _clamp_int(payload.get("frames", LTX2_DEFAULT_FRAMES), LTX2_DEFAULT_FRAMES, 1, 48),
+            "frames": _clamp_int(payload.get("frames", LTX2_DEFAULT_FRAMES), LTX2_DEFAULT_FRAMES, 1, 16),
             "fps": _clamp_int(payload.get("fps", LTX2_DEFAULT_FPS), LTX2_DEFAULT_FPS, 1, 12),
             "timeout": LTX2_JOB_TIMEOUT,
         }

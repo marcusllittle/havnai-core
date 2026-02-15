@@ -62,38 +62,45 @@ def load_animatediff_pipeline(
     with _PIPE_LOCK:
         mode = "i2v" if use_init_image else "t2v"
         if _PIPE is None or _PIPE_ID != model_id or _ADAPTER_ID != adapter_id or _PIPE_MODE != mode:
-            model_path = Path(model_id).expanduser()
-            base_kwargs = {
-                "torch_dtype": torch.float16,
-                "safety_checker": None,
-                "requires_safety_checker": False,
-                "feature_extractor": None,
-            }
-            if use_init_image:
-                if AnimateDiffVideoToVideoPipeline is None or StableDiffusionImg2ImgPipeline is None:
-                    raise RuntimeError("AnimateDiff init_image requires AnimateDiffVideoToVideoPipeline")
-                if model_path.exists() and model_path.is_file() and hasattr(StableDiffusionImg2ImgPipeline, "from_single_file"):
-                    base = StableDiffusionImg2ImgPipeline.from_single_file(
-                        str(model_path), **base_kwargs
-                    )
+            # Temporarily disable HF_HUB_OFFLINE for model loading so downloads
+            # can succeed when the model isn't cached yet.
+            _offline_was = os.environ.pop("HF_HUB_OFFLINE", None)
+            try:
+                model_path = Path(model_id).expanduser()
+                base_kwargs = {
+                    "torch_dtype": torch.float16,
+                    "safety_checker": None,
+                    "requires_safety_checker": False,
+                    "feature_extractor": None,
+                }
+                if use_init_image:
+                    if AnimateDiffVideoToVideoPipeline is None or StableDiffusionImg2ImgPipeline is None:
+                        raise RuntimeError("AnimateDiff init_image requires AnimateDiffVideoToVideoPipeline")
+                    if model_path.exists() and model_path.is_file() and hasattr(StableDiffusionImg2ImgPipeline, "from_single_file"):
+                        base = StableDiffusionImg2ImgPipeline.from_single_file(
+                            str(model_path), **base_kwargs
+                        )
+                    else:
+                        base = StableDiffusionImg2ImgPipeline.from_pretrained(
+                            model_id, **base_kwargs
+                        )
                 else:
-                    base = StableDiffusionImg2ImgPipeline.from_pretrained(
-                        model_id, **base_kwargs
-                    )
-            else:
-                if model_path.exists() and model_path.is_file() and hasattr(StableDiffusionPipeline, "from_single_file"):
-                    base = StableDiffusionPipeline.from_single_file(
-                        str(model_path), **base_kwargs
-                    )
+                    if model_path.exists() and model_path.is_file() and hasattr(StableDiffusionPipeline, "from_single_file"):
+                        base = StableDiffusionPipeline.from_single_file(
+                            str(model_path), **base_kwargs
+                        )
+                    else:
+                        base = StableDiffusionPipeline.from_pretrained(
+                            model_id, **base_kwargs
+                        )
+                adapter = MotionAdapter.from_pretrained(adapter_id, torch_dtype=torch.float16)
+                if use_init_image and AnimateDiffVideoToVideoPipeline is not None:
+                    pipe = AnimateDiffVideoToVideoPipeline.from_pipe(base, motion_adapter=adapter)
                 else:
-                    base = StableDiffusionPipeline.from_pretrained(
-                        model_id, **base_kwargs
-                    )
-            adapter = MotionAdapter.from_pretrained(adapter_id, torch_dtype=torch.float16)
-            if use_init_image and AnimateDiffVideoToVideoPipeline is not None:
-                pipe = AnimateDiffVideoToVideoPipeline.from_pipe(base, motion_adapter=adapter)
-            else:
-                pipe = AnimateDiffPipeline.from_pipe(base, motion_adapter=adapter)
+                    pipe = AnimateDiffPipeline.from_pipe(base, motion_adapter=adapter)
+            finally:
+                if _offline_was is not None:
+                    os.environ["HF_HUB_OFFLINE"] = _offline_was
             if DDIMScheduler is not None:
                 try:
                     pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)

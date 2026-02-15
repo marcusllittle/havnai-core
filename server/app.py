@@ -1442,14 +1442,16 @@ def submit_job() -> Any:
         if not prompt_text:
             return jsonify({"error": "missing prompt"}), 400
         negative_prompt = str(payload.get("negative_prompt") or "").strip()
+        raw_prompt = str(payload.get("raw_prompt", "")).lower() in ("1", "true", "yes")
         # Apply default video negative prompt if not provided
-        if not negative_prompt:
+        if not negative_prompt and not raw_prompt:
             negative_prompt = get_video_negative(model_name)
 
         # Append positive quality suffix if prompt doesn't have quality tokens
-        prompt_lower = prompt_text.lower()
-        if "best quality" not in prompt_lower and "masterpiece" not in prompt_lower:
-            prompt_text = f"{prompt_text}, {get_video_positive_suffix(model_name)}"
+        if not raw_prompt:
+            prompt_lower = prompt_text.lower()
+            if "best quality" not in prompt_lower and "masterpiece" not in prompt_lower:
+                prompt_text = f"{prompt_text}, {get_video_positive_suffix(model_name)}"
 
         seed = payload.get("seed")
         try:
@@ -1491,14 +1493,16 @@ def submit_job() -> Any:
     elif is_animatediff:
         prompt_text = str(payload.get("prompt") or "")
         negative_prompt = str(payload.get("negative_prompt") or "")
+        raw_prompt = str(payload.get("raw_prompt", "")).lower() in ("1", "true", "yes")
         # Apply default video negative prompt if not provided
-        if not negative_prompt:
+        if not negative_prompt and not raw_prompt:
             negative_prompt = get_video_negative(model_name)
 
         # Append positive quality suffix if prompt doesn't have quality tokens
-        prompt_lower = prompt_text.lower()
-        if prompt_text and "best quality" not in prompt_lower and "masterpiece" not in prompt_lower:
-            prompt_text = f"{prompt_text}, {get_video_positive_suffix(model_name)}"
+        if not raw_prompt:
+            prompt_lower = prompt_text.lower()
+            if prompt_text and "best quality" not in prompt_lower and "masterpiece" not in prompt_lower:
+                prompt_text = f"{prompt_text}, {get_video_positive_suffix(model_name)}"
 
         # Core AnimateDiff controls – validated/coerced into safe ranges
         try:
@@ -1576,12 +1580,15 @@ def submit_job() -> Any:
         task_type = "ANIMATEDIFF"
     else:
         prompt_text = str(payload.get("prompt") or payload.get("data") or "")
-        # Pipeline-aware positive suffix — prevents realism tokens on anime models
-        positive_suffix = get_positive_suffix(cfg)
-        if prompt_text:
-            prompt_text = f"{prompt_text}, {positive_suffix}"
-        else:
-            prompt_text = positive_suffix
+        # Pipeline-aware positive suffix — prevents realism tokens on anime models.
+        # Can be disabled by passing raw_prompt=true in the request.
+        raw_prompt = str(payload.get("raw_prompt", "")).lower() in ("1", "true", "yes")
+        if not raw_prompt:
+            positive_suffix = get_positive_suffix(cfg)
+            if prompt_text:
+                prompt_text = f"{prompt_text}, {positive_suffix}"
+            else:
+                prompt_text = positive_suffix
         negative_prompt = str(payload.get("negative_prompt") or "").strip()
         job_settings: Dict[str, Any] = {"prompt": prompt_text}
 
@@ -1732,7 +1739,7 @@ def generate_video_job() -> Any:
             frames = int(float(duration) * fps)
         except (TypeError, ValueError):
             frames = None
-    frames = _clamp(_coerce_int(frames or 24, 24), 1, 48)
+    frames = _clamp(_coerce_int(frames or 16, 16), 1, 16)
 
     steps = _clamp(_coerce_int(payload.get("steps", 25), 25), 1, 50)
     guidance = _coerce_float(payload.get("guidance", 6.0), 6.0)
@@ -2705,7 +2712,7 @@ def node_detail(node_id: str) -> Any:
     return jsonify(payload)
 
 
-@app.route("/api/models/stats", methods=["GET"])
+@app.route("/models/stats", methods=["GET"])
 def models_stats() -> Any:
     """
     Lightweight stats endpoint used by the public landing page.
@@ -2780,7 +2787,7 @@ def models_stats_legacy() -> Any:
     return models_stats()
 
 
-@app.route("/api/models/list", methods=["GET"])
+@app.route("/models/list", methods=["GET"])
 def models_list() -> Any:
     """
     Returns the full model registry with metadata for frontend consumption.
@@ -2901,7 +2908,7 @@ def _emit_node_event(event: str, node_id: str, **extra: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-@app.route("/api/wallet/verify", methods=["GET"])
+@app.route("/wallet/verify", methods=["GET"])
 def wallet_verify() -> Any:
     """Placeholder for wallet signature verification."""
     wallet = request.args.get("wallet", "").strip()
@@ -2911,7 +2918,7 @@ def wallet_verify() -> Any:
     return jsonify(result)
 
 
-@app.route("/api/rewards/claimable", methods=["GET"])
+@app.route("/rewards/claimable", methods=["GET"])
 def rewards_claimable() -> Any:
     """Return unclaimed reward balance for a wallet."""
     wallet = request.args.get("wallet", "").strip()
@@ -2921,7 +2928,7 @@ def rewards_claimable() -> Any:
     return jsonify(result)
 
 
-@app.route("/api/rewards/claim", methods=["POST"])
+@app.route("/rewards/claim", methods=["POST"])
 def rewards_claim() -> Any:
     """Claim pending rewards (DB-only for now)."""
     if not rate_limit(f"rewards-claim:{request.remote_addr}", limit=10):
@@ -2942,7 +2949,7 @@ def rewards_claim() -> Any:
     return jsonify(result)
 
 
-@app.route("/api/rewards/claims", methods=["GET"])
+@app.route("/rewards/claims", methods=["GET"])
 def rewards_claim_history() -> Any:
     """Return claim history for a wallet."""
     wallet = request.args.get("wallet", "").strip()
@@ -2957,7 +2964,7 @@ def rewards_claim_history() -> Any:
 # ---------------------------------------------------------------------------
 
 
-@app.route("/api/analytics/jobs", methods=["GET"])
+@app.route("/analytics/jobs", methods=["GET"])
 def api_analytics_jobs() -> Any:
     """Job counts grouped by day, model, task_type."""
     days = _clamp(_coerce_int(request.args.get("days"), 30), 1, 365)
@@ -2966,7 +2973,7 @@ def api_analytics_jobs() -> Any:
     return jsonify(result)
 
 
-@app.route("/api/analytics/costs", methods=["GET"])
+@app.route("/analytics/costs", methods=["GET"])
 def api_analytics_costs() -> Any:
     """Credit spend breakdown by model and time period."""
     days = _clamp(_coerce_int(request.args.get("days"), 30), 1, 365)
@@ -2975,14 +2982,14 @@ def api_analytics_costs() -> Any:
     return jsonify(result)
 
 
-@app.route("/api/analytics/nodes", methods=["GET"])
+@app.route("/analytics/nodes", methods=["GET"])
 def api_analytics_nodes() -> Any:
     """Node performance metrics."""
     result = analytics.analytics_nodes()
     return jsonify(result)
 
 
-@app.route("/api/analytics/rewards", methods=["GET"])
+@app.route("/analytics/rewards", methods=["GET"])
 def api_analytics_rewards() -> Any:
     """Reward distribution by node and model."""
     days = _clamp(_coerce_int(request.args.get("days"), 30), 1, 365)
@@ -2990,7 +2997,7 @@ def api_analytics_rewards() -> Any:
     return jsonify(result)
 
 
-@app.route("/api/analytics/overview", methods=["GET"])
+@app.route("/analytics/overview", methods=["GET"])
 def api_analytics_overview() -> Any:
     """Combined summary stats for the dashboard."""
     result = analytics.analytics_overview()
@@ -3002,7 +3009,7 @@ def api_analytics_overview() -> Any:
 # ---------------------------------------------------------------------------
 
 
-@app.route("/api/validate", methods=["POST"])
+@app.route("/validate", methods=["POST"])
 def api_validate() -> Any:
     """Submit a validation result for a job."""
     if not rate_limit(f"validate:{request.remote_addr}", limit=60):
@@ -3023,14 +3030,14 @@ def api_validate() -> Any:
     return jsonify(validation)
 
 
-@app.route("/api/validators", methods=["GET"])
+@app.route("/validators", methods=["GET"])
 def api_validators_list() -> Any:
     """List active validators."""
     active = validators.get_active_validators()
     return jsonify({"validators": active, "quorum_m": validators.QUORUM_M, "quorum_n": validators.QUORUM_N})
 
 
-@app.route("/api/validators/register", methods=["POST"])
+@app.route("/validators/register", methods=["POST"])
 def api_validator_register() -> Any:
     """Register a node as a validator."""
     if not check_join_token():
@@ -3046,7 +3053,7 @@ def api_validator_register() -> Any:
     return jsonify(result)
 
 
-@app.route("/api/validations/<job_id>", methods=["GET"])
+@app.route("/validations/<job_id>", methods=["GET"])
 def api_validation_history(job_id: str) -> Any:
     """Get validation history for a job."""
     history = validators.get_validation_history(job_id)
@@ -3059,7 +3066,7 @@ def api_validation_history(job_id: str) -> Any:
 # ---------------------------------------------------------------------------
 
 
-@app.route("/api/workflows", methods=["POST"])
+@app.route("/workflows", methods=["POST"])
 def api_workflow_create() -> Any:
     """Create a new workflow."""
     if not rate_limit(f"workflow-create:{request.remote_addr}", limit=20):
@@ -3087,7 +3094,7 @@ def api_workflow_create() -> Any:
     return jsonify(result), 201
 
 
-@app.route("/api/workflows", methods=["GET"])
+@app.route("/workflows", methods=["GET"])
 def api_workflow_list() -> Any:
     """List workflows with search, category filter, and pagination."""
     search = request.args.get("search", "").strip() or None
@@ -3102,7 +3109,7 @@ def api_workflow_list() -> Any:
     return jsonify(result)
 
 
-@app.route("/api/workflows/<int:workflow_id>", methods=["GET"])
+@app.route("/workflows/<int:workflow_id>", methods=["GET"])
 def api_workflow_detail(workflow_id: int) -> Any:
     """Get workflow details."""
     workflow = workflows.get_workflow(workflow_id)
@@ -3111,7 +3118,7 @@ def api_workflow_detail(workflow_id: int) -> Any:
     return jsonify(workflow)
 
 
-@app.route("/api/workflows/<int:workflow_id>", methods=["PUT"])
+@app.route("/workflows/<int:workflow_id>", methods=["PUT"])
 def api_workflow_update(workflow_id: int) -> Any:
     """Update an existing workflow."""
     data = request.get_json() or {}
@@ -3133,7 +3140,7 @@ def api_workflow_update(workflow_id: int) -> Any:
     return jsonify(result)
 
 
-@app.route("/api/workflows/<int:workflow_id>/publish", methods=["POST"])
+@app.route("/workflows/<int:workflow_id>/publish", methods=["POST"])
 def api_workflow_publish(workflow_id: int) -> Any:
     """Publish a workflow to the marketplace."""
     data = request.get_json() or {}
@@ -3146,7 +3153,7 @@ def api_workflow_publish(workflow_id: int) -> Any:
     return jsonify(result)
 
 
-@app.route("/api/marketplace/browse", methods=["GET"])
+@app.route("/marketplace/browse", methods=["GET"])
 def api_marketplace_browse() -> Any:
     """Browse published workflows in the marketplace."""
     search = request.args.get("search", "").strip() or None

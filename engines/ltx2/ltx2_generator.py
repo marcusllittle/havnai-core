@@ -30,6 +30,19 @@ _PIPE_ID: Optional[str] = None
 _LOGGER = logging.getLogger(__name__)
 
 
+def unload_pipeline() -> None:
+    """Release the cached LTX2 pipeline and free GPU memory."""
+    global _PIPE, _PIPE_ID
+    with _PIPE_LOCK:
+        if _PIPE is not None:
+            del _PIPE
+            _PIPE = None
+            _PIPE_ID = None
+            if torch is not None and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            _LOGGER.info("LTX2 pipeline unloaded")
+
+
 def load_latte_pipeline(model_id: str, device: str = "cuda") -> Any:
     """Load and cache LattePipeline + temporal VAE."""
     if LattePipeline is None or AutoencoderKLTemporalDecoder is None or torch is None:

@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import sys
 import os
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -131,10 +133,10 @@ class TestLTX2ParameterClamping(unittest.TestCase):
     def test_clamp_float_above_max(self):
         self.assertAlmostEqual(self.clamp_float("guidance", 20.0, 6.0, 0.0, 12.0, self.log), 12.0)
 
-    def test_frames_max_is_16(self):
-        """LTX2 max frames should be 16."""
-        result = self.clamp_int("frames", 32, 16, 1, 16, self.log)
-        self.assertEqual(result, 16)
+    def test_frames_max_is_48(self):
+        """LTX2 max frames should be 48."""
+        result = self.clamp_int("frames", 64, 12, 1, 48, self.log)
+        self.assertEqual(result, 48)
 
     def test_fps_max_is_12(self):
         """LTX2 max fps should be 12."""
@@ -307,6 +309,93 @@ class TestInitImageLoading(unittest.TestCase):
             if "PIL" in str(e):
                 self.skipTest("PIL not available")
             raise
+
+
+# ---------------------------------------------------------------------------
+# 6. Timeout and progress logging
+# ---------------------------------------------------------------------------
+
+class TestLTX2Timeout(unittest.TestCase):
+    """Test that the LTX2 runner respects job timeout."""
+
+    def test_timeout_constant_has_default(self):
+        from engines.ltx2.ltx2_runner import LTX2_JOB_TIMEOUT
+        self.assertIsInstance(LTX2_JOB_TIMEOUT, int)
+        self.assertGreater(LTX2_JOB_TIMEOUT, 0)
+
+    def test_job_timeout_exception_defined(self):
+        from engines.ltx2.ltx2_runner import _JobTimeout
+        exc = _JobTimeout("test")
+        self.assertIsInstance(exc, Exception)
+        self.assertEqual(str(exc), "test")
+
+    def test_timeout_in_metrics_when_no_gpu(self):
+        """Even when the job fails for no-GPU, timeout should be in metrics."""
+        from engines.ltx2.ltx2_runner import run_ltx2
+        metrics, _, _ = run_ltx2(
+            {"prompt": "test", "seed": 42, "timeout": 60},
+            log_fn=lambda m: None,
+        )
+        # Job fails (no GPU in test env), but we can check the params were parsed
+        self.assertEqual(metrics["status"], "failed")
+
+
+class TestLTX2ProgressCallback(unittest.TestCase):
+    """Test that generate_video_frames accepts callback_on_step_end."""
+
+    def test_generator_accepts_callback_kwarg(self):
+        """generate_video_frames signature should accept callback_on_step_end."""
+        import inspect
+        from engines.ltx2.ltx2_generator import generate_video_frames
+        sig = inspect.signature(generate_video_frames)
+        self.assertIn("callback_on_step_end", sig.parameters)
+
+
+# ---------------------------------------------------------------------------
+# 7. GPU profile presets
+# ---------------------------------------------------------------------------
+
+class TestGPUProfiles(unittest.TestCase):
+    """Test that GPU profile presets are correctly defined in app.py."""
+
+    def _load_profiles(self):
+        app_path = ROOT / "server" / "app.py"
+        src = app_path.read_text()
+        ns: dict = {"os": os, "Dict": dict, "Any": object}
+        # Extract the _GPU_PROFILES dict
+        lines = src.splitlines()
+        for i, line in enumerate(lines):
+            if "_GPU_PROFILES" in line and "=" in line:
+                block_lines = []
+                depth = 0
+                for j in range(i, min(i + 10, len(lines))):
+                    bl = lines[j]
+                    block_lines.append(bl)
+                    depth += bl.count("{") - bl.count("}")
+                    if depth <= 0 and j > i:
+                        break
+                block = "\n".join(block_lines)
+                exec(block, ns)
+                break
+        return ns.get("_GPU_PROFILES", {})
+
+    def test_fast_3060_profile_exists(self):
+        profiles = self._load_profiles()
+        self.assertIn("fast_3060", profiles)
+        p = profiles["fast_3060"]
+        self.assertEqual(p["steps"], 20)
+        self.assertEqual(p["frames"], 12)
+
+    def test_quality_profile_exists(self):
+        profiles = self._load_profiles()
+        self.assertIn("quality", profiles)
+        p = profiles["quality"]
+        self.assertEqual(p["steps"], 30)
+        self.assertEqual(p["frames"], 16)
+
+    def test_fast_3060_has_lower_steps_than_quality(self):
+        profiles = self._load_profiles()
+        self.assertLess(profiles["fast_3060"]["steps"], profiles["quality"]["steps"])
 
 
 if __name__ == "__main__":

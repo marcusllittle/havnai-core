@@ -91,6 +91,30 @@ INVITE_CONFIG_PATH = Path(
 INVITE_GATING = os.getenv("HAVNAI_INVITE_GATING", "").strip().lower() in {"1", "true", "yes"}
 CREDITS_ENABLED = os.getenv("HAVNAI_CREDITS_ENABLED", "").strip().lower() in {"1", "true", "yes"}
 
+# ---------------------------------------------------------------------------
+# GPU profile presets – select via HAVNAI_GPU_PROFILE env var.
+# "fast_3060" is tuned for RTX 3060 (12 GB); "quality" restores the old
+# high-fidelity defaults.  Unset / "auto" picks "fast_3060" by default.
+# Individual settings can still be overridden via HAVNAI_LTX2_STEPS, etc.
+# ---------------------------------------------------------------------------
+_GPU_PROFILES: Dict[str, Dict[str, Any]] = {
+    "fast_3060": {"steps": 20, "frames": 12, "fps": 8, "width": 512, "height": 512, "guidance": 7.0},
+    "quality":   {"steps": 30, "frames": 16, "fps": 8, "width": 512, "height": 512, "guidance": 7.0},
+}
+_GPU_PROFILE_NAME = os.getenv("HAVNAI_GPU_PROFILE", "fast_3060").strip().lower()
+GPU_PROFILE = _GPU_PROFILES.get(_GPU_PROFILE_NAME, _GPU_PROFILES["fast_3060"])
+
+# Allow per-setting env-var overrides on top of the profile
+LTX2_DEFAULT_STEPS = int(os.getenv("HAVNAI_LTX2_STEPS", str(GPU_PROFILE["steps"])))
+LTX2_DEFAULT_FRAMES = int(os.getenv("HAVNAI_LTX2_FRAMES", str(GPU_PROFILE["frames"])))
+LTX2_DEFAULT_FPS = int(os.getenv("HAVNAI_LTX2_FPS", str(GPU_PROFILE["fps"])))
+LTX2_DEFAULT_WIDTH = int(os.getenv("HAVNAI_LTX2_WIDTH", str(GPU_PROFILE["width"])))
+LTX2_DEFAULT_HEIGHT = int(os.getenv("HAVNAI_LTX2_HEIGHT", str(GPU_PROFILE["height"])))
+LTX2_DEFAULT_GUIDANCE = float(os.getenv("HAVNAI_LTX2_GUIDANCE", str(GPU_PROFILE["guidance"])))
+
+# Hard timeout (seconds) for a single video generation job.  0 = no limit.
+LTX2_JOB_TIMEOUT = int(os.getenv("HAVNAI_LTX2_JOB_TIMEOUT", "300"))
+
 # Reward configuration (can be overridden via environment variables)
 REWARD_CONFIG: Dict[str, float] = {
     "baseline_runtime": float(os.getenv("REWARD_BASELINE_RUNTIME", "8.0")),
@@ -1452,12 +1476,13 @@ def submit_job() -> Any:
             "prompt": prompt_text,
             "negative_prompt": negative_prompt,
             "seed": seed,
-            "steps": _clamp_int(payload.get("steps", 30), 30, 1, 50),  # Increased from 25 to 30 for better quality
-            "guidance": _clamp_float(payload.get("guidance", 7.0), 7.0, 0.0, 12.0),  # Increased from 6.0 to 7.0
-            "width": _clamp_int(payload.get("width", 512), 512, 256, 768),
-            "height": _clamp_int(payload.get("height", 512), 512, 256, 768),
-            "frames": _clamp_int(payload.get("frames", 16), 16, 1, 16),
-            "fps": _clamp_int(payload.get("fps", 8), 8, 1, 12),
+            "steps": _clamp_int(payload.get("steps", LTX2_DEFAULT_STEPS), LTX2_DEFAULT_STEPS, 1, 50),
+            "guidance": _clamp_float(payload.get("guidance", LTX2_DEFAULT_GUIDANCE), LTX2_DEFAULT_GUIDANCE, 0.0, 12.0),
+            "width": _clamp_int(payload.get("width", LTX2_DEFAULT_WIDTH), LTX2_DEFAULT_WIDTH, 256, 768),
+            "height": _clamp_int(payload.get("height", LTX2_DEFAULT_HEIGHT), LTX2_DEFAULT_HEIGHT, 256, 768),
+            "frames": _clamp_int(payload.get("frames", LTX2_DEFAULT_FRAMES), LTX2_DEFAULT_FRAMES, 1, 48),
+            "fps": _clamp_int(payload.get("fps", LTX2_DEFAULT_FPS), LTX2_DEFAULT_FPS, 1, 12),
+            "timeout": LTX2_JOB_TIMEOUT,
         }
         if init_image:
             settings["init_image"] = init_image

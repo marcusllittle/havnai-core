@@ -273,7 +273,7 @@ def run_animatediff(
                 torch.cuda.empty_cache()
             except Exception:
                 pass
-        log_fn(f"[{job_id}] AnimateDiff generation failed: {error_msg}")
+        log_fn(f"AnimateDiff generation failed: {error_msg}")
     except Exception as exc:  # pragma: no cover - safety net
         status = "failed"
         error_msg = str(exc)

@@ -1479,9 +1479,30 @@ def submit_job() -> Any:
     # Special-case AnimateDiff video jobs with rich structured payload
     is_animatediff = model_name == "animatediff" or pipeline_name == "animatediff"
 
+    # Backward-compatible alias for legacy WAN i2v routing that now maps to VIDEO_GEN behavior.
+    is_wan_i2v = (
+        is_ltx2
+        or model_name in {"wan_i2v", "wan-i2v", "wan22_i2v", "wan2.2-i2v"}
+        or pipeline_name in {"wan_i2v", "wan-i2v", "wan22_i2v", "wan2.2-i2v"}
+    )
+
     if is_wan_i2v:
-        # Persist all WAN-specific controls inside the job data blob as JSON
+        # Persist VIDEO_GEN controls inside the job data blob as JSON.
         prompt_text = enhanced_prompt
+        negative_prompt = str(payload.get("negative_prompt") or "").strip()
+        seed = payload.get("seed")
+        try:
+            seed = int(seed) if seed is not None else None
+        except (TypeError, ValueError):
+            seed = None
+        if seed is None:
+            seed = random.randint(0, 2**31 - 1)
+        init_image = (
+            payload.get("init_image")
+            or payload.get("init_image_url")
+            or payload.get("init_image_b64")
+            or None
+        )
         settings: Dict[str, Any] = {
             "prompt": prompt_text,
             "negative_prompt": negative_prompt,

@@ -115,6 +115,7 @@ LORA_DIR = Path(
 ).expanduser()
 MAX_LORAS = 5
 MODEL_FILE_EXTENSIONS = {".safetensors", ".ckpt", ".pt", ".pth", ".bin"}
+SUPPORTED_LORA_EXTS = {".safetensors", ".ckpt", ".pt", ".bin"}
 MODEL_SEARCH_DIR_CANDIDATES = [
     os.environ.get("HAVNAI_MODEL_DIR", ""),
     os.environ.get("HAI_MODEL_DIR", ""),

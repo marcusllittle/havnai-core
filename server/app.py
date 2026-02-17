@@ -1457,7 +1457,7 @@ def submit_job() -> Any:
                 return jsonify({"error": "no_creator_models"}), 400
         else:
             names = [meta["name"] for meta in candidates]
-            weights = [resolve_weight(meta["name"].lower(), meta.get("reward_weight", 10.0)) for meta in candidates]
+            weights = [rewards.resolve_weight(meta["name"].lower(), meta.get("reward_weight", 10.0)) for meta in candidates]
             chosen = random.choices(names, weights=weights, k=1)[0]
             model_name_raw = chosen
             model_name = chosen.lower()

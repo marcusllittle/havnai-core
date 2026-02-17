@@ -451,7 +451,9 @@ def parse_timestamp(value: Any) -> float:
         return float(value)
     if isinstance(value, str):
         try:
-            return datetime.fromisoformat(value.replace("Z", "")).timestamp()
+            # Replace trailing "Z" with "+00:00" so fromisoformat produces a
+            # timezone-aware datetime and .timestamp() returns correct UTC epoch.
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
         except ValueError:
             try:
                 return float(value)
@@ -833,13 +835,14 @@ log_event(f"Telemetry online with {len(NODES)} cached node(s).", version=APP_VER
 
 def get_job_summary(limit: int = 50, offset: int = 0) -> Dict[str, Any]:
     conn = get_db()
-    summary_types = (CREATOR_TASK_TYPE, "FACE_SWAP")
+    summary_types = (CREATOR_TASK_TYPE, "FACE_SWAP", "VIDEO_GEN", "ANIMATEDIFF")
+    placeholders = ",".join("?" for _ in summary_types)
     queued = conn.execute(
-        "SELECT COUNT(*) FROM jobs WHERE status='queued' AND UPPER(task_type) IN (?, ?)",
+        f"SELECT COUNT(*) FROM jobs WHERE status='queued' AND UPPER(task_type) IN ({placeholders})",
         summary_types,
     ).fetchone()[0]
     active = conn.execute(
-        "SELECT COUNT(*) FROM jobs WHERE status='running' AND UPPER(task_type) IN (?, ?)",
+        f"SELECT COUNT(*) FROM jobs WHERE status='running' AND UPPER(task_type) IN ({placeholders})",
         summary_types,
     ).fetchone()[0]
     total_distributed = conn.execute("SELECT COALESCE(SUM(reward_hai),0) FROM rewards").fetchone()[0]
@@ -847,12 +850,12 @@ def get_job_summary(limit: int = 50, offset: int = 0) -> Dict[str, Any]:
     # Count jobs that have finished today (either legacy 'completed' or
     # newer 'success' status values).
     completed_today = conn.execute(
-        """
+        f"""
         SELECT COUNT(*) FROM jobs
         WHERE status IN ('completed', 'success')
           AND completed_at IS NOT NULL
           AND completed_at >= ?
-          AND UPPER(task_type) IN (?, ?)
+          AND UPPER(task_type) IN ({placeholders})
         """,
         (today_start, *summary_types),
     ).fetchone()[0]
@@ -865,7 +868,7 @@ def get_job_summary(limit: int = 50, offset: int = 0) -> Dict[str, Any]:
                jobs.completed_at, jobs.timestamp, rewards.reward_hai
         FROM jobs
         LEFT JOIN rewards ON rewards.task_id = jobs.id
-        WHERE UPPER(jobs.task_type) IN (?, ?)
+        WHERE UPPER(jobs.task_type) IN ({placeholders})
         ORDER BY jobs.timestamp DESC
         LIMIT {limit_int} OFFSET {offset_int}
         """,
@@ -1896,7 +1899,7 @@ def register() -> Any:
             samples.pop(0)
         node["avg_utilization"] = round(sum(samples) / len(samples), 2) if samples else util
         node["last_seen"] = iso_now()
-    node["last_seen_unix"] = unix_now()
+        node["last_seen_unix"] = unix_now()
     save_nodes()
 
     _emit_node_event("node_heartbeat", node_id, role=node.get("role", "worker"), wallet=node.get("wallet"))
@@ -2736,25 +2739,27 @@ def models_stats() -> Any:
     job_summary = get_job_summary()
     jobs_24h = int(job_summary.get("jobs_completed_today", 0) or 0)
 
-    # Success rate: completed / total for creator jobs.
+    # Success rate: completed / total for all job types.
     conn = get_db()
+    all_types = (CREATOR_TASK_TYPE, "FACE_SWAP", "VIDEO_GEN", "ANIMATEDIFF")
+    ph = ",".join("?" for _ in all_types)
     # Total finished jobs (exclude queued/running)
     total_row = conn.execute(
-        """
+        f"""
         SELECT COUNT(*) FROM jobs
-        WHERE UPPER(task_type)=?
+        WHERE UPPER(task_type) IN ({ph})
           AND status NOT IN ('queued', 'running')
         """,
-        (CREATOR_TASK_TYPE,),
+        all_types,
     ).fetchone()
     # Successful jobs (legacy 'completed' or newer 'success')
     ok_row = conn.execute(
-        """
+        f"""
         SELECT COUNT(*) FROM jobs
-        WHERE UPPER(task_type)=?
+        WHERE UPPER(task_type) IN ({ph})
           AND status IN ('completed', 'success')
         """,
-        (CREATOR_TASK_TYPE,),
+        all_types,
     ).fetchone()
     total_jobs = int(total_row[0]) if total_row else 0
     ok_jobs = int(ok_row[0]) if ok_row else 0

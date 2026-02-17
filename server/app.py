@@ -1183,10 +1183,7 @@ def favicon() -> Any:
 # ---------------------------------------------------------------------------
 
 
-@app.route("/models/list")
-def list_models() -> Any:
-    refresh_manifest()
-    return jsonify({"models": list(MANIFEST_MODELS.values())})
+# /models/list is defined below (models_list) with full tier/pipeline metadata
 
 
 def _normalize_lora_catalog(raw_loras: Any) -> List[Dict[str, Any]]:
@@ -2780,13 +2777,6 @@ def models_stats() -> Any:
     )
 
 
-@app.route("/models/stats", methods=["GET"])
-def models_stats_legacy() -> Any:
-    """Backward-compatible alias used by older frontends."""
-
-    return models_stats()
-
-
 @app.route("/models/list", methods=["GET"])
 def models_list() -> Any:
     """
@@ -2824,6 +2814,7 @@ def models_list() -> Any:
         else:
             return "D"
 
+    refresh_manifest()
     models = []
     with LOCK:
         for model_key, model_data in MANIFEST_MODELS.items():

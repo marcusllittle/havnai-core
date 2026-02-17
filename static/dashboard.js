@@ -2,6 +2,17 @@ const NODE_ENDPOINT = "/nodes";
 const REWARD_ENDPOINT = "/rewards";
 const LOG_ENDPOINT = "/logs";
 const POLL_INTERVAL = 10000;
+const API_BASE_CANDIDATES = (() => {
+  const configured = [
+    window.NEXT_PUBLIC_API_BASE_URL,
+    window.NEXT_PUBLIC_HAVNAI_API_BASE,
+  ]
+    .filter((value) => typeof value === "string" && value.trim().length > 0)
+    .map((value) => normalizeApiBase(value));
+  return [...new Set([...configured, "", "/api"])];
+})();
+
+let preferredApiBase = null;
 
 const nodeTable = document.getElementById("nodeTable");
 const statusEl = document.getElementById("status");
@@ -22,6 +33,64 @@ const modelCatalogBody = document.getElementById("modelCatalog");
 function setStatus(message = "", tone = "info") {
   statusEl.textContent = message;
   statusEl.style.color = tone === "error" ? "var(--error)" : "var(--text-muted)";
+}
+
+function normalizeApiBase(base) {
+  const trimmed = String(base).trim().replace(/\/+$/, "");
+  if (!trimmed || trimmed === "/" || trimmed === ".") {
+    return "";
+  }
+  return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+}
+
+function buildEndpointUrl(base, endpoint) {
+  const safeEndpoint = endpoint.startsWith("/") ? endpoint : `/${endpoint}`;
+  return `${base}${safeEndpoint}`;
+}
+
+function resolveApiBases() {
+  const bases = [];
+  if (preferredApiBase !== null) {
+    bases.push(preferredApiBase);
+  }
+  API_BASE_CANDIDATES.forEach((base) => {
+    if (!bases.includes(base)) {
+      bases.push(base);
+    }
+  });
+  return bases;
+}
+
+async function fetchJsonWithFallback(endpoint, options = {}) {
+  const { required = true, defaultValue = null } = options;
+  const attempts = [];
+  const bases = resolveApiBases();
+
+  for (const base of bases) {
+    const url = buildEndpointUrl(base, endpoint);
+    try {
+      const response = await fetch(url);
+      if (!response.ok) {
+        attempts.push({ url, status: response.status });
+        continue;
+      }
+
+      const json = await response.json();
+      preferredApiBase = base;
+      return { data: json };
+    } catch (error) {
+      attempts.push({ url, error: error?.message || String(error) });
+    }
+  }
+
+  if (!required) {
+    return { data: defaultValue, warning: `${endpoint} unavailable` };
+  }
+
+  const detail = attempts
+    .map((item) => `${item.url}=${item.error || item.status}`)
+    .join(", ");
+  throw new Error(`${endpoint} request failed (${detail})`);
 }
 
 function renderNodes(nodes, rewardsMap) {
@@ -170,25 +239,25 @@ function renderModelCatalog(models) {
 
 async function fetchTelemetry() {
   try {
-    const [nodesRes, rewardsRes, logsRes] = await Promise.all([
-      fetch(NODE_ENDPOINT),
-      fetch(REWARD_ENDPOINT),
-      fetch(LOG_ENDPOINT),
+    const [nodesResult, rewardsResult, logsResult] = await Promise.all([
+      fetchJsonWithFallback(NODE_ENDPOINT, { required: true }),
+      fetchJsonWithFallback(REWARD_ENDPOINT, { required: false, defaultValue: { rewards: {} } }),
+      fetchJsonWithFallback(LOG_ENDPOINT, { required: false, defaultValue: { logs: [] } }),
     ]);
-
-    if (!nodesRes.ok) throw new Error(`Nodes request failed: ${nodesRes.status}`);
-    if (!rewardsRes.ok) throw new Error(`Rewards request failed: ${rewardsRes.status}`);
-    if (!logsRes.ok) throw new Error(`Logs request failed: ${logsRes.status}`);
-
-    const nodesJson = await nodesRes.json();
-    const rewardsJson = await rewardsRes.json();
-    const logsJson = await logsRes.json();
+    const warnings = [rewardsResult.warning, logsResult.warning].filter(Boolean);
+    const nodesJson = nodesResult.data || {};
+    const rewardsJson = rewardsResult.data || { rewards: {} };
+    const logsJson = logsResult.data || { logs: [] };
 
     renderNodes(nodesJson.nodes ?? [], rewardsJson.rewards ?? {});
     renderSummary(nodesJson.summary, nodesJson.job_summary);
     renderJobFeed(nodesJson.job_summary?.feed ?? []);
     renderModelCatalog(nodesJson.models_catalog ?? []);
     renderLogs(logsJson.logs ?? []);
+    if (warnings.length) {
+      setStatus(`Sync partial (${warnings.join(", ")}). Next update in ${POLL_INTERVAL / 1000}s.`, "error");
+      return;
+    }
     setStatus(`Sync successful. Next update in ${POLL_INTERVAL / 1000}s.`);
   } catch (error) {
     console.error("Dashboard refresh failed", error);

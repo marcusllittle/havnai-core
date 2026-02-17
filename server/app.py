@@ -63,6 +63,15 @@ SUPPORTED_LORA_EXTS = {".safetensors", ".ckpt", ".pt", ".bin"}
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
+from havnai.video_engine.gguf_wan2_2 import VideoEngine, VideoJobRequest
+from common.prompt_enhancers import (
+    ANTI_OVERLAY_NEGATIVE,
+    SHARPNESS_NEGATIVE,
+    enhance_prompt_for_positions,
+    has_hardcore_keywords,
+    resolve_position_lora_weight,
+)
+
 # Reward weights bootstrap – enriched at runtime via registration
 MODEL_WEIGHTS: Dict[str, float] = {
     "triomerge_v10": 12.0,
@@ -133,13 +142,25 @@ REWARD_CONFIG: Dict[str, float] = {
 POSITIVE_SUFFIX_SD15_REALISM = (
     "(ultra-realistic 8k:1.05), (detailed skin pores:1.03), "
     "focused eyes, clear pupils, natural gaze, "
-    "(well formed hands:1.1), (five fingers on each hand:1.1), "
-    "natural teeth, realistic mouth structure"
+    "natural teeth, realistic mouth structure, "
+    "no extra breasts, no multiple breasts, not deformed, no multiple legs"
 )
 
-POSITIVE_SUFFIX_SDXL = (
-    "high quality, sharp focus, detailed, professional, "
-    "correct anatomy, proper hands"
+HARDCORE_POSITIVE_SUFFIX = (
+    "ultra sharp skin texture, photorealistic details, highres, masterpiece, "
+    "perfect anatomy, smooth proportions, no overlays, clean insertion"
+)
+
+# Global negative prompt to discourage common artifacts across all models.
+GLOBAL_NEGATIVE_PROMPT = (
+    "bad anatomy, bad hands, missing fingers, extra digits, fused fingers, "
+    "deformed, disfigured, mutated, ugly, poorly drawn face, "
+    "extra limbs, missing limbs, extra arms, missing arms, "
+    "extra breasts, multiple breasts, multiple legs, "
+    "blurry, low quality, out of frame, watermark, signature, text, "
+    "duplicate body parts, merged bodies, cloned face, "
+    "duplicate ass, layered buttocks, overlapping anatomy, "
+    "pixelated, jpeg artifacts, lowres, worst quality"
 )
 
 POSITIVE_SUFFIX_STYLIZED = (
@@ -1397,6 +1418,21 @@ def submit_job() -> Any:
     model_name_raw = str(payload.get("model", "")).strip()
     model_name = model_name_raw.lower()
     weight = payload.get("weight")
+    raw_prompt = str(payload.get("prompt") or payload.get("data") or "")
+    auto_model_request = not model_name or model_name in {"auto", "auto_image", "auto-image"}
+    hardcore_prompt = has_hardcore_keywords(raw_prompt)
+    enhanced_prompt, model_override, position_lora, position_negative = enhance_prompt_for_positions(raw_prompt)
+
+    if model_override:
+        # Drop overrides that are no longer available in the manifest.
+        load_manifest()
+        if model_override.lower() not in MANIFEST_MODELS:
+            model_override = None
+
+    if auto_model_request and model_override:
+        # Use a valid override only; otherwise fall back to weighted auto selection.
+        model_name_raw = model_override
+        model_name = model_override.lower()
 
     if not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid wallet"}), 400
@@ -1413,12 +1449,19 @@ def submit_job() -> Any:
             if (meta.get("task_type") or CREATOR_TASK_TYPE).upper() == CREATOR_TASK_TYPE
         ]
         if not candidates:
-            return jsonify({"error": "no_creator_models"}), 400
-        names = [meta["name"] for meta in candidates]
-        weights = [rewards.resolve_weight(meta["name"].lower(), meta.get("reward_weight", 10.0)) for meta in candidates]
-        chosen = random.choices(names, weights=weights, k=1)[0]
-        model_name_raw = chosen
-        model_name = chosen.lower()
+            # Final safety fallback when weighted auto cannot select.
+            fallback = "uberRealisticPornMerge_v23Final"
+            if fallback.lower() in MANIFEST_MODELS:
+                model_name_raw = fallback
+                model_name = fallback.lower()
+            else:
+                return jsonify({"error": "no_creator_models"}), 400
+        else:
+            names = [meta["name"] for meta in candidates]
+            weights = [resolve_weight(meta["name"].lower(), meta.get("reward_weight", 10.0)) for meta in candidates]
+            chosen = random.choices(names, weights=weights, k=1)[0]
+            model_name_raw = chosen
+            model_name = chosen.lower()
 
     if not model_name:
         return jsonify({"error": "missing model"}), 400
@@ -1437,44 +1480,10 @@ def submit_job() -> Any:
     # Special-case AnimateDiff video jobs with rich structured payload
     is_animatediff = model_name == "animatediff" or pipeline_name == "animatediff"
 
-    if is_ltx2:
-        prompt_text = str(payload.get("prompt") or "").strip()
-        if not prompt_text:
-            return jsonify({"error": "missing prompt"}), 400
-        negative_prompt = str(payload.get("negative_prompt") or "").strip()
-        raw_prompt = str(payload.get("raw_prompt", "")).lower() in ("1", "true", "yes")
-        # Apply default video negative prompt if not provided
-        if not negative_prompt and not raw_prompt:
-            negative_prompt = get_video_negative(model_name)
-
-        # Append positive quality suffix if prompt doesn't have quality tokens
-        if not raw_prompt:
-            prompt_lower = prompt_text.lower()
-            if "best quality" not in prompt_lower and "masterpiece" not in prompt_lower:
-                prompt_text = f"{prompt_text}, {get_video_positive_suffix(model_name)}"
-
-        seed = payload.get("seed")
-        try:
-            seed = int(seed)
-        except (TypeError, ValueError):
-            return jsonify({"error": "missing seed"}), 400
-
-        def _clamp_int(value: Any, default: int, min_v: int, max_v: int) -> int:
-            try:
-                parsed = int(value)
-            except (TypeError, ValueError):
-                parsed = default
-            return max(min_v, min(parsed, max_v))
-
-        def _clamp_float(value: Any, default: float, min_v: float, max_v: float) -> float:
-            try:
-                parsed = float(value)
-            except (TypeError, ValueError):
-                parsed = default
-            return max(min_v, min(parsed, max_v))
-
-        init_image = payload.get("init_image") or payload.get("init_image_url") or payload.get("init_image_b64")
-        settings = {
+    if is_wan_i2v:
+        # Persist all WAN-specific controls inside the job data blob as JSON
+        prompt_text = enhanced_prompt
+        settings: Dict[str, Any] = {
             "prompt": prompt_text,
             "negative_prompt": negative_prompt,
             "seed": seed,
@@ -1491,7 +1500,7 @@ def submit_job() -> Any:
         job_data = json.dumps(settings)
         task_type = "VIDEO_GEN"
     elif is_animatediff:
-        prompt_text = str(payload.get("prompt") or "")
+        prompt_text = enhanced_prompt
         negative_prompt = str(payload.get("negative_prompt") or "")
         raw_prompt = str(payload.get("raw_prompt", "")).lower() in ("1", "true", "yes")
         # Apply default video negative prompt if not provided
@@ -1579,50 +1588,83 @@ def submit_job() -> Any:
         job_data = json.dumps(settings)
         task_type = "ANIMATEDIFF"
     else:
-        prompt_text = str(payload.get("prompt") or payload.get("data") or "")
-        # Pipeline-aware positive suffix — prevents realism tokens on anime models.
-        # Can be disabled by passing raw_prompt=true in the request.
-        raw_prompt = str(payload.get("raw_prompt", "")).lower() in ("1", "true", "yes")
-        if not raw_prompt:
-            positive_suffix = get_positive_suffix(cfg)
-            if prompt_text:
-                prompt_text = f"{prompt_text}, {positive_suffix}"
-            else:
-                prompt_text = positive_suffix
+        prompt_text = enhanced_prompt
+        if position_lora:
+            lora_weight = resolve_position_lora_weight(position_lora)
+            lora_tag = f"<lora:{position_lora}:{lora_weight:.2f}>"
+            if lora_tag not in prompt_text:
+                prompt_text = f"{prompt_text}, {lora_tag}" if prompt_text else lora_tag
+        if hardcore_prompt and HARDCORE_POSITIVE_SUFFIX.lower() not in prompt_text.lower():
+            prompt_text = f"{prompt_text}, {HARDCORE_POSITIVE_SUFFIX}" if prompt_text else HARDCORE_POSITIVE_SUFFIX
+        if prompt_text:
+            prompt_text = f"{prompt_text}, {GLOBAL_POSITIVE_SUFFIX}"
+        else:
+            prompt_text = GLOBAL_POSITIVE_SUFFIX
         negative_prompt = str(payload.get("negative_prompt") or "").strip()
-        job_settings: Dict[str, Any] = {"prompt": prompt_text}
-
-        # LoRA pipeline validation — reject LoRAs incompatible with the model
-        model_pipeline = (cfg.get("pipeline") or "sd15").lower() if cfg else "sd15"
-        loras = _normalize_loras(payload.get("loras") or payload.get("lora_list") or [])
-        if loras:
-            validated_loras = []
-            for lora_entry in loras:
-                lora_pipeline = str(lora_entry.get("pipeline") or "").lower()
-                # If LoRA declares a pipeline, check compatibility
-                if lora_pipeline and lora_pipeline != model_pipeline:
-                    # SD1.5 LoRA on SDXL model (or vice versa) = skip with warning
-                    is_sd15_on_sdxl = lora_pipeline == "sd15" and "sdxl" in model_pipeline
-                    is_sdxl_on_sd15 = "sdxl" in lora_pipeline and model_pipeline == "sd15"
-                    if is_sd15_on_sdxl or is_sdxl_on_sd15:
-                        log_event(
-                            "LoRA pipeline mismatch, skipping",
-                            level="warning",
-                            lora_name=lora_entry.get("name"),
-                            lora_pipeline=lora_pipeline,
-                            model_pipeline=model_pipeline,
-                        )
+        seed = payload.get("seed")
+        try:
+            seed = int(seed) if seed is not None else None
+        except (TypeError, ValueError):
+            seed = None
+        auto_anatomy_raw = payload.get("auto_anatomy")
+        if isinstance(auto_anatomy_raw, bool):
+            auto_anatomy = auto_anatomy_raw
+        elif isinstance(auto_anatomy_raw, str):
+            auto_anatomy = auto_anatomy_raw.strip().lower() in {"1", "true", "yes"}
+        else:
+            auto_anatomy = False
+        # Pass through per-image overrides for the node to honor.
+        job_settings: Dict[str, Any] = {"prompt": prompt_text, "auto_anatomy": auto_anatomy}
+        payload_loras = payload.get("loras") or []
+        loras_list: List[Dict[str, Any]] = []
+        if isinstance(payload_loras, list):
+            for item in payload_loras:
+                if isinstance(item, dict):
+                    name = str(item.get("name") or "").strip()
+                    if not name:
                         continue
-                validated_loras.append(lora_entry)
-            if validated_loras:
-                job_settings["loras"] = validated_loras
+                    entry: Dict[str, Any] = {"name": name}
+                    if "weight" in item:
+                        entry["weight"] = item.get("weight")
+                    loras_list.append(entry)
+                else:
+                    name = str(item).strip()
+                    if name:
+                        loras_list.append({"name": name})
+        if not loras_list:
+            pipeline_norm = str(cfg.get("pipeline", "")).lower() if cfg else ""
+            if pipeline_norm == "sdxl" or "sdxl" in pipeline_norm:
+                loras_list = [{"name": "perfectionstyle", "weight": 0.35}]
+            elif pipeline_norm in {"sd15", "sd1.5", ""}:
+                loras_list = [
+                    {"name": "DetailedPerfectionSD1.5", "weight": 0.6},
+                    {"name": "perfectionstyleSD1.5", "weight": 0.3},
+                ]
+        if position_lora:
+            def normalize_lora_ref(name: str) -> str:
+                base = Path(name).name
+                if base.lower().endswith(".safetensors"):
+                    base = base[:-len(".safetensors")]
+                return base.strip().lower()
 
-        # Pipeline-aware negative prompt — SD1.5 gets much stronger hand correction
-        pipeline_negative = get_pipeline_negative(model_pipeline)
+            position_norm = normalize_lora_ref(position_lora)
+            if not any(normalize_lora_ref(str(entry.get("name") or "")) == position_norm for entry in loras_list):
+                loras_list.append({"name": position_lora, "weight": resolve_position_lora_weight(position_lora)})
+        if loras_list:
+            job_settings["loras"] = loras_list
+        if seed is not None:
+            job_settings["seed"] = seed
         base_negative = str(cfg.get("negative_prompt_default") or "").strip() if cfg else ""
         combined_negative = ", ".join(
-            filter(None, [negative_prompt or base_negative, pipeline_negative])
+            filter(None, [negative_prompt, base_negative, GLOBAL_NEGATIVE_PROMPT])
         )
+        if position_negative:
+            combined_negative = f"{combined_negative}, {position_negative}" if combined_negative else position_negative
+        if hardcore_prompt:
+            for extra_negative in (ANTI_OVERLAY_NEGATIVE, SHARPNESS_NEGATIVE):
+                if not extra_negative:
+                    continue
+                combined_negative = f"{combined_negative}, {extra_negative}" if combined_negative else extra_negative
         if combined_negative:
             job_settings["negative_prompt"] = combined_negative
         pose_image = payload.get("pose_image") or payload.get("pose_image_b64") or ""
@@ -1644,6 +1686,16 @@ def submit_job() -> Any:
                 job_settings["height"] = cfg["height"]
             if cfg.get("sampler"):
                 job_settings["sampler"] = cfg["sampler"]
+        if hardcore_prompt:
+            job_settings["steps"] = 40
+            job_settings["guidance"] = 7.5
+
+        injected_loras = job_settings.get("loras") or []
+        log_event(
+            "Enhanced prompt: "
+            f"{prompt_text} | Selected model: {model_name_raw or model_name} | "
+            f"Injected LoRAs: {injected_loras} | Extra negatives: {position_negative or ''}"
+        )
 
         overrides: Dict[str, Any] = {}
         if payload.get("steps") is not None:
@@ -1986,8 +2038,8 @@ def get_creator_tasks() -> Any:
                     raw_data = job.get("data")
                     prompt_text = raw_data or ""
                     negative_prompt = ""
-                    loras: List[Dict[str, Any]] = []
-                    image_settings: Dict[str, Any] = {}
+                    loras: List[str] = []
+                    image_overrides: Dict[str, Any] = {}
                     try:
                         parsed = json.loads(raw_data) if isinstance(raw_data, str) else None
                     except Exception:
@@ -1995,21 +2047,35 @@ def get_creator_tasks() -> Any:
                     if isinstance(parsed, dict):
                         prompt_text = str(parsed.get("prompt") or "")
                         negative_prompt = str(parsed.get("negative_prompt") or "")
-                        parsed_loras = parsed.get("loras")
+                        parsed_loras = parsed.get("loras") or []
                         if isinstance(parsed_loras, list):
-                            loras = parsed_loras
-                        overrides = parsed.get("overrides")
-                        if isinstance(overrides, dict):
-                            for key in ("steps", "guidance", "width", "height", "sampler", "seed"):
-                                if key in overrides and overrides[key] is not None:
-                                    image_settings[key] = overrides[key]
-                        # Pass init_image and strength for img2img
-                        init_img = parsed.get("init_image") or parsed.get("init_image_b64") or ""
-                        if init_img:
-                            image_settings["init_image"] = init_img
-                        init_strength = parsed.get("strength")
-                        if init_strength is not None:
-                            image_settings["strength"] = init_strength
+                            loras = [item for item in parsed_loras if item]
+                        # Forward per-image overrides stored in job settings.
+                        for key in ("steps", "guidance", "width", "height", "sampler", "seed", "auto_anatomy"):
+                            if key not in parsed:
+                                continue
+                            value = parsed.get(key)
+                            if value is None:
+                                continue
+                            if key in {"steps", "width", "height", "seed"}:
+                                try:
+                                    image_overrides[key] = int(value)
+                                except (TypeError, ValueError):
+                                    continue
+                            elif key == "guidance":
+                                try:
+                                    image_overrides[key] = float(value)
+                                except (TypeError, ValueError):
+                                    continue
+                            elif key == "sampler":
+                                value_str = str(value).strip()
+                                if value_str:
+                                    image_overrides[key] = value_str
+                            elif key == "auto_anatomy":
+                                if isinstance(value, bool):
+                                    image_overrides[key] = value
+                                elif isinstance(value, str):
+                                    image_overrides[key] = value.strip().lower() in {"1", "true", "yes"}
                     # Always send plain prompt text to the node (avoid passing raw JSON)
                     prompt_for_node = prompt_text
 
@@ -2020,26 +2086,25 @@ def get_creator_tasks() -> Any:
                     reward_weight = float(job["weight"] or cfg.get("reward_weight", rewards.resolve_weight(job["model"], 10.0)))
                     job_task_type = (job.get("task_type") or CREATOR_TASK_TYPE).upper()
                     pending_entry = {
-                        "task_id": job["id"],
-                        "task_type": job_task_type,
-                        "model_name": job["model"],
-                        "model": model_spec,
-                        "model_path": cfg.get("path", ""),
-                        "pipeline": cfg.get("pipeline", "sd15"),
-                        "input_shape": cfg.get("input_shape", []),
-                        "reward_weight": reward_weight,
-                        "status": "pending",
-                        "wallet": job["wallet"],
-                        "assigned_to": node_id,
-                        "job_id": job["id"],
-                        "data": raw_data,
-                        "prompt": prompt_for_node,
-                        "negative_prompt": negative_prompt,
-                        "loras": loras,
-                        "queued_at": job.get("timestamp"),
-                    }
-                    if image_settings:
-                        pending_entry.update(image_settings)
+                            "task_id": job["id"],
+                            "task_type": job_task_type,
+                            "model_name": job["model"],
+                            "model_path": cfg.get("path", ""),
+                            "pipeline": cfg.get("pipeline", "sd15"),
+                            "input_shape": cfg.get("input_shape", []),
+                            "reward_weight": reward_weight,
+                            "status": "pending",
+                            "wallet": job["wallet"],
+                            "assigned_to": node_id,
+                            "job_id": job["id"],
+                            "data": raw_data,
+                            "prompt": prompt_for_node,
+                            "negative_prompt": negative_prompt,
+                            "loras": loras,
+                            "queued_at": job.get("timestamp"),
+                        }
+                    if job_task_type == CREATOR_TASK_TYPE and image_overrides:
+                        pending_entry.update(image_overrides)
                     pending = [pending_entry]
                     node_info["current_task"] = {
                         "task_id": job["id"],
@@ -2071,15 +2136,16 @@ def get_creator_tasks() -> Any:
                 "wallet": task.get("wallet"),
                 "prompt": task.get("prompt") or task.get("data", ""),
                 "negative_prompt": task.get("negative_prompt") or "",
+                "loras": task.get("loras") or [],
                 "queued_at": task.get("queued_at"),
                 "assigned_at": task.get("assigned_at"),
             }
-            for key in ("steps", "guidance", "width", "height", "sampler", "seed", "init_image", "strength"):
-                if key in task and task[key] is not None:
-                    task_payload[key] = task[key]
-            if task.get("loras"):
-                task_payload["loras"] = task.get("loras")
-            # If this is an LTX2 job, surface structured controls directly on the task payload
+            if task_payload["type"].upper() == CREATOR_TASK_TYPE:
+                # Forward generation overrides for image tasks only.
+                for key in ("steps", "guidance", "width", "height", "sampler", "seed", "auto_anatomy"):
+                    if key in task and task[key] is not None:
+                        task_payload[key] = task[key]
+            # If this is a WAN I2V video job, attempt to expose structured settings to the node
             if task_payload["type"].upper() == "VIDEO_GEN":
                 try:
                     raw_ltx2 = task.get("data") or ""

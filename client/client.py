@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import hashlib
-import inspect
 import json
 import logging
+import math
 from logging.handlers import RotatingFileHandler
 import os
 import random
@@ -19,11 +18,12 @@ import urllib.parse
 from pathlib import Path
 import atexit
 import signal
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 import base64
-import io
 
 import requests
+
+from registry import REGISTRY, ModelEntry, ManifestError
 
 try:
     import numpy as np  # type: ignore
@@ -55,26 +55,13 @@ try:
     except Exception:  # pragma: no cover
         _SDXLPipe = None  # type: ignore
     try:
-        from diffusers import StableDiffusionImg2ImgPipeline as _SDImg2Img  # type: ignore
+        from diffusers import DPMSolverMultistepScheduler as _DPMSolver  # type: ignore
     except Exception:  # pragma: no cover
-        _SDImg2Img = None  # type: ignore
+        _DPMSolver = None  # type: ignore
     try:
-        from diffusers import StableDiffusionXLImg2ImgPipeline as _SDXLImg2Img  # type: ignore
+        from diffusers import AutoencoderKL as _AutoencoderKL  # type: ignore
     except Exception:  # pragma: no cover
-        _SDXLImg2Img = None  # type: ignore
-    try:
-        from diffusers import LattePipeline as _LattePipe  # type: ignore
-    except Exception:  # pragma: no cover
-        _LattePipe = None  # type: ignore
-    from diffusers import DPMSolverMultistepScheduler as _DPMSolver  # type: ignore
-    try:
-        from diffusers import EulerAncestralDiscreteScheduler as _EulerA  # type: ignore
-    except Exception:  # pragma: no cover
-        _EulerA = None  # type: ignore
-    try:
-        from diffusers import EulerDiscreteScheduler as _Euler  # type: ignore
-    except Exception:  # pragma: no cover
-        _Euler = None  # type: ignore
+        _AutoencoderKL = None  # type: ignore
 except ImportError:  # pragma: no cover
     diffusers = None
     _AutoPipe = None  # type: ignore
@@ -82,8 +69,7 @@ except ImportError:  # pragma: no cover
     _SDXLPipe = None  # type: ignore
     _LattePipe = None  # type: ignore
     _DPMSolver = None  # type: ignore
-    _EulerA = None  # type: ignore
-    _Euler = None  # type: ignore
+    _AutoencoderKL = None  # type: ignore
 try:
     from PIL import Image  # type: ignore
 except Exception:  # pragma: no cover
@@ -112,8 +98,6 @@ except ImportError:  # pragma: no cover
 
 HAVNAI_HOME = Path(os.environ.get("HAVNAI_HOME", Path.home() / ".havnai"))
 ENV_PATH = HAVNAI_HOME / ".env"
-CREATOR_SCAN_DIR = HAVNAI_HOME / "models" / "creator"
-DOWNLOAD_DIR = HAVNAI_HOME / "downloads"
 LOGS_DIR = HAVNAI_HOME / "logs"
 OUTPUTS_DIR = HAVNAI_HOME / "outputs"
 LORA_DIR = Path(
@@ -123,16 +107,18 @@ LORA_DIR = Path(
     or (HAVNAI_HOME / "loras")
 )
 VERSION_SEARCH_PATHS = [HAVNAI_HOME / "VERSION", Path(__file__).resolve().parent / "VERSION"]
+DEFAULT_LORA_DIR = Path("/mnt/d/havnai-storage/models/loras")
+LORA_DIR = Path(
+    os.environ.get("HAI_LORA_DIR")
+    or os.environ.get("HAVNAI_LORA_DIR")
+    or (DEFAULT_LORA_DIR if DEFAULT_LORA_DIR.exists() else HAVNAI_HOME / "loras")
+).expanduser()
+MAX_LORAS = 5
 
 HAVNAI_HOME.mkdir(parents=True, exist_ok=True)
-CREATOR_SCAN_DIR.mkdir(parents=True, exist_ok=True)
-DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 LORA_DIR.mkdir(parents=True, exist_ok=True)
-
-SUPPORTED_MODEL_EXTS = {".onnx", ".safetensors", ".ckpt"}
-SUPPORTED_LORA_EXTS = {".safetensors", ".pt", ".bin"}
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -173,51 +159,16 @@ def log(message: str, prefix: str = "ℹ️", **extra: Any) -> None:
     LOGGER.info(f"{prefix} {message}", extra={"node": socket.gethostname(), **extra})
 
 
-def _configure_cuda_runtime() -> None:
-    """Prefer stable CUDA attention kernels on consumer GPUs."""
-    if torch is None or not SAFE_CUDA_KERNELS:
-        return
-    try:
-        if not torch.cuda.is_available():
-            return
-        backend = getattr(torch.backends, "cuda", None)
-        if backend is None:
-            return
-        changes: List[str] = []
-        if hasattr(backend, "enable_flash_sdp"):
-            backend.enable_flash_sdp(False)
-            changes.append("flash_sdp=off")
-        if hasattr(backend, "enable_mem_efficient_sdp"):
-            backend.enable_mem_efficient_sdp(False)
-            changes.append("mem_efficient_sdp=off")
-        if hasattr(backend, "enable_math_sdp"):
-            backend.enable_math_sdp(True)
-            changes.append("math_sdp=on")
-        if changes:
-            log(
-                "CUDA safety mode active (" + ", ".join(changes) + "). "
-                "Set HAI_SAFE_CUDA_KERNELS=0 to disable.",
-                prefix="🛡️",
-            )
-    except Exception as exc:
-        log(f"CUDA safety mode setup failed: {exc}", prefix="⚠️")
-
-
-INSTANTID_REPO = os.environ.get("INSTANTID_REPO", "instantx/InstantID-XL")
-INSTANTID_CONTROLNET_SUBFOLDER = os.environ.get("INSTANTID_CONTROLNET_SUBFOLDER", "ControlNetModel")
-INSTANTID_IP_ADAPTER_FILE = os.environ.get("INSTANTID_IP_ADAPTER_FILE", "ip-adapter.bin")
-INSTANTID_CACHE_ENABLED = os.environ.get("INSTANTID_CACHE_ENABLED", "true").strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
+WAN_I2V_DEFAULTS: Dict[str, Any] = {
+    "steps_high": 2,
+    "steps_low": 2,
+    "cfg": 1.0,
+    "sampler": "euler",
+    "num_frames": 32,
+    "fps": 24,
+    "height": 720,
+    "width": 512,
 }
-INSTANTID_CACHE_DIR = (HAVNAI_HOME / "instantid").resolve()
-INSTANTID_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-
-_FACE_ANALYSIS: Optional["FaceAnalysis"] = None
-_INSTANTID_PIPELINE_CACHE: Dict[Tuple[str, str, str, str, str], Any] = {}
-_INSTANTID_PIPELINE_LOCK = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -295,154 +246,71 @@ LTX2_MODEL_PATH = os.environ.get("LTX2_MODEL_PATH") or ENV_VARS.get("LTX2_MODEL_
 ENABLE_XFORMERS = _env_flag("HAI_ENABLE_XFORMERS", False)
 SAFE_CUDA_KERNELS = _env_flag("HAI_SAFE_CUDA_KERNELS", True)
 
+REGISTRY.base_url = SERVER_BASE
+
 HEARTBEAT_INTERVAL = 30
 TASK_POLL_INTERVAL = 15
 BACKOFF_BASE = 5
 MAX_BACKOFF = 60
 START_TIME = time.time()
 
+IMAGE_STEPS = int(os.environ.get("HAI_STEPS", "20"))
+IMAGE_GUIDANCE = float(os.environ.get("HAI_GUIDANCE", "7.0"))
+IMAGE_WIDTH = int(os.environ.get("HAI_WIDTH", "512"))
+IMAGE_HEIGHT = int(os.environ.get("HAI_HEIGHT", "512"))
+
 utilization_hint = random.randint(10, 25 if ROLE == "creator" else 15)
 
-LOCAL_MODELS: Dict[str, Dict[str, Any]] = {}
 SESSION = requests.Session()
 SESSION.headers.update({"Content-Type": "application/json"})
 if JOIN_TOKEN:
     SESSION.headers["X-Join-Token"] = JOIN_TOKEN
 
-_LTX2_LAST_READY: Optional[bool] = None
-_LTX2_LAST_REASON: str = ""
-_RESTART_LOCK = threading.Lock()
-_RESTART_REQUESTED = False
-_FATAL_CUDA_MARKERS = (
-    "misaligned address",
-    "an illegal memory access was encountered",
-    "device-side assert triggered",
-    "unspecified launch failure",
-)
+REGISTRY.session = SESSION
+
+
+def refresh_manifest_with_backoff(reason: str = "startup") -> None:
+    backoff = BACKOFF_BASE
+    while True:
+        try:
+            REGISTRY.refresh()
+            log("Model manifest refreshed", prefix="✅", reason=reason)
+            return
+        except Exception as exc:
+            log(f"Manifest refresh failed ({reason}): {exc}", prefix="⚠️")
+            time.sleep(backoff)
+            backoff = min(MAX_BACKOFF, backoff * 2)
 
 
 def endpoint(path: str) -> str:
     return f"{SERVER_BASE}{path}"
 
 
-def _is_fatal_cuda_error(error_text: str) -> bool:
-    if not error_text:
-        return False
-    text = error_text.lower()
-    if "cuda" not in text:
-        return False
-    return any(marker in text for marker in _FATAL_CUDA_MARKERS)
-
-
-def _request_self_restart(reason: str) -> None:
-    """Trigger a one-time process restart so systemd can restore a clean CUDA context."""
-    global _RESTART_REQUESTED
-    with _RESTART_LOCK:
-        if _RESTART_REQUESTED:
-            return
-        _RESTART_REQUESTED = True
-
-    def _restart_worker() -> None:
-        log(f"Fatal GPU runtime error detected; restarting node ({reason})", prefix="💥")
-        try:
-            disconnect()
-        except Exception:
-            pass
-        try:
-            if torch is not None and torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception:
-            pass
-        time.sleep(0.25)
-        os._exit(86)
-
-    threading.Thread(target=_restart_worker, daemon=True).start()
-
-
-# ---------------------------------------------------------------------------
-# Capability helpers
-# ---------------------------------------------------------------------------
-
-
-def _hf_cache_root() -> Path:
-    cache_root = (
-        os.environ.get("HUGGINGFACE_HUB_CACHE")
-        or os.environ.get("HF_HUB_CACHE")
-        or os.environ.get("HF_HOME")
-        or str(Path.home() / ".cache" / "huggingface")
-    )
-    root = Path(cache_root).expanduser()
-    if root.name != "hub":
-        root = root / "hub"
-    return root
-
-
-def _hf_model_cached(repo_id: str) -> bool:
-    if not repo_id:
-        return False
-    cache_dir = _hf_cache_root() / f"models--{repo_id.replace('/', '--')}"
-    return cache_dir.exists()
-
-
-def check_ltx2_ready() -> (bool, str):
-    if ROLE != "creator":
-        return False, "role"
-    if diffusers is None or torch is None:
-        return False, "deps_missing"
-    if _LattePipe is None:
-        return False, "latte_missing"
+def ensure_model_entry(model_name: str) -> ModelEntry:
     try:
-        if not torch.cuda.is_available():
-            return False, "cuda_unavailable"
-    except Exception:
-        return False, "cuda_unavailable"
-    if LTX2_MODEL_PATH:
-        model_path = Path(LTX2_MODEL_PATH).expanduser()
-        if not model_path.exists():
-            return False, "model_path_missing"
-        return True, "ok"
-    repo_id = (LTX2_MODEL_ID or "").strip()
-    if not repo_id:
-        return False, "missing_model_id"
-    if not _hf_model_cached(repo_id):
-        return False, "model_cache_missing"
-    return True, "ok"
+        return REGISTRY.get(model_name)
+    except (KeyError, ManifestError) as exc:
+        raise RuntimeError(f"Model '{model_name}' missing from manifest") from exc
 
 
-def check_animatediff_ready() -> (bool, str):
-    try:
-        if not torch.cuda.is_available():
-            return False, "cuda_unavailable"
-    except Exception:
-        return False, "cuda_unavailable"
-    return True, "ok"
+def ensure_model_path(entry: ModelEntry) -> Path:
+    path = Path(entry.path).expanduser()
+    if not path.exists():
+        raise FileNotFoundError(f"Model path missing on node: {path}")
+    return path
 
 
-def build_node_capabilities() -> (List[str], List[str]):
-    pipelines: List[str] = []
-    supports: List[str] = []
-    if ROLE == "creator":
-        supports.append("image")
-        pipelines.extend(["sd15", "sdxl"])
-        ready, reason = check_ltx2_ready()
-        global _LTX2_LAST_READY, _LTX2_LAST_REASON
-        if _LTX2_LAST_READY is None or ready != _LTX2_LAST_READY or reason != _LTX2_LAST_REASON:
-            if ready:
-                log("LTX2 ready; advertising ltx2 pipeline", prefix="✅")
-            else:
-                log(f"LTX2 not ready; skipping ltx2 advertise ({reason})", prefix="ℹ️")
-            _LTX2_LAST_READY = ready
-            _LTX2_LAST_REASON = reason
-        if ready:
-            pipelines.append("ltx2")
-            supports.append("video")
-        ad_ready, ad_reason = check_animatediff_ready()
-        if ad_ready:
-            pipelines.append("animatediff")
-            supports.append("animatediff")
-        else:
-            log(f"AnimateDiff not ready; skipping animatediff advertise ({ad_reason})", prefix="ℹ️")
-    return pipelines, supports
+def discover_capabilities() -> Dict[str, List[str]]:
+    pipelines: set[str] = set()
+    models: List[str] = []
+    for entry in REGISTRY.list_entries():
+        try:
+            path = ensure_model_path(entry)
+        except Exception:
+            continue
+        pipelines.add(entry.pipeline)
+        models.append(entry.name)
+    return {"pipelines": sorted(pipelines), "models": sorted(models)}
 
 
 # ---------------------------------------------------------------------------
@@ -467,102 +335,6 @@ def ensure_wallet() -> str:
 
 
 WALLET = ensure_wallet()
-
-
-# ---------------------------------------------------------------------------
-# Model scanning & registration
-# ---------------------------------------------------------------------------
-
-
-_HASH_CACHE_PATH = HAVNAI_HOME / "hash_cache.json"
-
-
-def _load_hash_cache() -> Dict[str, Any]:
-    try:
-        return json.loads(_HASH_CACHE_PATH.read_text()) if _HASH_CACHE_PATH.exists() else {}
-    except Exception:
-        return {}
-
-
-def _save_hash_cache(cache: Dict[str, Any]) -> None:
-    try:
-        _HASH_CACHE_PATH.write_text(json.dumps(cache))
-    except Exception:
-        pass
-
-
-def hash_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(chunk_size), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def hash_file_cached(path: Path, cache: Dict[str, Any]) -> str:
-    """Return cached hash if file mtime+size unchanged, else compute and cache."""
-    key = str(path)
-    stat = path.stat()
-    mtime = stat.st_mtime
-    size = stat.st_size
-    entry = cache.get(key)
-    if entry and entry.get("mtime") == mtime and entry.get("size") == size:
-        return entry["hash"]
-    h = hash_file(path)
-    cache[key] = {"mtime": mtime, "size": size, "hash": h}
-    return h
-
-
-def scan_local_models() -> Dict[str, Dict[str, Any]]:
-    catalog: Dict[str, Dict[str, Any]] = {}
-    if not CREATOR_SCAN_DIR.exists():
-        return catalog
-    cache = _load_hash_cache()
-    for path in CREATOR_SCAN_DIR.rglob("*"):
-        if not path.is_file() or path.suffix.lower() not in SUPPORTED_MODEL_EXTS:
-            continue
-        name = path.stem.lower().replace(" ", "-")
-        weight = 10.0 if path.suffix.lower() in {".safetensors", ".ckpt"} else 2.0
-        if "nsfw" in name:
-            weight = max(weight, 12.0)
-        catalog[name] = {
-            "name": name,
-            "filename": path.name,
-            "path": path,
-            "size": path.stat().st_size,
-            "hash": hash_file_cached(path, cache),
-            "tags": [path.suffix.lstrip(".")],
-            "weight": weight,
-            "task_type": "IMAGE_GEN",
-        }
-    _save_hash_cache(cache)
-    return catalog
-
-
-def register_local_models() -> None:
-    global LOCAL_MODELS
-    LOCAL_MODELS = scan_local_models()
-    if not LOCAL_MODELS:
-        log("No creator models discovered under ~/.havnai/models/creator", prefix="ℹ️")
-        return
-    manifest = [
-        {
-            "name": meta["name"],
-            "filename": meta["filename"],
-            "size": meta["size"],
-            "hash": meta["hash"],
-            "tags": meta["tags"],
-            "weight": meta["weight"],
-            "task_type": meta["task_type"],
-        }
-        for meta in LOCAL_MODELS.values()
-    ]
-    try:
-        resp = SESSION.post(endpoint("/register_models"), data=json.dumps({"node_id": NODE_NAME, "models": manifest}), timeout=20)
-        resp.raise_for_status()
-        log(f"Registered {len(manifest)} local models.", prefix="✅")
-    except Exception as exc:
-        log(f"Model registration failed: {exc}", prefix="⚠️")
 
 
 # ---------------------------------------------------------------------------
@@ -637,29 +409,6 @@ def _handle_signal(signum, frame):  # type: ignore
         sys.exit(0)
     except SystemExit:
         pass
-
-
-def resolve_model_path(model_name: str, model_url: str = "", filename_hint: Optional[str] = None) -> Path:
-    entry = LOCAL_MODELS.get(model_name.lower())
-    if entry:
-        return entry["path"]
-    if model_url:
-        filename = filename_hint or Path(model_url).name
-        target = DOWNLOAD_DIR / Path(filename).name
-        if target.exists():
-            return target
-        url = model_url
-        if url.startswith("/"):
-            url = f"{SERVER_BASE}{url}"
-        log(f"Downloading model {model_name} from {url}", prefix="⬇️")
-        resp = SESSION.get(url, stream=True, timeout=120)
-        resp.raise_for_status()
-        with target.open("wb") as handle:
-            for chunk in resp.iter_content(chunk_size=8192):
-                if chunk:
-                    handle.write(chunk)
-        return target
-    raise RuntimeError(f"Model {model_name} unavailable on node")
 
 
 def random_input(shape: List[int]) -> np.ndarray:
@@ -1248,19 +997,10 @@ def execute_task(task: Dict[str, Any]) -> None:
     task_id = task.get("task_id", "unknown")
     task_type = (task.get("type") or "IMAGE_GEN").lower()
     model_name = (task.get("model_name") or "model").lower()
-    model_url = task.get("model_url", "") or task.get("model_path", "")
     reward_weight = float(task.get("reward_weight", 1.0))
     input_shape = task.get("input_shape") or []
     prompt = task.get("prompt") or ""
-    queued_at = task.get("queued_at")
-    assigned_at = task.get("assigned_at")
-    task_started_at = time.time()
-    queue_wait_ms = None
-    assign_to_start_ms = None
-    if queued_at and assigned_at:
-        queue_wait_ms = int((assigned_at - queued_at) * 1000)
-    if assigned_at:
-        assign_to_start_ms = int((task_started_at - assigned_at) * 1000)
+    negative_prompt = task.get("negative_prompt") or ""
 
     if task_type in {"image_gen", "video_gen", "animatediff"} and ROLE != "creator":
         log(f"Skipping creator task {task_id[:8]} — node not in creator mode", prefix="⚠️")
@@ -1269,113 +1009,58 @@ def execute_task(task: Dict[str, Any]) -> None:
     log(f"Executing {task_type} task {task_id[:8]} · {model_name}", prefix="🚀")
 
     image_b64: Optional[str] = None
-    video_b64: Optional[str] = None
+    try:
+        entry = ensure_model_entry(model_name)
+        model_path = ensure_model_path(entry)
+    except Exception as exc:
+        log(f"Model resolution failed: {exc}", prefix="🚫")
+        return
     if task_type == "image_gen":
-        loras = task.get("loras") if isinstance(task.get("loras"), list) else None
-        model_spec = task.get("model") if isinstance(task.get("model"), dict) else None
-        model_lora = model_spec.get("lora") if isinstance(model_spec, dict) else None
-        model_pipeline = model_spec.get("pipeline") if isinstance(model_spec, dict) else None
-        negative_prompt = str(task.get("negative_prompt") or "").strip()
-        image_settings = {}
-        for key in ("steps", "guidance", "width", "height", "sampler", "seed", "init_image", "strength"):
-            if key in task and task[key] is not None:
-                image_settings[key] = task[key]
+        # Parse structured settings from task if present
+        job_settings = None
+        prompt_raw = task.get("prompt")
+        try:
+            task_loras = task.get("loras") if isinstance(task, dict) else None
+            if task_loras:
+                if job_settings is None:
+                    job_settings = {}
+                job_settings["loras"] = task_loras
+            if isinstance(prompt_raw, dict):
+                job_settings = prompt_raw
+                prompt = str(job_settings.get("prompt") or prompt)
+                negative_prompt = str(job_settings.get("negative_prompt") or negative_prompt)
+            elif isinstance(prompt_raw, str) and prompt_raw.strip().startswith("{"):
+                job_settings = json.loads(prompt_raw)
+                if isinstance(job_settings, dict):
+                    prompt = str(job_settings.get("prompt") or prompt)
+                    negative_prompt = str(job_settings.get("negative_prompt") or negative_prompt)
+                else:
+                    job_settings = None
+            elif isinstance(prompt_raw, str):
+                prompt = prompt_raw
+        except Exception as exc:
+            log(f"Failed to parse job settings: {exc}", prefix="⚠️", task_id=task_id)
+        # Merge coordinator-sent overrides even when prompt is plain text.
+        if isinstance(task, dict):
+            for key in ("steps", "guidance", "width", "height", "sampler", "seed", "auto_anatomy"):
+                value = task.get(key)
+                if value is None or value == "":
+                    continue
+                if job_settings is None:
+                    job_settings = {}
+                job_settings.setdefault(key, value)
+
         metrics, util, image_b64 = run_image_generation(
             task_id,
-            model_name,
-            model_url,
+            entry,
+            model_path,
             reward_weight,
             prompt,
-            negative_prompt=negative_prompt,
-            loras=loras,
-            model_lora=model_lora,
-            pipeline_hint=model_pipeline,
-            image_settings=image_settings or None,
-        )
-    elif task_type == "animatediff" or str(task.get("pipeline") or "").lower() == "animatediff" or str(task.get("engine") or "").lower() == "animatediff":
-        from engines.animatediff.animatediff_runner import run_animatediff, video_to_b64
-        # Free LTX2 pipeline from GPU before loading AnimateDiff
-        try:
-            from engines.ltx2.ltx2_generator import unload_pipeline as unload_ltx2
-            unload_ltx2()
-        except Exception:
-            pass
-
-        model_ref = model_url or os.environ.get("ANIMATEDIFF_MODEL_PATH") or model_name
-        metrics, util, video_path = run_animatediff(
-            task,
-            model_ref,
-            outputs_dir=OUTPUTS_DIR,
-            log_fn=lambda message: log(message, prefix="🎞️"),
-            read_gpu_stats=read_gpu_stats,
-            utilization_hint=utilization_hint,
-        )
-        if video_path is not None:
-            video_b64 = video_to_b64(video_path)
-    elif task_type == "video_gen" or str(task.get("pipeline") or "").lower() == "ltx2" or str(task.get("engine") or "").lower() == "ltx2":
-        from engines.ltx2.ltx2_runner import run_ltx2, video_to_b64
-        # Free AnimateDiff pipeline from GPU before loading LTX2
-        try:
-            from engines.animatediff.animatediff_generator import unload_pipeline as unload_animatediff
-            unload_animatediff()
-        except Exception:
-            pass
-
-        model_ref = LTX2_MODEL_PATH or LTX2_MODEL_ID or "maxin-cn/Latte-1"
-        metrics, util, video_path = run_ltx2(
-            task,
-            log_fn=lambda message: log(message, prefix="🎬"),
-            outputs_dir=OUTPUTS_DIR,
-            read_gpu_stats=read_gpu_stats,
-            utilization_hint=utilization_hint,
-            model_id=model_ref,
-        )
-        if video_path is not None:
-            video_b64 = video_to_b64(video_path)
-    elif task_type == "face_swap":
-        job_settings: Dict[str, Any] = {}
-        if isinstance(task, dict):
-            for key in (
-                "base_image_url",
-                "base_image",
-                "base_image_b64",
-                "base_image_path",
-                "image",
-                "image_b64",
-                "face_source_url",
-                "face_source",
-                "face_source_b64",
-                "face_source_path",
-                "face_image",
-                "face_image_b64",
-                "strength",
-                "num_steps",
-                "seed",
-            ):
-                if key in task and task[key] is not None:
-                    job_settings[key] = task[key]
-        metrics, util, image_b64 = run_faceswap_generation(
-            task_id,
-            model_name,
-            model_url,
-            reward_weight,
-            prompt,
-            "",
+            negative_prompt,
             job_settings,
         )
     else:
-        metrics, util = run_ai_inference(model_name, model_url, input_shape, reward_weight)
-
-    total_ms = int((time.time() - task_started_at) * 1000)
-    metrics["task_total_ms"] = total_ms
-    if queue_wait_ms is not None:
-        metrics["queue_wait_ms"] = queue_wait_ms
-    if assign_to_start_ms is not None:
-        metrics["assign_to_start_ms"] = assign_to_start_ms
-    error_text = str(metrics.get("error") or "")
-    fatal_cuda_error = _is_fatal_cuda_error(error_text)
-    if fatal_cuda_error:
-        metrics["fatal_gpu_error"] = True
+        metrics, util = run_ai_inference(entry, model_path, input_shape, reward_weight)
 
     with lock:
         utilization_hint = util
@@ -1416,26 +1101,12 @@ def execute_task(task: Dict[str, Any]) -> None:
 
     if submit_error is None:
         prefix = "✅" if payload["status"] == "success" else "⚠️"
-        log(
-            f"Task {task_id[:8]} {payload['status'].upper()} · reward {reward} HAI",
-            prefix=prefix,
-            task_total_ms=total_ms,
-            queue_wait_ms=queue_wait_ms,
-            assign_to_start_ms=assign_to_start_ms,
-            inference_ms=metrics.get("inference_time_ms"),
-        )
-    else:
-        log(f"Failed to submit result: {submit_error}", prefix="🚫")
-    if fatal_cuda_error:
-        _request_self_restart(f"{task_type}:{task_id[:8]}")
-
-
-def run_ai_inference(model_name: str, model_url: str, input_shape: List[int], reward_weight: float) -> (Dict[str, Any], int):
-    try:
-        model_path = resolve_model_path(model_name, model_url)
+        log(f"Task {task_id[:8]} {payload['status'].upper()} · reward {reward} HAI", prefix=prefix)
     except Exception as exc:
-        return ({"status": "failed", "error": str(exc), "reward_weight": reward_weight}, utilization_hint)
+        log(f"Failed to submit result: {exc}", prefix="🚫")
 
+
+def run_ai_inference(entry: ModelEntry, model_path: Path, input_shape: List[int], reward_weight: float) -> (Dict[str, Any], int):
     try:
         ort_session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
         input_name = ort_session.get_inputs()[0].name
@@ -1460,7 +1131,7 @@ def run_ai_inference(model_name: str, model_url: str, input_shape: List[int], re
     util = max(start_stats.get("utilization", 0), end_stats.get("utilization", 0), utilization_hint)
     metrics = {
         "status": status,
-        "model_name": model_name,
+        "model_name": entry.name,
         "model_path": str(model_path),
         "input_shape": input_shape,
         "reward_weight": reward_weight,
@@ -1473,330 +1144,442 @@ def run_ai_inference(model_name: str, model_url: str, input_shape: List[int], re
     return metrics, int(util)
 
 
-def run_faceswap_generation(
-    task_id: str,
+# ---------------------------------------------------------------------------
+# LoRA helpers
+# ---------------------------------------------------------------------------
+
+POSITION_LORA_NAMES = {
+    "povdoggy",
+    "povreversecowgirl",
+    "pscowgirl",
+    "missionaryvaginal-v2",
+}
+
+ANATOMY_LORA_NAMES = {
+    "handv2",
+    "detailedperfectionsd1.5",
+    "detailedperfectionsd15",
+    "detailed perfection sd1.5",
+}
+ANATOMY_LORA_PREFIXES = ("badanatomy_sdxl_negative_lora",)
+ANATOMY_RISK_PATTERNS = (
+    r"\bhands?\b",
+    r"\bfingers?\b",
+    r"\blimbs?\b",
+    r"\bspread\b",
+    r"\bbent\b",
+    r"\bcrouching\b",
+    r"\bsquatting\b",
+    r"\bwide pose\b",
+)
+
+STYLE_LORA_NAMES = {
+    "perfectionstyle",
+    "perfectionstylesd1.5",
+    "perfectionstylev2d",
+    "skintexturestylesd1.5v1",
+    "skintexturestylev3",
+    "skintexturestylev5",
+    "hyperlora_sdxl",
+}
+
+LORA_BASE_TYPE = {
+    "povdoggy": "sd15",
+    "povreversecowgirl": "sd15",
+    "pscowgirl": "sd15",
+    "missionaryvaginal-v2": "sd15",
+    "handv2": "sdxl",
+    "detailedperfectionsd1.5": "sd15",
+    "detailedperfectionsd15": "sd15",
+    "detailed perfection sd1.5": "sd15",
+    "perfectionstylesd1.5": "sd15",
+    "skintexturestylesd1.5v1": "sd15",
+    "perfectionstyle": "sdxl",
+    "perfectionstylev2d": "sdxl",
+    "skintexturestylev3": "sdxl",
+    "skintexturestylev5": "sdxl",
+    "hyperlora_sdxl": "sdxl",
+}
+
+ROLE_WEIGHT_RANGES = {
+    "position": (0.0, 2.0, 0.6),
+    "anatomy": (0.5, 0.8, 0.65),
+    "style": (0.3, 0.4, 0.35),
+}
+
+AUTO_ANATOMY_WEIGHT_SD15 = 0.7
+AUTO_ANATOMY_WEIGHT_SDXL = 0.5
+AUTO_STYLE_WEIGHT = 0.35
+AUTO_ANATOMY_SD15_CANDIDATES = (
+    "DetailedPerfectionSD1.5",
+    "DetailedPerfectionSD15",
+    "Detailed Perfection SD1.5",
+)
+AUTO_ANATOMY_SDXL_CANDIDATES = ("Handv2",)
+AUTO_STYLE_SD15_CANDIDATES = ("perfectionstyleSD1.5",)
+AUTO_STYLE_SDXL_CANDIDATES = ("perfectionstyle",)
+
+
+def is_sdxl_model(model_name: str) -> bool:
+    name = (model_name or "").lower()
+    if "sdxl" in name:
+        return True
+    if "sd1.5" in name or "sd15" in name:
+        return False
+    if name.endswith("xl") or "xl_" in name or "_xl" in name or "-xl" in name:
+        return True
+    return "xl" in name
+
+
+def coerce_bool(value: Any) -> bool:
+    """Normalize coordinator boolean flags without prompt hacks."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes"}
+    return bool(value) if value is not None else False
+
+
+def has_anatomy_risk(prompt: str) -> bool:
+    """Heuristic prompt scan for anatomy-risk poses."""
+    prompt = (prompt or "").strip()
+    if not prompt:
+        return False
+    return any(re.search(pat, prompt, flags=re.IGNORECASE) for pat in ANATOMY_RISK_PATTERNS)
+
+
+def normalize_lora_name(lora_name: str) -> str:
+    base = Path(lora_name).name
+    if base.lower().endswith(".safetensors"):
+        base = base[:-len(".safetensors")]
+    return base.strip().lower()
+
+
+def infer_lora_base_type(normalized_name: str) -> Optional[str]:
+    for prefix in ANATOMY_LORA_PREFIXES:
+        if normalized_name.startswith(prefix):
+            return "sdxl"
+    mapped = LORA_BASE_TYPE.get(normalized_name)
+    if mapped:
+        return mapped
+    if "sdxl" in normalized_name:
+        return "sdxl"
+    if "sd1.5" in normalized_name or "sd15" in normalized_name or "sd_15" in normalized_name or "sd-15" in normalized_name:
+        return "sd15"
+    return None
+
+
+def classify_lora_role(normalized_name: str) -> str:
+    if normalized_name in POSITION_LORA_NAMES:
+        return "position"
+    if normalized_name in ANATOMY_LORA_NAMES:
+        return "anatomy"
+    for prefix in ANATOMY_LORA_PREFIXES:
+        if normalized_name.startswith(prefix):
+            return "anatomy"
+    if normalized_name in STYLE_LORA_NAMES:
+        return "style"
+    # Unknown LoRAs are treated conservatively as style to keep weights low.
+    return "style"
+
+
+def clamp_lora_weight(weight: Optional[float], role: str) -> float:
+    min_w, max_w, default_w = ROLE_WEIGHT_RANGES.get(role, (0.25, 0.45, 0.35))
+    try:
+        value = float(weight) if weight is not None else default_w
+    except (TypeError, ValueError):
+        value = default_w
+    if not math.isfinite(value):
+        value = default_w
+    if role == "position":
+        # Respect server-provided position weights without forcing a narrow clamp.
+        return value
+    return max(min_w, min(max_w, value))
+
+
+def resolve_lora_path(lora_name: str) -> Optional[Path]:
+    candidate = Path(lora_name).expanduser()
+    if candidate.is_file():
+        return candidate
+    if candidate.suffix == "":
+        candidate = candidate.with_suffix(".safetensors")
+    fallback = LORA_DIR / candidate.name
+    if fallback.exists():
+        return fallback
+    return None
+
+
+def find_auto_anatomy_lora(model_is_sdxl: bool, seen: Set[str]) -> Optional[Tuple[Path, float, str]]:
+    if model_is_sdxl:
+        for candidate in AUTO_ANATOMY_SDXL_CANDIDATES:
+            path = resolve_lora_path(candidate)
+            if path is None:
+                continue
+            normalized = normalize_lora_name(path.name)
+            if normalized in seen:
+                continue
+            weight = clamp_lora_weight(AUTO_ANATOMY_WEIGHT_SDXL, "anatomy")
+            return (path, weight, f"lora_anatomy_{path.stem}")
+        for path in sorted(LORA_DIR.glob("*.safetensors")):
+            normalized = normalize_lora_name(path.name)
+            if normalized in seen:
+                continue
+            if any(normalized.startswith(prefix) for prefix in ANATOMY_LORA_PREFIXES):
+                weight = clamp_lora_weight(AUTO_ANATOMY_WEIGHT_SDXL, "anatomy")
+                return (path, weight, f"lora_anatomy_{path.stem}")
+        return None
+
+    for candidate in AUTO_ANATOMY_SD15_CANDIDATES:
+        path = resolve_lora_path(candidate)
+        if path is None:
+            continue
+        normalized = normalize_lora_name(path.name)
+        if normalized in seen:
+            continue
+        weight = clamp_lora_weight(AUTO_ANATOMY_WEIGHT_SD15, "anatomy")
+        return (path, weight, f"lora_anatomy_{path.stem}")
+    return None
+
+
+def find_auto_style_lora(model_is_sdxl: bool, seen: Set[str]) -> Optional[Tuple[Path, float, str]]:
+    candidates = AUTO_STYLE_SDXL_CANDIDATES if model_is_sdxl else AUTO_STYLE_SD15_CANDIDATES
+    for candidate in candidates:
+        path = resolve_lora_path(candidate)
+        if path is None:
+            continue
+        normalized = normalize_lora_name(path.name)
+        if normalized in seen:
+            continue
+        weight = clamp_lora_weight(AUTO_STYLE_WEIGHT, "style")
+        return (path, weight, f"lora_style_{path.stem}")
+    return None
+
+
+def select_lora_entries(
+    requested: List[Any],
     model_name: str,
-    model_url: str,
+    prompt: Optional[str] = None,
+    auto_anatomy_enabled: bool = True,
+) -> List[Tuple[Path, float, str]]:
+    model_is_sdxl = is_sdxl_model(model_name)
+    positions: List[Tuple[Path, float, str]] = []
+    anatomies: List[Tuple[Path, float, str]] = []
+    styles: List[Tuple[Path, float, str]] = []
+    seen: Set[str] = set()
+    needs_auto_anatomy = auto_anatomy_enabled and has_anatomy_risk(prompt or "")
+
+    for item in requested:
+        raw_weight: Optional[float] = None
+        if isinstance(item, dict):
+            name = str(item.get("name") or "").strip()
+            raw_weight = item.get("weight")
+        else:
+            name = str(item or "").strip()
+        if not name:
+            continue
+        normalized = normalize_lora_name(name)
+        if normalized in seen:
+            continue
+        base_type = infer_lora_base_type(normalized)
+        # Enforce SDXL/SD1.5 compatibility to avoid mismatched LoRA loads.
+        if base_type == "sdxl" and not model_is_sdxl:
+            continue
+        if base_type == "sd15" and model_is_sdxl:
+            continue
+        role = classify_lora_role(normalized)
+        weight = clamp_lora_weight(raw_weight, role)
+        lora_path = resolve_lora_path(name)
+        if not lora_path:
+            continue
+        adapter_name = f"lora_{role}_{lora_path.stem}"
+        entry = (lora_path, weight, adapter_name)
+        if role == "position":
+            positions.append(entry)
+        elif role == "anatomy":
+            anatomies.append(entry)
+        else:
+            styles.append(entry)
+        seen.add(normalized)
+
+    if needs_auto_anatomy and not anatomies:
+        # Allow anatomy LoRA even without a position LoRA.
+        auto_anatomy_entry = find_auto_anatomy_lora(model_is_sdxl, seen)
+        if auto_anatomy_entry:
+            anatomies.append(auto_anatomy_entry)
+            seen.add(normalize_lora_name(auto_anatomy_entry[0].name))
+
+    if positions and not styles:
+        auto_style = find_auto_style_lora(model_is_sdxl, seen)
+        if auto_style:
+            styles.append(auto_style)
+            seen.add(normalize_lora_name(auto_style[0].name))
+
+    selected: List[Tuple[Path, float, str]] = []
+    # Enforce stack order: position -> anatomy -> styles (request order), with safe caps.
+    if positions:
+        selected.append(positions[0])
+    if anatomies and len(selected) < MAX_LORAS:
+        selected.append(anatomies[0])
+    for style in styles:
+        if len(selected) >= MAX_LORAS:
+            break
+        selected.append(style)
+    return selected
+
+
+def build_lora_stack(
+    prompt: str,
+    model_name: str,
+    requested_loras: Any,
+) -> List[Dict[str, Any]]:
+    """Build a deterministic LoRA stack from prompt rules and user requests."""
+    prompt_text = str(prompt or "")
+    prompt_text = re.sub(r"<\s*lora:[^>]+>", "", prompt_text)
+    model_is_sdxl = is_sdxl_model(model_name)
+
+    requested: List[Any]
+    if isinstance(requested_loras, str):
+        requested = [requested_loras]
+    elif isinstance(requested_loras, list):
+        requested = requested_loras
+    else:
+        requested = []
+
+    seen: Set[str] = set()
+    positions: List[Dict[str, Any]] = []
+    anatomies: List[Dict[str, Any]] = []
+    styles: List[Dict[str, Any]] = []
+
+    def add_entry(name: str, raw_weight: Optional[float], role: str) -> Optional[Dict[str, Any]]:
+        normalized = normalize_lora_name(name)
+        if normalized in seen:
+            return None
+        base_type = infer_lora_base_type(normalized)
+        if base_type == "sdxl" and not model_is_sdxl:
+            return None
+        if base_type == "sd15" and model_is_sdxl:
+            return None
+        if not resolve_lora_path(name):
+            return None
+        weight = clamp_lora_weight(raw_weight, role)
+        entry = {"name": name, "weight": weight, "normalized": normalized, "role": role}
+        seen.add(normalized)
+        return entry
+
+    for item in requested:
+        raw_weight: Optional[float] = None
+        if isinstance(item, dict):
+            name = str(item.get("name") or "").strip()
+            raw_weight = item.get("weight")
+        else:
+            name = str(item or "").strip()
+        if not name:
+            continue
+        normalized = normalize_lora_name(name)
+        role = classify_lora_role(normalized)
+        entry = add_entry(name, raw_weight, role)
+        if not entry:
+            continue
+        if role == "position":
+            positions.append(entry)
+        elif role == "anatomy":
+            anatomies.append(entry)
+        else:
+            styles.append(entry)
+
+    baseline_candidates = (
+        ("perfectionstyle", "skintexturestylev3")
+        if model_is_sdxl
+        else ("perfectionstyleSD1.5", "skintexturestylesd1.5", "skintexturestylesd1.5v1")
+    )
+    baseline_norms = {normalize_lora_name(name) for name in baseline_candidates}
+
+    baseline_entry: Optional[Dict[str, Any]] = None
+    remaining_styles: List[Dict[str, Any]] = []
+    for style in styles:
+        if baseline_entry is None and style["normalized"] in baseline_norms:
+            baseline_entry = style
+            continue
+        remaining_styles.append(style)
+
+    auto_baseline: Optional[Dict[str, Any]] = None
+    if baseline_entry is None:
+        for candidate in baseline_candidates:
+            entry = add_entry(candidate, None, "style")
+            if entry:
+                auto_baseline = entry
+                break
+
+    def prompt_hits(patterns: Tuple[str, ...]) -> bool:
+        return any(re.search(pattern, prompt_text, flags=re.IGNORECASE) for pattern in patterns)
+
+    effect_entries: List[Dict[str, Any]] = []
+    effect_entries.extend(remaining_styles)
+
+    auto_effects: List[Dict[str, Any]] = []
+    if prompt_hits((r"\bsweat\b", r"\bsweaty\b", r"\bperspiration\b")):
+        entry = add_entry("Sweatingmyballsofmate", None, "style")
+        if entry:
+            auto_effects.append(entry)
+    if prompt_hits((r"\bcum\b", r"\bcumshot\b", r"\bcumming\b", r"\bejacu(?:late|lation|lating)\b", r"\bsemen\b", r"\bjizz\b")):
+        for candidate in ("CumOnCloth", "reverse_fellatio"):
+            entry = add_entry(candidate, None, "style")
+            if entry:
+                auto_effects.append(entry)
+                break
+    if model_is_sdxl and prompt_hits((r"\bbdsm\b", r"\bbondage\b", r"\bdominatrix\b", r"\bdomination\b", r"\bsubmissive\b", r"\bgag(?:ged)?\b", r"\bcollar\b", r"\bleash\b", r"\bspank(?:ing)?\b")):
+        entry = add_entry("bdsm_SDXL_1", None, "style")
+        if entry:
+            auto_effects.append(entry)
+    if model_is_sdxl and prompt_hits((r"\bcinematic lighting\b", r"\bdramatic lighting\b", r"\brim light\b", r"\bbacklight\b", r"\bvolumetric\b", r"\bstudio lighting\b")):
+        entry = add_entry("HyperLoRA_SDXL", None, "style")
+        if entry:
+            auto_effects.append(entry)
+
+    selected: List[Dict[str, Any]] = []
+    if positions and len(selected) < MAX_LORAS:
+        selected.append(positions[0])
+    if anatomies and len(selected) < MAX_LORAS:
+        selected.append(anatomies[0])
+
+    max_effects = 2
+    remaining_slots = max(0, MAX_LORAS - len(selected))
+    user_effects_without_baseline = min(max_effects, len(effect_entries), remaining_slots)
+    if baseline_entry is None and auto_baseline is not None and remaining_slots > 0:
+        # Only add auto baseline if it does not reduce user-requested effects.
+        slots_if_baseline = remaining_slots - 1
+        user_effects_with_baseline = min(max_effects, len(effect_entries), max(0, slots_if_baseline))
+        if user_effects_with_baseline == user_effects_without_baseline:
+            baseline_entry = auto_baseline
+
+    if baseline_entry is not None and len(selected) < MAX_LORAS:
+        selected.append(baseline_entry)
+
+    effect_slots = min(max_effects, MAX_LORAS - len(selected))
+    for entry in effect_entries:
+        if effect_slots <= 0:
+            break
+        selected.append(entry)
+        effect_slots -= 1
+    if effect_slots > 0:
+        for entry in auto_effects:
+            if effect_slots <= 0:
+                break
+            selected.append(entry)
+            effect_slots -= 1
+
+    return [{"name": entry["name"], "weight": entry["weight"]} for entry in selected]
+
+
+def run_image_generation(
+    task_id: str,
+    entry: ModelEntry,
+    model_path: Path,
     reward_weight: float,
     prompt: str,
     negative_prompt: str,
     job_settings: Optional[Dict[str, Any]] = None,
 ) -> (Dict[str, Any], int, Optional[str]):
-    start_stats = read_gpu_stats()
-    started = time.time()
-    status = "success"
-    error_msg = ""
-
-    image_b64: Optional[str] = None
-    output_path = OUTPUTS_DIR / f"{task_id}.png"
-    try:
-        if torch is None or diffusers is None:
-            raise RuntimeError("diffusers/torch required for face swap")
-        if Image is None or np is None or cv2 is None:
-            raise RuntimeError("opencv-python and numpy are required for face swap")
-        if FaceAnalysis is None:
-            raise RuntimeError("insightface is required for face swap")
-
-        from diffusers import ControlNetModel  # type: ignore
-        from pipeline_stable_diffusion_xl_instantid_inpaint import (  # type: ignore
-            StableDiffusionXLInstantIDInpaintPipeline,
-        )
-
-        try:
-            model_path = resolve_model_path(model_name, model_url, filename_hint=f"{model_name}.safetensors")
-        except Exception as exc:
-            raise RuntimeError(str(exc)) from exc
-
-        settings = job_settings if isinstance(job_settings, dict) else {}
-        base_image_src = (
-            settings.get("base_image_url")
-            or settings.get("base_image")
-            or settings.get("base_image_b64")
-            or settings.get("base_image_path")
-            or settings.get("image")
-            or settings.get("image_b64")
-        )
-        face_source_src = (
-            settings.get("face_source_url")
-            or settings.get("face_source")
-            or settings.get("face_source_b64")
-            or settings.get("face_source_path")
-            or settings.get("face_image")
-            or settings.get("face_image_b64")
-        )
-        if not base_image_src or not face_source_src:
-            raise RuntimeError("base_image and face_source are required for face swap")
-
-        strength = coerce_float(settings.get("strength", 0.8), 0.8)
-        num_steps = coerce_int(settings.get("num_steps", 20), 20)
-        strength = max(0.0, min(1.0, strength))
-        num_steps = max(5, min(60, num_steps))
-
-        base_image, base_error = load_image_source_with_error(str(base_image_src))
-        face_image, face_error = load_image_source_with_error(str(face_source_src))
-        if base_image is None or face_image is None:
-            base_desc = _describe_image_source(base_image_src)
-            face_desc = _describe_image_source(face_source_src)
-            base_msg = base_error or "unknown error"
-            face_msg = face_error or "unknown error"
-            raise RuntimeError(
-                f"Failed to load base image ({base_desc}): {base_msg}; "
-                f"face image ({face_desc}): {face_msg}"
-            )
-
-        app = get_face_analysis()
-        face_infos = app.get(cv2.cvtColor(np.array(face_image), cv2.COLOR_RGB2BGR))
-        face_info = pick_primary_face(face_infos)
-        if not face_info:
-            raise RuntimeError("No face detected in face_source_url image")
-        face_emb = face_info["embedding"]
-
-        target_infos = app.get(cv2.cvtColor(np.array(base_image), cv2.COLOR_RGB2BGR))
-        target_face = pick_primary_face(target_infos)
-        if not target_face:
-            raise RuntimeError("No face detected in base_image_url image")
-
-        images, position = prepare_mask_and_pose_control(base_image, target_face)
-        mask, pose_image_preprocessed, control_image = images
-
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        dtype = torch.float16 if device == "cuda" else torch.float32
-
-        instantid_repo = INSTANTID_REPO
-        local_repo_path = Path(instantid_repo).expanduser()
-        use_local_repo = local_repo_path.exists()
-        if hf_hub_download is None and not use_local_repo:
-            raise RuntimeError("huggingface_hub is required for face swap")
-
-        if use_local_repo:
-            controlnet_path = local_repo_path / INSTANTID_CONTROLNET_SUBFOLDER
-            controlnet_source = str(controlnet_path if controlnet_path.exists() else local_repo_path)
-            adapter_source = str(local_repo_path / INSTANTID_IP_ADAPTER_FILE)
-        else:
-            controlnet_source = f"{instantid_repo}::{INSTANTID_CONTROLNET_SUBFOLDER}"
-            adapter_source = f"{instantid_repo}::{INSTANTID_IP_ADAPTER_FILE}"
-
-        cache_enabled = INSTANTID_CACHE_ENABLED
-        cache_key = (str(model_path), controlnet_source, adapter_source, device, str(dtype))
-        if cache_enabled:
-            with _INSTANTID_PIPELINE_LOCK:
-                pipe = _INSTANTID_PIPELINE_CACHE.get(cache_key)
-        else:
-            with _INSTANTID_PIPELINE_LOCK:
-                _INSTANTID_PIPELINE_CACHE.clear()
-            pipe = None
-
-        if pipe is None:
-            if use_local_repo:
-                controlnet = ControlNetModel.from_pretrained(controlnet_source, torch_dtype=dtype)
-            else:
-                controlnet = ControlNetModel.from_pretrained(
-                    instantid_repo,
-                    subfolder=INSTANTID_CONTROLNET_SUBFOLDER,
-                    torch_dtype=dtype,
-                    cache_dir=str(INSTANTID_CACHE_DIR),
-                )
-
-            pipe = None
-            if hasattr(StableDiffusionXLInstantIDInpaintPipeline, "from_single_file") and model_path.is_file():
-                try:
-                    pipe = StableDiffusionXLInstantIDInpaintPipeline.from_single_file(
-                        str(model_path), controlnet=controlnet, torch_dtype=dtype, safety_checker=None
-                    )
-                except Exception as exc:
-                    log(f"InstantID from_single_file failed: {exc}", prefix="⚠️")
-            if pipe is None:
-                if model_path.is_dir():
-                    pipe = StableDiffusionXLInstantIDInpaintPipeline.from_pretrained(
-                        str(model_path), controlnet=controlnet, torch_dtype=dtype
-                    )
-                else:
-                    pipe = StableDiffusionXLInstantIDInpaintPipeline.from_pretrained(
-                        str(model_path), controlnet=controlnet, torch_dtype=dtype
-                    )
-
-            pipe = pipe.to(device)
-
-            if use_local_repo:
-                adapter_path = Path(adapter_source)
-                if not adapter_path.exists():
-                    raise RuntimeError(f"InstantID ip-adapter not found at {adapter_path}")
-                adapter_path = str(adapter_path)
-            else:
-                adapter_path = hf_hub_download(
-                    instantid_repo,
-                    filename=INSTANTID_IP_ADAPTER_FILE,
-                    cache_dir=str(INSTANTID_CACHE_DIR),
-                )
-            pipe.load_ip_adapter_instantid(adapter_path, scale=strength)
-            if hasattr(pipe, "image_proj_model") and pipe.image_proj_model is not None:
-                try:
-                    pipe.image_proj_model.to(device=device, dtype=dtype)
-                except Exception:
-                    pipe.image_proj_model.to(device)
-            if cache_enabled:
-                with _INSTANTID_PIPELINE_LOCK:
-                    _INSTANTID_PIPELINE_CACHE[cache_key] = pipe
-                log("Cached InstantID pipeline", prefix="♻️", model=str(model_path))
-        elif cache_enabled:
-            try:
-                pipe = pipe.to(device)
-            except Exception:
-                pass
-            log("Using cached InstantID pipeline", prefix="♻️", model=str(model_path))
-
-        if hasattr(pipe, "enable_attention_slicing"):
-            pipe.enable_attention_slicing("max")
-        if hasattr(pipe, "set_progress_bar_config"):
-            pipe.set_progress_bar_config(disable=True)
-
-        seed = settings.get("seed")
-        try:
-            seed = int(seed) if seed is not None else None
-        except (TypeError, ValueError):
-            seed = None
-        if seed is None:
-            seed = int(time.time()) & 0x7FFFFFFF
-        generator = torch.Generator(device=device).manual_seed(seed)
-
-        prompt_text = prompt or ""
-        neg_text = negative_prompt or ""
-        guidance_scale = 5.0 if prompt_text else 0.0
-
-        face_emb_tensor = torch.tensor(face_emb, device=device, dtype=pipe.unet.dtype)
-        result = pipe(
-            prompt=prompt_text,
-            negative_prompt=neg_text or None,
-            image_embeds=face_emb_tensor,
-            control_image=control_image,
-            image=pose_image_preprocessed,
-            mask_image=mask,
-            strength=strength,
-            controlnet_conditioning_scale=strength,
-            ip_adapter_scale=strength,
-            num_inference_steps=num_steps,
-            guidance_scale=guidance_scale,
-            generator=generator,
-        )
-
-        face_patch = result.images[0]
-        x, y, w, h = position
-        face_patch = face_patch.resize((w, h))
-        base_image.paste(face_patch, (x, y))
-        base_image.save(output_path)
-        with output_path.open("rb") as fh:
-            image_b64 = base64.b64encode(fh.read()).decode("utf-8")
-    except Exception as exc:
-        status = "failed"
-        error_msg = str(exc)
-        log(f"Face swap failed: {error_msg}", prefix="🚫")
-
-    duration = time.time() - started
-    end_stats = read_gpu_stats()
-    util = max(start_stats.get("utilization", 0), end_stats.get("utilization", 0), utilization_hint)
-    util = int(max(util, 70 if ROLE == "creator" else util))
-    metrics = {
-        "status": status,
-        "model_name": model_name,
-        "model_path": str(model_path) if "model_path" in locals() else "",
-        "reward_weight": reward_weight,
-        "task_type": "face_swap",
-        "inference_time_ms": round(duration * 1000, 3),
-        "gpu_util_start": start_stats.get("utilization", 0),
-        "gpu_util_end": end_stats.get("utilization", 0),
-        "strength": strength if "strength" in locals() else None,
-        "num_steps": num_steps if "num_steps" in locals() else None,
-        "output_path": str(output_path) if output_path else None,
-    }
-    if status == "failed":
-        metrics["error"] = error_msg or "face swap error"
-    return metrics, util, image_b64
-
-
-def run_image_generation(
-    task_id: str,
-    model_name: str,
-    model_url: str,
-    reward_weight: float,
-    prompt: str,
-    negative_prompt: str = "",
-    loras: Optional[List[Dict[str, Any]]] = None,
-    model_lora: Optional[Any] = None,
-    pipeline_hint: Optional[str] = None,
-    image_settings: Optional[Dict[str, Any]] = None,
-) -> (Dict[str, Any], int, Optional[str]):
-    """Run SD image generation with explicit pipeline and env-driven settings."""
-
-    def _env_int(name: str, default: int) -> int:
-        raw = os.environ.get(name) or ENV_VARS.get(name, "")
-        try:
-            v = int(raw)
-            return v if v > 0 else default
-        except Exception:
-            return default
-
-    def _env_float(name: str, default: float) -> float:
-        raw = os.environ.get(name) or ENV_VARS.get(name, "")
-        try:
-            return float(raw)
-        except Exception:
-            return default
-    def _override_int(name: str) -> Optional[int]:
-        if not image_settings or name not in image_settings:
-            return None
-        try:
-            return int(image_settings[name])
-        except (TypeError, ValueError):
-            return None
-
-    def _override_float(name: str) -> Optional[float]:
-        if not image_settings or name not in image_settings:
-            return None
-        try:
-            return float(image_settings[name])
-        except (TypeError, ValueError):
-            return None
-
-    def _override_str(name: str) -> str:
-        if not image_settings or name not in image_settings:
-            return ""
-        return str(image_settings[name] or "").strip()
-
-    try:
-        model_path = resolve_model_path(model_name, model_url, filename_hint=f"{model_name}.safetensors")
-    except Exception as exc:
-        return ({"status": "failed", "error": str(exc), "reward_weight": reward_weight}, utilization_hint, None)
-
-    steps = _env_int("HAI_STEPS", 28)
-    guidance = _env_float("HAI_GUIDANCE", 6.0)
-    clip_skip = _env_int("HAI_CLIP_SKIP", 0)
-    width = _env_int("HAI_WIDTH", 512)
-    height = _env_int("HAI_HEIGHT", 512)
-    override_steps = _override_int("steps")
-    if override_steps is not None:
-        steps = override_steps
-    override_guidance = _override_float("guidance")
-    if override_guidance is not None:
-        guidance = override_guidance
-    override_width = _override_int("width")
-    if override_width is not None:
-        width = override_width
-    override_height = _override_int("height")
-    if override_height is not None:
-        height = override_height
-    sampler_name = _override_str("sampler")
-    seed_override = _override_int("seed")
-    init_image_raw = _override_str("init_image")
-    img2img_strength = _override_float("strength")
-    if img2img_strength is None:
-        img2img_strength = 0.65  # sensible default for img2img
-    else:
-        img2img_strength = max(0.1, min(1.0, img2img_strength))
-    use_img2img = bool(init_image_raw)
-    width = max(64, width - (width % 8))
-    height = max(64, height - (height % 8))
-    pipeline_hint_norm = str(pipeline_hint or "").lower()
-    is_xl = "sdxl" in pipeline_hint_norm or ("xl" in pipeline_hint_norm if pipeline_hint_norm else "xl" in model_name.lower())
 
     start_stats = read_gpu_stats()
     started = time.time()
@@ -1853,119 +1636,111 @@ def run_image_generation(
             pipe_mode = "img2img" if init_pil is not None else "txt2img"
             log(f"Loading {pipe_mode} pipeline…", prefix="ℹ️", device=device)
             load_t0 = time.time()
-
             pipe = None
-            if init_pil is not None:
-                # img2img pipeline
-                if is_xl and _SDXLImg2Img is not None:
-                    try:
-                        pipe = _SDXLImg2Img.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
-                    except Exception as exc:
-                        log(f"SDXLImg2Img load failed: {exc}", prefix="⚠️")
-                if pipe is None and _SDImg2Img is not None:
-                    try:
-                        pipe = _SDImg2Img.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
-                    except Exception as exc:
-                        log(f"SDImg2Img load failed, falling back to txt2img: {exc}", prefix="⚠️")
-                        init_pil = None  # fall back to txt2img
-
-            if pipe is None:
-                # txt2img pipeline (normal path or img2img fallback)
-                if is_xl and _SDXLPipe is not None:
+            # For SD1.5-style checkpoints (triomerge, etc.) use StableDiffusionPipeline
+            # to match direct test behavior; reserve AutoPipeline/SDXL pipeline for SDXL types.
+            pipeline_name = (getattr(entry, "pipeline", "") or "sd15").lower()
+            if pipeline_name in {"sdxl"}:
+                if _SDXLPipe is not None:
                     try:
                         pipe = _SDXLPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
                     except Exception as exc:
                         log(f"StableDiffusionXLPipeline load failed: {exc}", prefix="⚠️")
-
-                if pipe is None and _SDPipe is not None:
+                auto_from_single = getattr(_AutoPipe, "from_single_file", None) if _AutoPipe is not None else None
+                if pipe is None and callable(auto_from_single):
                     try:
-                        pipe = _SDPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
-                    except Exception as exc:
-                        log(f"StableDiffusionPipeline load failed: {exc}", prefix="⚠️")
-
-                # AutoPipeline is truly optional; only use it when the expected
-                # helper is present in this diffusers version.
-                if pipe is None and _AutoPipe is not None and hasattr(_AutoPipe, "from_single_file"):
-                    try:
-                        pipe = _AutoPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
-                    except Exception as exc_auto:
-                        log(f"AutoPipeline load failed: {exc_auto}", prefix="🚫")
-                        raise
+                        pipe = auto_from_single(str(model_path), torch_dtype=dtype, safety_checker=None)
+                    except Exception as exc:  # fallback to SD1.5 pipe
+                        log(f"AutoPipeline load failed: {exc}", prefix="⚠️")
+            if pipe is None and _SDPipe is not None:
+                pipe = _SDPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
             if pipe is None:
-                raise RuntimeError("Failed to construct a pipeline for model.")
-
-            if is_xl:
-                needs_tokenizers = (
-                    not hasattr(pipe, "tokenizer")
-                    or pipe.tokenizer is None
-                    or not hasattr(pipe, "tokenizer_2")
-                    or pipe.tokenizer_2 is None
+                raise RuntimeError("Failed to construct a text2image pipeline for model.")
+            # Optionally swap in a custom VAE for SD1.5-style checkpoints
+            if pipe is not None and getattr(entry, "vae_path", "") and pipeline_name != "sdxl":
+                vae_path = Path(str(getattr(entry, "vae_path", ""))).expanduser()
+                if vae_path.exists() and _AutoencoderKL is not None:
+                    try:
+                        custom_vae = _AutoencoderKL.from_single_file(str(vae_path), torch_dtype=dtype)
+                        pipe.vae = custom_vae
+                        log(f"Loaded custom VAE for {entry.name}", prefix="✅", vae=str(vae_path))
+                    except Exception as exc:
+                        log(f"Custom VAE load failed for {entry.name}: {exc}", prefix="⚠️", vae=str(vae_path))
+            # Optional LoRA attachment with safe stacking and role-aware weights.
+            lora_entries: List[Tuple[Path, float, str]] = []
+            requested: List[Any] = []
+            if job_settings and isinstance(job_settings, dict):
+                requested = job_settings.get("loras") or []
+            if isinstance(requested, str):
+                requested = [requested]
+            if not isinstance(requested, list):
+                requested = []
+            model_hint = f"{entry.name} {pipeline_name}".strip()
+            model_is_sdxl = is_sdxl_model(model_hint)
+            seen: Set[str] = set()
+            for item in requested:
+                if len(lora_entries) >= MAX_LORAS:
+                    break
+                raw_weight: Optional[float] = None
+                if isinstance(item, dict):
+                    name = str(item.get("name") or "").strip()
+                    raw_weight = item.get("weight")
+                else:
+                    name = str(item or "").strip()
+                if not name:
+                    continue
+                normalized = normalize_lora_name(name)
+                if normalized in seen:
+                    continue
+                base_type = infer_lora_base_type(normalized)
+                if base_type == "sdxl" and not model_is_sdxl:
+                    continue
+                if base_type == "sd15" and model_is_sdxl:
+                    continue
+                lora_path = resolve_lora_path(name)
+                if not lora_path:
+                    continue
+                role = classify_lora_role(normalized)
+                weight = clamp_lora_weight(raw_weight, role)
+                adapter_name = f"lora_{role}_{lora_path.stem}"
+                lora_entries.append((lora_path, weight, adapter_name))
+                seen.add(normalized)
+            if lora_entries:
+                lora_summary = ", ".join(
+                    f"{adapter}:{weight:.2f} ({path.name})" for path, weight, adapter in lora_entries
                 )
-                if needs_tokenizers:
-                    base_id = os.environ.get("SDXL_BASE_MODEL") or os.environ.get("SDXL_BASE_PATH")
-                    if not base_id:
-                        raise RuntimeError(
-                            "SDXL tokenizers missing. Set SDXL_BASE_MODEL or SDXL_BASE_PATH to a cached SDXL base."
-                        )
-                    try:
-                        base_pipe = _SDXLPipe.from_pretrained(
-                            base_id, torch_dtype=dtype, safety_checker=None
-                        )
-                        pipe.tokenizer = base_pipe.tokenizer
-                        pipe.tokenizer_2 = base_pipe.tokenizer_2
-                        pipe.text_encoder = base_pipe.text_encoder
-                        pipe.text_encoder_2 = base_pipe.text_encoder_2
-                    except Exception as exc:
-                        raise RuntimeError(f"Failed to load SDXL base components: {exc}") from exc
-
-            if clip_skip > 0:
-                if hasattr(pipe, "set_clip_skip"):
-                    try:
-                        pipe.set_clip_skip(clip_skip)
-                        log(f"Clip skip set to {clip_skip}", prefix="✅")
-                    except Exception as exc:
-                        log(f"Clip skip set failed: {exc}", prefix="⚠️")
-                elif hasattr(pipe, "clip_skip"):
-                    try:
-                        pipe.clip_skip = clip_skip
-                        log(f"Clip skip set to {clip_skip}", prefix="✅")
-                    except Exception as exc:
-                        log(f"Clip skip set failed: {exc}", prefix="⚠️")
-
-            combined_loras: List[Any] = []
-            if isinstance(model_lora, list):
-                combined_loras.extend(model_lora)
-            elif isinstance(model_lora, dict):
-                combined_loras.append(model_lora)
-            if loras:
-                combined_loras.extend(loras)
-            if combined_loras:
-                loaded_loras = _apply_loras_to_pipe(pipe, combined_loras)
-                if loaded_loras:
-                    log(f"Attached {len(loaded_loras)} LoRA(s)", prefix="✅")
-
-            scheduler_set = False
-            sampler = sampler_name.lower() if sampler_name else "dpmpp_2m_karras"
-            if sampler in {"euler_a", "euler-ancestral", "euler_ancestral"} and _EulerA is not None:
-                pipe.scheduler = _EulerA.from_config(pipe.scheduler.config)  # type: ignore[attr-defined]
-                scheduler_set = True
-            elif sampler in {"euler", "euler_discrete"} and _Euler is not None:
-                pipe.scheduler = _Euler.from_config(pipe.scheduler.config)  # type: ignore[attr-defined]
-                scheduler_set = True
-            elif _DPMSolver is not None:
-                pipe.scheduler = _DPMSolver.from_config(
-                    pipe.scheduler.config,
-                    algorithm_type="dpmsolver++",
-                    use_karras_sigmas="karras" in sampler,
-                )  # type: ignore[attr-defined]
-                scheduler_set = True
-            if not scheduler_set and sampler_name:
-                log(f"Sampler '{sampler_name}' unsupported; using default scheduler", prefix="⚠️")
-            LOGGER.info(
-                "Scheduler=%s, use_karras_sigmas=%s",
-                type(pipe.scheduler).__name__,
-                getattr(pipe.scheduler.config, "use_karras_sigmas", None),
-            )
+            else:
+                lora_summary = "none"
+            log(f"Loading LoRAs: {lora_summary}", prefix="🎛️")
+            if lora_entries:
+                adapter_names: List[str] = []
+                adapter_weights: List[float] = []
+                if hasattr(pipe, "load_lora_weights"):
+                    for lora_path, lora_weight, adapter_name in lora_entries:
+                        adapter = adapter_name
+                        try:
+                            pipe.load_lora_weights(str(lora_path), adapter_name=adapter)
+                        except TypeError:
+                            pipe.load_lora_weights(str(lora_path))
+                        except Exception as exc:
+                            log(f"LoRA load failed for {entry.name}: {exc}", prefix="⚠️", lora=str(lora_path))
+                            continue
+                        adapter_names.append(adapter)
+                        adapter_weights.append(lora_weight)
+                        log(f"Loaded LoRA for {entry.name}", prefix="✅", lora=str(lora_path), weight=lora_weight)
+                if adapter_names:
+                    if hasattr(pipe, "set_adapters"):
+                        try:
+                            pipe.set_adapters(adapter_names, adapter_weights)
+                        except TypeError:
+                            pipe.set_adapters(adapter_names)
+                    elif hasattr(pipe, "fuse_lora"):
+                        try:
+                            pipe.fuse_lora()
+                        except Exception as exc:
+                            log(f"LoRA fuse failed for {entry.name}: {exc}", prefix="⚠️")
+                else:
+                    log("Pipeline does not support LoRA loading", prefix="⚠️")
             if hasattr(pipe, "enable_attention_slicing"):
                 pipe.enable_attention_slicing("max")
             # xformers can crash on some consumer GPUs/drivers; keep it opt-in.
@@ -1980,6 +1755,11 @@ def run_image_generation(
                     log("xformers disabled (set HAI_ENABLE_XFORMERS=1 to enable)", prefix="ℹ️")
             if hasattr(pipe, "set_progress_bar_config"):
                 pipe.set_progress_bar_config(disable=True)
+            if "_DPMSolver" in globals() and _DPMSolver is not None and hasattr(pipe, "scheduler"):
+                try:
+                    pipe.scheduler = _DPMSolver.from_config(pipe.scheduler.config)
+                except Exception as exc:
+                    log(f"DPM scheduler setup failed: {exc}", prefix="⚠️")
             pipe = pipe.to(device)
             if not is_xl and hasattr(pipe, "vae") and pipe.vae is not None:
                 try:
@@ -1990,63 +1770,81 @@ def run_image_generation(
                 except Exception as exc:
                     log(f"VAE upcast failed: {exc}", prefix="⚠️")
             load_ms = int((time.time() - load_t0) * 1000)
-            log(
-                f"Pipeline ready in {load_ms}ms · {pipe.__class__.__name__}",
-                prefix="✅",
-            )
+            log(f"Pipeline ready in {load_ms}ms", prefix="✅")
 
-            seed = seed_override if seed_override is not None else (int(time.time()) & 0x7FFFFFFF)
+            seed = None
+            if job_settings and isinstance(job_settings, dict):
+                seed = job_settings.get("seed")
+            try:
+                seed = int(seed) if seed is not None else None
+            except (TypeError, ValueError):
+                seed = None
+            if seed is None:
+                seed = int(time.time()) & 0x7FFFFFFF
             generator = torch.Generator(device=device).manual_seed(seed)
-            text = prompt or "a high quality photo of a golden retriever on a beach at sunset"
-            log(f"Generation: {steps} steps, guidance {guidance}, {width}x{height}, seed {seed}", prefix="🎨")
-            if negative_prompt:
-                log(f"Negative prompt: {negative_prompt[:120]}{'…' if len(negative_prompt) > 120 else ''}", prefix="🚫")
-            if getattr(pipe, "tokenizer", None) is not None and hasattr(pipe.tokenizer, "model_max_length"):
+            pos_text = prompt or "a high quality photo of a golden retriever on a beach at sunset"
+            neg_text = negative_prompt or ""
+            # Merge per-job overrides with model defaults from manifest
+            steps = IMAGE_STEPS
+            guidance = IMAGE_GUIDANCE
+            height = IMAGE_HEIGHT
+            width = IMAGE_WIDTH
+            sampler = None
+            if job_settings and isinstance(job_settings, dict):
+                steps = int(job_settings.get("steps", steps) or steps)
+                guidance = float(job_settings.get("guidance", guidance) or guidance)
+                height = int(job_settings.get("height", height) or height)
+                width = int(job_settings.get("width", width) or width)
+                sampler = str(job_settings.get("sampler") or "").strip().lower() or None
+                if job_settings.get("negative_prompt"):
+                    neg_text = str(job_settings.get("negative_prompt") or "")
+            # clamp to sane ranges
+            steps = max(5, min(50, steps))
+            guidance = max(1.0, min(15.0, guidance))
+            height = max(256, min(1536, height))
+            width = max(256, min(1536, width))
+            # Proactively truncate to CLIP token limit to avoid noisy warnings
+            if hasattr(pipe, "tokenizer") and hasattr(pipe.tokenizer, "model_max_length"):
                 try:
                     encoded = pipe.tokenizer(
-                        text,
+                        pos_text,
                         max_length=pipe.tokenizer.model_max_length,
                         truncation=True,
                         return_tensors="pt",
                     )
-                    text = pipe.tokenizer.batch_decode(encoded.input_ids, skip_special_tokens=True)[0]
+                    pos_text = pipe.tokenizer.batch_decode(
+                        encoded.input_ids, skip_special_tokens=True
+                    )[0]
+                    if neg_text:
+                        encoded_neg = pipe.tokenizer(
+                            neg_text,
+                            max_length=pipe.tokenizer.model_max_length,
+                            truncation=True,
+                            return_tensors="pt",
+                        )
+                        neg_text = pipe.tokenizer.batch_decode(
+                            encoded_neg.input_ids, skip_special_tokens=True
+                        )[0]
                 except Exception as exc:
                     log(f"Prompt truncation failed: {exc}", prefix="⚠️")
             gen_t0 = time.time()
-            call_kwargs = {
-                "num_inference_steps": steps,
-                "guidance_scale": guidance,
-                "generator": generator,
-            }
-            if init_pil is not None:
-                # img2img: pass image and strength, no explicit width/height
-                call_kwargs["image"] = init_pil
-                call_kwargs["strength"] = img2img_strength
-                log(f"img2img: strength={img2img_strength}", prefix="🖼️")
-            else:
-                # txt2img: pass dimensions
-                call_kwargs["height"] = height
-                call_kwargs["width"] = width
-            if negative_prompt:
-                call_kwargs["negative_prompt"] = negative_prompt
-            if clip_skip > 0:
-                try:
-                    if "clip_skip" in inspect.signature(pipe.__call__).parameters:
-                        call_kwargs["clip_skip"] = clip_skip
-                except (TypeError, ValueError):
-                    pass
-            def _run_pipe() -> Any:
-                with torch.inference_mode():
-                    return pipe(text, **call_kwargs)
-
-            try:
-                result = _run_pipe()
-            except RuntimeError as exc:
-                msg = str(exc)
-                is_dtype_error = (
-                    "bias type" in msg
-                    or "expected" in msg.lower() and "float" in msg.lower()
-                    or "Half" in msg
+            # Optional sampler switch if supported
+            if sampler and hasattr(pipe, "scheduler") and _DPMSolver is not None:
+                sampler_norm = sampler.replace("+", "p")
+                if "dpmpp" in sampler_norm:
+                    try:
+                        pipe.scheduler = _DPMSolver.from_config(pipe.scheduler.config)
+                    except Exception as exc:
+                        log(f"Sampler switch failed: {exc}", prefix="⚠️", sampler=sampler)
+            with torch.inference_mode():
+                result = pipe(
+                    pos_text,
+                    negative_prompt=neg_text or None,
+                    num_inference_steps=steps,
+                    guidance_scale=guidance,
+                    generator=generator,
+                    height=height,
+                    width=width,
                 )
                 if not is_xl and is_dtype_error:
                     log("SD1.5 dtype mismatch — converting full pipeline to fp32", prefix="⚠️")
@@ -2057,21 +1855,15 @@ def run_image_generation(
                 else:
                     raise
             gen_ms = int((time.time() - gen_t0) * 1000)
-            log(
-                f"Generated in {gen_ms}ms",
-                prefix="✅",
-                steps=steps,
-                guidance=guidance,
-                width=width,
-                height=height,
-            )
+            log(f"Generated in {gen_ms}ms", prefix="✅")
             img = result.images[0]
             img.save(output_path)
             with output_path.open("rb") as fh:
                 image_b64 = base64.b64encode(fh.read()).decode("utf-8")
         elif Image is not None:
             log("Using fast preview placeholder (no SD detected or FAST_PREVIEW enabled)", prefix="ℹ️")
-            w, h = width, height
+            # Fallback: deterministic gradient image with text-like bands so it isn't noisy
+            w = h = 512
             if np is not None:
                 yy = np.linspace(0, 255, h, dtype=np.uint8)
                 xx = np.linspace(0, 255, w, dtype=np.uint8)
@@ -2086,6 +1878,7 @@ def run_image_generation(
             with output_path.open("rb") as fh:
                 image_b64 = base64.b64encode(fh.read()).decode("utf-8")
         else:
+            # No image libs available; simulate compute only
             time.sleep(random.uniform(1.2, 2.2))
     except Exception as exc:
         status = "failed"
@@ -2098,17 +1891,13 @@ def run_image_generation(
     util = int(max(util, 70 if ROLE == "creator" else util))
     metrics = {
         "status": status,
-        "model_name": model_name,
-        "model_path": str(model_path),
-        "reward_weight": reward_weight,
+            "model_name": entry.name,
+            "model_path": str(model_path),
+            "reward_weight": reward_weight,
         "task_type": "image_gen",
         "inference_time_ms": round(duration * 1000, 3),
         "gpu_util_start": start_stats.get("utilization", 0),
         "gpu_util_end": end_stats.get("utilization", 0),
-        "steps": steps,
-        "guidance": guidance,
-        "width": width,
-        "height": height,
     }
     if loaded_loras:
         metrics["loras"] = loaded_loras
@@ -2125,18 +1914,20 @@ def run_image_generation(
 def heartbeat_loop() -> None:
     backoff = BACKOFF_BASE
     while True:
-        local_loras = list_local_loras()
-        pipelines, supports = build_node_capabilities()
+        gpu_stats = read_gpu_stats()
+        capabilities = discover_capabilities()
         payload = {
             "node_id": NODE_NAME,
             "os": os.uname().sysname if hasattr(os, "uname") else os.name,
-            "gpu": read_gpu_stats(),
+            "gpu": gpu_stats.get("gpu_name", "Simulated"),
+            "gpu_stats": gpu_stats,
             "start_time": START_TIME,
             "uptime": time.time() - START_TIME,
             "role": ROLE,
             "version": CLIENT_VERSION,
             "node_name": NODE_NAME,
-            "loras": local_loras,
+            "models": capabilities["models"],
+            "pipelines": capabilities["pipelines"],
         }
         if pipelines:
             payload["pipelines"] = pipelines
@@ -2147,6 +1938,10 @@ def heartbeat_loop() -> None:
             resp.raise_for_status()
             backoff = BACKOFF_BASE
             log(f"Heartbeat OK ({ROLE})", prefix="✅")
+            try:
+                REGISTRY.refresh()
+            except Exception as exc:
+                log(f"Manifest refresh failed (heartbeat): {exc}", prefix="⚠️")
         except Exception as exc:
             log(f"Heartbeat failed: {exc}", prefix="⚠️")
             time.sleep(backoff)
@@ -2182,8 +1977,7 @@ def poll_tasks_loop() -> None:
 
 if __name__ == "__main__":
     log(f"Node ID: {NODE_NAME} · Role: {ROLE.upper()} · Version: {CLIENT_VERSION}")
-    _configure_cuda_runtime()
-    register_local_models()
+    refresh_manifest_with_backoff("startup")
     link_wallet(WALLET)
     # Graceful shutdown hooks
     atexit.register(disconnect)

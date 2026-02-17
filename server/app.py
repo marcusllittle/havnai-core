@@ -6,20 +6,35 @@ from logging.handlers import RotatingFileHandler
 import os
 import re
 import sqlite3
+import shutil
 import subprocess
 import sys
 import threading
 import time
 import uuid
 import random
+import requests
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from flask import abort, Flask, jsonify, request, send_file, send_from_directory, g, has_app_context
+from flask import abort, Flask, jsonify, request, Response, send_file, send_from_directory, g, has_app_context
 from flask_cors import CORS
+
+# Import our local modules
+import safety
+import credits
+import invite
+import rewards
+import job_helpers
+import stripe_payments
+import sse as sse_module
+import blockchain
+import analytics
+import validators
+import workflows
 
 # ---------------------------------------------------------------------------
 # Paths & constants
@@ -38,10 +53,13 @@ CLIENT_PATH = BASE_DIR / "client" / "client.py"
 CLIENT_REGISTRY = BASE_DIR / "client" / "registry.py"
 CLIENT_REQUIREMENTS = BASE_DIR / "client" / "requirements-node.txt"
 VERSION_FILE = BASE_DIR / "VERSION"
+LORA_STORAGE_DIR = Path(os.getenv("HAVNAI_LORA_STORAGE_DIR", "/mnt/d/havnai-storage/models/loras"))
 
 CREATOR_TASK_TYPE = "IMAGE_GEN"
 
-# Ensure local packages (e.g., havnai.video_engine) are importable when running server/app.py directly
+SUPPORTED_LORA_EXTS = {".safetensors", ".ckpt", ".pt", ".bin"}
+
+# Ensure local packages (e.g., havnai.*) are importable when running server/app.py directly
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
@@ -71,10 +89,40 @@ RATE_LIMIT_BUCKETS: Dict[str, deque] = defaultdict(deque)
 
 ONLINE_THRESHOLD = 120  # seconds before a node is considered offline
 WALLET_REGEX = re.compile(r"^0x[a-fA-F0-9]{40}$")
+JOB_ID_REGEX = re.compile(r"^[A-Za-z0-9_-]+$")
 
 SERVER_JOIN_TOKEN = os.getenv("SERVER_JOIN_TOKEN", "").strip()
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "").strip()
 RESET_ON_STARTUP = os.getenv("RESET_ON_STARTUP", "").strip()
+INVITE_CONFIG_PATH = Path(
+    os.getenv("HAVNAI_INVITE_CONFIG", str(BASE_DIR / "server" / "invites.json"))
+)
+INVITE_GATING = os.getenv("HAVNAI_INVITE_GATING", "").strip().lower() in {"1", "true", "yes"}
+CREDITS_ENABLED = os.getenv("HAVNAI_CREDITS_ENABLED", "").strip().lower() in {"1", "true", "yes"}
+
+# ---------------------------------------------------------------------------
+# GPU profile presets – select via HAVNAI_GPU_PROFILE env var.
+# "fast_3060" is tuned for RTX 3060 (12 GB); "quality" restores the old
+# high-fidelity defaults.  Unset / "auto" picks "fast_3060" by default.
+# Individual settings can still be overridden via HAVNAI_LTX2_STEPS, etc.
+# ---------------------------------------------------------------------------
+_GPU_PROFILES: Dict[str, Dict[str, Any]] = {
+    "fast_3060": {"steps": 20, "frames": 16, "fps": 8, "width": 512, "height": 512, "guidance": 7.0},
+    "quality":   {"steps": 30, "frames": 16, "fps": 8, "width": 512, "height": 512, "guidance": 7.0},
+}
+_GPU_PROFILE_NAME = os.getenv("HAVNAI_GPU_PROFILE", "fast_3060").strip().lower()
+GPU_PROFILE = _GPU_PROFILES.get(_GPU_PROFILE_NAME, _GPU_PROFILES["fast_3060"])
+
+# Allow per-setting env-var overrides on top of the profile
+LTX2_DEFAULT_STEPS = int(os.getenv("HAVNAI_LTX2_STEPS", str(GPU_PROFILE["steps"])))
+LTX2_DEFAULT_FRAMES = int(os.getenv("HAVNAI_LTX2_FRAMES", str(GPU_PROFILE["frames"])))
+LTX2_DEFAULT_FPS = int(os.getenv("HAVNAI_LTX2_FPS", str(GPU_PROFILE["fps"])))
+LTX2_DEFAULT_WIDTH = int(os.getenv("HAVNAI_LTX2_WIDTH", str(GPU_PROFILE["width"])))
+LTX2_DEFAULT_HEIGHT = int(os.getenv("HAVNAI_LTX2_HEIGHT", str(GPU_PROFILE["height"])))
+LTX2_DEFAULT_GUIDANCE = float(os.getenv("HAVNAI_LTX2_GUIDANCE", str(GPU_PROFILE["guidance"])))
+
+# Hard timeout (seconds) for a single video generation job.  0 = no limit.
+LTX2_JOB_TIMEOUT = int(os.getenv("HAVNAI_LTX2_JOB_TIMEOUT", "300"))
 
 # Reward configuration (can be overridden via environment variables)
 REWARD_CONFIG: Dict[str, float] = {
@@ -82,13 +130,17 @@ REWARD_CONFIG: Dict[str, float] = {
     "sdxl_factor": float(os.getenv("REWARD_SDXL_FACTOR", "1.5")),
     "sd15_factor": float(os.getenv("REWARD_SD15_FACTOR", "1.0")),
     "anime_factor": float(os.getenv("REWARD_ANIME_FACTOR", "0.7")),
+    "ltx2_factor": float(os.getenv("REWARD_LTX2_FACTOR", "2.0")),
     "base_reward": float(os.getenv("REWARD_BASE_HAI", "0.05")),
 }
 
-# Slight global positive bias to help realism skin detail.
-GLOBAL_POSITIVE_SUFFIX = (
-    "(ultra-realistic 8k:1.05), "
-    "(detailed skin pores:1.03), "
+# Per-pipeline positive suffixes.  SD1.5 realism models benefit from strong
+# hand/anatomy hints; SDXL already handles anatomy well and just needs a
+# light quality push.  Stylized models (anime, cartoon, manhwa) should NOT
+# get the realism suffix — it fights against the art style.
+
+POSITIVE_SUFFIX_SD15_REALISM = (
+    "(ultra-realistic 8k:1.05), (detailed skin pores:1.03), "
     "focused eyes, clear pupils, natural gaze, "
     "natural teeth, realistic mouth structure, "
     "no extra breasts, no multiple breasts, not deformed, no multiple legs"
@@ -110,6 +162,155 @@ GLOBAL_NEGATIVE_PROMPT = (
     "duplicate ass, layered buttocks, overlapping anatomy, "
     "pixelated, jpeg artifacts, lowres, worst quality"
 )
+
+POSITIVE_SUFFIX_STYLIZED = (
+    "high quality, masterpiece, detailed, clean lines"
+)
+
+# Tags that indicate a stylized (non-realism) model
+_STYLIZED_TAGS = {"anime", "cartoon", "pixar", "manhwa", "webtoon", "stylized", "fantasy"}
+
+def get_positive_suffix(model_cfg: Optional[Dict[str, Any]] = None) -> str:
+    """Return the appropriate positive suffix based on model config."""
+    if model_cfg is None:
+        return POSITIVE_SUFFIX_SD15_REALISM
+    tags = set(t.lower() for t in (model_cfg.get("tags") or []))
+    pipeline = (model_cfg.get("pipeline") or "sd15").lower()
+    if tags & _STYLIZED_TAGS:
+        return POSITIVE_SUFFIX_STYLIZED
+    if "sdxl" in pipeline or "xl" in pipeline:
+        return POSITIVE_SUFFIX_SDXL
+    return POSITIVE_SUFFIX_SD15_REALISM
+
+# Backward-compatible alias used by older code paths
+GLOBAL_POSITIVE_SUFFIX = POSITIVE_SUFFIX_SD15_REALISM
+
+# Per-pipeline negative prompts — SD1.5 needs much stronger hand/anatomy
+# correction while SDXL handles anatomy natively and just needs lighter cleanup.
+
+_NEGATIVE_HAND_SD15 = (
+    "(worst hands:1.4), (deformed hands:1.4), (wrong number of fingers:1.3), "
+    "(extra fingers:1.3), (missing fingers:1.3), (fused fingers:1.3), "
+    "(too many fingers:1.3), (mutated hands:1.3), (poorly drawn hands:1.3), "
+    "(bad hands:1.3), (extra digit:1.2), (fewer digits:1.2), "
+    "(six fingers:1.3), (four fingers:1.3), "
+    "liquid fingers, interlocked fingers, webbed fingers, broken finger, "
+    "broken hand, broken wrist, twisted fingers, split fingers, "
+    "disfigured hand, inverted hand, liquid hand, three hands, "
+    "no thumb, ugly fingers, long fingers"
+)
+
+_NEGATIVE_ANATOMY_SD15 = (
+    "(bad anatomy:1.3), (extra limbs:1.2), extra arm, extra leg, "
+    "missing arm, missing leg, malformed limbs, fused limbs, "
+    "disconnected limbs, twisted limbs, split limbs, "
+    "duplicate face, multiple faces, extra eyes, huge eyes, "
+    "deformed face, cloned face, asymmetrical features, "
+    "long neck, weird neck, oversized head, "
+    "disproportionate, unrealistic proportions, gross proportions"
+)
+
+_NEGATIVE_QUALITY_COMMON = (
+    "worst quality, low quality, normal quality, jpeg artifacts, "
+    "blurry, out of frame, cropped, watermark, signature, "
+    "text, logo, username, artist name, letterbox, "
+    "draft, grainy, noisy, pixelated, compression artifacts, "
+    "overexposed, underexposed, motion blur"
+)
+
+_NEGATIVE_STYLE_REALISM = (
+    "3d, render, cgi, doll, cartoon, illustration, painting, "
+    "digital art, anime, fake, 3d modeling, drawing, sketch"
+)
+
+GLOBAL_NEGATIVE_SD15 = ", ".join([
+    "FastNegativeV2",
+    _NEGATIVE_HAND_SD15,
+    _NEGATIVE_ANATOMY_SD15,
+    _NEGATIVE_QUALITY_COMMON,
+    _NEGATIVE_STYLE_REALISM,
+    "split image, amputee, mutation, morbid, mutilated, "
+    "deformed, disfigured, bad proportions",
+])
+
+GLOBAL_NEGATIVE_SDXL = ", ".join([
+    "extra fingers, fused fingers, too many fingers, mutated hands, "
+    "bad hands, deformed hands, extra hands, three hands",
+    "extra limbs, missing arm, missing leg, extra arm, extra leg, "
+    "duplicate face, cloned face, extra eyes",
+    _NEGATIVE_QUALITY_COMMON,
+    _NEGATIVE_STYLE_REALISM,
+    "bad anatomy, gross proportions, long neck, oversized head",
+])
+
+# Backward-compatible alias — defaults to SD1.5 (stricter) for safety
+GLOBAL_NEGATIVE_PROMPT = GLOBAL_NEGATIVE_SD15
+
+def get_pipeline_negative(pipeline: str) -> str:
+    """Return the appropriate global negative prompt for a pipeline type."""
+    pipeline = (pipeline or "sd15").lower()
+    if "sdxl" in pipeline or "xl" in pipeline:
+        return GLOBAL_NEGATIVE_SDXL
+    return GLOBAL_NEGATIVE_SD15
+
+# ---------------------------------------------------------------------------
+# Video-specific negative prompts
+# ---------------------------------------------------------------------------
+
+_NEGATIVE_VIDEO_COMMON = (
+    "jitter, flicker, frame inconsistency, temporal artifacts, "
+    "blurry motion, ghosting, double exposure, choppy animation, "
+    "static noise, digital compression, low bitrate"
+)
+
+_NEGATIVE_VIDEO_HAND = (
+    "(worst hands:1.3), (deformed hands:1.3), (wrong number of fingers:1.2), "
+    "(extra fingers:1.2), (missing fingers:1.2), (fused fingers:1.2)"
+)
+
+NEGATIVE_VIDEO_LTXL = ", ".join([
+    _NEGATIVE_VIDEO_COMMON,
+    _NEGATIVE_VIDEO_HAND,
+    "distorted faces, inconsistent appearance, morphing face, "
+    "bad anatomy, warped geometry, stretched limbs",
+    _NEGATIVE_QUALITY_COMMON,
+])
+
+NEGATIVE_VIDEO_ANIMATEDIFF = ", ".join([
+    _NEGATIVE_VIDEO_COMMON,
+    _NEGATIVE_VIDEO_HAND,
+    _NEGATIVE_ANATOMY_SD15,  # Use SD1.5 anatomy since AnimateDiff is based on SD1.5
+    "distorted faces, inconsistent appearance, morphing face",
+    _NEGATIVE_QUALITY_COMMON,
+])
+
+POSITIVE_VIDEO_LTXL = (
+    "smooth motion, consistent appearance, high quality, cinematic, "
+    "professional, sharp details, (masterpiece:1.1), (best quality:1.1)"
+)
+
+POSITIVE_VIDEO_ANIMATEDIFF = (
+    "smooth motion, consistent appearance, high quality, cinematic, "
+    "professional, sharp details, smooth motion, flowing motion, (best quality:1.1)"
+)
+
+def get_video_negative(model_name: str) -> str:
+    """Return the appropriate negative prompt for a video model."""
+    model_lower = (model_name or "").lower()
+    if "ltx" in model_lower or "latte" in model_lower:
+        return NEGATIVE_VIDEO_LTXL
+    if "animat" in model_lower:
+        return NEGATIVE_VIDEO_ANIMATEDIFF
+    return NEGATIVE_VIDEO_LTXL  # Safe default
+
+def get_video_positive_suffix(model_name: str) -> str:
+    """Return quality tokens to append to video prompts."""
+    model_lower = (model_name or "").lower()
+    if "ltx" in model_lower or "latte" in model_lower:
+        return POSITIVE_VIDEO_LTXL
+    if "animat" in model_lower:
+        return POSITIVE_VIDEO_ANIMATEDIFF
+    return POSITIVE_VIDEO_LTXL
 
 # ---------------------------------------------------------------------------
 # Version helpers
@@ -143,6 +344,12 @@ else:
     CORS(app)
 
 app.config["APP_VERSION"] = APP_VERSION
+
+# ---------------------------------------------------------------------------
+# SSE (Server-Sent Events) broker
+# ---------------------------------------------------------------------------
+
+sse_broker = sse_module.SSEBroker()
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -186,6 +393,66 @@ def log_event(message: str, level: str = "info", **extra: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Dependency injection for modules
+# ---------------------------------------------------------------------------
+
+def _inject_module_dependencies() -> None:
+    """Inject app dependencies into extracted modules."""
+    # Invite module
+    invite.get_db = get_db  # type: ignore[attr-defined]
+    invite.request = request  # type: ignore[attr-defined]
+    invite.jsonify = jsonify  # type: ignore[attr-defined]
+    invite.INVITE_CONFIG_PATH = INVITE_CONFIG_PATH  # type: ignore[attr-defined]
+    invite.INVITE_GATING = INVITE_GATING  # type: ignore[attr-defined]
+    invite.LOGGER = LOGGER  # type: ignore[attr-defined]
+
+    # Credits module
+    credits.get_db = get_db  # type: ignore[attr-defined]
+    credits.log_event = log_event  # type: ignore[attr-defined]
+    credits.CREDITS_ENABLED = CREDITS_ENABLED  # type: ignore[attr-defined]
+    # get_model_config will be injected after it's defined
+
+    # Rewards module
+    rewards.get_db = get_db  # type: ignore[attr-defined]
+    rewards.LOGGER = LOGGER  # type: ignore[attr-defined]
+    rewards.MODEL_WEIGHTS = MODEL_WEIGHTS  # type: ignore[attr-defined]
+    rewards.REWARD_CONFIG = REWARD_CONFIG  # type: ignore[attr-defined]
+
+    # Job helpers module
+    job_helpers.get_db = get_db  # type: ignore[attr-defined]
+    job_helpers.NODES = NODES  # type: ignore[attr-defined]
+    job_helpers.CREATOR_TASK_TYPE = CREATOR_TASK_TYPE  # type: ignore[attr-defined]
+    # get_model_config will be injected after it's defined
+
+    # Stripe payments module
+    stripe_payments.get_db = get_db  # type: ignore[attr-defined]
+    stripe_payments.log_event = log_event  # type: ignore[attr-defined]
+    stripe_payments.deposit_credits = credits.deposit_credits  # type: ignore[attr-defined]
+
+    # Blockchain module
+    blockchain.get_db = get_db  # type: ignore[attr-defined]
+    blockchain.log_event = log_event  # type: ignore[attr-defined]
+    blockchain.WALLET_REGEX = WALLET_REGEX  # type: ignore[attr-defined]
+
+    # Analytics module
+    analytics.get_db = get_db  # type: ignore[attr-defined]
+    analytics.log_event = log_event  # type: ignore[attr-defined]
+    analytics.NODES = NODES  # type: ignore[attr-defined]
+    analytics.ONLINE_THRESHOLD = ONLINE_THRESHOLD  # type: ignore[attr-defined]
+    analytics.CREATOR_TASK_TYPE = CREATOR_TASK_TYPE  # type: ignore[attr-defined]
+
+    # Validators module
+    validators.get_db = get_db  # type: ignore[attr-defined]
+    validators.log_event = log_event  # type: ignore[attr-defined]
+    validators.NODES = NODES  # type: ignore[attr-defined]
+
+    # Workflows module
+    workflows.get_db = get_db  # type: ignore[attr-defined]
+    workflows.log_event = log_event  # type: ignore[attr-defined]
+    workflows.WALLET_REGEX = WALLET_REGEX  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
 # Utility helpers
 # ---------------------------------------------------------------------------
 
@@ -205,7 +472,9 @@ def parse_timestamp(value: Any) -> float:
         return float(value)
     if isinstance(value, str):
         try:
-            return datetime.fromisoformat(value.replace("Z", "")).timestamp()
+            # Replace trailing "Z" with "+00:00" so fromisoformat produces a
+            # timezone-aware datetime and .timestamp() returns correct UTC epoch.
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
         except ValueError:
             try:
                 return float(value)
@@ -225,10 +494,6 @@ def format_duration(seconds: float) -> str:
         parts.append(f"{minutes}m")
     parts.append(f"{secs}s")
     return " ".join(parts)
-
-
-def resolve_weight(model_name: str, default: float = 1.0) -> float:
-    return float(MODEL_WEIGHTS.get(model_name, default))
 
 
 def check_join_token() -> bool:
@@ -254,6 +519,62 @@ def rate_limit(key: str, limit: int, per_seconds: int = 60) -> bool:
     return True
 
 
+# Invite management moved to server/invite.py
+
+
+# Safety filtering moved to server/safety.py
+
+
+def _download_lora_asset(lora: Dict[str, Any], dest_dir: Path) -> Path:
+    filename = str(lora.get("filename") or lora.get("name") or "").strip()
+    if not filename:
+        raise RuntimeError("lora filename missing")
+    local_path = dest_dir / filename
+    if local_path.exists():
+        return local_path
+    url = str(lora.get("url") or "").strip()
+    if not url:
+        raise RuntimeError(f"lora url missing for {filename}")
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    temp_path = local_path.with_suffix(local_path.suffix + ".part")
+    last_error: Optional[Exception] = None
+    for attempt in range(2):
+        try:
+            resp = requests.get(url, stream=True, timeout=120, headers={"User-Agent": "HavnAI/1.0"})
+            resp.raise_for_status()
+            with temp_path.open("wb") as handle:
+                for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        handle.write(chunk)
+            temp_path.replace(local_path)
+            return local_path
+        except Exception as exc:
+            last_error = exc
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+            except Exception:
+                pass
+            log_event(
+                "LoRA download failed",
+                level="warning",
+                filename=filename,
+                url=url,
+                attempt=attempt + 1,
+                error=str(exc),
+            )
+            if attempt == 0:
+                time.sleep(1)
+    log_event(
+        "LoRA download failed after retry",
+        level="error",
+        filename=filename,
+        url=url,
+        error=str(last_error),
+    )
+    raise RuntimeError(f"LoRA download failed: {last_error}")
+
+
 # ---------------------------------------------------------------------------
 # Directory bootstrap
 # ---------------------------------------------------------------------------
@@ -265,64 +586,6 @@ def ensure_directories() -> None:
 
 
 ensure_directories()
-
-# ---------------------------------------------------------------------------
-# WAN 2.2 GGUF video worker
-# ---------------------------------------------------------------------------
-
-VIDEO_ENGINE = VideoEngine()
-VIDEO_EXECUTOR = ThreadPoolExecutor(max_workers=int(os.getenv("WAN_W2V_WORKERS", "1")) or 1)
-VIDEO_JOBS: Dict[str, Dict[str, Any]] = {}
-VIDEO_JOB_LOCK = threading.Lock()
-
-
-def submit_video_job(job_request: VideoJobRequest) -> str:
-    """Queue a WAN GGUF video generation job."""
-
-    job_id = job_request.job_id or f"wan-video-{uuid.uuid4().hex[:8]}"
-    job_request.job_id = job_id
-    mode = "i2v" if job_request.init_image_b64 else "t2v"
-    record = {
-        "job_id": job_id,
-        "status": "queued",
-        "prompt": job_request.prompt,
-        "negative_prompt": job_request.negative_prompt,
-        "mode": mode,
-        "loras": job_request.lora_list,
-        "motion_type": job_request.motion_type,
-        "duration": job_request.duration,
-        "fps": job_request.fps,
-        "created_at": iso_now(),
-        "frames_dir": str(VIDEO_ENGINE.registry.paths.frames_dir),
-        "videos_dir": str(VIDEO_ENGINE.registry.paths.videos_dir),
-    }
-    with VIDEO_JOB_LOCK:
-        VIDEO_JOBS[job_id] = record
-    VIDEO_EXECUTOR.submit(_run_video_job, job_id, job_request)
-    return job_id
-
-
-def _run_video_job(job_id: str, job_request: VideoJobRequest) -> None:
-    with VIDEO_JOB_LOCK:
-        if job_id in VIDEO_JOBS:
-            VIDEO_JOBS[job_id]["status"] = "running"
-            VIDEO_JOBS[job_id]["started_at"] = iso_now()
-    result = VIDEO_ENGINE.generate(job_request)
-    with VIDEO_JOB_LOCK:
-        payload = VIDEO_JOBS.get(job_id, {})
-        payload["status"] = result.status
-        payload["completed_at"] = iso_now()
-        payload["video_path"] = result.video_path
-        payload["frame_paths"] = result.frame_paths
-        payload["error"] = result.error
-        payload["metadata"] = result.metadata
-        VIDEO_JOBS[job_id] = payload
-
-
-def get_video_job(job_id: str) -> Optional[Dict[str, Any]]:
-    with VIDEO_JOB_LOCK:
-        job = VIDEO_JOBS.get(job_id)
-        return dict(job) if job else None
 
 # ---------------------------------------------------------------------------
 # Database helpers
@@ -374,10 +637,14 @@ def init_db() -> None:
             node_id TEXT,
             timestamp REAL NOT NULL,
             assigned_at REAL,
-            completed_at REAL
+            completed_at REAL,
+            invite_code TEXT
         )
         """
     )
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+    if "invite_code" not in columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN invite_code TEXT")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS rewards (
@@ -399,11 +666,31 @@ def init_db() -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS credits (
+            wallet TEXT PRIMARY KEY,
+            balance REAL NOT NULL DEFAULT 0.0 CHECK (balance >= 0),
+            total_deposited REAL NOT NULL DEFAULT 0.0,
+            total_spent REAL NOT NULL DEFAULT 0.0,
+            updated_at REAL NOT NULL
+        )
+        """
+    )
     conn.execute("UPDATE jobs SET status='queued', node_id=NULL WHERE status='running'")
     conn.commit()
 
 
 init_db()
+stripe_payments.init_stripe_tables(get_db())
+
+# Inject dependencies into extracted modules (initial injection)
+_inject_module_dependencies()
+
+# Initialize tables for new modules (must come after dependency injection)
+blockchain.init_blockchain_tables(get_db())
+validators.init_validator_tables(get_db())
+workflows.init_workflow_tables(get_db())
 
 # Optional: clear database and in-memory state on startup for a fresh dashboard
 if RESET_ON_STARTUP:
@@ -464,9 +751,18 @@ def load_manifest() -> None:
 load_manifest()
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
+# Manifest TTL cache: only reload from disk at most every 60 seconds
+_MANIFEST_LAST_LOADED: float = time.time()
+_MANIFEST_TTL: float = 60.0  # seconds
+
 
 def refresh_manifest() -> None:
-    load_manifest()
+    """Reload manifest only if the TTL has elapsed since the last load."""
+    global _MANIFEST_LAST_LOADED
+    now = time.time()
+    if (now - _MANIFEST_LAST_LOADED) >= _MANIFEST_TTL:
+        load_manifest()
+        _MANIFEST_LAST_LOADED = now
 
 # ---------------------------------------------------------------------------
 # Node persistence (nodes.json + wallet bindings)
@@ -484,6 +780,7 @@ def load_nodes() -> Dict[str, Dict[str, Any]]:
         node.setdefault("gpu", {})
         node.setdefault("pipelines", [])
         node.setdefault("models", [])
+        node.setdefault("loras", [])
         node.setdefault("rewards", 0.0)
         node.setdefault("utilization", 0.0)
         node.setdefault("avg_utilization", node.get("utilization", 0.0))
@@ -511,7 +808,9 @@ def save_nodes() -> None:
         json.dump(payload, f, indent=2)
 
 
-NODES = load_nodes()
+# Keep the original dict object so injected module references stay valid.
+NODES.clear()
+NODES.update(load_nodes())
 
 
 def load_node_wallets() -> None:
@@ -532,6 +831,7 @@ def load_node_wallets() -> None:
             "start_time": unix_now(),
             "role": "worker",
             "last_seen": iso_now(),
+            "loras": [],
         })
         node["wallet"] = row["wallet"]
         if row["node_name"]:
@@ -546,213 +846,54 @@ log_event(f"Telemetry online with {len(NODES)} cached node(s).", version=APP_VER
 # ---------------------------------------------------------------------------
 
 
-def enqueue_job(wallet: str, model: str, task_type: str, data: str, weight: float) -> str:
-    job_id = f"job-{uuid.uuid4().hex[:12]}"
-    task_type = (task_type or CREATOR_TASK_TYPE).upper()
+# Job queue and reward management moved to server/job_helpers.py and server/rewards.py
+
+
+# ---------------------------------------------------------------------------
+# Credits helpers (moved to server/credits.py)
+# ---------------------------------------------------------------------------
+
+
+def get_job_summary(limit: int = 50, offset: int = 0) -> Dict[str, Any]:
     conn = get_db()
-    conn.execute(
-        """
-        INSERT INTO jobs (id, wallet, model, data, task_type, weight, status, node_id, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?, 'queued', NULL, ?)
-        """,
-        (job_id, wallet, model, data, task_type, float(weight), unix_now()),
-    )
-    conn.commit()
-    return job_id
-
-
-def compute_reward(
-    model_name: str,
-    pipeline: str,
-    metrics: Dict[str, Any],
-    status: str,
-) -> Tuple[float, Dict[str, Any]]:
-    """Compute dynamic reward for a completed job.
-
-    Formula:
-        reward = base_reward * weight_factor * compute_cost_factor
-                  * runtime_factor * success_factor
-    """
-
-    try:
-        base_reward = float(REWARD_CONFIG.get("base_reward", 0.05))
-        # Weight factor based on manifest/model weight
-        model_weight = resolve_weight(model_name, 10.0)
-        weight_factor = model_weight / 10.0
-
-        # Compute-cost factor based on pipeline family
-        pipeline_norm = (pipeline or "sd15").lower()
-        if pipeline_norm == "sdxl":
-            compute_cost_factor = float(REWARD_CONFIG.get("sdxl_factor", 1.5))
-        elif pipeline_norm == "sd15":
-            compute_cost_factor = float(REWARD_CONFIG.get("sd15_factor", 1.0))
-        elif pipeline_norm in {"anime", "cartoon"}:
-            compute_cost_factor = float(REWARD_CONFIG.get("anime_factor", 0.7))
-        else:
-            compute_cost_factor = 1.0
-
-        # Runtime factor from actual runtime vs baseline
-        baseline_runtime = float(REWARD_CONFIG.get("baseline_runtime", 8.0)) or 8.0
-        runtime_sec = 0.0
-        inf_ms = metrics.get("inference_time_ms")
-        if isinstance(inf_ms, (int, float)) and inf_ms > 0:
-            runtime_sec = float(inf_ms) / 1000.0
-        else:
-            dur = metrics.get("duration")
-            if isinstance(dur, (int, float)) and dur > 0:
-                runtime_sec = float(dur)
-        runtime_sec = max(0.0, runtime_sec)
-        runtime_factor = max(1.0, runtime_sec / baseline_runtime) if baseline_runtime > 0 else 1.0
-
-        # Success / failure factor
-        status_norm = (status or "").lower()
-        success_factor = 1.0 if status_norm == "success" else 0.0
-
-        reward = base_reward * weight_factor * compute_cost_factor * runtime_factor * success_factor
-        reward = round(float(reward), 6)
-
-        factors = {
-            "base_reward": base_reward,
-            "weight_factor": weight_factor,
-            "compute_cost_factor": compute_cost_factor,
-            "runtime_factor": runtime_factor,
-            "success_factor": success_factor,
-            "runtime_seconds": runtime_sec,
-            "model_weight": model_weight,
-            "pipeline": pipeline_norm,
-            # TODO: future quality verification boost
-            # "quality_factor": 1.0,
-        }
-        return reward, factors
-    except Exception as exc:  # pragma: no cover - defensive
-        LOGGER.exception("Reward computation failed for %s: %s", model_name, exc)
-        return 0.0, {
-            "base_reward": float(REWARD_CONFIG.get("base_reward", 0.05)),
-            "weight_factor": 0.0,
-            "compute_cost_factor": 1.0,
-            "runtime_factor": 1.0,
-            "success_factor": 0.0,
-            "runtime_seconds": 0.0,
-            "error": str(exc),
-        }
-
-
-def fetch_next_job_for_node(node_id: str) -> Optional[Dict[str, Any]]:
-    conn = get_db()
-    rows = conn.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY timestamp ASC").fetchall()
-    node = NODES.get(node_id, {})
-    role = node.get("role", "worker")
-    node_supports = {s.lower() for s in node.get("supports", []) if isinstance(s, str)}
-    for row in rows:
-        task_type = (row["task_type"] or CREATOR_TASK_TYPE).upper()
-        # Support standard IMAGE_GEN, WAN video jobs, and AnimateDiff video jobs.
-        if task_type not in {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF"}:
-            continue
-        if role != "creator":
-            continue
-        required_support = "image"
-        if task_type in {"VIDEO_GEN", "ANIMATEDIFF"}:
-            required_support = "animatediff" if task_type == "ANIMATEDIFF" else "image"
-        if node_supports and required_support not in node_supports:
-            continue
-        model_name = row["model"].lower()
-        cfg = get_model_config(model_name)
-        if not cfg:
-            continue
-        node_models = {m.lower() for m in node.get("models", []) if isinstance(m, str)}
-        if node_models and model_name not in node_models:
-            continue
-        required_pipeline = (cfg.get("pipeline") or "sd15").lower()
-        node_pipelines = {p.lower() for p in node.get("pipelines", []) if isinstance(p, str)}
-        if node_pipelines and required_pipeline not in node_pipelines:
-            continue
-        return dict(row)
-    return None
-
-
-def assign_job_to_node(job_id: str, node_id: str) -> None:
-    conn = get_db()
-    conn.execute("UPDATE jobs SET status='running', node_id=?, assigned_at=? WHERE id=?", (node_id, unix_now(), job_id))
-    conn.commit()
-
-
-def complete_job(job_id: str, node_id: str, status: str) -> bool:
-    """Mark a job complete only if it is still running for the given node."""
-    conn = get_db()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute("SELECT status, node_id FROM jobs WHERE id=?", (job_id,)).fetchone()
-        current_status = (row["status"] or "").lower() if row else ""
-        owner = row["node_id"] if row else None
-        if not row or current_status != "running" or (owner and owner != node_id):
-            conn.rollback()
-            return False
-        conn.execute(
-            "UPDATE jobs SET status=?, node_id=?, completed_at=? WHERE id=?",
-            (status, node_id, unix_now(), job_id),
-        )
-        conn.commit()
-        return True
-    except Exception:
-        conn.rollback()
-        raise
-
-
-def record_reward(wallet: Optional[str], task_id: str, reward: float) -> None:
-    if not wallet:
-        return
-    conn = get_db()
-    conn.execute(
-        """
-        INSERT INTO rewards (wallet, task_id, reward_hai, timestamp)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(task_id) DO UPDATE SET
-            wallet=excluded.wallet,
-            reward_hai=excluded.reward_hai,
-            timestamp=excluded.timestamp
-        """,
-        (wallet, task_id, reward, unix_now()),
-    )
-    conn.commit()
-
-
-def get_job_summary(limit: int = 50) -> Dict[str, Any]:
-    conn = get_db()
+    summary_types = (CREATOR_TASK_TYPE, "FACE_SWAP", "VIDEO_GEN", "ANIMATEDIFF")
+    placeholders = ",".join("?" for _ in summary_types)
     queued = conn.execute(
-        "SELECT COUNT(*) FROM jobs WHERE status='queued' AND UPPER(task_type)=?",
-        (CREATOR_TASK_TYPE,),
+        f"SELECT COUNT(*) FROM jobs WHERE status='queued' AND UPPER(task_type) IN ({placeholders})",
+        summary_types,
     ).fetchone()[0]
     active = conn.execute(
-        "SELECT COUNT(*) FROM jobs WHERE status='running' AND UPPER(task_type)=?",
-        (CREATOR_TASK_TYPE,),
+        f"SELECT COUNT(*) FROM jobs WHERE status='running' AND UPPER(task_type) IN ({placeholders})",
+        summary_types,
     ).fetchone()[0]
     total_distributed = conn.execute("SELECT COALESCE(SUM(reward_hai),0) FROM rewards").fetchone()[0]
     today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     # Count jobs that have finished today (either legacy 'completed' or
     # newer 'success' status values).
     completed_today = conn.execute(
-        """
+        f"""
         SELECT COUNT(*) FROM jobs
         WHERE status IN ('completed', 'success')
           AND completed_at IS NOT NULL
           AND completed_at >= ?
-          AND UPPER(task_type)=?
+          AND UPPER(task_type) IN ({placeholders})
         """,
-        (today_start, CREATOR_TASK_TYPE),
+        (today_start, *summary_types),
     ).fetchone()[0]
-    # Avoid binding LIMIT to sidestep driver quirks under concurrency; limit is internal and cast to int.
+    # Avoid binding LIMIT/OFFSET to sidestep driver quirks under concurrency; values are internal and cast to int.
     limit_int = int(limit)
+    offset_int = int(offset)
     rows = conn.execute(
         f"""
         SELECT jobs.id, jobs.wallet, jobs.model, jobs.task_type, jobs.status, jobs.weight,
                jobs.completed_at, jobs.timestamp, rewards.reward_hai
         FROM jobs
         LEFT JOIN rewards ON rewards.task_id = jobs.id
-        WHERE UPPER(jobs.task_type)=?
+        WHERE UPPER(jobs.task_type) IN ({placeholders})
         ORDER BY jobs.timestamp DESC
-        LIMIT {limit_int}
+        LIMIT {limit_int} OFFSET {offset_int}
         """,
-        (CREATOR_TASK_TYPE,),
+        summary_types,
     ).fetchall()
     feed = []
     for row in rows:
@@ -767,6 +908,10 @@ def get_job_summary(limit: int = 50) -> Dict[str, Any]:
         has_image = image_path.exists()
         image_url = f"/static/outputs/{image_filename}" if has_image else None
         output_path = str(image_path) if has_image else None
+        videos_dir = OUTPUTS_DIR / "videos"
+        video_path = videos_dir / f"{row['id']}.mp4"
+        has_video = video_path.exists()
+        video_url = f"/static/outputs/videos/{row['id']}.mp4" if has_video else None
         timestamp_value = row["timestamp"]
         submitted_iso = (
             datetime.fromtimestamp(timestamp_value, timezone.utc).isoformat().replace("+00:00", "Z")
@@ -787,6 +932,7 @@ def get_job_summary(limit: int = 50) -> Dict[str, Any]:
                 "completed_at": completed_iso,
                 "submitted_at": submitted_iso,
                 "image_url": image_url,
+                "video_url": video_url,
                 "output_path": output_path,
             }
         )
@@ -818,13 +964,18 @@ def get_model_config(model_name: str) -> Optional[Dict[str, Any]]:
     return dict(entry)
 
 
+# Inject get_model_config into modules that need it
+credits.get_model_config = get_model_config  # type: ignore[attr-defined]
+job_helpers.get_model_config = get_model_config  # type: ignore[attr-defined]
+
+
 def build_models_catalog() -> List[Dict[str, Any]]:
     catalog: List[Dict[str, Any]] = []
     for name, meta in MANIFEST_MODELS.items():
         catalog.append(
             {
                 "model": name,
-                "weight": resolve_weight(name, meta.get("reward_weight", 5.0)),
+                "weight": rewards.resolve_weight(name, meta.get("reward_weight", 5.0)),
                 "source": "manifest",
                 "nodes": [],
                 "tags": meta.get("tags", []),
@@ -848,7 +999,7 @@ def pending_tasks_for_node(node_id: str) -> List[Dict[str, Any]]:
         if task.get("status") not in relevant_status:
             continue
         task_type = (task.get("task_type") or CREATOR_TASK_TYPE).upper()
-        if task_type not in {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF"}:
+        if task_type not in {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP"}:
             continue
         tasks.append(task)
     return tasks
@@ -952,23 +1103,19 @@ def join_page() -> Any:
       <h1>Join the HavnAI GPU Grid</h1>
       <p>Run the installer on your GPU machine:</p>
       <pre><code>{install_cmd}</code></pre>
+      <p>If you have a join token, append <code>--token &lt;TOKEN&gt;</code>. To prefill a wallet, add <code>--wallet 0x...</code>.</p>
       <h2>Prerequisites</h2>
       <ul>
-        <li>64-bit Linux (Ubuntu/Debian/RHEL) or macOS (12+)</li>
-        <li>Python 3.10 or newer, curl, and a GPU driver/runtime</li>
-        <li>$HAI wallet address (EVM compatible)</li>
-      </ul>
-      <h2>Optional – WAN I2V Video Support</h2>
-      <ul>
-        <li><code>ffmpeg</code> installed and on <code>PATH</code> (e.g. <code>sudo apt-get install -y ffmpeg</code> on Debian/Ubuntu)</li>
-        <li>WAN I2V safetensor checkpoint(s) downloaded to the paths referenced by the coordinator manifest (for example <code>/mnt/d/havnai-storage/models/video/wan-i2v/wan_2.2_lightning.safetensors</code>)</li>
-        <li><code>CREATOR_MODE=true</code> in <code>~/.havnai/.env</code> if you want this node to accept WAN video jobs</li>
+        <li>64-bit Linux (Ubuntu/Debian/RHEL) or macOS 12+</li>
+        <li>Python 3.10+, curl, and a GPU driver/runtime (NVIDIA + CUDA recommended)</li>
+        <li>12 GB+ NVIDIA GPU recommended for creator/video workloads (CPU nodes still supported)</li>
+        <li>EVM wallet address (simulated rewards in Alpha)</li>
       </ul>
       <h2>What happens next?</h2>
       <ol>
-        <li>Installer prepares <code>~/.havnai</code>, Python venv, and the node binary</li>
-        <li>Configure your wallet inside <code>~/.havnai/.env</code></li>
-        <li>Enable the service (systemd or launchd)</li>
+        <li>Installer prepares <code>~/.havnai</code>, Python venv, and the node client</li>
+        <li>Configure <code>WALLET</code> / <code>JOIN_TOKEN</code> inside <code>~/.havnai/.env</code> (or pass flags)</li>
+        <li>Start the service (systemd or launchd) or run directly</li>
         <li>Monitor progress via <a href=\"/dashboard\">dashboard</a> and <a href=\"/network/leaderboard\">leaderboard</a></li>
       </ol>
       <p>Need the join token or help? Contact the grid operator.</p>
@@ -1060,10 +1207,93 @@ def favicon() -> Any:
 # ---------------------------------------------------------------------------
 
 
-@app.route("/models/list")
-def list_models() -> Any:
-    load_manifest()
-    return jsonify({"models": list(MANIFEST_MODELS.values())})
+# /models/list is defined below (models_list) with full tier/pipeline metadata
+
+
+def _normalize_lora_catalog(raw_loras: Any) -> List[Dict[str, Any]]:
+    if not raw_loras or not isinstance(raw_loras, list):
+        return []
+    normalized: List[Dict[str, Any]] = []
+    for entry in raw_loras:
+        if isinstance(entry, dict):
+            name = str(entry.get("name") or "").strip()
+            filename = str(entry.get("filename") or "").strip()
+            label = str(entry.get("label") or "").strip()
+            if not name and filename:
+                name = Path(filename).stem or filename
+            if not name:
+                continue
+            item: Dict[str, Any] = {"name": name}
+            if filename:
+                item["filename"] = filename
+            if label:
+                item["label"] = label
+            # Preserve pipeline compatibility field (sd15 / sdxl)
+            pipeline = str(entry.get("pipeline") or "").strip().lower()
+            if pipeline:
+                item["pipeline"] = pipeline
+            normalized.append(item)
+            continue
+        if isinstance(entry, str):
+            name = entry.strip()
+            if name:
+                normalized.append({"name": name})
+    return normalized
+
+
+@app.route("/loras/list")
+def list_loras() -> Any:
+    # Optional pipeline filter: /loras/list?pipeline=sdxl or ?pipeline=sd15
+    pipeline_filter = request.args.get("pipeline", "").strip().lower()
+    loras: List[Dict[str, Any]] = []
+    nodes_with_loras: List[str] = []
+    with LOCK:
+        for node_id, node in NODES.items():
+            node_loras = _normalize_lora_catalog(node.get("loras"))
+            if node_loras:
+                nodes_with_loras.append(node_id)
+                loras.extend(node_loras)
+    if loras:
+        seen = set()
+        deduped: List[Dict[str, Any]] = []
+        for entry in loras:
+            key = str(entry.get("filename") or entry.get("name") or "").strip().lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(entry)
+        deduped.sort(key=lambda item: str(item.get("label") or item.get("name") or "").lower())
+        if pipeline_filter:
+            deduped = [e for e in deduped if _lora_matches_pipeline(e, pipeline_filter)]
+        return jsonify({"loras": deduped, "nodes": nodes_with_loras, "source": "nodes"})
+    path = LORA_STORAGE_DIR
+    if path.exists():
+        for entry in sorted(path.iterdir()):
+            if not entry.is_file():
+                continue
+            if entry.suffix.lower() not in SUPPORTED_LORA_EXTS:
+                continue
+            loras.append({"name": entry.stem, "filename": entry.name})
+    loras.sort(key=lambda item: str(item.get("name") or "").lower())
+    if pipeline_filter:
+        loras = [e for e in loras if _lora_matches_pipeline(e, pipeline_filter)]
+    return jsonify({"loras": loras, "path": str(path), "source": "local"})
+
+
+def _lora_matches_pipeline(lora: Dict[str, Any], target_pipeline: str) -> bool:
+    """Check if a LoRA is compatible with the target pipeline.
+
+    Returns True if the LoRA has no pipeline metadata (unknown = show it)
+    or if the pipeline matches.
+    """
+    lora_pipeline = str(lora.get("pipeline") or "").lower()
+    if not lora_pipeline:
+        return True  # No metadata — show in all pipelines
+    if target_pipeline == "sdxl":
+        return "sdxl" in lora_pipeline or "xl" in lora_pipeline
+    if target_pipeline == "sd15":
+        return lora_pipeline == "sd15" or lora_pipeline == "sd1.5"
+    return True
 
 
 @app.route("/installers/<path:filename>")
@@ -1084,11 +1314,106 @@ def installer_assets(filename: str) -> Any:
 # ---------------------------------------------------------------------------
 
 
+def _coerce_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _clamp(value: int, min_val: int, max_val: int) -> int:
+    return max(min_val, min(max_val, value))
+
+
+def _normalize_loras(raw_loras: Any) -> List[Dict[str, Any]]:
+    if not raw_loras or not isinstance(raw_loras, list):
+        return []
+    normalized: List[Dict[str, Any]] = []
+    for entry in raw_loras:
+        if isinstance(entry, dict):
+            name = str(entry.get("name") or "").strip()
+            if not name:
+                continue
+            item: Dict[str, Any] = {"name": name}
+            weight = entry.get("weight")
+            if weight is not None:
+                try:
+                    item["weight"] = float(weight)
+                except (TypeError, ValueError):
+                    pass
+            # Preserve pipeline compatibility field for validation
+            pipeline = str(entry.get("pipeline") or "").strip().lower()
+            if pipeline:
+                item["pipeline"] = pipeline
+            normalized.append(item)
+            continue
+        if isinstance(entry, str):
+            name = entry.strip()
+            if name:
+                normalized.append({"name": name})
+    return normalized
+
+
+def build_faceswap_settings(payload: Dict[str, Any], prompt_text: str) -> Dict[str, Any]:
+    base_image_url = str(
+        payload.get("base_image_url")
+        or payload.get("base_image_b64")
+        or payload.get("base_image")
+        or payload.get("base_image_path")
+        or payload.get("image")
+        or payload.get("image_b64")
+        or ""
+    ).strip()
+    face_source_url = str(
+        payload.get("face_source_url")
+        or payload.get("face_source_b64")
+        or payload.get("face_source")
+        or payload.get("face_image")
+        or payload.get("face_image_b64")
+        or payload.get("face_source_path")
+        or ""
+    ).strip()
+    strength = _coerce_float(payload.get("strength", 0.8), 0.8)
+    num_steps = _coerce_int(payload.get("num_steps", payload.get("steps", 20)), 20)
+    strength = max(0.0, min(1.0, strength))
+    num_steps = _clamp(num_steps, 5, 60)
+    settings: Dict[str, Any] = {
+        "prompt": prompt_text,
+        "base_image_url": base_image_url,
+        "face_source_url": face_source_url,
+        "strength": strength,
+        "num_steps": num_steps,
+    }
+    seed = payload.get("seed")
+    try:
+        seed = int(seed) if seed is not None else None
+    except (TypeError, ValueError):
+        seed = None
+    if seed is not None:
+        settings["seed"] = seed
+    return settings
+
+
 @app.route("/submit-job", methods=["POST"])
 def submit_job() -> Any:
     if not rate_limit(f"submit-job:{request.remote_addr}", limit=30):
         return jsonify({"error": "rate limit"}), 429
     payload = request.get_json() or {}
+    invite_code, invite_error = invite.enforce_invite_limits(payload)
+    if invite_error:
+        return invite_error
+    prompt_raw = str(payload.get("prompt") or payload.get("data") or "")
+    negative_raw = str(payload.get("negative_prompt") or "")
+    block_reason = safety.check_safety(prompt_raw, negative_raw)
+    if block_reason:
+        return jsonify({"error": "prompt_blocked", "reason": block_reason}), 400
     wallet = str(payload.get("wallet", "")).strip()
     model_name_raw = str(payload.get("model", "")).strip()
     model_name = model_name_raw.lower()
@@ -1111,9 +1436,12 @@ def submit_job() -> Any:
 
     if not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid wallet"}), 400
+    # Per-wallet rate limiting (20 jobs per 60 seconds per wallet)
+    if not rate_limit(f"submit-job:wallet:{wallet}", limit=20):
+        return jsonify({"error": "rate limit", "detail": "per-wallet limit exceeded"}), 429
     # Allow "auto" model selection based on manifest weights
     if not model_name or model_name in {"auto", "auto_image", "auto-image"}:
-        load_manifest()
+        refresh_manifest()
         # Candidate models: creator IMAGE_GEN only
         candidates = [
             meta
@@ -1143,33 +1471,48 @@ def submit_job() -> Any:
         return jsonify({"error": "unknown model"}), 400
 
     if weight is None:
-        weight = cfg.get("reward_weight", resolve_weight(model_name, 10.0))
+        weight = cfg.get("reward_weight", rewards.resolve_weight(model_name, 10.0))
 
-    # Special-case WAN I2V video jobs so we preserve structured settings
-    is_wan_i2v = model_name == "wan-i2v" or str(cfg.get("pipeline", "")).lower() == "wan-i2v"
+    # Special-case LTX2 video jobs with structured payload
+    pipeline_name = str(cfg.get("pipeline", "")).lower()
+    is_ltx2 = model_name == "ltx2" or pipeline_name == "ltx2"
 
     # Special-case AnimateDiff video jobs with rich structured payload
-    is_animatediff = model_name == "animatediff" or str(cfg.get("pipeline", "")).lower() == "animatediff"
+    is_animatediff = model_name == "animatediff" or pipeline_name == "animatediff"
 
     if is_wan_i2v:
         # Persist all WAN-specific controls inside the job data blob as JSON
         prompt_text = enhanced_prompt
         settings: Dict[str, Any] = {
             "prompt": prompt_text,
-            "init_image": payload.get("init_image") or None,
-            "steps_high": int(payload.get("steps_high", 2)),
-            "steps_low": int(payload.get("steps_low", 2)),
-            "sampler": str(payload.get("sampler") or "euler"),
-            "cfg": float(payload.get("cfg", 1.0)),
-            "num_frames": int(payload.get("num_frames", 32)),
-            "fps": int(payload.get("fps", 24)),
-            "resolution": str(payload.get("resolution") or "720x512"),
+            "negative_prompt": negative_prompt,
+            "seed": seed,
+            "steps": _clamp_int(payload.get("steps", LTX2_DEFAULT_STEPS), LTX2_DEFAULT_STEPS, 1, 50),
+            "guidance": _clamp_float(payload.get("guidance", LTX2_DEFAULT_GUIDANCE), LTX2_DEFAULT_GUIDANCE, 0.0, 12.0),
+            "width": _clamp_int(payload.get("width", LTX2_DEFAULT_WIDTH), LTX2_DEFAULT_WIDTH, 256, 768),
+            "height": _clamp_int(payload.get("height", LTX2_DEFAULT_HEIGHT), LTX2_DEFAULT_HEIGHT, 256, 768),
+            "frames": _clamp_int(payload.get("frames", LTX2_DEFAULT_FRAMES), LTX2_DEFAULT_FRAMES, 1, 16),
+            "fps": _clamp_int(payload.get("fps", LTX2_DEFAULT_FPS), LTX2_DEFAULT_FPS, 1, 12),
+            "timeout": LTX2_JOB_TIMEOUT,
         }
+        if init_image:
+            settings["init_image"] = init_image
         job_data = json.dumps(settings)
         task_type = "VIDEO_GEN"
     elif is_animatediff:
         prompt_text = enhanced_prompt
         negative_prompt = str(payload.get("negative_prompt") or "")
+        raw_prompt = str(payload.get("raw_prompt", "")).lower() in ("1", "true", "yes")
+        # Apply default video negative prompt if not provided
+        if not negative_prompt and not raw_prompt:
+            negative_prompt = get_video_negative(model_name)
+
+        # Append positive quality suffix if prompt doesn't have quality tokens
+        if not raw_prompt:
+            prompt_lower = prompt_text.lower()
+            if prompt_text and "best quality" not in prompt_lower and "masterpiece" not in prompt_lower:
+                prompt_text = f"{prompt_text}, {get_video_positive_suffix(model_name)}"
+
         # Core AnimateDiff controls – validated/coerced into safe ranges
         try:
             frames = int(payload.get("frames", 16))
@@ -1180,7 +1523,7 @@ def submit_job() -> Any:
         except (TypeError, ValueError):
             fps = 8
         frames = max(1, min(frames, 64))
-        fps = max(1, min(fps, 60))
+        fps = max(1, min(fps, 24))  # Increased max fps from 60 to 24 for realistic smooth video
 
         motion = str(payload.get("motion") or "").strip().lower() or "zoom-in"
         base_model = str(payload.get("base_model") or "realisticVision")
@@ -1202,7 +1545,25 @@ def submit_job() -> Any:
             lora_strength = float(lora_strength) if lora_strength is not None else None
         except (TypeError, ValueError):
             lora_strength = None
-        init_image = payload.get("init_image") or None
+        strength = payload.get("strength")
+        try:
+            strength = float(strength) if strength is not None else None
+        except (TypeError, ValueError):
+            strength = None
+        init_image = (
+            payload.get("init_image")
+            or payload.get("init_image_url")
+            or payload.get("init_image_b64")
+            or None
+        )
+        extend_raw = payload.get("extend_chunks")
+        if extend_raw is None:
+            extend_raw = payload.get("extend") or payload.get("extend_video")
+        try:
+            extend_chunks = int(extend_raw) if extend_raw is not None else 0
+        except (TypeError, ValueError):
+            extend_chunks = 1 if bool(extend_raw) else 0
+        extend_chunks = max(0, min(extend_chunks, 6))
         scheduler = str(payload.get("scheduler") or "DDIM").upper()
         if scheduler not in {"DDIM", "EULER", "HEUN"}:
             scheduler = "DDIM"
@@ -1220,6 +1581,9 @@ def submit_job() -> Any:
             "lora_strength": lora_strength,
             "init_image": init_image,
             "scheduler": scheduler,
+            "strength": strength,
+            "extend_remaining": extend_chunks,
+            "extend_total": extend_chunks,
         }
         job_data = json.dumps(settings)
         task_type = "ANIMATEDIFF"
@@ -1333,68 +1697,205 @@ def submit_job() -> Any:
             f"Injected LoRAs: {injected_loras} | Extra negatives: {position_negative or ''}"
         )
 
+        overrides: Dict[str, Any] = {}
+        if payload.get("steps") is not None:
+            overrides["steps"] = _coerce_int(payload.get("steps"), int(job_settings.get("steps", 20)))
+        if payload.get("guidance") is not None:
+            overrides["guidance"] = _coerce_float(
+                payload.get("guidance"),
+                float(job_settings.get("guidance", 7.0)),
+            )
+        if payload.get("width") is not None:
+            overrides["width"] = _coerce_int(payload.get("width"), int(job_settings.get("width", 512)))
+        if payload.get("height") is not None:
+            overrides["height"] = _coerce_int(payload.get("height"), int(job_settings.get("height", 512)))
+        sampler_override = payload.get("sampler")
+        if sampler_override is not None and str(sampler_override).strip():
+            overrides["sampler"] = str(sampler_override).strip()
+        seed = payload.get("seed")
+        try:
+            seed = int(seed) if seed is not None else None
+        except (TypeError, ValueError):
+            seed = None
+        if seed is not None:
+            overrides["seed"] = seed
+        if overrides:
+            job_settings["overrides"] = overrides
+
         job_data = json.dumps(job_settings)
         task_type = CREATOR_TASK_TYPE
 
+    # Credit gate — only active when HAVNAI_CREDITS_ENABLED=true
+    credit_err = credits.check_and_deduct_credits(wallet, cfg.get("name", model_name), task_type)
+    if credit_err:
+        return credit_err
+
     with LOCK:
-        job_id = enqueue_job(wallet, cfg.get("name", model_name), task_type, job_data, float(weight))
+        job_id = job_helpers.enqueue_job(
+            wallet,
+            cfg.get("name", model_name),
+            task_type,
+            job_data,
+            float(weight),
+            invite_code,
+        )
     log_event("Public job queued", wallet=wallet, model=model_name, job_id=job_id)
+    _emit_job_event("job_queued", job_id, wallet, model=model_name, task_type=task_type)
     return jsonify({"status": "queued", "job_id": job_id}), 200
 
 
 @app.route("/generate-video", methods=["POST"])
-def generate_video() -> Any:
-    """Trigger a WAN 2.2 GGUF T2V/I2V job via background worker."""
+def generate_video_job() -> Any:
+    if not rate_limit(f"generate-video:{request.remote_addr}", limit=30):
+        return jsonify({"error": "rate limit"}), 429
+    payload = request.get_json() or {}
+    invite_code, invite_error = invite.enforce_invite_limits(payload)
+    if invite_error:
+        return invite_error
 
-    data = request.get_json() or {}
-    prompt = str(data.get("prompt", "")).strip()
-    if not prompt:
-        return jsonify({"error": "prompt is required"}), 400
+    prompt_text = str(payload.get("prompt") or "").strip()
+    if not prompt_text:
+        return jsonify({"error": "missing prompt"}), 400
 
-    negative_prompt = str(data.get("negative_prompt", "")).strip()
-    motion_type = str(data.get("motion_type", "high")).strip().lower() or "high"
-    lora_list = data.get("lora_list") or []
-    if not isinstance(lora_list, list):
-        return jsonify({"error": "lora_list must be an array"}), 400
+    wallet = str(payload.get("wallet", "")).strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    # Per-wallet rate limiting (10 video jobs per 60 seconds per wallet)
+    if not rate_limit(f"generate-video:wallet:{wallet}", limit=10):
+        return jsonify({"error": "rate limit", "detail": "per-wallet limit exceeded"}), 429
 
-    duration = float(data.get("duration", 4.0) or 4.0)
-    fps = int(data.get("fps", 24) or 24)
-    fps = max(1, min(fps, 60))
-    width = int(data.get("width", 720) or 720)
-    height = int(data.get("height", 512) or 512)
+    model_name_raw = str(payload.get("model") or "ltx2").strip()
+    model_name = model_name_raw.lower()
+    refresh_manifest()
+    cfg = get_model_config(model_name)
+    if not cfg:
+        return jsonify({"error": "unknown model"}), 400
 
-    job_request = VideoJobRequest(
-        prompt=prompt,
-        negative_prompt=negative_prompt,
-        motion_type=motion_type,
-        lora_list=[str(item) for item in lora_list],
-        init_image_b64=data.get("init_image"),
-        duration=duration,
-        fps=fps,
-        width=width,
-        height=height,
-    )
-    job_id = submit_video_job(job_request)
-    job = get_video_job(job_id) or {}
-    response = {
-        "job_id": job_id,
-        "status": job.get("status", "queued"),
-        "mode": job.get("mode"),
+    weight = payload.get("weight")
+    if weight is None:
+        weight = cfg.get("reward_weight", rewards.resolve_weight(model_name, 10.0))
+
+    seed = payload.get("seed")
+    try:
+        seed = int(seed) if seed is not None else None
+    except (TypeError, ValueError):
+        seed = None
+    if seed is None:
+        seed = random.randint(0, 2**31 - 1)
+
+    fps = _clamp(_coerce_int(payload.get("fps", 8), 8), 1, 8)
+    duration = payload.get("duration")
+    frames = payload.get("frames")
+    if frames is None and duration is not None:
+        try:
+            frames = int(float(duration) * fps)
+        except (TypeError, ValueError):
+            frames = None
+    frames = _clamp(_coerce_int(frames or 16, 16), 1, 16)
+
+    steps = _clamp(_coerce_int(payload.get("steps", 25), 25), 1, 50)
+    guidance = _coerce_float(payload.get("guidance", 6.0), 6.0)
+    guidance = max(0.0, min(guidance, 12.0))
+    width = _clamp(_coerce_int(payload.get("width", 512), 512), 256, 512)
+    height = _clamp(_coerce_int(payload.get("height", 512), 512), 256, 512)
+
+    settings: Dict[str, Any] = {
+        "prompt": prompt_text,
+        "negative_prompt": str(payload.get("negative_prompt") or "").strip(),
+        "seed": seed,
+        "steps": steps,
+        "guidance": guidance,
+        "width": width,
+        "height": height,
+        "frames": frames,
         "fps": fps,
-        "duration": duration,
-        "frames_dir": job.get("frames_dir"),
-        "videos_dir": job.get("videos_dir"),
-        "engine": VIDEO_ENGINE.describe(),
     }
-    return jsonify(response), 202
+    motion_type = payload.get("motion_type")
+    if motion_type:
+        settings["motion_type"] = motion_type
+    lora_list = payload.get("lora_list")
+    if lora_list:
+        settings["lora_list"] = lora_list
+    init_image = payload.get("init_image")
+    if init_image:
+        settings["init_image"] = init_image
+
+    job_data = json.dumps(settings)
+
+    # Credit gate — only active when HAVNAI_CREDITS_ENABLED=true
+    credit_err = credits.check_and_deduct_credits(wallet, cfg.get("name", model_name), "VIDEO_GEN")
+    if credit_err:
+        return credit_err
+
+    with LOCK:
+        job_id = job_helpers.enqueue_job(
+            wallet,
+            cfg.get("name", model_name),
+            "VIDEO_GEN",
+            job_data,
+            float(weight),
+            invite_code,
+        )
+    log_event("Video job queued", wallet=wallet, model=model_name, job_id=job_id)
+    _emit_job_event("job_queued", job_id, wallet, model=model_name, task_type="VIDEO_GEN")
+    return jsonify({"status": "queued", "job_id": job_id}), 200
 
 
-@app.route("/generate-video/<job_id>", methods=["GET"])
-def video_job_status(job_id: str) -> Any:
-    job = get_video_job(job_id)
-    if not job:
-        return jsonify({"error": "job not found"}), 404
-    return jsonify(job), 200
+@app.route("/submit-faceswap-job", methods=["POST"])
+def submit_faceswap_job_endpoint() -> Any:
+    if not rate_limit(f"submit-faceswap-job:{request.remote_addr}", limit=30):
+        return jsonify({"error": "rate limit"}), 429
+    payload = request.get_json() or {}
+    invite_code, invite_error = invite.enforce_invite_limits(payload)
+    if invite_error:
+        return invite_error
+    wallet = str(payload.get("wallet", "")).strip()
+    model_name_raw = str(payload.get("model") or "epicrealismxl_vxviicrystalclear").strip()
+    model_name = model_name_raw.lower()
+    prompt_text = str(payload.get("prompt") or "").strip()
+    negative_raw = str(payload.get("negative_prompt") or "")
+    block_reason = safety.check_safety(prompt_text, negative_raw)
+    if block_reason:
+        return jsonify({"error": "prompt_blocked", "reason": block_reason}), 400
+
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+
+    settings = build_faceswap_settings(payload, prompt_text)
+    if not settings.get("base_image_url") or not settings.get("face_source_url"):
+        return jsonify({"error": "base_image and face_source are required"}), 400
+
+    refresh_manifest()
+    cfg = get_model_config(model_name)
+    if not cfg:
+        return jsonify({"error": "unknown model"}), 400
+    pipeline_norm = str(cfg.get("pipeline", "")).lower()
+    if "sdxl" not in pipeline_norm:
+        return jsonify({"error": "faceswap requires an SDXL base model"}), 400
+
+    weight = payload.get("weight")
+    if weight is None:
+        weight = cfg.get("reward_weight", rewards.resolve_weight(model_name, 10.0))
+
+    job_data = json.dumps(settings)
+
+    # Credit gate — only active when HAVNAI_CREDITS_ENABLED=true
+    credit_err = credits.check_and_deduct_credits(wallet, cfg.get("name", model_name), "FACE_SWAP")
+    if credit_err:
+        return credit_err
+
+    with LOCK:
+        job_id = job_helpers.enqueue_job(
+            wallet,
+            cfg.get("name", model_name),
+            "FACE_SWAP",
+            job_data,
+            float(weight),
+            invite_code,
+        )
+    log_event("Face-swap job queued", wallet=wallet, model=model_name, job_id=job_id)
+    _emit_job_event("job_queued", job_id, wallet, model=model_name, task_type="FACE_SWAP")
+    return jsonify({"status": "queued", "job_id": job_id}), 200
 
 
 @app.route("/register", methods=["POST"])
@@ -1426,6 +1927,7 @@ def register() -> Any:
                 "start_time": data.get("start_time", unix_now()),
                 "role": data.get("role", "worker"),
                 "node_name": data.get("node_name") or node_id,
+                "loras": [],
             }
             NODES[node_id] = node
             log_event("Node registered", node_id=node_id, role=node["role"], version=data.get("version"))
@@ -1438,6 +1940,8 @@ def register() -> Any:
         node["pipelines"] = data.get("pipelines", node.get("pipelines", []))
         node["models"] = data.get("models", node.get("models", []))
         node["supports"] = data.get("supports", node.get("supports", []))
+        if "loras" in data:
+            node["loras"] = _normalize_lora_catalog(data.get("loras"))
         util = data.get("gpu", {}).get("utilization") if isinstance(data.get("gpu"), dict) else data.get("utilization")
         util = float(util or node.get("utilization", 0.0))
         node["utilization"] = util
@@ -1447,9 +1951,10 @@ def register() -> Any:
             samples.pop(0)
         node["avg_utilization"] = round(sum(samples) / len(samples), 2) if samples else util
         node["last_seen"] = iso_now()
-    node["last_seen_unix"] = unix_now()
+        node["last_seen_unix"] = unix_now()
     save_nodes()
 
+    _emit_node_event("node_heartbeat", node_id, role=node.get("role", "worker"), wallet=node.get("wallet"))
     return jsonify({"status": "ok", "node": node_id}), 200
 
 
@@ -1520,10 +2025,15 @@ def get_creator_tasks() -> Any:
 
         pending = pending_tasks_for_node(node_id)
         if not pending:
-            job = fetch_next_job_for_node(node_id)
+            job = job_helpers.fetch_next_job_for_node(node_id)
             if job:
                 cfg = get_model_config(job["model"])
                 if cfg:
+                    model_spec: Optional[Dict[str, Any]] = None
+                    if isinstance(cfg, dict):
+                        model_spec = {"name": job["model"], "pipeline": cfg.get("pipeline")}
+                        if cfg.get("lora") is not None:
+                            model_spec["lora"] = cfg.get("lora")
                     # Decode prompt/negative_prompt for standard IMAGE_GEN jobs stored as JSON
                     raw_data = job.get("data")
                     prompt_text = raw_data or ""
@@ -1570,9 +2080,10 @@ def get_creator_tasks() -> Any:
                     prompt_for_node = prompt_text
 
                     # Assign under global lock to avoid multiple nodes claiming the same job
-                    assign_job_to_node(job["id"], node_id)
+                    job_helpers.assign_job_to_node(job["id"], node_id)
                     log_event("Job claimed by node", job_id=job["id"], node_id=node_id)
-                    reward_weight = float(job["weight"] or cfg.get("reward_weight", resolve_weight(job["model"], 10.0)))
+                    _emit_job_event("job_running", job["id"], job.get("wallet", ""), node_id=node_id, model=job["model"])
+                    reward_weight = float(job["weight"] or cfg.get("reward_weight", rewards.resolve_weight(job["model"], 10.0)))
                     job_task_type = (job.get("task_type") or CREATOR_TASK_TYPE).upper()
                     pending_entry = {
                             "task_id": job["id"],
@@ -1604,7 +2115,7 @@ def get_creator_tasks() -> Any:
                     }
                     save_nodes()
                 else:
-                    complete_job(job["id"], node_id, "failed")
+                    job_helpers.complete_job(job["id"], node_id, "failed")
 
         response_tasks = []
         for task in pending:
@@ -1617,6 +2128,7 @@ def get_creator_tasks() -> Any:
                 "task_id": task["task_id"],
                 "type": task.get("task_type", CREATOR_TASK_TYPE),
                 "model_name": task["model_name"],
+                "model": task.get("model"),
                 "model_path": task.get("model_path", ""),
                 "pipeline": pipeline,
                 "input_shape": task.get("input_shape", []),
@@ -1636,14 +2148,14 @@ def get_creator_tasks() -> Any:
             # If this is a WAN I2V video job, attempt to expose structured settings to the node
             if task_payload["type"].upper() == "VIDEO_GEN":
                 try:
-                    raw = task.get("data") or ""
-                    settings = json.loads(raw) if isinstance(raw, str) else {}
+                    raw_ltx2 = task.get("data") or ""
+                    ltx2_settings = json.loads(raw_ltx2) if isinstance(raw_ltx2, str) else {}
                 except Exception:
-                    settings = {}
-                if isinstance(settings, dict):
-                    for key in ("num_frames", "fps", "steps_high", "steps_low", "cfg", "sampler", "resolution", "init_image"):
-                        if key in settings:
-                            task_payload[key] = settings[key]
+                    ltx2_settings = {}
+                if isinstance(ltx2_settings, dict):
+                    for key in ("prompt", "negative_prompt", "seed", "steps", "guidance", "width", "height", "frames", "fps", "init_image"):
+                        if key in ltx2_settings and ltx2_settings[key] is not None:
+                            task_payload[key] = ltx2_settings[key]
             # If this is an AnimateDiff job, surface rich controls directly on the task payload
             if task_payload["type"].upper() == "ANIMATEDIFF":
                 try:
@@ -1664,10 +2176,29 @@ def get_creator_tasks() -> Any:
                         "seed",
                         "lora_strength",
                         "init_image",
+                        "strength",
                         "scheduler",
                     ):
                         if key in ad_settings and ad_settings[key] is not None:
                             task_payload[key] = ad_settings[key]
+            if task_payload["type"].upper() == "FACE_SWAP":
+                try:
+                    raw_fs = task.get("data") or ""
+                    fs_settings = json.loads(raw_fs) if isinstance(raw_fs, str) else {}
+                except Exception:
+                    fs_settings = {}
+                if isinstance(fs_settings, dict):
+                    for key in (
+                        "prompt",
+                        "negative_prompt",
+                        "base_image_url",
+                        "face_source_url",
+                        "strength",
+                        "num_steps",
+                        "seed",
+                    ):
+                        if key in fs_settings and fs_settings[key] is not None:
+                            task_payload[key] = fs_settings[key]
             response_tasks.append(task_payload)
     return jsonify({"tasks": response_tasks}), 200
 
@@ -1681,6 +2212,28 @@ def tasks_alias() -> Any:
 def tasks_ai_alias() -> Any:
     # Backward/alternate compatibility for clients polling /tasks/ai
     return get_creator_tasks()
+
+
+def _extract_last_frame(video_path: Path, output_path: Path) -> bool:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return False
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-sseof",
+        "-0.1",
+        "-i",
+        str(video_path),
+        "-vframes",
+        "1",
+        str(output_path),
+    ]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except Exception:
+        return False
+    return output_path.exists()
 
 
 @app.route("/results", methods=["POST"])
@@ -1707,7 +2260,7 @@ def submit_results() -> Any:
                 "task_id": job["id"],
                 "task_type": job.get("task_type", CREATOR_TASK_TYPE),
                 "model_name": job["model"],
-                "reward_weight": job.get("weight", resolve_weight(job["model"], 10.0)),
+                "reward_weight": job.get("weight", rewards.resolve_weight(job["model"], 10.0)),
                 "wallet": job.get("wallet"),
                 "prompt": job.get("data"),
             }
@@ -1726,18 +2279,26 @@ def submit_results() -> Any:
         pipeline = cfg.get("pipeline", "sd15") if cfg else "sd15"
 
         # Compute dynamic reward and factors
-        reward, reward_factors = compute_reward(model_name, pipeline, metrics, status)
+        reward, reward_factors = rewards.compute_reward(model_name, pipeline, metrics, status)
 
         # Ensure job is still owned/running before completing
-        if not complete_job(task_id, node_id, status):
-            log_event(
-                "Results rejected (job not running/owned by node)",
-                level="warning",
-                job_id=task_id,
-                node_id=node_id,
-            )
-            TASKS.pop(task_id, None)
-            return jsonify({"error": "conflict"}), 409
+        if not job_helpers.complete_job(task_id, node_id, status):
+            if job_helpers.complete_job_if_queued(task_id, node_id, status):
+                log_event(
+                    "Accepted late results for queued job",
+                    level="warning",
+                    job_id=task_id,
+                    node_id=node_id,
+                )
+            else:
+                log_event(
+                    "Results rejected (job not running/owned by node)",
+                    level="warning",
+                    job_id=task_id,
+                    node_id=node_id,
+                )
+                TASKS.pop(task_id, None)
+                return jsonify({"error": "conflict"}), 409
 
         if node:
             node["rewards"] = round(node.get("rewards", 0.0) + reward, 6)
@@ -1758,6 +2319,7 @@ def submit_results() -> Any:
             # If an image or video was uploaded, persist to outputs dir
             image_url = None
             video_url = None
+            video_path_saved: Optional[Path] = None
             if image_b64:
                 try:
                     import base64
@@ -1778,6 +2340,7 @@ def submit_results() -> Any:
                     video_path = videos_dir / f"{task_id}.mp4"
                     with video_path.open("wb") as fh:
                         fh.write(video_bytes)
+                    video_path_saved = video_path
                     # Stored at: STATIC_DIR / outputs / videos / <job_id>.mp4
                     video_url = f"/static/outputs/videos/{task_id}.mp4"
                 except Exception:
@@ -1851,8 +2414,66 @@ def submit_results() -> Any:
                 except Exception:
                     conn.rollback()
             wallet = wallet or job.get("wallet")
+            task_type = task.get("task_type", CREATOR_TASK_TYPE)
+            if (
+                status == "success"
+                and str(task_type).upper() == "ANIMATEDIFF"
+                and isinstance(payload, dict)
+            ):
+                try:
+                    remaining = int(payload.get("extend_remaining") or 0)
+                except (TypeError, ValueError):
+                    remaining = 0
+                if remaining > 0:
+                    videos_dir = OUTPUTS_DIR / "videos"
+                    video_path = video_path_saved or (videos_dir / f"{task_id}.mp4")
+                    if video_path.exists():
+                        last_frame_path = videos_dir / f"{task_id}_last.png"
+                        if _extract_last_frame(video_path, last_frame_path):
+                            next_payload = dict(payload)
+                            next_payload["extend_remaining"] = remaining - 1
+                            next_payload["extend_parent"] = task_id
+                            next_payload["init_image"] = str(last_frame_path)
+                            next_payload["init_image_path"] = str(last_frame_path)
+                            try:
+                                invite_code = job.get("invite_code")
+                            except Exception:
+                                invite_code = None
+                            weight_value = float(job.get("weight") or rewards.resolve_weight(model_name, 10.0))
+                            next_job_id = job_helpers.enqueue_job(
+                                wallet,
+                                model_name,
+                                "ANIMATEDIFF",
+                                json.dumps(next_payload),
+                                weight_value,
+                                invite_code,
+                            )
+                            log_event(
+                                "Auto-extended job queued",
+                                job_id=next_job_id,
+                                parent_job_id=task_id,
+                            )
+                        else:
+                            log_event(
+                                "Auto-extend skipped (last frame extract failed)",
+                                job_id=task_id,
+                            )
+                    else:
+                        log_event(
+                            "Auto-extend skipped (video missing)",
+                            job_id=task_id,
+                        )
 
-        record_reward(wallet, task_id, reward)
+        rewards.record_reward(wallet, task_id, reward)
+
+        # Emit SSE events for job completion and reward
+        _emit_job_event(
+            "job_success" if status == "success" else "job_failed",
+            task_id, wallet or "",
+            node_id=node_id, model=model_name, status=status,
+        )
+        if reward > 0:
+            _emit_job_event("reward_computed", task_id, wallet or "", reward=reward, node_id=node_id)
 
         stats = MODEL_STATS.setdefault(model_name, {"count": 0.0, "total_time": 0.0})
         if status == "success":
@@ -1901,6 +2522,7 @@ def disconnect_node() -> Any:
             raise
 
     log_event("Node disconnected", node_id=node_id)
+    _emit_node_event("node_disconnected", node_id)
     return jsonify({"status": "disconnected", "node": node_id, "existed": existed}), 200
 
     log_event(
@@ -1922,16 +2544,160 @@ def rewards_endpoint() -> Any:
     return jsonify({"rewards": rewards, "total": job_summary["total_distributed"]})
 
 
+# ---------------------------------------------------------------------------
+# Credits endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.route("/credits/balance", methods=["GET"])
+def credits_balance() -> Any:
+    """Return credit balance for a wallet."""
+    wallet = request.args.get("wallet", "").strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    conn = get_db()
+    row = conn.execute(
+        "SELECT balance, total_deposited, total_spent, updated_at FROM credits WHERE wallet=?",
+        (wallet,),
+    ).fetchone()
+    if not row:
+        return jsonify({
+            "wallet": wallet,
+            "balance": 0.0,
+            "total_deposited": 0.0,
+            "total_spent": 0.0,
+            "credits_enabled": CREDITS_ENABLED,
+        })
+    return jsonify({
+        "wallet": wallet,
+        "balance": float(row["balance"]),
+        "total_deposited": float(row["total_deposited"]),
+        "total_spent": float(row["total_spent"]),
+        "updated_at": row["updated_at"],
+        "credits_enabled": CREDITS_ENABLED,
+    })
+
+
+@app.route("/credits/deposit", methods=["POST"])
+def credits_deposit() -> Any:
+    """Deposit credits to a wallet.
+
+    This is an admin / webhook endpoint.  In production, this will be
+    called by Stripe webhooks or on-chain listeners — never directly by
+    end users.  For now it is gated by the join token.
+    """
+    if not check_join_token():
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json() or {}
+    wallet = str(data.get("wallet", "")).strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    try:
+        amount = float(data.get("amount", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid amount"}), 400
+    if amount <= 0:
+        return jsonify({"error": "amount must be positive"}), 400
+    reason = str(data.get("reason", "manual")).strip()
+    new_balance = credits.deposit_credits(wallet, amount, reason=reason)
+    return jsonify({
+        "wallet": wallet,
+        "deposited": amount,
+        "balance": new_balance,
+        "reason": reason,
+    })
+
+
+@app.route("/credits/cost", methods=["GET"])
+def credits_cost() -> Any:
+    """Return the credit cost for a given model, so the frontend can show prices."""
+    model = request.args.get("model", "").strip().lower()
+    task_type = request.args.get("task_type", "").strip()
+    cost = credits.resolve_credit_cost(model, task_type)
+    return jsonify({
+        "model": model,
+        "cost": cost,
+        "credits_enabled": CREDITS_ENABLED,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Stripe payment endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.route("/payments/packages", methods=["GET"])
+def payments_packages() -> Any:
+    """Return available credit packages and whether Stripe is enabled."""
+    return jsonify({
+        "packages": stripe_payments.CREDIT_PACKAGES,
+        "stripe_enabled": stripe_payments.STRIPE_ENABLED,
+    })
+
+
+@app.route("/payments/checkout", methods=["POST"])
+def payments_checkout() -> Any:
+    """Create a Stripe Checkout Session for buying credits."""
+    if not stripe_payments.STRIPE_ENABLED:
+        return jsonify({"error": "payments_disabled", "message": "Stripe payments are not enabled."}), 503
+    data = request.get_json() or {}
+    wallet = str(data.get("wallet", "")).strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    package_id = str(data.get("package_id", "")).strip()
+    if not package_id:
+        return jsonify({"error": "missing package_id"}), 400
+    success_url = str(data.get("success_url", "")).strip()
+    cancel_url = str(data.get("cancel_url", "")).strip()
+    if not success_url or not cancel_url:
+        return jsonify({"error": "missing success_url or cancel_url"}), 400
+    try:
+        result = stripe_payments.create_checkout_session(wallet, package_id, success_url, cancel_url)
+        return jsonify(result)
+    except ValueError as exc:
+        return jsonify({"error": "invalid_package", "message": str(exc)}), 400
+    except Exception as exc:
+        log_event("Stripe checkout error", level="error", error=str(exc))
+        return jsonify({"error": "checkout_failed", "message": "Could not create checkout session."}), 500
+
+
+@app.route("/payments/webhook", methods=["POST"])
+def payments_webhook() -> Any:
+    """Handle Stripe webhook events (payment confirmations)."""
+    if not stripe_payments.STRIPE_ENABLED:
+        return jsonify({"error": "payments_disabled"}), 503
+    payload = request.get_data()
+    sig_header = request.headers.get("Stripe-Signature", "")
+    try:
+        result = stripe_payments.handle_webhook_event(payload, sig_header)
+        return jsonify(result)
+    except Exception as exc:
+        log_event("Stripe webhook error", level="error", error=str(exc))
+        return jsonify({"error": "webhook_failed", "message": str(exc)}), 400
+
+
+@app.route("/payments/history", methods=["GET"])
+def payments_history() -> Any:
+    """Return payment history for a wallet."""
+    wallet = request.args.get("wallet", "").strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    history = stripe_payments.get_payment_history(wallet)
+    return jsonify({"wallet": wallet, "payments": history})
+
+
 @app.route("/jobs/recent", methods=["GET"])
 def jobs_recent() -> Any:
-    """Return recent creator jobs with reward information."""
+    """Return recent creator jobs with reward information.
 
-    try:
-        limit = int(request.args.get("limit", 25))
-    except Exception:
-        limit = 25
-    summary = get_job_summary(limit=limit)
-    return jsonify({"jobs": summary.get("feed", []), "summary": summary})
+    Query params:
+        limit  – max jobs to return (default 50, max 200)
+        offset – number of jobs to skip (default 0)
+    """
+    limit = _clamp(_coerce_int(request.args.get("limit"), 50), 1, 200)
+    offset = max(0, _coerce_int(request.args.get("offset"), 0))
+    summary = get_job_summary(limit=limit, offset=offset)
+    return jsonify({"jobs": summary.get("feed", []), "summary": summary, "limit": limit, "offset": offset})
 
 
 @app.route("/jobs/<job_id>", methods=["GET"])
@@ -1973,6 +2739,34 @@ def job_detail(job_id: str) -> Any:
     )
 
 
+@app.route("/quota", methods=["GET"])
+def quota_status() -> Any:
+    invite_config = invite.load_invite_config()
+    if not invite.invite_gating_enabled(invite_config):
+        return jsonify(
+            invite.quota_payload(0, 0, 0, 0, iso_now())
+        )
+    invite_code = invite.extract_invite_code({})
+    if not invite_code:
+        return invite.invite_error_response()
+    limits = invite.resolve_invite_limits(invite_code, invite_config)
+    if not limits:
+        return invite.invite_error_response()
+
+    usage = invite.compute_invite_usage(invite_code)
+    max_daily = int(limits.get("max_daily") or 0)
+    max_concurrent = int(limits.get("max_concurrent") or 0)
+    return jsonify(
+        invite.quota_payload(
+            max_daily,
+            usage["used_today"],
+            max_concurrent,
+            usage["used_concurrent"],
+            usage["reset_at"],
+        )
+    )
+
+
 @app.route("/nodes/<node_id>", methods=["GET"])
 def node_detail(node_id: str) -> Any:
     with LOCK:
@@ -1984,7 +2778,7 @@ def node_detail(node_id: str) -> Any:
     return jsonify(payload)
 
 
-@app.route("/api/models/stats", methods=["GET"])
+@app.route("/models/stats", methods=["GET"])
 def models_stats() -> Any:
     """
     Lightweight stats endpoint used by the public landing page.
@@ -2011,25 +2805,27 @@ def models_stats() -> Any:
     job_summary = get_job_summary()
     jobs_24h = int(job_summary.get("jobs_completed_today", 0) or 0)
 
-    # Success rate: completed / total for creator jobs.
+    # Success rate: completed / total for all job types.
     conn = get_db()
+    all_types = (CREATOR_TASK_TYPE, "FACE_SWAP", "VIDEO_GEN", "ANIMATEDIFF")
+    ph = ",".join("?" for _ in all_types)
     # Total finished jobs (exclude queued/running)
     total_row = conn.execute(
-        """
+        f"""
         SELECT COUNT(*) FROM jobs
-        WHERE UPPER(task_type)=?
+        WHERE UPPER(task_type) IN ({ph})
           AND status NOT IN ('queued', 'running')
         """,
-        (CREATOR_TASK_TYPE,),
+        all_types,
     ).fetchone()
     # Successful jobs (legacy 'completed' or newer 'success')
     ok_row = conn.execute(
-        """
+        f"""
         SELECT COUNT(*) FROM jobs
-        WHERE UPPER(task_type)=?
+        WHERE UPPER(task_type) IN ({ph})
           AND status IN ('completed', 'success')
         """,
-        (CREATOR_TASK_TYPE,),
+        all_types,
     ).fetchone()
     total_jobs = int(total_row[0]) if total_row else 0
     ok_jobs = int(ok_row[0]) if ok_row else 0
@@ -2052,11 +2848,386 @@ def models_stats() -> Any:
     )
 
 
-@app.route("/models/stats", methods=["GET"])
-def models_stats_legacy() -> Any:
-    """Backward-compatible alias used by older frontends."""
+@app.route("/models/list", methods=["GET"])
+def models_list() -> Any:
+    """
+    Returns the full model registry with metadata for frontend consumption.
 
-    return models_stats()
+    Returns:
+        {
+          "models": [
+            {
+              "name": str,
+              "tier": str,           # S, A, B, C, D
+              "weight": float,
+              "reward_weight": float,
+              "task_type": str,      # IMAGE_GEN, VIDEO_GEN, ANIMATEDIFF
+              "pipeline": str,       # sdxl, sd15, ltx2, animatediff
+              "tags": list[str],
+              "strengths": str | null,
+              "weaknesses": str | null
+            },
+            ...
+          ]
+        }
+    """
+
+    def weight_to_tier(weight: float) -> str:
+        """Map weight to tier label (S/A/B/C/D)."""
+        if weight >= 20:
+            return "S"
+        elif weight >= 10:
+            return "A"
+        elif weight >= 8:
+            return "B"
+        elif weight >= 5:
+            return "C"
+        else:
+            return "D"
+
+    refresh_manifest()
+    models = []
+    with LOCK:
+        for model_key, model_data in MANIFEST_MODELS.items():
+            weight = float(model_data.get("reward_weight", 10.0))
+            models.append(
+                {
+                    "name": model_data.get("name", model_key),
+                    "tier": weight_to_tier(weight),
+                    "weight": weight,
+                    "reward_weight": weight,
+                    "task_type": model_data.get("task_type", CREATOR_TASK_TYPE),
+                    "pipeline": model_data.get("pipeline", "sd15"),
+                    "tags": model_data.get("tags", []),
+                    "strengths": model_data.get("strengths"),
+                    "weaknesses": model_data.get("weaknesses"),
+                }
+            )
+
+    # Sort by weight descending (highest tier first)
+    models.sort(key=lambda m: m["weight"], reverse=True)
+
+    return jsonify({"models": models})
+
+
+# ---------------------------------------------------------------------------
+# SSE streaming endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.route("/events/jobs", methods=["GET"])
+def sse_jobs() -> Any:
+    """SSE stream for job status updates.
+
+    Optional query param ``wallet`` filters events to a specific wallet.
+    Without a wallet, all job events are streamed.
+    """
+    wallet = request.args.get("wallet", "").strip()
+    channel = f"jobs:{wallet}" if wallet else "jobs:*"
+    return Response(
+        sse_broker.stream(channel),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@app.route("/events/nodes", methods=["GET"])
+def sse_nodes() -> Any:
+    """SSE stream for node heartbeat and status events."""
+    return Response(
+        sse_broker.stream("nodes"),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+def _emit_job_event(event: str, job_id: str, wallet: str, **extra: Any) -> None:
+    """Publish a job event to all relevant SSE channels."""
+    data = {"job_id": job_id, "wallet": wallet, "event": event, **extra}
+    # Broadcast to the wildcard channel (all listeners)
+    sse_broker.publish("jobs:*", event, data)
+    # Broadcast to the wallet-specific channel
+    if wallet:
+        sse_broker.publish(f"jobs:{wallet}", event, data)
+
+
+def _emit_node_event(event: str, node_id: str, **extra: Any) -> None:
+    """Publish a node event to the nodes SSE channel."""
+    data = {"node_id": node_id, "event": event, **extra}
+    sse_broker.publish("nodes", event, data)
+
+
+# ---------------------------------------------------------------------------
+# Blockchain / on-chain integration endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.route("/wallet/verify", methods=["GET"])
+def wallet_verify() -> Any:
+    """Placeholder for wallet signature verification."""
+    wallet = request.args.get("wallet", "").strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    result = blockchain.verify_wallet(wallet)
+    return jsonify(result)
+
+
+@app.route("/rewards/claimable", methods=["GET"])
+def rewards_claimable() -> Any:
+    """Return unclaimed reward balance for a wallet."""
+    wallet = request.args.get("wallet", "").strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    result = blockchain.get_claimable_rewards(wallet)
+    return jsonify(result)
+
+
+@app.route("/rewards/claim", methods=["POST"])
+def rewards_claim() -> Any:
+    """Claim pending rewards (DB-only for now)."""
+    if not rate_limit(f"rewards-claim:{request.remote_addr}", limit=10):
+        return jsonify({"error": "rate limit"}), 429
+    data = request.get_json() or {}
+    wallet = str(data.get("wallet", "")).strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    amount = data.get("amount")
+    if amount is not None:
+        try:
+            amount = float(amount)
+        except (TypeError, ValueError):
+            return jsonify({"error": "invalid amount"}), 400
+    result = blockchain.claim_rewards(wallet, amount)
+    if "error" in result:
+        return jsonify(result), 400
+    return jsonify(result)
+
+
+@app.route("/rewards/claims", methods=["GET"])
+def rewards_claim_history() -> Any:
+    """Return claim history for a wallet."""
+    wallet = request.args.get("wallet", "").strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    history = blockchain.get_claim_history(wallet)
+    return jsonify({"wallet": wallet, "claims": history})
+
+
+# ---------------------------------------------------------------------------
+# Analytics endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.route("/analytics/jobs", methods=["GET"])
+def api_analytics_jobs() -> Any:
+    """Job counts grouped by day, model, task_type."""
+    days = _clamp(_coerce_int(request.args.get("days"), 30), 1, 365)
+    wallet = request.args.get("wallet", "").strip() or None
+    result = analytics.analytics_jobs(days=days, wallet=wallet)
+    return jsonify(result)
+
+
+@app.route("/analytics/costs", methods=["GET"])
+def api_analytics_costs() -> Any:
+    """Credit spend breakdown by model and time period."""
+    days = _clamp(_coerce_int(request.args.get("days"), 30), 1, 365)
+    wallet = request.args.get("wallet", "").strip() or None
+    result = analytics.analytics_costs(days=days, wallet=wallet)
+    return jsonify(result)
+
+
+@app.route("/analytics/nodes", methods=["GET"])
+def api_analytics_nodes() -> Any:
+    """Node performance metrics."""
+    result = analytics.analytics_nodes()
+    return jsonify(result)
+
+
+@app.route("/analytics/rewards", methods=["GET"])
+def api_analytics_rewards() -> Any:
+    """Reward distribution by node and model."""
+    days = _clamp(_coerce_int(request.args.get("days"), 30), 1, 365)
+    result = analytics.analytics_rewards(days=days)
+    return jsonify(result)
+
+
+@app.route("/analytics/overview", methods=["GET"])
+def api_analytics_overview() -> Any:
+    """Combined summary stats for the dashboard."""
+    result = analytics.analytics_overview()
+    return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
+# Validator quorum endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.route("/validate", methods=["POST"])
+def api_validate() -> Any:
+    """Submit a validation result for a job."""
+    if not rate_limit(f"validate:{request.remote_addr}", limit=60):
+        return jsonify({"error": "rate limit"}), 429
+    data = request.get_json() or {}
+    job_id = str(data.get("job_id", "")).strip()
+    validator_node_id = str(data.get("validator_node_id", "")).strip()
+    result = str(data.get("result", "")).strip().lower()
+
+    if not job_id:
+        return jsonify({"error": "missing job_id"}), 400
+    if not validator_node_id:
+        return jsonify({"error": "missing validator_node_id"}), 400
+    if result not in ("approve", "reject"):
+        return jsonify({"error": "result must be 'approve' or 'reject'"}), 400
+
+    validation = validators.submit_validation(job_id, validator_node_id, result)
+    return jsonify(validation)
+
+
+@app.route("/validators", methods=["GET"])
+def api_validators_list() -> Any:
+    """List active validators."""
+    active = validators.get_active_validators()
+    return jsonify({"validators": active, "quorum_m": validators.QUORUM_M, "quorum_n": validators.QUORUM_N})
+
+
+@app.route("/validators/register", methods=["POST"])
+def api_validator_register() -> Any:
+    """Register a node as a validator."""
+    if not check_join_token():
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json() or {}
+    node_id = str(data.get("node_id", "")).strip()
+    wallet = str(data.get("wallet", "")).strip()
+    if not node_id:
+        return jsonify({"error": "missing node_id"}), 400
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    result = validators.register_validator(node_id, wallet)
+    return jsonify(result)
+
+
+@app.route("/validations/<job_id>", methods=["GET"])
+def api_validation_history(job_id: str) -> Any:
+    """Get validation history for a job."""
+    history = validators.get_validation_history(job_id)
+    quorum = validators.check_quorum(job_id)
+    return jsonify({"job_id": job_id, "validations": history, "quorum": quorum})
+
+
+# ---------------------------------------------------------------------------
+# Workflow CRUD & marketplace endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.route("/workflows", methods=["POST"])
+def api_workflow_create() -> Any:
+    """Create a new workflow."""
+    if not rate_limit(f"workflow-create:{request.remote_addr}", limit=20):
+        return jsonify({"error": "rate limit"}), 429
+    data = request.get_json() or {}
+    wallet = str(data.get("wallet", "")).strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    name = str(data.get("name", "")).strip()
+    if not name:
+        return jsonify({"error": "missing name"}), 400
+    description = str(data.get("description", "")).strip()
+    config = data.get("config") if isinstance(data.get("config"), dict) else {}
+    category = str(data.get("category", "")).strip()
+    tags = data.get("tags") if isinstance(data.get("tags"), list) else []
+
+    result = workflows.create_workflow(
+        creator_wallet=wallet,
+        name=name,
+        description=description,
+        config=config,
+        category=category,
+        tags=tags,
+    )
+    return jsonify(result), 201
+
+
+@app.route("/workflows", methods=["GET"])
+def api_workflow_list() -> Any:
+    """List workflows with search, category filter, and pagination."""
+    search = request.args.get("search", "").strip() or None
+    category = request.args.get("category", "").strip() or None
+    wallet = request.args.get("wallet", "").strip() or None
+    limit = _clamp(_coerce_int(request.args.get("limit"), 50), 1, 200)
+    offset = max(0, _coerce_int(request.args.get("offset"), 0))
+    result = workflows.list_workflows(
+        search=search, category=category, creator_wallet=wallet,
+        limit=limit, offset=offset,
+    )
+    return jsonify(result)
+
+
+@app.route("/workflows/<int:workflow_id>", methods=["GET"])
+def api_workflow_detail(workflow_id: int) -> Any:
+    """Get workflow details."""
+    workflow = workflows.get_workflow(workflow_id)
+    if not workflow:
+        return jsonify({"error": "workflow_not_found"}), 404
+    return jsonify(workflow)
+
+
+@app.route("/workflows/<int:workflow_id>", methods=["PUT"])
+def api_workflow_update(workflow_id: int) -> Any:
+    """Update an existing workflow."""
+    data = request.get_json() or {}
+    wallet = str(data.get("wallet", "")).strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+
+    result = workflows.update_workflow(
+        workflow_id=workflow_id,
+        creator_wallet=wallet,
+        name=data.get("name"),
+        description=data.get("description"),
+        config=data.get("config") if isinstance(data.get("config"), dict) else None,
+        category=data.get("category"),
+        tags=data.get("tags") if isinstance(data.get("tags"), list) else None,
+    )
+    if result is None:
+        return jsonify({"error": "workflow_not_found_or_unauthorized"}), 404
+    return jsonify(result)
+
+
+@app.route("/workflows/<int:workflow_id>/publish", methods=["POST"])
+def api_workflow_publish(workflow_id: int) -> Any:
+    """Publish a workflow to the marketplace."""
+    data = request.get_json() or {}
+    wallet = str(data.get("wallet", "")).strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    result = workflows.publish_workflow(workflow_id, wallet)
+    if result is None:
+        return jsonify({"error": "workflow_not_found_or_unauthorized"}), 404
+    return jsonify(result)
+
+
+@app.route("/marketplace/browse", methods=["GET"])
+def api_marketplace_browse() -> Any:
+    """Browse published workflows in the marketplace."""
+    search = request.args.get("search", "").strip() or None
+    category = request.args.get("category", "").strip() or None
+    sort = request.args.get("sort", "popular").strip()
+    limit = _clamp(_coerce_int(request.args.get("limit"), 50), 1, 200)
+    offset = max(0, _coerce_int(request.args.get("offset"), 0))
+    result = workflows.browse_marketplace(
+        search=search, category=category, sort=sort,
+        limit=limit, offset=offset,
+    )
+    return jsonify(result)
 
 
 # ---------------------------------------------------------------------------
@@ -2162,7 +3333,7 @@ def get_result(job_id: str) -> Any:
     """
     Return a simple JSON payload describing where the result artifact lives.
 
-    For video jobs (WAN I2V or AnimateDiff), this exposes the MP4 download URL
+    For video jobs (LTX2/AnimateDiff), this exposes the MP4 download URL
     under ``/static/outputs/videos/<job_id>.mp4`` if it exists.
     """
     if not job_id:
@@ -2181,6 +3352,60 @@ def get_result(job_id: str) -> Any:
     if "image_url" not in payload and "video_url" not in payload:
         return jsonify({"error": "result_not_found", "job_id": job_id}), 404
     return jsonify(payload), 200
+
+
+@app.route("/videos/stitch", methods=["POST"])
+def stitch_videos() -> Any:
+    payload = request.get_json() or {}
+    job_ids = payload.get("job_ids")
+    if not isinstance(job_ids, list) or not job_ids:
+        return jsonify({"error": "job_ids_required"}), 400
+    if shutil.which("ffmpeg") is None:
+        return jsonify({"error": "ffmpeg_missing"}), 400
+
+    videos_dir = OUTPUTS_DIR / "videos"
+    videos_dir.mkdir(parents=True, exist_ok=True)
+    input_paths: List[Path] = []
+    for raw_id in job_ids:
+        if not isinstance(raw_id, str) or not JOB_ID_REGEX.match(raw_id):
+            return jsonify({"error": "invalid_job_id"}), 400
+        path = videos_dir / f"{raw_id}.mp4"
+        if not path.exists():
+            return jsonify({"error": "video_not_found", "job_id": raw_id}), 404
+        input_paths.append(path)
+
+    output_name = str(payload.get("output_name") or f"stitched_{int(time.time())}.mp4")
+    output_name = Path(output_name).name
+    output_path = videos_dir / output_name
+
+    concat_path = videos_dir / f"concat_{uuid.uuid4().hex}.txt"
+    try:
+        with concat_path.open("w", encoding="utf-8") as handle:
+            for path in input_paths:
+                handle.write(f"file '{path.as_posix()}'\n")
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_path),
+            "-c",
+            "copy",
+            str(output_path),
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            return jsonify({"error": "ffmpeg_failed", "detail": proc.stderr.strip()}), 500
+    finally:
+        try:
+            concat_path.unlink()
+        except Exception:
+            pass
+
+    return jsonify({"video_url": f"/static/outputs/videos/{output_name}"}), 200
 
 
 @app.route("/nodes", methods=["GET"])
@@ -2216,7 +3441,7 @@ def nodes_endpoint() -> Any:
             try:
                 weight = float(weight)
             except (TypeError, ValueError):
-                weight = resolve_weight(model_name or "triomerge_v10", 10.0)
+                weight = rewards.resolve_weight(model_name or "triomerge_v10", 10.0)
             payload.append(
                 {
                     "node_id": node_id,
@@ -2275,5 +3500,6 @@ def root() -> Any:
 
 if __name__ == "__main__":
     host = os.getenv("SERVER_BIND", "0.0.0.0")
-    port = int(os.getenv("SERVER_PORT", "5001"))
+    port_raw = os.getenv("SERVER_PORT") or os.getenv("PORT") or "5001"
+    port = int(port_raw)
     app.run(host=host, port=port)

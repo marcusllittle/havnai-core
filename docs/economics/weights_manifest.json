@@ -1,0 +1,80 @@
+{
+  "version": "1.0.0",
+  "header_note": "PLANNING ONLY: not consumed by runtime code.",
+  "description": "Routing weight configuration for ltx2 decentralized GPU platform (currently mocked/simulated)",
+  "phases": {
+    "current": "mocked",
+    "next": "weighted-mock-with-reputation",
+    "future": "crypto-activated"
+  },
+  "signals": {
+    "safe_early": [
+      {
+        "name": "uptime_percentage",
+        "weight": 0.5,
+        "source": "heartbeat",
+        "description": "Fraction of successful heartbeats in last 24h",
+        "min_threshold": 0.9
+      },
+      {
+        "name": "avg_job_latency_seconds",
+        "weight": 0.3,
+        "source": "job_completion",
+        "description": "Lower is better, normalized against median",
+        "inversion": true
+      }
+    ],
+    "dangerous_early": [
+      "creator_rating_average",
+      "self_reported_gpu_flops",
+      "geographic_diversity_score"
+    ],
+    "never_payout_linked": [
+      "diversity_bonus",
+      "social_reputation_offchain",
+      "job_volume_raw"
+    ]
+  },
+  "priorities": {
+    "current": {
+      "reliability": 0.6,
+      "performance": 0.4,
+      "cost": 0.0,
+      "diversity": 0.0
+    },
+    "future_target": {
+      "reliability": 0.4,
+      "performance": 0.3,
+      "cost": 0.2,
+      "diversity": 0.1
+    }
+  },
+  "kill_switches": {
+    "enabled_signals": [
+      "uptime_percentage",
+      "avg_job_latency_seconds"
+    ],
+    "min_active_operators": 50,
+    "max_failure_rate": 0.05
+  },
+  "notes": {
+    "status": "Not wired into runtime; planning-only document.",
+    "principles": [
+      "Early networks are small; avoid weights that amplify collusion or single points of failure.",
+      "Metrics must be verifiable; avoid self-reported or subjective signals early.",
+      "Never link diversity or social signals directly to payouts.",
+      "Keep rewards mocked and non-competitive until anti-gaming safeguards exist."
+    ],
+    "activation_preconditions": [
+      ">= 200 active operators with diverse ownership",
+      ">= 95% job success rate sustained for 6+ months in mock mode",
+      "Auditable anti-gaming checks (e.g., verified compute proofs)",
+      "Kill-switches tested and documented"
+    ],
+    "wallet_guidance": [
+      "Wallets represent identity + mocked credits/points only",
+      "Separate creator and operator tracks within the same wallet",
+      "Avoid overloading wallets with multiple high-stakes roles early"
+    ]
+  }
+}

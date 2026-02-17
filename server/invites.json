@@ -1,0 +1,5 @@
+{
+  "alpha-abc123": { "max_daily": 30, "max_concurrent": 2, "enabled": true },
+  "alpha-xyz789": { "max_daily": 10, "max_concurrent": 1, "enabled": true },
+  "Surcr@m": { "max_daily": 1000, "max_concurrent": 5, "enabled": true }
+}

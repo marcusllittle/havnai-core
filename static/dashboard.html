@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>HavnAI Grid · Stage 5A</title>
+  <title>HavnAI Grid · Stage 7 Alpha</title>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/normalize/8.0.1/normalize.min.css" integrity="sha512-oHDEc8XedS+d2cN2B3d9kM0C5s1Y+sLuRfCp6HIMi7Q5x0sF4XKQ4uvo9Z3p2dg5p3u5l5pX5ho2BZHmOj5rkg==" crossorigin="anonymous" referrerpolicy="no-referrer" />
   <style>
     @import url("https://fonts.googleapis.com/css2?family=Exo+2:wght@400;600;700&display=swap");
@@ -47,6 +47,12 @@
       color: var(--text-muted);
       font-size: 1rem;
       letter-spacing: 0.3px;
+    }
+
+    .alpha-disclaimer {
+      margin-top: 0.5rem;
+      font-size: 0.85rem;
+      color: #f6d792;
     }
 
     p.links {
@@ -316,7 +322,8 @@
 <body>
   <header class="hero">
     <h1>HavnAI Grid Telemetry</h1>
-    <p>Stage 5A · Creator Mode & Public Jobs · Powered by $HAI</p>
+    <p>Stage 7 — Alpha · Creator Mode & Public Jobs · Simulated economics</p>
+    <p class="alpha-disclaimer">Weights and rewards are simulated in Alpha and may change. No payouts are active yet.</p>
     <p class="links"><a href="/join">Join the Grid</a> · <a href="/network/leaderboard">Leaderboard</a></p>
   </header>
 
@@ -330,7 +337,7 @@
       <strong id="metricJobsToday">0</strong>
     </div>
     <div class="analytics-card">
-      <span class="label">Total HAI Rewarded</span>
+      <span class="label">Total HAI Rewarded (Simulated)</span>
       <strong id="metricTotalHai">0</strong>
     </div>
   </section>
@@ -357,7 +364,7 @@
       <strong id="summaryBacklog">0</strong>
     </div>
     <div class="summary-card">
-      <span class="label">$HAI Distributed</span>
+      <span class="label">$HAI Distributed (Simulated)</span>
       <strong id="summaryRewards">0 HAI</strong>
     </div>
     <div class="summary-card">
@@ -374,7 +381,7 @@
           <th>Node</th>
           <th>Creator Mode</th>
           <th>GPU Util %</th>
-          <th>Total HAI</th>
+          <th>Total HAI (Simulated)</th>
         </tr>
       </thead>
       <tbody id="nodeTable">
@@ -396,7 +403,7 @@
           <th>Model</th>
           <th>Wallet</th>
           <th>Status</th>
-          <th>Reward (HAI)</th>
+          <th>Reward (HAI, Simulated)</th>
           <th>Preview</th>
           <th>Completed</th>
         </tr>

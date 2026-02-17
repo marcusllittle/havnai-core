@@ -46,6 +46,90 @@
       "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, action wrist hyperflex, prop-hand glow fusion, twisted ankles, malformed feet, duplicate people, background ghosts, clothing merging, bad anatomy, low quality, blurry"
     },
     {
+      "name": "babesByStableYogiPony_xlV4",
+      "pipeline": "sdxl",
+      "path": "/mnt/d/havnai-storage/models/creator/babesByStableYogiPony_xlV4.safetensors",
+      "type": "checkpoint",
+      "tags": [
+        "stylized",
+        "experimental"
+      ],
+      "task_type": "IMAGE_GEN",
+      "weight": 3,
+      "reward_weight": 3,
+      "strengths": "Experimental SDXL checkpoint for evaluation.",
+      "weaknesses": "Needs testing before wider rollout.",
+      "sampler": "dpmpp_2m_karras",
+      "steps": 28,
+      "guidance": 6.0,
+      "width": 768,
+      "height": 1152,
+      "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, action wrist hyperflex, prop-hand glow fusion, twisted ankles, malformed feet, duplicate people, background ghosts, clothing merging, bad anatomy, low quality, blurry"
+    },
+    {
+      "name": "epicrealismXL_purefix",
+      "pipeline": "sdxl",
+      "path": "/mnt/d/havnai-storage/models/creator/epicrealismXL_purefix.safetensors",
+      "type": "checkpoint",
+      "tags": [
+        "realism",
+        "experimental"
+      ],
+      "task_type": "IMAGE_GEN",
+      "weight": 3,
+      "reward_weight": 3,
+      "strengths": "Experimental SDXL checkpoint for evaluation.",
+      "weaknesses": "Needs testing before wider rollout.",
+      "sampler": "dpmpp_2m_karras",
+      "steps": 28,
+      "guidance": 6.0,
+      "width": 768,
+      "height": 1152,
+      "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, action wrist hyperflex, prop-hand glow fusion, twisted ankles, malformed feet, duplicate people, background ghosts, clothing merging, bad anatomy, low quality, blurry"
+    },
+    {
+      "name": "perfectdeliberate_v60",
+      "pipeline": "sdxl",
+      "path": "/mnt/d/havnai-storage/models/creator/perfectdeliberate_v60.safetensors",
+      "type": "checkpoint",
+      "tags": [
+        "realism",
+        "experimental"
+      ],
+      "task_type": "IMAGE_GEN",
+      "weight": 3,
+      "reward_weight": 3,
+      "strengths": "Experimental SDXL checkpoint for evaluation.",
+      "weaknesses": "Needs testing before wider rollout.",
+      "sampler": "dpmpp_2m_karras",
+      "steps": 28,
+      "guidance": 6.0,
+      "width": 768,
+      "height": 1152,
+      "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, action wrist hyperflex, prop-hand glow fusion, twisted ankles, malformed feet, duplicate people, background ghosts, clothing merging, bad anatomy, low quality, blurry"
+    },
+    {
+      "name": "zavychromaxl_v100",
+      "pipeline": "sdxl",
+      "path": "/mnt/d/havnai-storage/models/creator/zavychromaxl_v100.safetensors",
+      "type": "checkpoint",
+      "tags": [
+        "realism",
+        "experimental"
+      ],
+      "task_type": "IMAGE_GEN",
+      "weight": 3,
+      "reward_weight": 3,
+      "strengths": "Experimental SDXL checkpoint for evaluation.",
+      "weaknesses": "Needs testing before wider rollout.",
+      "sampler": "dpmpp_2m_karras",
+      "steps": 28,
+      "guidance": 6.0,
+      "width": 768,
+      "height": 1152,
+      "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, action wrist hyperflex, prop-hand glow fusion, twisted ankles, malformed feet, duplicate people, background ghosts, clothing merging, bad anatomy, low quality, blurry"
+    },
+    {
       "name": "perfectdeliberate_v5SD15",
       "pipeline": "sd15",
       "path": "/mnt/d/havnai-storage/models/creator/perfectdeliberate_v5SD15.safetensors",
@@ -66,6 +150,29 @@
       "guidance": 7.5,
       "width": 672,
       "height": 1344,
+      "negative_prompt_default": "duplicate face, multiple faces, extra hands, extra fingers, deformed hands, merged limbs, bad anatomy, mangled"
+    },
+    {
+      "name": "divineelegancemix_V10",
+      "pipeline": "sd15",
+      "path": "/mnt/d/havnai-storage/models/creator/divineelegancemix_V10.safetensors",
+      "vae_path": "/mnt/d/havnai-storage/models/creator/clearvaeSD15_v23.safetensors",
+      "controlnet_path": "/mnt/d/havnai-storage/models/controlnet/control_v11p_sd15_openpose.pth",
+      "type": "checkpoint",
+      "tags": [
+        "realism",
+        "experimental"
+      ],
+      "task_type": "IMAGE_GEN",
+      "weight": 3,
+      "reward_weight": 3,
+      "strengths": "Experimental SD1.5 checkpoint for evaluation.",
+      "weaknesses": "Needs testing before wider rollout.",
+      "sampler": "euler_a",
+      "steps": 23,
+      "guidance": 6.3,
+      "width": 576,
+      "height": 768,
       "negative_prompt_default": "duplicate face, multiple faces, extra hands, extra fingers, deformed hands, merged limbs, bad anatomy, mangled"
     },
     {
@@ -208,70 +315,131 @@
   "notes": "Use 'negative_prompt_default' for solo (1girl) scenes — gives clean, perfect results. Append or replace with 'negative_prompt_multi_girl' terms when generating 2girls, yuri, couples, or any scene with physical contact to prevent merging/fusion artifacts."
 },
     {
-      "name": "wan_t2v_a14b",
-      "pipeline": "wan",
-      "path": "/mnt/d/havnai-storage/models/video/wan-2.2/T2V-A14B",
+      "name": "aMixIllustrious_aMix",
+      "pipeline": "sdxl",
+      "path": "/mnt/d/havnai-storage/models/creator/aMixIllustrious_aMix.safetensors",
+      "type": "checkpoint",
+      "tags": [
+        "sdxl",
+        "custom"
+      ],
+      "task_type": "IMAGE_GEN",
+      "weight": 8,
+      "reward_weight": 8,
+      "strengths": "Custom SDXL checkpoint.",
+      "weaknesses": "Needs evaluation.",
+      "sampler": "dpmpp_2m_karras",
+      "steps": 28,
+      "guidance": 6.0,
+      "width": 768,
+      "height": 1152
+    },
+    {
+      "name": "cyberrealisticPony_v160",
+      "pipeline": "sdxl",
+      "path": "/mnt/d/havnai-storage/models/creator/cyberrealisticPony_v160.safetensors",
+      "type": "checkpoint",
+      "tags": [
+        "sdxl",
+        "realism"
+      ],
+      "task_type": "IMAGE_GEN",
+      "weight": 8,
+      "reward_weight": 8,
+      "strengths": "Custom SDXL checkpoint.",
+      "weaknesses": "Needs evaluation.",
+      "sampler": "dpmpp_2m_karras",
+      "steps": 28,
+      "guidance": 6.0,
+      "width": 768,
+      "height": 1152
+    },
+    {
+      "name": "ponyDiffusionV6XL_v615",
+      "pipeline": "sd15",
+      "path": "/mnt/d/havnai-storage/models/creator/ponyDiffusionV6XL_v615.safetensors",
+      "vae_path": "/mnt/d/havnai-storage/models/creator/clearvaeSD15_v23.safetensors",
+      "controlnet_path": "/mnt/d/havnai-storage/models/controlnet/control_v11p_sd15_openpose.pth",
+      "type": "checkpoint",
+      "tags": [
+        "sd15",
+        "stylized"
+      ],
+      "task_type": "IMAGE_GEN",
+      "weight": 8,
+      "reward_weight": 8,
+      "strengths": "Stylized SD1.5 checkpoint.",
+      "weaknesses": "Needs evaluation.",
+      "sampler": "euler_a",
+      "steps": 20,
+      "guidance": 6.3,
+      "width": 576,
+      "height": 768,
+      "negative_prompt_default": "extra limbs, bad hands, bad anatomy, distorted face"
+    },
+    {
+      "name": "realisticVisionV60B1_v51HyperVAE",
+      "pipeline": "sd15",
+      "path": "/mnt/d/havnai-storage/models/creator/realisticVisionV60B1_v51HyperVAE.safetensors",
+      "vae_path": "/mnt/d/havnai-storage/models/creator/clearvaeSD15_v23.safetensors",
+      "controlnet_path": "/mnt/d/havnai-storage/models/controlnet/control_v11p_sd15_openpose.pth",
+      "type": "checkpoint",
+      "tags": [
+        "sd15",
+        "realism"
+      ],
+      "task_type": "IMAGE_GEN",
+      "weight": 8,
+      "reward_weight": 8,
+      "strengths": "Realistic SD1.5 checkpoint.",
+      "weaknesses": "Needs evaluation.",
+      "sampler": "euler_a",
+      "steps": 20,
+      "guidance": 6.3,
+      "width": 576,
+      "height": 768,
+      "negative_prompt_default": "extra limbs, bad hands, bad anatomy, distorted face"
+    },
+    {
+      "name": "lyriel_v16",
+      "pipeline": "sd15",
+      "path": "/home/marcus/.havnai/models/creator/lyriel_v16.safetensors",
+      "vae_path": "/mnt/d/havnai-storage/models/creator/clearvaeSD15_v23.safetensors",
+      "controlnet_path": "/mnt/d/havnai-storage/models/controlnet/control_v11p_sd15_openpose.pth",
+      "type": "checkpoint",
+      "tags": [
+        "sd15",
+        "anime"
+      ],
+      "task_type": "IMAGE_GEN",
+      "weight": 8,
+      "reward_weight": 8,
+      "strengths": "Anime-focused SD1.5 checkpoint.",
+      "weaknesses": "Needs evaluation.",
+      "sampler": "euler_a",
+      "steps": 20,
+      "guidance": 6.3,
+      "width": 576,
+      "height": 768,
+      "negative_prompt_default": "extra limbs, bad hands, bad anatomy, distorted face"
+    },
+    {
+      "name": "ltx2",
+      "pipeline": "ltx2",
+      "path": "maxin-cn/Latte-1",
       "type": "diffusers",
       "tags": [
         "video",
-        "text2video"
+        "ltx2",
+        "latte"
       ],
       "task_type": "VIDEO_GEN",
       "reward_weight": 20.0
-    },
-    {
-      "name": "wan_ti2v_5b_diffusers",
-      "pipeline": "wan",
-      "path": "/mnt/d/havnai-storage/models/video/wan-2.2/TI2V-5B-Diffusers",
-      "type": "diffusers",
-      "tags": [
-        "video",
-        "text2video"
-      ],
-      "task_type": "VIDEO_GEN",
-      "reward_weight": 20.0
-    },
-    {
-      "name": "wan22_ti2v_5b",
-      "pipeline": "wan",
-      "path": "/mnt/d/havnai-storage/models/video/wan-2.2/Wan2.2-TI2V-5B",
-      "type": "diffusers",
-      "tags": [
-        "video",
-        "text2video"
-      ],
-      "task_type": "VIDEO_GEN",
-      "reward_weight": 22.0
-    },
-    {
-      "name": "wan22_enhanced_camera_prompt",
-      "pipeline": "wan",
-      "path": "/mnt/d/havnai-storage/models/video/wan-2.2/wan22EnhancedCameraPrompt_t2vHIGH.safetensors",
-      "type": "checkpoint",
-      "tags": [
-        "video",
-        "prompt"
-      ],
-      "task_type": "VIDEO_GEN",
-      "reward_weight": 5.0
-    },
-    {
-      "name": "wan-i2v",
-      "pipeline": "wan-i2v",
-      "path": "/mnt/d/havnai-storage/models/video/wan-i2v/wan_2.2_lightning.safetensors",
-      "type": "checkpoint",
-      "tags": [
-        "video",
-        "i2v",
-        "t2v"
-      ],
-      "task_type": "VIDEO_GEN",
-      "reward_weight": 22.0
     },
     {
       "name": "animatediff",
       "pipeline": "animatediff",
-      "path": "/mnt/d/havnai-storage/models/creator/realisticVisionV60B1_v51HyperVAE.safetensors",
+      "path": "/home/marcus/.havnai/models/creator/realisticVisionV60B1_v51HyperVAE.safetensors",
       "type": "checkpoint",
       "tags": [
         "video",

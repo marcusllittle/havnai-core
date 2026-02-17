@@ -152,6 +152,47 @@ This repo is a standard Python/Flask application with a bundled node client. A m
 
 Only the most relevant coordinator endpoints are covered here. See `server/app.py` for the full list.
 
+### Closed Beta invite gating
+
+Invite enforcement uses a simple JSON config at `server/invites.json` (override with `HAVNAI_INVITE_CONFIG`). When `HAVNAI_INVITE_GATING=1` or the file is present, the following endpoints require `X-INVITE-CODE` and enforce max daily + concurrent quotas: `POST /submit-job`, `POST /submit-faceswap-job`, `POST /generate-video`, `GET /quota`.
+
+**Example curl (missing invite)**
+
+```bash
+curl -X POST http://localhost:8080/submit-job \
+  -H "Content-Type: application/json" \
+  -d '{"wallet":"0x0123456789abcdef0123456789abcdef01234567","model":"auto","prompt":"Hello"}'
+```
+
+Expected response:
+
+```json
+{ "error": "invite_required", "message": "Invite code required." }
+```
+
+**Example curl (rate limited)**
+
+```bash
+curl -X POST http://localhost:8080/generate-video \
+  -H "Content-Type: application/json" \
+  -H "X-INVITE-CODE: alpha-abc123" \
+  -d '{"wallet":"0x0123456789abcdef0123456789abcdef01234567","prompt":"test video"}'
+```
+
+Expected response:
+
+```json
+{
+  "error": "rate_limited",
+  "message": "Invite quota exceeded.",
+  "max_daily": 30,
+  "used_today": 30,
+  "max_concurrent": 2,
+  "used_concurrent": 2,
+  "reset_at": "2025-01-05T00:00:00Z"
+}
+```
+
 ### `POST /submit-job`
 
 Public job intake used by wallets / dApps to submit creator jobs.
@@ -185,7 +226,7 @@ Internally this:
 
 1. Validates the wallet format.
 2. Resolves the model config (or picks one via weighted routing when `model="auto"`).
-3. Serializes the job payload (with special handling for WAN I2V and AnimateDiff).
+3. Serializes the job payload (with special handling for AnimateDiff).
 4. Enqueues a row into the `jobs` table with status `queued`.
 
 ### `GET /jobs/recent`
@@ -200,7 +241,7 @@ Recent creator jobs with reward info and optional output URLs.
       {
         "job_id": "job-...",
         "wallet": "0x...",
-        "model": "majicmixrealistic_v7",
+        "model": "epicrealismXL_vxviiCrystalclear",
         "task_type": "IMAGE_GEN",
         "status": "SUCCESS",
         "weight": 25.0,
@@ -270,7 +311,7 @@ Sent periodically by each node with GPU stats and capabilities.
     "role": "creator",
     "version": "stage7",
     "node_name": "my-havnai-node",
-    "models": ["juggernautXL_ragnarokBy", "majicmixRealistic_v7"],
+    "models": ["juggernautXL_ragnarokBy", "epicrealismXL_vxviiCrystalclear"],
     "pipelines": ["sdxl", "sd15"]
   }
   ```
@@ -394,6 +435,12 @@ The result is rounded to 6 decimal places and stored along with a `reward_factor
 
 ---
 
+## Future Weighting & Reward Architecture
+
+The single source of truth for planned routing and reward-weight signals is `docs/economics/weights_manifest.json`. It is intentionally dormant in mocked mode today, and exists to prevent future economic/design failures while preserving optionality. Update this file as the plan evolves; do not wire it into runtime until activation criteria are met.
+
+---
+
 ## Benchmark Workflow (Planned)
 
 As of this version, **benchmarking and tier assignment are not implemented in code**. Weights are static values defined in the manifest. The intended workflow (roadmap) is:
@@ -501,4 +548,3 @@ Contributions are welcome. To work on HavnAI Core:
 ---
 
 HavnAI Core is evolving quickly; treat this README as the canonical reference for the current coordinator behavior. For anything unclear, consult `server/app.py` and `client/client.py` or open an issue. 
-

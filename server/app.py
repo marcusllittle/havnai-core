@@ -63,7 +63,6 @@ SUPPORTED_LORA_EXTS = {".safetensors", ".ckpt", ".pt", ".bin"}
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from havnai.video_engine.gguf_wan2_2 import VideoEngine, VideoJobRequest
 from common.prompt_enhancers import (
     ANTI_OVERLAY_NEGATIVE,
     SHARPNESS_NEGATIVE,

@@ -474,6 +474,23 @@ WALLET = ensure_wallet()
 # ---------------------------------------------------------------------------
 
 
+_HASH_CACHE_PATH = HAVNAI_HOME / "hash_cache.json"
+
+
+def _load_hash_cache() -> Dict[str, Any]:
+    try:
+        return json.loads(_HASH_CACHE_PATH.read_text()) if _HASH_CACHE_PATH.exists() else {}
+    except Exception:
+        return {}
+
+
+def _save_hash_cache(cache: Dict[str, Any]) -> None:
+    try:
+        _HASH_CACHE_PATH.write_text(json.dumps(cache))
+    except Exception:
+        pass
+
+
 def hash_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -482,10 +499,25 @@ def hash_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
+def hash_file_cached(path: Path, cache: Dict[str, Any]) -> str:
+    """Return cached hash if file mtime+size unchanged, else compute and cache."""
+    key = str(path)
+    stat = path.stat()
+    mtime = stat.st_mtime
+    size = stat.st_size
+    entry = cache.get(key)
+    if entry and entry.get("mtime") == mtime and entry.get("size") == size:
+        return entry["hash"]
+    h = hash_file(path)
+    cache[key] = {"mtime": mtime, "size": size, "hash": h}
+    return h
+
+
 def scan_local_models() -> Dict[str, Dict[str, Any]]:
     catalog: Dict[str, Dict[str, Any]] = {}
     if not CREATOR_SCAN_DIR.exists():
         return catalog
+    cache = _load_hash_cache()
     for path in CREATOR_SCAN_DIR.rglob("*"):
         if not path.is_file() or path.suffix.lower() not in SUPPORTED_MODEL_EXTS:
             continue
@@ -498,11 +530,12 @@ def scan_local_models() -> Dict[str, Dict[str, Any]]:
             "filename": path.name,
             "path": path,
             "size": path.stat().st_size,
-            "hash": hash_file(path),
+            "hash": hash_file_cached(path, cache),
             "tags": [path.suffix.lstrip(".")],
             "weight": weight,
             "task_type": "IMAGE_GEN",
         }
+    _save_hash_cache(cache)
     return catalog
 
 

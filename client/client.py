@@ -114,6 +114,14 @@ LORA_DIR = Path(
     or (DEFAULT_LORA_DIR if DEFAULT_LORA_DIR.exists() else HAVNAI_HOME / "loras")
 ).expanduser()
 MAX_LORAS = 5
+MODEL_FILE_EXTENSIONS = {".safetensors", ".ckpt", ".pt", ".pth", ".bin"}
+MODEL_SEARCH_DIR_CANDIDATES = [
+    os.environ.get("HAVNAI_MODEL_DIR", ""),
+    os.environ.get("HAI_MODEL_DIR", ""),
+    os.environ.get("MODEL_DIR", ""),
+    str(HAVNAI_HOME / "models" / "creator"),
+    "/mnt/d/havnai-storage/models/creator",
+]
 
 HAVNAI_HOME.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -269,15 +277,19 @@ if JOIN_TOKEN:
 REGISTRY.session = SESSION
 
 
-def refresh_manifest_with_backoff(reason: str = "startup") -> None:
+def refresh_manifest_with_backoff(reason: str = "startup", max_attempts: Optional[int] = None) -> bool:
     backoff = BACKOFF_BASE
+    attempts = 0
     while True:
+        attempts += 1
         try:
             REGISTRY.refresh()
             log("Model manifest refreshed", prefix="✅", reason=reason)
-            return
+            return True
         except Exception as exc:
             log(f"Manifest refresh failed ({reason}): {exc}", prefix="⚠️")
+            if max_attempts is not None and attempts >= max_attempts:
+                return False
             time.sleep(backoff)
             backoff = min(MAX_BACKOFF, backoff * 2)
 
@@ -294,10 +306,57 @@ def ensure_model_entry(model_name: str) -> ModelEntry:
 
 
 def ensure_model_path(entry: ModelEntry) -> Path:
-    path = Path(entry.path).expanduser()
-    if not path.exists():
-        raise FileNotFoundError(f"Model path missing on node: {path}")
-    return path
+    path_value = str(getattr(entry, "path", "") or "").strip()
+    if path_value:
+        path = Path(path_value).expanduser()
+        if path.exists():
+            return path
+
+    fallback = resolve_model_path_from_name(entry.name)
+    if fallback is not None:
+        try:
+            entry.path = str(fallback)
+        except Exception:
+            pass
+        return fallback
+
+    if path_value:
+        raise FileNotFoundError(f"Model path missing on node: {path_value}")
+    raise FileNotFoundError(f"Model path missing on node for manifest model: {entry.name}")
+
+
+def resolve_model_path_from_name(model_name: str) -> Optional[Path]:
+    target = re.sub(r"[^a-z0-9]+", "", (model_name or "").lower())
+    if not target:
+        return None
+
+    seen: Set[str] = set()
+    search_dirs: List[Path] = []
+    for candidate in MODEL_SEARCH_DIR_CANDIDATES:
+        raw = str(candidate or "").strip()
+        if not raw:
+            continue
+        path = Path(raw).expanduser()
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        if path.exists() and path.is_dir():
+            search_dirs.append(path)
+
+    for base in search_dirs:
+        try:
+            for child in base.iterdir():
+                if not child.is_file():
+                    continue
+                if child.suffix.lower() not in MODEL_FILE_EXTENSIONS:
+                    continue
+                stem = re.sub(r"[^a-z0-9]+", "", child.stem.lower())
+                if stem == target:
+                    return child
+        except Exception:
+            continue
+    return None
 
 
 def discover_capabilities() -> Dict[str, List[str]]:
@@ -1102,8 +1161,8 @@ def execute_task(task: Dict[str, Any]) -> None:
     if submit_error is None:
         prefix = "✅" if payload["status"] == "success" else "⚠️"
         log(f"Task {task_id[:8]} {payload['status'].upper()} · reward {reward} HAI", prefix=prefix)
-    except Exception as exc:
-        log(f"Failed to submit result: {exc}", prefix="🚫")
+    else:
+        log(f"Failed to submit result: {submit_error}", prefix="🚫")
 
 
 def run_ai_inference(entry: ModelEntry, model_path: Path, input_shape: List[int], reward_weight: float) -> (Dict[str, Any], int):
@@ -1929,10 +1988,6 @@ def heartbeat_loop() -> None:
             "models": capabilities["models"],
             "pipelines": capabilities["pipelines"],
         }
-        if pipelines:
-            payload["pipelines"] = pipelines
-        if supports:
-            payload["supports"] = supports
         try:
             resp = SESSION.post(endpoint("/register"), data=json.dumps(payload), timeout=5)
             resp.raise_for_status()
@@ -1977,7 +2032,8 @@ def poll_tasks_loop() -> None:
 
 if __name__ == "__main__":
     log(f"Node ID: {NODE_NAME} · Role: {ROLE.upper()} · Version: {CLIENT_VERSION}")
-    refresh_manifest_with_backoff("startup")
+    if not refresh_manifest_with_backoff("startup", max_attempts=5):
+        log("Proceeding with degraded manifest state; heartbeat loop will keep retrying.", prefix="⚠️")
     link_wallet(WALLET)
     # Graceful shutdown hooks
     atexit.register(disconnect)

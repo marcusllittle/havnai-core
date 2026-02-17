@@ -112,6 +112,25 @@ class ModelRegistry:
                 if not isinstance(model, dict):
                     continue
                 filtered = {key: value for key, value in model.items() if key in allowed}
+                name = str(filtered.get("name") or model.get("model") or "").strip()
+                if not name:
+                    continue
+                filtered["name"] = name
+                filtered["pipeline"] = str(filtered.get("pipeline") or "sd15").strip().lower()
+                filtered["type"] = str(filtered.get("type") or "checkpoint").strip().lower()
+                # Coordinator /models/list currently does not expose artifact paths.
+                # Keep path optional here; node runtime resolves local files by model name.
+                filtered["path"] = str(filtered.get("path") or "").strip()
+                if "reward_weight" not in filtered and "weight" in model:
+                    try:
+                        filtered["reward_weight"] = float(model.get("weight"))  # type: ignore[arg-type]
+                    except Exception:
+                        pass
+                tags = filtered.get("tags")
+                if isinstance(tags, str):
+                    filtered["tags"] = [tags]
+                elif not isinstance(tags, list):
+                    filtered["tags"] = []
                 normalized.append(ModelEntry(**filtered))  # type: ignore[arg-type]
         except Exception as exc:  # pragma: no cover
             raise ManifestError(f"Invalid manifest structure: {exc}") from exc

@@ -1986,6 +1986,7 @@ def heartbeat_loop() -> None:
             "version": CLIENT_VERSION,
             "node_name": NODE_NAME,
             "models": capabilities["models"],
+            "loras": list_local_loras(),
             "pipelines": capabilities["pipelines"],
         }
         try:

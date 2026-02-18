@@ -1049,14 +1049,14 @@ def leaderboard_rows(limit: int = 25) -> List[Dict[str, Any]]:
             {
                 "wallet": wallet,
                 "wallet_short": wallet[:6] + "…" + wallet[-4:] if wallet else "—",
-                "all_time": round(total, 6),
+                "total_rewards": round(total, 6),
                 "jobs": job_counts.get(wallet, 0),
-                "rewards_24h": round(last24.get(wallet, 0.0), 6),
+                "last_24h": round(last24.get(wallet, 0.0), 6),
                 "nodes": nodes,
                 "creator": creator,
             }
         )
-    leaderboard.sort(key=lambda row: row["all_time"], reverse=True)
+    leaderboard.sort(key=lambda row: row["total_rewards"], reverse=True)
     for idx, row in enumerate(leaderboard, start=1):
         row["rank"] = idx
         if idx > limit:
@@ -1136,8 +1136,8 @@ def leaderboard() -> Any:
 
     rows_html = "".join(
         f"<tr><td>{row['rank']}</td><td>{', '.join(node['node_name'] for node in row['nodes']) or '—'}</td>"
-        f"<td>{row['wallet_short']}</td><td>{row['jobs']}</td><td>{row['rewards_24h']:.6f}</td>"
-        f"<td>{row['all_time']:.6f}</td><td>{'✅' if row['creator'] else ''}</td></tr>"
+        f"<td>{row['wallet_short']}</td><td>{row['jobs']}</td><td>{row['last_24h']:.6f}</td>"
+        f"<td>{row['total_rewards']:.6f}</td><td>{'✅' if row['creator'] else ''}</td></tr>"
         for row in data
     )
     html = f"""

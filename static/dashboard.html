@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <script>
-    window.NEXT_PUBLIC_API_BASE_URL = "";
+    window.NEXT_PUBLIC_API_BASE_URL = window.location.pathname.startsWith("/api/") ? "/api" : "";
     window.NEXT_PUBLIC_HAVNAI_API_BASE = "";
   </script>
   <meta charset="UTF-8" />
@@ -452,6 +452,6 @@
     </ul>
   </section>
 
-  <script src="/static/dashboard.js" type="module"></script>
+  <script src="static/dashboard.js" type="module"></script>
 </body>
 </html>

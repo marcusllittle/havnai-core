@@ -40,6 +40,9 @@ function normalizeApiBase(base) {
   if (!trimmed || trimmed === "/" || trimmed === ".") {
     return "";
   }
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed;
+  }
   return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
 }
 

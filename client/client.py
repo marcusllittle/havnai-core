@@ -86,6 +86,8 @@ except Exception:  # pragma: no cover
     FaceAnalysis = None  # type: ignore
 
 _FACE_ANALYSIS = None
+_FACE_SWAP_PIPE = None
+_FACE_SWAP_PIPE_MODEL = ""
 
 try:
     from huggingface_hub import hf_hub_download  # type: ignore
@@ -129,6 +131,13 @@ MODEL_SEARCH_DIR_CANDIDATES = [
     str(HAVNAI_HOME / "models" / "creator"),
     "/mnt/d/havnai-storage/models/creator",
 ]
+
+# When running from the havnai-core repo, ensure sibling packages (engines/*)
+# are importable even if current working directory is elsewhere.
+CLIENT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = CLIENT_DIR.parent
+if (REPO_ROOT / "engines").exists() and str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 HAVNAI_HOME.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -258,6 +267,28 @@ FAST_PREVIEW = (
 )
 LTX2_MODEL_ID = os.environ.get("LTX2_MODEL_ID") or ENV_VARS.get("LTX2_MODEL_ID") or "maxin-cn/Latte-1"
 LTX2_MODEL_PATH = os.environ.get("LTX2_MODEL_PATH") or ENV_VARS.get("LTX2_MODEL_PATH", "")
+ANIMATEDIFF_ADAPTER_ID = (
+    os.environ.get("ANIMATEDIFF_MOTION_ADAPTER")
+    or ENV_VARS.get("ANIMATEDIFF_MOTION_ADAPTER")
+    or "guoyww/animatediff-motion-adapter-v1-5-2"
+)
+INSTANTID_ADAPTER_PATH = (
+    os.environ.get("HAVNAI_INSTANTID_ADAPTER")
+    or os.environ.get("INSTANTID_ADAPTER_PATH")
+    or ENV_VARS.get("HAVNAI_INSTANTID_ADAPTER")
+    or str(INSTANTID_CACHE_DIR / "ip-adapter.bin")
+)
+INSTANTID_CONTROLNET_PATH = (
+    os.environ.get("HAVNAI_INSTANTID_CONTROLNET")
+    or os.environ.get("INSTANTID_CONTROLNET_PATH")
+    or ENV_VARS.get("HAVNAI_INSTANTID_CONTROLNET")
+    or str(INSTANTID_CACHE_DIR / "ControlNetModel")
+)
+INSTANTID_CONTROLNET_REPO = (
+    os.environ.get("HAVNAI_INSTANTID_CONTROLNET_REPO")
+    or ENV_VARS.get("HAVNAI_INSTANTID_CONTROLNET_REPO")
+    or "InstantX/InstantID"
+)
 ENABLE_XFORMERS = _env_flag("HAI_ENABLE_XFORMERS", False)
 SAFE_CUDA_KERNELS = _env_flag("HAI_SAFE_CUDA_KERNELS", True)
 
@@ -370,13 +401,109 @@ def discover_capabilities() -> Dict[str, List[str]]:
     pipelines: set[str] = set()
     models: List[str] = []
     for entry in REGISTRY.list_entries():
+        pipeline = str(getattr(entry, "pipeline", "") or "").lower()
+        name = str(getattr(entry, "name", "") or "").strip()
+        if not name:
+            continue
+        # LTX2 can be loaded from HF repo id; local path is optional.
+        if pipeline == "ltx2":
+            pipelines.add(pipeline)
+            models.append(name)
+            continue
         try:
-            path = ensure_model_path(entry)
+            ensure_model_path(entry)
         except Exception:
             continue
-        pipelines.add(entry.pipeline)
-        models.append(entry.name)
+        pipelines.add(pipeline or "sd15")
+        models.append(name)
     return {"pipelines": sorted(pipelines), "models": sorted(models)}
+
+
+def _has_runner(module_name: str, function_name: str) -> bool:
+    try:
+        module = __import__(module_name, fromlist=[function_name])
+        return hasattr(module, function_name)
+    except Exception:
+        return False
+
+
+def _has_sdxl_base_model() -> bool:
+    for entry in REGISTRY.list_entries():
+        pipeline = str(getattr(entry, "pipeline", "") or "").lower()
+        task_type = str(getattr(entry, "task_type", "IMAGE_GEN") or "IMAGE_GEN").upper()
+        if task_type != "IMAGE_GEN":
+            continue
+        if "sdxl" not in pipeline:
+            continue
+        try:
+            ensure_model_path(entry)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _has_image_generation_model() -> bool:
+    for entry in REGISTRY.list_entries():
+        task_type = str(getattr(entry, "task_type", "IMAGE_GEN") or "IMAGE_GEN").upper()
+        if task_type != "IMAGE_GEN":
+            continue
+        try:
+            ensure_model_path(entry)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _instantid_assets_ready() -> bool:
+    adapter_path = Path(INSTANTID_ADAPTER_PATH).expanduser()
+    controlnet_path = Path(INSTANTID_CONTROLNET_PATH).expanduser()
+    if adapter_path.exists() and controlnet_path.exists():
+        return True
+    # If local assets are missing, allow runtime download when HF helper is available.
+    return hf_hub_download is not None
+
+
+def discover_supports(capabilities: Dict[str, List[str]]) -> List[str]:
+    if ROLE != "creator":
+        return []
+
+    supports: List[str] = []
+    pipelines = {p.lower() for p in capabilities.get("pipelines", [])}
+    models = {m.lower() for m in capabilities.get("models", [])}
+
+    if _has_image_generation_model():
+        supports.append("image")
+
+    if "ltx2" in pipelines and "ltx2" in models and _has_runner("engines.ltx2.ltx2_runner", "run_ltx2"):
+        supports.append("video")
+
+    if (
+        "animatediff" in pipelines
+        and "animatediff" in models
+        and _has_runner("engines.animatediff.animatediff_runner", "run_animatediff")
+    ):
+        supports.append("animatediff")
+
+    face_swap_ready = (
+        torch is not None
+        and diffusers is not None
+        and Image is not None
+        and np is not None
+        and cv2 is not None
+        and FaceAnalysis is not None
+        and _has_runner(
+            "pipeline_stable_diffusion_xl_instantid_inpaint",
+            "StableDiffusionXLInstantIDInpaintPipeline",
+        )
+        and _has_sdxl_base_model()
+        and _instantid_assets_ready()
+    )
+    if face_swap_ready:
+        supports.append("face_swap")
+
+    return sorted(set(supports))
 
 
 # ---------------------------------------------------------------------------
@@ -1057,77 +1184,386 @@ def prepare_mask_and_pose_control(
     return (mask, image, control_image), (p_x1, p_y1, original_width, original_height)
 
 
+def _resolve_instantid_adapter_path() -> Path:
+    adapter_path = Path(INSTANTID_ADAPTER_PATH).expanduser()
+    if adapter_path.exists():
+        return adapter_path
+    if hf_hub_download is None:
+        raise RuntimeError(
+            f"InstantID adapter missing at {adapter_path} and huggingface_hub is unavailable."
+        )
+    try:
+        downloaded = hf_hub_download(
+            repo_id=INSTANTID_CONTROLNET_REPO,
+            filename="ip-adapter.bin",
+            cache_dir=str(INSTANTID_CACHE_DIR),
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Failed to download InstantID adapter: {exc}") from exc
+    return Path(downloaded)
+
+
+def _resolve_instantid_controlnet_ref() -> str:
+    controlnet_path = Path(INSTANTID_CONTROLNET_PATH).expanduser()
+    if controlnet_path.exists():
+        return str(controlnet_path)
+    return INSTANTID_CONTROLNET_REPO
+
+
+def _run_ltx2_task(
+    task_id: str,
+    entry: ModelEntry,
+    reward_weight: float,
+    task: Dict[str, Any],
+) -> Tuple[Dict[str, Any], int, Optional[str]]:
+    try:
+        from engines.ltx2.ltx2_runner import run_ltx2, video_to_b64 as ltx2_video_to_b64  # type: ignore
+    except Exception as exc:
+        return (
+            {
+                "status": "failed",
+                "task_type": "video_gen",
+                "model_name": entry.name,
+                "reward_weight": reward_weight,
+                "error": f"LTX2 runtime unavailable: {exc}",
+            },
+            utilization_hint,
+            None,
+        )
+
+    model_ref = LTX2_MODEL_PATH or str(getattr(entry, "path", "") or LTX2_MODEL_ID)
+    task_payload = dict(task)
+    task_payload["task_id"] = task_id
+    task_payload["model_name"] = entry.name
+    task_payload["reward_weight"] = reward_weight
+    task_payload.setdefault("seed", random.randint(0, 2**31 - 1))
+
+    try:
+        metrics, util, video_path = run_ltx2(
+            task_payload,
+            log_fn=lambda message: log(message, prefix="🎬", task_id=task_id),
+            outputs_dir=OUTPUTS_DIR,
+            read_gpu_stats=read_gpu_stats,
+            utilization_hint=utilization_hint,
+            model_id=model_ref,
+        )
+    except Exception as exc:
+        return (
+            {
+                "status": "failed",
+                "task_type": "video_gen",
+                "model_name": entry.name,
+                "reward_weight": reward_weight,
+                "error": f"LTX2 execution failed: {exc}",
+            },
+            utilization_hint,
+            None,
+        )
+
+    video_b64 = ltx2_video_to_b64(video_path) if video_path else None
+    if metrics.get("status") == "success" and not video_b64:
+        metrics["status"] = "failed"
+        metrics["error"] = "LTX2 produced no output video payload"
+    try:
+        util_int = int(util)
+    except (TypeError, ValueError):
+        util_int = utilization_hint
+    return metrics, util_int, video_b64
+
+
+def _run_animatediff_task(
+    task_id: str,
+    entry: ModelEntry,
+    model_path: Path,
+    reward_weight: float,
+    task: Dict[str, Any],
+) -> Tuple[Dict[str, Any], int, Optional[str]]:
+    try:
+        from engines.animatediff.animatediff_runner import run_animatediff, video_to_b64 as ad_video_to_b64  # type: ignore
+    except Exception as exc:
+        return (
+            {
+                "status": "failed",
+                "task_type": "animatediff",
+                "model_name": entry.name,
+                "reward_weight": reward_weight,
+                "error": f"AnimateDiff runtime unavailable: {exc}",
+            },
+            utilization_hint,
+            None,
+        )
+
+    task_payload = dict(task)
+    task_payload["task_id"] = task_id
+    task_payload["model_name"] = entry.name
+    task_payload["reward_weight"] = reward_weight
+    task_payload.setdefault("seed", random.randint(0, 2**31 - 1))
+
+    try:
+        metrics, util_info, video_path = run_animatediff(
+            task_payload,
+            model_id=str(model_path),
+            outputs_dir=OUTPUTS_DIR,
+            log_fn=lambda message: log(message, prefix="🎞️", task_id=task_id),
+            read_gpu_stats=read_gpu_stats,
+            utilization_hint={"utilization": utilization_hint},
+        )
+    except Exception as exc:
+        return (
+            {
+                "status": "failed",
+                "task_type": "animatediff",
+                "model_name": entry.name,
+                "reward_weight": reward_weight,
+                "error": f"AnimateDiff execution failed: {exc}",
+            },
+            utilization_hint,
+            None,
+        )
+
+    video_b64 = ad_video_to_b64(video_path) if video_path else None
+    if metrics.get("status") == "success" and not video_b64:
+        metrics["status"] = "failed"
+        metrics["error"] = "AnimateDiff produced no output video payload"
+
+    if isinstance(util_info, dict):
+        try:
+            util_val = float(util_info.get("utilization", utilization_hint))
+        except (TypeError, ValueError):
+            util_val = float(utilization_hint)
+    else:
+        try:
+            util_val = float(util_info)
+        except (TypeError, ValueError):
+            util_val = float(utilization_hint)
+    return metrics, int(max(util_val, float(utilization_hint))), video_b64
+
+
+def _run_faceswap_task(
+    task_id: str,
+    entry: ModelEntry,
+    model_path: Path,
+    reward_weight: float,
+    task: Dict[str, Any],
+) -> Tuple[Dict[str, Any], int, Optional[str]]:
+    global _FACE_SWAP_PIPE, _FACE_SWAP_PIPE_MODEL
+
+    start_stats = read_gpu_stats()
+    end_stats: Dict[str, Any] = {}
+    started = time.time()
+    status = "success"
+    error_msg = ""
+    image_b64: Optional[str] = None
+    util = utilization_hint
+
+    try:
+        if torch is None or diffusers is None:
+            raise RuntimeError("diffusers + torch are required for face swap")
+        if Image is None or np is None or cv2 is None:
+            raise RuntimeError("pillow + numpy + opencv are required for face swap")
+
+        from diffusers.models import ControlNetModel  # type: ignore
+        from pipeline_stable_diffusion_xl_instantid_inpaint import (  # type: ignore
+            StableDiffusionXLInstantIDInpaintPipeline,
+        )
+
+        prompt = str(task.get("prompt") or "").strip() or "portrait, photorealistic, high detail"
+        negative_prompt = str(task.get("negative_prompt") or "").strip()
+        strength = coerce_float(task.get("strength"), 0.8)
+        strength = max(0.0, min(1.0, strength))
+        num_steps = coerce_int(task.get("num_steps"), 20)
+        num_steps = max(5, min(60, num_steps))
+        seed = task.get("seed")
+        try:
+            seed = int(seed) if seed is not None else random.randint(0, 2**31 - 1)
+        except (TypeError, ValueError):
+            seed = random.randint(0, 2**31 - 1)
+
+        base_image, base_error = load_image_source_with_error(task.get("base_image_url"))
+        if base_image is None:
+            raise RuntimeError(f"Failed to load base image: {base_error or 'unknown error'}")
+        source_image, source_error = load_image_source_with_error(task.get("face_source_url"))
+        if source_image is None:
+            raise RuntimeError(f"Failed to load face source: {source_error or 'unknown error'}")
+
+        face_app = get_face_analysis()
+        base_faces = face_app.get(cv2.cvtColor(np.array(base_image), cv2.COLOR_RGB2BGR))
+        source_faces = face_app.get(cv2.cvtColor(np.array(source_image), cv2.COLOR_RGB2BGR))
+        base_face = pick_primary_face(base_faces)
+        source_face = pick_primary_face(source_faces)
+        if base_face is None:
+            raise RuntimeError("No face detected in base image")
+        if source_face is None:
+            raise RuntimeError("No face detected in face source image")
+
+        crop_inputs, crop_region = prepare_mask_and_pose_control(base_image, base_face, padding=70, mask_grow=48)
+        mask_image, cropped_image, control_image = crop_inputs
+        crop_x, crop_y, crop_w, crop_h = crop_region
+
+        adapter_path = _resolve_instantid_adapter_path()
+        controlnet_ref = _resolve_instantid_controlnet_ref()
+        dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        pipeline_cache_key = f"{model_path}|{controlnet_ref}|{adapter_path}"
+        if _FACE_SWAP_PIPE is None or _FACE_SWAP_PIPE_MODEL != pipeline_cache_key:
+            controlnet = ControlNetModel.from_pretrained(controlnet_ref, torch_dtype=dtype)
+            pipe = StableDiffusionXLInstantIDInpaintPipeline.from_single_file(
+                str(model_path),
+                controlnet=controlnet,
+                torch_dtype=dtype,
+                safety_checker=None,
+            )
+            pipe.load_ip_adapter_instantid(str(adapter_path))
+            pipe.set_ip_adapter_scale(0.8)
+            pipe.to(device)
+            if hasattr(pipe, "enable_attention_slicing"):
+                pipe.enable_attention_slicing("max")
+            _FACE_SWAP_PIPE = pipe
+            _FACE_SWAP_PIPE_MODEL = pipeline_cache_key
+
+        generator = torch.Generator(device=device).manual_seed(seed)
+        result = _FACE_SWAP_PIPE(
+            prompt=prompt,
+            negative_prompt=negative_prompt or None,
+            image=cropped_image,
+            mask_image=mask_image,
+            control_image=control_image,
+            image_embeds=source_face["embedding"],
+            num_inference_steps=num_steps,
+            guidance_scale=5.0,
+            strength=strength,
+            controlnet_conditioning_scale=0.8,
+            generator=generator,
+        )
+        swapped_crop = result.images[0]
+        swapped_crop = swapped_crop.resize((crop_w, crop_h), resample=Image.LANCZOS)
+        composed = base_image.copy()
+        composed.paste(swapped_crop, (crop_x, crop_y))
+
+        output_path = OUTPUTS_DIR / f"{task_id}.png"
+        composed.save(output_path)
+        with output_path.open("rb") as fh:
+            image_b64 = base64.b64encode(fh.read()).decode("utf-8")
+    except Exception as exc:
+        status = "failed"
+        error_msg = str(exc)
+        log(f"Face swap generation failed: {error_msg}", prefix="🚫", task_id=task_id)
+    finally:
+        end_stats = read_gpu_stats()
+        try:
+            util = int(max(start_stats.get("utilization", 0), end_stats.get("utilization", 0), utilization_hint))
+        except Exception:
+            util = utilization_hint
+
+    metrics: Dict[str, Any] = {
+        "status": status,
+        "task_type": "face_swap",
+        "model_name": entry.name,
+        "model_path": str(model_path),
+        "reward_weight": reward_weight,
+        "inference_time_ms": round((time.time() - started) * 1000, 3),
+        "gpu_util_start": start_stats.get("utilization", 0),
+        "gpu_util_end": end_stats.get("utilization", 0),
+    }
+    if status != "success":
+        metrics["error"] = error_msg or "face swap error"
+    return metrics, util, image_b64
+
+
 def execute_task(task: Dict[str, Any]) -> None:
     global utilization_hint
 
     task_id = task.get("task_id", "unknown")
-    task_type = (task.get("type") or "IMAGE_GEN").lower()
+    task_type = str(task.get("type") or "IMAGE_GEN").upper()
     model_name = (task.get("model_name") or "model").lower()
     reward_weight = float(task.get("reward_weight", 1.0))
     input_shape = task.get("input_shape") or []
     prompt = task.get("prompt") or ""
     negative_prompt = task.get("negative_prompt") or ""
 
-    if task_type in {"image_gen", "video_gen", "animatediff"} and ROLE != "creator":
+    if task_type in {"IMAGE_GEN", "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP"} and ROLE != "creator":
         log(f"Skipping creator task {task_id[:8]} — node not in creator mode", prefix="⚠️")
         return
 
-    log(f"Executing {task_type} task {task_id[:8]} · {model_name}", prefix="🚀")
+    log(f"Executing {task_type.lower()} task {task_id[:8]} · {model_name}", prefix="🚀")
 
     image_b64: Optional[str] = None
     video_b64: Optional[str] = None
+    metrics: Dict[str, Any]
+    util: int = utilization_hint
+    entry: Optional[ModelEntry] = None
+    model_path: Optional[Path] = None
     try:
         entry = ensure_model_entry(model_name)
-        model_path = ensure_model_path(entry)
+        if task_type in {"IMAGE_GEN", "ANIMATEDIFF", "FACE_SWAP"}:
+            model_path = ensure_model_path(entry)
     except Exception as exc:
-        log(f"Model resolution failed: {exc}", prefix="🚫")
-        return
-    if task_type == "image_gen":
-        # Parse structured settings from task if present
-        job_settings = None
-        prompt_raw = task.get("prompt")
-        try:
-            task_loras = task.get("loras") if isinstance(task, dict) else None
-            if task_loras:
-                if job_settings is None:
-                    job_settings = {}
-                job_settings["loras"] = task_loras
-            if isinstance(prompt_raw, dict):
-                job_settings = prompt_raw
-                prompt = str(job_settings.get("prompt") or prompt)
-                negative_prompt = str(job_settings.get("negative_prompt") or negative_prompt)
-            elif isinstance(prompt_raw, str) and prompt_raw.strip().startswith("{"):
-                job_settings = json.loads(prompt_raw)
-                if isinstance(job_settings, dict):
+        metrics = {
+            "status": "failed",
+            "task_type": task_type.lower(),
+            "model_name": model_name,
+            "reward_weight": reward_weight,
+            "error": f"Model resolution failed: {exc}",
+        }
+    else:
+        if task_type == "IMAGE_GEN":
+            # Parse structured settings from task if present
+            job_settings = None
+            prompt_raw = task.get("prompt")
+            try:
+                task_loras = task.get("loras") if isinstance(task, dict) else None
+                if task_loras:
+                    if job_settings is None:
+                        job_settings = {}
+                    job_settings["loras"] = task_loras
+                if isinstance(prompt_raw, dict):
+                    job_settings = prompt_raw
                     prompt = str(job_settings.get("prompt") or prompt)
                     negative_prompt = str(job_settings.get("negative_prompt") or negative_prompt)
-                else:
-                    job_settings = None
-            elif isinstance(prompt_raw, str):
-                prompt = prompt_raw
-        except Exception as exc:
-            log(f"Failed to parse job settings: {exc}", prefix="⚠️", task_id=task_id)
-        # Merge coordinator-sent overrides even when prompt is plain text.
-        if isinstance(task, dict):
-            for key in ("steps", "guidance", "width", "height", "sampler", "seed", "auto_anatomy"):
-                value = task.get(key)
-                if value is None or value == "":
-                    continue
-                if job_settings is None:
-                    job_settings = {}
-                job_settings.setdefault(key, value)
+                elif isinstance(prompt_raw, str) and prompt_raw.strip().startswith("{"):
+                    job_settings = json.loads(prompt_raw)
+                    if isinstance(job_settings, dict):
+                        prompt = str(job_settings.get("prompt") or prompt)
+                        negative_prompt = str(job_settings.get("negative_prompt") or negative_prompt)
+                    else:
+                        job_settings = None
+                elif isinstance(prompt_raw, str):
+                    prompt = prompt_raw
+            except Exception as exc:
+                log(f"Failed to parse job settings: {exc}", prefix="⚠️", task_id=task_id)
+            # Merge coordinator-sent overrides even when prompt is plain text.
+            if isinstance(task, dict):
+                for key in ("steps", "guidance", "width", "height", "sampler", "seed", "auto_anatomy"):
+                    value = task.get(key)
+                    if value is None or value == "":
+                        continue
+                    if job_settings is None:
+                        job_settings = {}
+                    job_settings.setdefault(key, value)
 
-        metrics, util, image_b64 = run_image_generation(
-            task_id,
-            entry,
-            model_path,
-            reward_weight,
-            prompt,
-            negative_prompt,
-            job_settings,
-        )
-    else:
-        metrics, util = run_ai_inference(entry, model_path, input_shape, reward_weight)
+            metrics, util, image_b64 = run_image_generation(
+                task_id,
+                entry,
+                model_path,
+                reward_weight,
+                prompt,
+                negative_prompt,
+                job_settings,
+            )
+        elif task_type == "VIDEO_GEN":
+            metrics, util, video_b64 = _run_ltx2_task(task_id, entry, reward_weight, task)
+        elif task_type == "ANIMATEDIFF":
+            metrics, util, video_b64 = _run_animatediff_task(task_id, entry, model_path, reward_weight, task)
+        elif task_type == "FACE_SWAP":
+            metrics, util, image_b64 = _run_faceswap_task(task_id, entry, model_path, reward_weight, task)
+        else:
+            metrics = {
+                "status": "failed",
+                "task_type": task_type.lower(),
+                "model_name": model_name,
+                "reward_weight": reward_weight,
+                "error": f"Unsupported task type: {task_type}",
+            }
 
     with lock:
         utilization_hint = util
@@ -1998,6 +2434,7 @@ def heartbeat_loop() -> None:
     while True:
         gpu_stats = read_gpu_stats()
         capabilities = discover_capabilities()
+        supports = discover_supports(capabilities)
         payload = {
             "node_id": NODE_NAME,
             "os": os.uname().sysname if hasattr(os, "uname") else os.name,
@@ -2011,6 +2448,7 @@ def heartbeat_loop() -> None:
             "models": capabilities["models"],
             "loras": list_local_loras(),
             "pipelines": capabilities["pipelines"],
+            "supports": supports,
         }
         try:
             resp = SESSION.post(endpoint("/register"), data=json.dumps(payload), timeout=5)

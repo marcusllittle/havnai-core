@@ -45,6 +45,15 @@ def fetch_next_job_for_node(node_id: str) -> Optional[Dict[str, Any]]:
     node = NODES.get(node_id, {})
     role = node.get("role", "worker")
     node_supports = {s.lower() for s in node.get("supports", []) if isinstance(s, str)}
+    # Legacy nodes do not advertise supports; treat as image-only.
+    if not node_supports:
+        node_supports = {"image"}
+    support_map = {
+        CREATOR_TASK_TYPE: "image",
+        "VIDEO_GEN": "video",
+        "ANIMATEDIFF": "animatediff",
+        "FACE_SWAP": "face_swap",
+    }
     for row in rows:
         task_type = (row["task_type"] or CREATOR_TASK_TYPE).upper()
         # Support standard IMAGE_GEN, LTX2 video jobs, AnimateDiff video jobs, and face swap.
@@ -52,12 +61,7 @@ def fetch_next_job_for_node(node_id: str) -> Optional[Dict[str, Any]]:
             continue
         if role != "creator":
             continue
-        if task_type == "ANIMATEDIFF":
-            required_support = "animatediff"
-        elif task_type == "VIDEO_GEN":
-            required_support = "video"
-        else:
-            required_support = "image"
+        required_support = support_map.get(task_type, "image")
         if node_supports and required_support not in node_supports:
             continue
         model_name = row["model"].lower()

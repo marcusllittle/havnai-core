@@ -99,6 +99,14 @@ INVITE_CONFIG_PATH = Path(
 INVITE_GATING = os.getenv("HAVNAI_INVITE_GATING", "").strip().lower() in {"1", "true", "yes"}
 CREDITS_ENABLED = os.getenv("HAVNAI_CREDITS_ENABLED", "").strip().lower() in {"1", "true", "yes"}
 
+SUPPORTED_TASK_TYPES = {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP"}
+TASK_SUPPORT_MAP = {
+    CREATOR_TASK_TYPE: "image",
+    "VIDEO_GEN": "video",
+    "ANIMATEDIFF": "animatediff",
+    "FACE_SWAP": "face_swap",
+}
+
 # ---------------------------------------------------------------------------
 # GPU profile presets – select via HAVNAI_GPU_PROFILE env var.
 # "fast_3060" is tuned for RTX 3060 (12 GB); "quality" restores the old
@@ -972,6 +980,95 @@ credits.get_model_config = get_model_config  # type: ignore[attr-defined]
 job_helpers.get_model_config = get_model_config  # type: ignore[attr-defined]
 
 
+def _normalize_task_type(task_type: Optional[str]) -> str:
+    normalized = str(task_type or CREATOR_TASK_TYPE).upper()
+    return normalized if normalized in SUPPORTED_TASK_TYPES else CREATOR_TASK_TYPE
+
+
+def _node_is_online(node: Dict[str, Any], now: Optional[float] = None) -> bool:
+    current = unix_now() if now is None else now
+    last_seen_unix = node.get("last_seen_unix")
+    try:
+        last_seen = float(last_seen_unix)
+    except (TypeError, ValueError):
+        last_seen = 0.0
+    return (current - last_seen) <= ONLINE_THRESHOLD
+
+
+def _node_supports(node: Dict[str, Any]) -> set[str]:
+    supports = {s.lower() for s in node.get("supports", []) if isinstance(s, str)}
+    # Legacy nodes do not report supports. Keep them IMAGE_GEN-only.
+    return supports or {"image"}
+
+
+def _node_can_run_task(
+    node: Dict[str, Any],
+    model_name: str,
+    model_cfg: Dict[str, Any],
+    task_type: str,
+    now: Optional[float] = None,
+) -> bool:
+    if node.get("role", "worker") != "creator":
+        return False
+    if not _node_is_online(node, now=now):
+        return False
+
+    normalized_task_type = _normalize_task_type(task_type)
+    required_support = TASK_SUPPORT_MAP.get(normalized_task_type, "image")
+    if required_support not in _node_supports(node):
+        return False
+
+    node_models = {m.lower() for m in node.get("models", []) if isinstance(m, str)}
+    if node_models and model_name.lower() not in node_models:
+        return False
+
+    required_pipeline = str(model_cfg.get("pipeline") or "sd15").lower()
+    node_pipelines = {p.lower() for p in node.get("pipelines", []) if isinstance(p, str)}
+    if node_pipelines and required_pipeline not in node_pipelines:
+        return False
+
+    return True
+
+
+def _eligible_online_node_ids(model_name: str, task_type: str) -> List[str]:
+    normalized_model = str(model_name or "").lower()
+    cfg = get_model_config(normalized_model)
+    if not cfg:
+        return []
+    now = unix_now()
+    with LOCK:
+        nodes_snapshot = list(NODES.items())
+    eligible: List[str] = []
+    for node_id, node in nodes_snapshot:
+        if _node_can_run_task(node, normalized_model, cfg, task_type, now=now):
+            eligible.append(node_id)
+    return eligible
+
+
+def _eligible_online_node_count(model_name: str, task_type: str) -> int:
+    return len(_eligible_online_node_ids(model_name, task_type))
+
+
+def _no_capacity_response(model_name: str, task_type: str) -> Any:
+    normalized_task_type = _normalize_task_type(task_type)
+    normalized_model = str(model_name or "").strip().lower()
+    support_token = TASK_SUPPORT_MAP.get(normalized_task_type, "image")
+    return (
+        jsonify(
+            {
+                "error": "no_capacity",
+                "task_type": normalized_task_type,
+                "model": normalized_model,
+                "message": (
+                    f"No online creator nodes currently support {normalized_task_type} "
+                    f"for model '{normalized_model}' ({support_token})."
+                ),
+            }
+        ),
+        503,
+    )
+
+
 def build_models_catalog() -> List[Dict[str, Any]]:
     catalog: List[Dict[str, Any]] = []
     for name, meta in MANIFEST_MODELS.items():
@@ -1464,19 +1561,23 @@ def submit_job() -> Any:
             if (meta.get("task_type") or CREATOR_TASK_TYPE).upper() == CREATOR_TASK_TYPE
         ]
         if not candidates:
-            # Final safety fallback when weighted auto cannot select.
-            fallback = "uberRealisticPornMerge_v23Final"
-            if fallback.lower() in MANIFEST_MODELS:
-                model_name_raw = fallback
-                model_name = fallback.lower()
-            else:
-                return jsonify({"error": "no_creator_models"}), 400
-        else:
-            names = [meta["name"] for meta in candidates]
-            weights = [rewards.resolve_weight(meta["name"].lower(), meta.get("reward_weight", 10.0)) for meta in candidates]
-            chosen = random.choices(names, weights=weights, k=1)[0]
-            model_name_raw = chosen
-            model_name = chosen.lower()
+            return jsonify({"error": "no_creator_models"}), 400
+
+        eligible: List[Dict[str, Any]] = []
+        for meta in candidates:
+            candidate_name = str(meta.get("name") or "").strip().lower()
+            if not candidate_name:
+                continue
+            if _eligible_online_node_count(candidate_name, CREATOR_TASK_TYPE) > 0:
+                eligible.append(meta)
+        if not eligible:
+            return _no_capacity_response("auto", CREATOR_TASK_TYPE)
+
+        names = [meta["name"] for meta in eligible]
+        weights = [rewards.resolve_weight(meta["name"].lower(), meta.get("reward_weight", 10.0)) for meta in eligible]
+        chosen = random.choices(names, weights=weights, k=1)[0]
+        model_name_raw = chosen
+        model_name = chosen.lower()
 
     if not model_name:
         return jsonify({"error": "missing model"}), 400
@@ -1761,15 +1862,20 @@ def submit_job() -> Any:
         job_data = json.dumps(job_settings)
         task_type = CREATOR_TASK_TYPE
 
+    selected_model_name = str(cfg.get("name") or model_name).strip()
+    selected_model_key = selected_model_name.lower()
+    if _eligible_online_node_count(selected_model_key, task_type) <= 0:
+        return _no_capacity_response(selected_model_key, task_type)
+
     # Credit gate — only active when HAVNAI_CREDITS_ENABLED=true
-    credit_err = credits.check_and_deduct_credits(wallet, cfg.get("name", model_name), task_type)
+    credit_err = credits.check_and_deduct_credits(wallet, selected_model_name, task_type)
     if credit_err:
         return credit_err
 
     with LOCK:
         job_id = job_helpers.enqueue_job(
             wallet,
-            cfg.get("name", model_name),
+            selected_model_name,
             task_type,
             job_data,
             float(weight),
@@ -1858,15 +1964,20 @@ def generate_video_job() -> Any:
 
     job_data = json.dumps(settings)
 
+    selected_model_name = str(cfg.get("name") or model_name).strip()
+    selected_model_key = selected_model_name.lower()
+    if _eligible_online_node_count(selected_model_key, "VIDEO_GEN") <= 0:
+        return _no_capacity_response(selected_model_key, "VIDEO_GEN")
+
     # Credit gate — only active when HAVNAI_CREDITS_ENABLED=true
-    credit_err = credits.check_and_deduct_credits(wallet, cfg.get("name", model_name), "VIDEO_GEN")
+    credit_err = credits.check_and_deduct_credits(wallet, selected_model_name, "VIDEO_GEN")
     if credit_err:
         return credit_err
 
     with LOCK:
         job_id = job_helpers.enqueue_job(
             wallet,
-            cfg.get("name", model_name),
+            selected_model_name,
             "VIDEO_GEN",
             job_data,
             float(weight),
@@ -1915,15 +2026,20 @@ def submit_faceswap_job_endpoint() -> Any:
 
     job_data = json.dumps(settings)
 
+    selected_model_name = str(cfg.get("name") or model_name).strip()
+    selected_model_key = selected_model_name.lower()
+    if _eligible_online_node_count(selected_model_key, "FACE_SWAP") <= 0:
+        return _no_capacity_response(selected_model_key, "FACE_SWAP")
+
     # Credit gate — only active when HAVNAI_CREDITS_ENABLED=true
-    credit_err = credits.check_and_deduct_credits(wallet, cfg.get("name", model_name), "FACE_SWAP")
+    credit_err = credits.check_and_deduct_credits(wallet, selected_model_name, "FACE_SWAP")
     if credit_err:
         return credit_err
 
     with LOCK:
         job_id = job_helpers.enqueue_job(
             wallet,
-            cfg.get("name", model_name),
+            selected_model_name,
             "FACE_SWAP",
             job_data,
             float(weight),
@@ -1975,7 +2091,17 @@ def register() -> Any:
         node["version"] = data.get("version", "dev")
         node["pipelines"] = data.get("pipelines", node.get("pipelines", []))
         node["models"] = data.get("models", node.get("models", []))
-        node["supports"] = data.get("supports", node.get("supports", []))
+        supports_raw = data.get("supports", node.get("supports", []))
+        if isinstance(supports_raw, list):
+            node["supports"] = sorted(
+                {
+                    str(item).strip().lower()
+                    for item in supports_raw
+                    if str(item).strip()
+                }
+            )
+        else:
+            node["supports"] = node.get("supports", [])
         if "loras" in data:
             node["loras"] = _normalize_lora_catalog(data.get("loras"))
         util = data.get("gpu", {}).get("utilization") if isinstance(data.get("gpu"), dict) else data.get("utilization")
@@ -2899,6 +3025,10 @@ def models_list() -> Any:
               "reward_weight": float,
               "task_type": str,      # IMAGE_GEN, VIDEO_GEN, ANIMATEDIFF
               "pipeline": str,       # sdxl, sd15, ltx2, animatediff
+              "available": bool,
+              "online_nodes": int,
+              "face_swap_available": bool,
+              "face_swap_online_nodes": int,
               "tags": list[str],
               "strengths": str | null,
               "weaknesses": str | null
@@ -2924,21 +3054,38 @@ def models_list() -> Any:
     refresh_manifest()
     models = []
     with LOCK:
-        for model_key, model_data in MANIFEST_MODELS.items():
-            weight = float(model_data.get("reward_weight", 10.0))
-            models.append(
-                {
-                    "name": model_data.get("name", model_key),
-                    "tier": weight_to_tier(weight),
-                    "weight": weight,
-                    "reward_weight": weight,
-                    "task_type": model_data.get("task_type", CREATOR_TASK_TYPE),
-                    "pipeline": model_data.get("pipeline", "sd15"),
-                    "tags": model_data.get("tags", []),
-                    "strengths": model_data.get("strengths"),
-                    "weaknesses": model_data.get("weaknesses"),
-                }
-            )
+        manifest_snapshot = list(MANIFEST_MODELS.items())
+    for model_key, model_data in manifest_snapshot:
+        model_name = str(model_data.get("name", model_key)).strip()
+        model_key_norm = model_name.lower()
+        native_task_type = _normalize_task_type(str(model_data.get("task_type", CREATOR_TASK_TYPE)))
+        pipeline = str(model_data.get("pipeline", "sd15")).lower()
+        weight = float(model_data.get("reward_weight", 10.0))
+
+        online_nodes = _eligible_online_node_count(model_key_norm, native_task_type)
+        face_swap_online_nodes = (
+            _eligible_online_node_count(model_key_norm, "FACE_SWAP")
+            if "sdxl" in pipeline
+            else 0
+        )
+
+        models.append(
+            {
+                "name": model_name,
+                "tier": weight_to_tier(weight),
+                "weight": weight,
+                "reward_weight": weight,
+                "task_type": native_task_type,
+                "pipeline": pipeline,
+                "available": online_nodes > 0,
+                "online_nodes": online_nodes,
+                "face_swap_available": face_swap_online_nodes > 0,
+                "face_swap_online_nodes": face_swap_online_nodes,
+                "tags": model_data.get("tags", []),
+                "strengths": model_data.get("strengths"),
+                "weaknesses": model_data.get("weaknesses"),
+            }
+        )
 
     # Sort by weight descending (highest tier first)
     models.sort(key=lambda m: m["weight"], reverse=True)

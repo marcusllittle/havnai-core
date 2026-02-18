@@ -54,7 +54,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$SERVER_URL" ]]; then
-  SERVER_URL="http://localhost:5001"
+  SERVER_URL="http://api.joinhavn.io:5001"
   echo "[WARN] --server not provided, defaulting to $SERVER_URL"
 fi
 

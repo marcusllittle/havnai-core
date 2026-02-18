@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import logging
 import math
@@ -82,6 +84,9 @@ try:
     from insightface.app import FaceAnalysis  # type: ignore
 except Exception:  # pragma: no cover
     FaceAnalysis = None  # type: ignore
+
+_FACE_ANALYSIS = None
+
 try:
     from huggingface_hub import hf_hub_download  # type: ignore
 except Exception:  # pragma: no cover
@@ -106,6 +111,7 @@ LORA_DIR = Path(
     or os.environ.get("LORA_DIR")
     or (HAVNAI_HOME / "loras")
 )
+INSTANTID_CACHE_DIR = HAVNAI_HOME / "instantid"
 VERSION_SEARCH_PATHS = [HAVNAI_HOME / "VERSION", Path(__file__).resolve().parent / "VERSION"]
 DEFAULT_LORA_DIR = Path("/mnt/d/havnai-storage/models/loras")
 LORA_DIR = Path(

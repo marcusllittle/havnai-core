@@ -1069,6 +1069,7 @@ def execute_task(task: Dict[str, Any]) -> None:
     log(f"Executing {task_type} task {task_id[:8]} · {model_name}", prefix="🚀")
 
     image_b64: Optional[str] = None
+    video_b64: Optional[str] = None
     try:
         entry = ensure_model_entry(model_name)
         model_path = ensure_model_path(entry)
@@ -1649,6 +1650,29 @@ def run_image_generation(
     image_b64: Optional[str] = None
     loaded_loras: List[str] = []
     output_path = OUTPUTS_DIR / f"{task_id}.png"
+    # Derive XL flag from model entry pipeline — used for dtype selection and VAE upcast
+    _ep = (getattr(entry, "pipeline", "") or "sd15").lower()
+    is_xl = "sdxl" in _ep or ("xl" in _ep and "sd15" not in _ep)
+    # img2img params — extracted from job_settings before the pipeline block
+    use_img2img = False
+    init_image_raw: Optional[str] = None
+    img2img_strength = 0.75
+    if job_settings and isinstance(job_settings, dict):
+        init_image_raw = job_settings.get("init_image") or job_settings.get("init_image_url")
+        use_img2img = bool(init_image_raw)
+        try:
+            img2img_strength = float(job_settings.get("img2img_strength", 0.75) or 0.75)
+        except (TypeError, ValueError):
+            img2img_strength = 0.75
+    # Early width/height defaults for init image resize (overridden later from job_settings)
+    width = IMAGE_WIDTH
+    height = IMAGE_HEIGHT
+    if job_settings and isinstance(job_settings, dict):
+        try:
+            width = int(job_settings.get("width", width) or width)
+            height = int(job_settings.get("height", height) or height)
+        except (TypeError, ValueError):
+            pass
     try:
         if not FAST_PREVIEW and torch is not None and diffusers is not None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -1906,14 +1930,6 @@ def run_image_generation(
                     height=height,
                     width=width,
                 )
-                if not is_xl and is_dtype_error:
-                    log("SD1.5 dtype mismatch — converting full pipeline to fp32", prefix="⚠️")
-                    pipe = pipe.to(device=device, dtype=torch.float32)
-                    generator = torch.Generator(device=device).manual_seed(seed)
-                    call_kwargs["generator"] = generator
-                    result = _run_pipe()
-                else:
-                    raise
             gen_ms = int((time.time() - gen_t0) * 1000)
             log(f"Generated in {gen_ms}ms", prefix="✅")
             img = result.images[0]

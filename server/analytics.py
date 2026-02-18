@@ -336,7 +336,7 @@ def analytics_overview() -> Dict[str, Any]:
         "jobs_today": jobs_today,
         "completed": completed,
         "failed": failed,
-        "success_rate": round(completed / finished, 4) if finished > 0 else 0.0,
+        "success_rate": success_rate,
         "total_rewards": round(float(total_rewards), 6),
         "active_nodes": online_count,
         "online_nodes": online_count,

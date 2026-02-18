@@ -166,6 +166,10 @@ POSITIVE_SUFFIX_STYLIZED = (
     "high quality, masterpiece, detailed, clean lines"
 )
 
+POSITIVE_SUFFIX_SDXL = (
+    "high quality, masterpiece, detailed, sharp focus, 8k"
+)
+
 # Tags that indicate a stylized (non-realism) model
 _STYLIZED_TAGS = {"anime", "cartoon", "pixar", "manhwa", "webtoon", "stylized", "fantasy"}
 
@@ -1329,6 +1333,18 @@ def _coerce_float(value: Any, default: float) -> float:
 
 def _clamp(value: int, min_val: int, max_val: int) -> int:
     return max(min_val, min(max_val, value))
+
+
+def _clamp_int(value: Any, default: int, min_val: int, max_val: int) -> int:
+    return _clamp(_coerce_int(value, default), min_val, max_val)
+
+
+def _clamp_float(value: Any, default: float, min_val: float, max_val: float) -> float:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        v = default
+    return max(min_val, min(max_val, v))
 
 
 def _normalize_loras(raw_loras: Any) -> List[Dict[str, Any]]:
@@ -3443,8 +3459,8 @@ def nodes_endpoint() -> Any:
                 online_count += 1
             avg_util = float(info.get("avg_utilization", info.get("utilization", 0.0)))
             total_util += avg_util
-            rewards = float(info.get("rewards", 0.0))
-            total_rewards += rewards
+            node_rewards = float(info.get("rewards", 0.0))
+            total_rewards += node_rewards
             start_time = parse_timestamp(info.get("start_time"))
             uptime_seconds = max(0, int(now - start_time))
             # Normalize possibly-null fields from node telemetry
@@ -3474,7 +3490,7 @@ def nodes_endpoint() -> Any:
                     "inference_time_ms": inference_time,
                     "gpu_utilization": info.get("utilization", 0.0),
                     "avg_utilization": avg_util,
-                    "rewards": rewards,
+                    "rewards": node_rewards,
                     "last_reward": info.get("last_reward", 0.0),
                     "last_seen": info.get("last_seen"),
                     "uptime_human": format_duration(uptime_seconds),

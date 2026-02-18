@@ -3,3 +3,5 @@ __pycache__/
 client/__pycache__/
 server/__pycache__/
 tmp_gpu/
+server/logs/
+db/

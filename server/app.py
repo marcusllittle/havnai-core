@@ -166,6 +166,10 @@ POSITIVE_SUFFIX_STYLIZED = (
     "high quality, masterpiece, detailed, clean lines"
 )
 
+POSITIVE_SUFFIX_SDXL = (
+    "high quality, masterpiece, detailed, sharp focus, 8k"
+)
+
 # Tags that indicate a stylized (non-realism) model
 _STYLIZED_TAGS = {"anime", "cartoon", "pixar", "manhwa", "webtoon", "stylized", "fantasy"}
 

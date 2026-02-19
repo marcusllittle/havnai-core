@@ -2768,6 +2768,37 @@ def credits_deposit() -> Any:
         "balance": new_balance,
         "reason": reason,
     })
+    @app.route("/credits/convert", methods=["POST"])
+def credits_convert() -> Any:
+    """Convert credits to HAI tokens."""
+    data = request.get_json() or {}
+    wallet = str(data.get("wallet", "")).strip()
+    try:
+        amount = float(data.get("amount", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid amount"}), 400
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    if amount <= 0:
+        return jsonify({"error": "amount must be positive"}), 400
+    # Call the credits module to deduct credits and record HAI reward
+    success, remaining = credits.convert_credits_to_hai(wallet, amount)
+    if not success:
+        return jsonify({
+            "error": "insufficient_credits",
+            "balance": remaining,
+            "cost": amount,
+        }), 402
+    return jsonify({
+        "wallet": wallet,
+        "converted": amount,
+        "balance": remaining,
+        "message": "Credits converted to HAI",
+        "credits_enabled": CREDITS_ENABLED,
+    })
+
+
+
 
 
 @app.route("/credits/cost", methods=["GET"])

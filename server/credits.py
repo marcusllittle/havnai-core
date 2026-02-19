@@ -147,3 +147,19 @@ def check_and_deduct_credits(
             "cost": cost,
         }), 402
     return None
+
+
+
+def convert_credits_to_hai(wallet: str, amount: float) -> Tuple[bool, float]:
+    """Convert credits to HAI tokens. This is a stub that deducts credits and records equivalent HAI reward.
+
+    Returns a tuple of (success, remaining_credits).
+    """
+    # Deduct credits from the wallet
+    ok, remaining = deduct_credits(wallet, amount)
+    if not ok:
+        return False, remaining
+    # TODO: Integrate with blockchain or reward system to mint/transfer HAI tokens
+    # For now, simply log the event
+    log_event("Credits converted to HAI", wallet=wallet, amount=amount, remaining_credits=remaining)
+    return True, remaining

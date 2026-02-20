@@ -7,6 +7,7 @@ import io
 import json
 import logging
 import math
+import gc
 from logging.handlers import RotatingFileHandler
 import os
 import random
@@ -22,6 +23,7 @@ import atexit
 import signal
 from typing import Any, Dict, List, Optional, Set, Tuple
 import base64
+from collections import OrderedDict
 
 import requests
 
@@ -88,6 +90,8 @@ except Exception:  # pragma: no cover
 _FACE_ANALYSIS = None
 _FACE_SWAP_PIPE = None
 _FACE_SWAP_PIPE_MODEL = ""
+_IMAGE_PIPELINE_CACHE: "OrderedDict[str, Any]" = OrderedDict()
+_IMAGE_PIPELINE_CACHE_LOCK = threading.Lock()
 
 try:
     from huggingface_hub import hf_hub_download  # type: ignore
@@ -257,6 +261,18 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        raw = ENV_VARS.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+
+
 SERVER_BASE = ENV_VARS.get("SERVER_URL", "http://127.0.0.1:5001").rstrip("/")
 JOIN_TOKEN = ENV_VARS.get("JOIN_TOKEN", "").strip()
 ROLE = "creator" if ENV_VARS.get("CREATOR_MODE", "false").lower() in {"1", "true", "yes"} else "worker"
@@ -291,6 +307,14 @@ INSTANTID_CONTROLNET_REPO = (
 )
 ENABLE_XFORMERS = _env_flag("HAI_ENABLE_XFORMERS", False)
 SAFE_CUDA_KERNELS = _env_flag("HAI_SAFE_CUDA_KERNELS", True)
+IMAGE_PIPELINE_CACHE_SIZE = max(0, _env_int("HAI_IMAGE_PIPELINE_CACHE_SIZE", 1))
+PRELOAD_IMAGE_ON_STARTUP = _env_flag("HAI_PRELOAD_IMAGE_ON_STARTUP", True)
+PRELOAD_IMAGE_MODEL = str(
+    os.environ.get("HAI_PRELOAD_IMAGE_MODEL")
+    or ENV_VARS.get("HAI_PRELOAD_IMAGE_MODEL")
+    or ""
+).strip()
+ALLOW_REMOTE_LORA_DOWNLOAD = _env_flag("HAI_ALLOW_REMOTE_LORA_DOWNLOAD", False)
 
 REGISTRY.base_url = SERVER_BASE
 
@@ -457,9 +481,9 @@ def _has_image_generation_model() -> bool:
 
 
 def _instantid_assets_ready() -> bool:
-    adapter_path = Path(INSTANTID_ADAPTER_PATH).expanduser()
-    controlnet_path = Path(INSTANTID_CONTROLNET_PATH).expanduser()
-    if adapter_path.exists() and controlnet_path.exists():
+    adapter_exists = any(path.exists() for path in _candidate_instantid_adapter_paths())
+    controlnet_exists = any(path.exists() for path in _candidate_instantid_controlnet_paths())
+    if adapter_exists and controlnet_exists:
         return True
     # If local assets are missing, allow runtime download when HF helper is available.
     return hf_hub_download is not None
@@ -766,6 +790,10 @@ def _download_lora_spec(lora: Dict[str, Any]) -> Path:
     url = str(lora.get("url") or "").strip()
     if not url:
         raise RuntimeError(f"LoRA url missing for {filename}")
+    if not ALLOW_REMOTE_LORA_DOWNLOAD:
+        raise RuntimeError(
+            "Remote LoRA downloads are disabled (set HAI_ALLOW_REMOTE_LORA_DOWNLOAD=true to enable)"
+        )
     LORA_DIR.mkdir(parents=True, exist_ok=True)
     temp_path = local_path.with_suffix(local_path.suffix + ".part")
     last_error: Optional[Exception] = None
@@ -1184,13 +1212,47 @@ def prepare_mask_and_pose_control(
     return (mask, image, control_image), (p_x1, p_y1, original_width, original_height)
 
 
+def _candidate_instantid_adapter_paths() -> List[Path]:
+    candidates = [
+        Path(INSTANTID_ADAPTER_PATH).expanduser(),
+        INSTANTID_CACHE_DIR / "InstantID" / "ip-adapter.bin",
+        INSTANTID_CACHE_DIR / "ip-adapter.bin",
+    ]
+    unique: List[Path] = []
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(path)
+    return unique
+
+
+def _candidate_instantid_controlnet_paths() -> List[Path]:
+    candidates = [
+        Path(INSTANTID_CONTROLNET_PATH).expanduser(),
+        INSTANTID_CACHE_DIR / "InstantID" / "ControlNetModel",
+        INSTANTID_CACHE_DIR / "ControlNetModel",
+    ]
+    unique: List[Path] = []
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(path)
+    return unique
+
+
 def _resolve_instantid_adapter_path() -> Path:
-    adapter_path = Path(INSTANTID_ADAPTER_PATH).expanduser()
-    if adapter_path.exists():
-        return adapter_path
+    for adapter_path in _candidate_instantid_adapter_paths():
+        if adapter_path.exists():
+            return adapter_path
     if hf_hub_download is None:
         raise RuntimeError(
-            f"InstantID adapter missing at {adapter_path} and huggingface_hub is unavailable."
+            "InstantID adapter missing locally and huggingface_hub is unavailable."
         )
     try:
         downloaded = hf_hub_download(
@@ -1204,10 +1266,24 @@ def _resolve_instantid_adapter_path() -> Path:
 
 
 def _resolve_instantid_controlnet_ref() -> str:
-    controlnet_path = Path(INSTANTID_CONTROLNET_PATH).expanduser()
-    if controlnet_path.exists():
-        return str(controlnet_path)
+    for controlnet_path in _candidate_instantid_controlnet_paths():
+        if controlnet_path.exists():
+            return str(controlnet_path)
     return INSTANTID_CONTROLNET_REPO
+
+
+def _load_instantid_controlnet(dtype: Any) -> Any:
+    """Load InstantID ControlNet from local path or HF repo/subfolder."""
+    from diffusers.models import ControlNetModel  # type: ignore
+
+    controlnet_ref = _resolve_instantid_controlnet_ref()
+    load_kwargs: Dict[str, Any] = {"torch_dtype": dtype}
+
+    # InstantX/InstantID stores ControlNet weights in the ControlNetModel subfolder.
+    if not Path(str(controlnet_ref)).expanduser().exists() and str(controlnet_ref) == INSTANTID_CONTROLNET_REPO:
+        load_kwargs["subfolder"] = "ControlNetModel"
+
+    return ControlNetModel.from_pretrained(controlnet_ref, **load_kwargs)
 
 
 def _run_ltx2_task(
@@ -1362,7 +1438,6 @@ def _run_faceswap_task(
         if Image is None or np is None or cv2 is None:
             raise RuntimeError("pillow + numpy + opencv are required for face swap")
 
-        from diffusers.models import ControlNetModel  # type: ignore
         from pipeline_stable_diffusion_xl_instantid_inpaint import (  # type: ignore
             StableDiffusionXLInstantIDInpaintPipeline,
         )
@@ -1406,7 +1481,7 @@ def _run_faceswap_task(
         device = "cuda" if torch.cuda.is_available() else "cpu"
         pipeline_cache_key = f"{model_path}|{controlnet_ref}|{adapter_path}"
         if _FACE_SWAP_PIPE is None or _FACE_SWAP_PIPE_MODEL != pipeline_cache_key:
-            controlnet = ControlNetModel.from_pretrained(controlnet_ref, torch_dtype=dtype)
+            controlnet = _load_instantid_controlnet(dtype)
             pipe = StableDiffusionXLInstantIDInpaintPipeline.from_single_file(
                 str(model_path),
                 controlnet=controlnet,
@@ -1416,10 +1491,23 @@ def _run_faceswap_task(
             pipe.load_ip_adapter_instantid(str(adapter_path))
             pipe.set_ip_adapter_scale(0.8)
             pipe.to(device)
+            # InstantID adds a custom projection module that is not always moved by
+            # generic pipeline .to(...), so force placement to avoid cpu/cuda mismatch.
+            if hasattr(pipe, "image_proj_model") and pipe.image_proj_model is not None:
+                pipe.image_proj_model.to(device=device, dtype=dtype)
             if hasattr(pipe, "enable_attention_slicing"):
                 pipe.enable_attention_slicing("max")
             _FACE_SWAP_PIPE = pipe
             _FACE_SWAP_PIPE_MODEL = pipeline_cache_key
+
+        if hasattr(_FACE_SWAP_PIPE, "image_proj_model") and _FACE_SWAP_PIPE.image_proj_model is not None:
+            _FACE_SWAP_PIPE.image_proj_model.to(device=device, dtype=dtype)
+
+        image_embeds: Any = source_face["embedding"]
+        if isinstance(image_embeds, np.ndarray):
+            image_embeds = torch.from_numpy(image_embeds)
+        if isinstance(image_embeds, torch.Tensor):
+            image_embeds = image_embeds.to(device=device, dtype=dtype)
 
         generator = torch.Generator(device=device).manual_seed(seed)
         result = _FACE_SWAP_PIPE(
@@ -1428,7 +1516,7 @@ def _run_faceswap_task(
             image=cropped_image,
             mask_image=mask_image,
             control_image=control_image,
-            image_embeds=source_face["embedding"],
+            image_embeds=image_embeds,
             num_inference_steps=num_steps,
             guidance_scale=5.0,
             strength=strength,
@@ -1533,7 +1621,7 @@ def execute_task(task: Dict[str, Any]) -> None:
                 log(f"Failed to parse job settings: {exc}", prefix="⚠️", task_id=task_id)
             # Merge coordinator-sent overrides even when prompt is plain text.
             if isinstance(task, dict):
-                for key in ("steps", "guidance", "width", "height", "sampler", "seed", "auto_anatomy"):
+                for key in ("steps", "guidance", "width", "height", "sampler", "seed"):
                     value = task.get(key)
                     if value is None or value == "":
                         continue
@@ -1665,16 +1753,6 @@ ANATOMY_LORA_NAMES = {
     "detailed perfection sd1.5",
 }
 ANATOMY_LORA_PREFIXES = ("badanatomy_sdxl_negative_lora",)
-ANATOMY_RISK_PATTERNS = (
-    r"\bhands?\b",
-    r"\bfingers?\b",
-    r"\blimbs?\b",
-    r"\bspread\b",
-    r"\bbent\b",
-    r"\bcrouching\b",
-    r"\bsquatting\b",
-    r"\bwide pose\b",
-)
 
 STYLE_LORA_NAMES = {
     "perfectionstyle",
@@ -1710,18 +1788,6 @@ ROLE_WEIGHT_RANGES = {
     "style": (0.3, 0.4, 0.35),
 }
 
-AUTO_ANATOMY_WEIGHT_SD15 = 0.7
-AUTO_ANATOMY_WEIGHT_SDXL = 0.5
-AUTO_STYLE_WEIGHT = 0.35
-AUTO_ANATOMY_SD15_CANDIDATES = (
-    "DetailedPerfectionSD1.5",
-    "DetailedPerfectionSD15",
-    "Detailed Perfection SD1.5",
-)
-AUTO_ANATOMY_SDXL_CANDIDATES = ("Handv2",)
-AUTO_STYLE_SD15_CANDIDATES = ("perfectionstyleSD1.5",)
-AUTO_STYLE_SDXL_CANDIDATES = ("perfectionstyle",)
-
 
 def is_sdxl_model(model_name: str) -> bool:
     name = (model_name or "").lower()
@@ -1732,23 +1798,6 @@ def is_sdxl_model(model_name: str) -> bool:
     if name.endswith("xl") or "xl_" in name or "_xl" in name or "-xl" in name:
         return True
     return "xl" in name
-
-
-def coerce_bool(value: Any) -> bool:
-    """Normalize coordinator boolean flags without prompt hacks."""
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes"}
-    return bool(value) if value is not None else False
-
-
-def has_anatomy_risk(prompt: str) -> bool:
-    """Heuristic prompt scan for anatomy-risk poses."""
-    prompt = (prompt or "").strip()
-    if not prompt:
-        return False
-    return any(re.search(pat, prompt, flags=re.IGNORECASE) for pat in ANATOMY_RISK_PATTERNS)
 
 
 def normalize_lora_name(lora_name: str) -> str:
@@ -1812,66 +1861,164 @@ def resolve_lora_path(lora_name: str) -> Optional[Path]:
     return None
 
 
-def find_auto_anatomy_lora(model_is_sdxl: bool, seen: Set[str]) -> Optional[Tuple[Path, float, str]]:
-    if model_is_sdxl:
-        for candidate in AUTO_ANATOMY_SDXL_CANDIDATES:
-            path = resolve_lora_path(candidate)
-            if path is None:
-                continue
-            normalized = normalize_lora_name(path.name)
-            if normalized in seen:
-                continue
-            weight = clamp_lora_weight(AUTO_ANATOMY_WEIGHT_SDXL, "anatomy")
-            return (path, weight, f"lora_anatomy_{path.stem}")
-        for path in sorted(LORA_DIR.glob("*.safetensors")):
-            normalized = normalize_lora_name(path.name)
-            if normalized in seen:
-                continue
-            if any(normalized.startswith(prefix) for prefix in ANATOMY_LORA_PREFIXES):
-                weight = clamp_lora_weight(AUTO_ANATOMY_WEIGHT_SDXL, "anatomy")
-                return (path, weight, f"lora_anatomy_{path.stem}")
-        return None
-
-    for candidate in AUTO_ANATOMY_SD15_CANDIDATES:
-        path = resolve_lora_path(candidate)
-        if path is None:
-            continue
-        normalized = normalize_lora_name(path.name)
-        if normalized in seen:
-            continue
-        weight = clamp_lora_weight(AUTO_ANATOMY_WEIGHT_SD15, "anatomy")
-        return (path, weight, f"lora_anatomy_{path.stem}")
-    return None
+def _resolve_image_runtime(entry: ModelEntry) -> Tuple[str, Any, bool, str]:
+    pipeline_name = (getattr(entry, "pipeline", "") or "sd15").lower()
+    is_xl = "sdxl" in pipeline_name or ("xl" in pipeline_name and "sd15" not in pipeline_name)
+    device = "cuda" if torch is not None and torch.cuda.is_available() else "cpu"
+    if torch is None:
+        dtype = None
+    elif device == "cuda":
+        dtype = torch.float16
+    else:
+        dtype = torch.float32
+    return device, dtype, is_xl, pipeline_name
 
 
-def find_auto_style_lora(model_is_sdxl: bool, seen: Set[str]) -> Optional[Tuple[Path, float, str]]:
-    candidates = AUTO_STYLE_SDXL_CANDIDATES if model_is_sdxl else AUTO_STYLE_SD15_CANDIDATES
-    for candidate in candidates:
-        path = resolve_lora_path(candidate)
-        if path is None:
-            continue
-        normalized = normalize_lora_name(path.name)
-        if normalized in seen:
-            continue
-        weight = clamp_lora_weight(AUTO_STYLE_WEIGHT, "style")
-        return (path, weight, f"lora_style_{path.stem}")
-    return None
+def _image_pipeline_cache_key(model_path: Path, pipeline_name: str, device: str, dtype: Any) -> str:
+    try:
+        model_ref = str(model_path.resolve())
+    except Exception:
+        model_ref = str(model_path)
+    dtype_ref = str(dtype)
+    return f"{model_ref}|{pipeline_name}|{device}|{dtype_ref}"
 
 
-def select_lora_entries(
-    requested: List[Any],
-    model_name: str,
-    prompt: Optional[str] = None,
-    auto_anatomy_enabled: bool = True,
-) -> List[Tuple[Path, float, str]]:
-    model_is_sdxl = is_sdxl_model(model_name)
-    positions: List[Tuple[Path, float, str]] = []
-    anatomies: List[Tuple[Path, float, str]] = []
-    styles: List[Tuple[Path, float, str]] = []
+def _release_image_pipeline(pipe: Any) -> None:
+    if pipe is None:
+        return
+    try:
+        pipe.to("cpu")
+    except Exception:
+        pass
+    try:
+        if hasattr(pipe, "unload_lora_weights"):
+            pipe.unload_lora_weights()
+    except Exception:
+        pass
+    gc.collect()
+    if torch is not None and torch.cuda.is_available():
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+
+def _configure_image_pipeline(pipe: Any, entry: ModelEntry, is_xl: bool, device: str) -> Any:
+    if hasattr(pipe, "enable_attention_slicing"):
+        pipe.enable_attention_slicing("max")
+    if hasattr(pipe, "enable_xformers_memory_efficient_attention"):
+        if ENABLE_XFORMERS:
+            try:
+                pipe.enable_xformers_memory_efficient_attention()
+                log("xformers memory-efficient attention enabled", prefix="✅")
+            except Exception as exc:
+                log(f"xformers unavailable, using default attention: {exc}", prefix="ℹ️")
+        else:
+            log("xformers disabled (set HAI_ENABLE_XFORMERS=1 to enable)", prefix="ℹ️")
+    if hasattr(pipe, "set_progress_bar_config"):
+        pipe.set_progress_bar_config(disable=True)
+    if "_DPMSolver" in globals() and _DPMSolver is not None and hasattr(pipe, "scheduler"):
+        try:
+            pipe.scheduler = _DPMSolver.from_config(pipe.scheduler.config)
+        except Exception as exc:
+            log(f"DPM scheduler setup failed: {exc}", prefix="⚠️")
+    pipe = pipe.to(device)
+    if torch is not None and not is_xl and hasattr(pipe, "vae") and pipe.vae is not None:
+        try:
+            pipe.vae.to(device=device, dtype=torch.float32)
+            if hasattr(pipe.vae, "config") and hasattr(pipe.vae.config, "force_upcast"):
+                pipe.vae.config.force_upcast = True
+            log("Upcasted VAE to fp32 for SD1.5 stability", prefix="✅")
+        except Exception as exc:
+            log(f"VAE upcast failed: {exc}", prefix="⚠️")
+    return pipe
+
+
+def _construct_base_image_pipeline(
+    entry: ModelEntry,
+    model_path: Path,
+    pipeline_name: str,
+    dtype: Any,
+    is_xl: bool,
+    device: str,
+) -> Tuple[Any, int]:
+    load_t0 = time.time()
+    pipe = None
+    if pipeline_name in {"sdxl"}:
+        if _SDXLPipe is not None:
+            try:
+                pipe = _SDXLPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
+            except Exception as exc:
+                log(f"StableDiffusionXLPipeline load failed: {exc}", prefix="⚠️")
+        auto_from_single = getattr(_AutoPipe, "from_single_file", None) if _AutoPipe is not None else None
+        if pipe is None and callable(auto_from_single):
+            try:
+                pipe = auto_from_single(str(model_path), torch_dtype=dtype, safety_checker=None)
+            except Exception as exc:
+                log(f"AutoPipeline load failed: {exc}", prefix="⚠️")
+    if pipe is None and _SDPipe is not None:
+        pipe = _SDPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
+    if pipe is None:
+        raise RuntimeError("Failed to construct a text2image pipeline for model.")
+    if getattr(entry, "vae_path", "") and pipeline_name != "sdxl":
+        vae_path = Path(str(getattr(entry, "vae_path", ""))).expanduser()
+        if vae_path.exists() and _AutoencoderKL is not None:
+            try:
+                custom_vae = _AutoencoderKL.from_single_file(str(vae_path), torch_dtype=dtype)
+                pipe.vae = custom_vae
+                log(f"Loaded custom VAE for {entry.name}", prefix="✅", vae=str(vae_path))
+            except Exception as exc:
+                log(f"Custom VAE load failed for {entry.name}: {exc}", prefix="⚠️", vae=str(vae_path))
+    pipe = _configure_image_pipeline(pipe, entry, is_xl, device)
+    load_ms = int((time.time() - load_t0) * 1000)
+    return pipe, load_ms
+
+
+def _acquire_base_image_pipeline(
+    entry: ModelEntry,
+    model_path: Path,
+    pipeline_name: str,
+    dtype: Any,
+    is_xl: bool,
+    device: str,
+) -> Tuple[Any, bool, int]:
+    if IMAGE_PIPELINE_CACHE_SIZE <= 0:
+        pipe, load_ms = _construct_base_image_pipeline(entry, model_path, pipeline_name, dtype, is_xl, device)
+        return pipe, False, load_ms
+
+    cache_key = _image_pipeline_cache_key(model_path, pipeline_name, device, dtype)
+    with _IMAGE_PIPELINE_CACHE_LOCK:
+        cached_pipe = _IMAGE_PIPELINE_CACHE.pop(cache_key, None)
+        if cached_pipe is not None:
+            _IMAGE_PIPELINE_CACHE[cache_key] = cached_pipe
+            return cached_pipe, True, 0
+
+    pipe, load_ms = _construct_base_image_pipeline(entry, model_path, pipeline_name, dtype, is_xl, device)
+    evicted: List[Any] = []
+    with _IMAGE_PIPELINE_CACHE_LOCK:
+        _IMAGE_PIPELINE_CACHE[cache_key] = pipe
+        while len(_IMAGE_PIPELINE_CACHE) > IMAGE_PIPELINE_CACHE_SIZE:
+            _, old_pipe = _IMAGE_PIPELINE_CACHE.popitem(last=False)
+            evicted.append(old_pipe)
+    for old_pipe in evicted:
+        _release_image_pipeline(old_pipe)
+    return pipe, False, load_ms
+
+
+def _collect_explicit_loras(requested_raw: Any, entry: ModelEntry, pipeline_name: str) -> List[Tuple[Path, float, str]]:
+    requested = requested_raw
+    if isinstance(requested, str):
+        requested = [requested]
+    if not isinstance(requested, list):
+        return []
+
+    model_hint = f"{entry.name} {pipeline_name}".strip()
+    model_is_sdxl = is_sdxl_model(model_hint)
+    lora_entries: List[Tuple[Path, float, str]] = []
     seen: Set[str] = set()
-    needs_auto_anatomy = auto_anatomy_enabled and has_anatomy_risk(prompt or "")
-
     for item in requested:
+        if len(lora_entries) >= MAX_LORAS:
+            break
         raw_weight: Optional[float] = None
         if isinstance(item, dict):
             name = str(item.get("name") or "").strip()
@@ -1884,194 +2031,56 @@ def select_lora_entries(
         if normalized in seen:
             continue
         base_type = infer_lora_base_type(normalized)
-        # Enforce SDXL/SD1.5 compatibility to avoid mismatched LoRA loads.
         if base_type == "sdxl" and not model_is_sdxl:
             continue
         if base_type == "sd15" and model_is_sdxl:
             continue
-        role = classify_lora_role(normalized)
-        weight = clamp_lora_weight(raw_weight, role)
         lora_path = resolve_lora_path(name)
         if not lora_path:
             continue
-        adapter_name = f"lora_{role}_{lora_path.stem}"
-        entry = (lora_path, weight, adapter_name)
-        if role == "position":
-            positions.append(entry)
-        elif role == "anatomy":
-            anatomies.append(entry)
-        else:
-            styles.append(entry)
-        seen.add(normalized)
-
-    if needs_auto_anatomy and not anatomies:
-        # Allow anatomy LoRA even without a position LoRA.
-        auto_anatomy_entry = find_auto_anatomy_lora(model_is_sdxl, seen)
-        if auto_anatomy_entry:
-            anatomies.append(auto_anatomy_entry)
-            seen.add(normalize_lora_name(auto_anatomy_entry[0].name))
-
-    if positions and not styles:
-        auto_style = find_auto_style_lora(model_is_sdxl, seen)
-        if auto_style:
-            styles.append(auto_style)
-            seen.add(normalize_lora_name(auto_style[0].name))
-
-    selected: List[Tuple[Path, float, str]] = []
-    # Enforce stack order: position -> anatomy -> styles (request order), with safe caps.
-    if positions:
-        selected.append(positions[0])
-    if anatomies and len(selected) < MAX_LORAS:
-        selected.append(anatomies[0])
-    for style in styles:
-        if len(selected) >= MAX_LORAS:
-            break
-        selected.append(style)
-    return selected
-
-
-def build_lora_stack(
-    prompt: str,
-    model_name: str,
-    requested_loras: Any,
-) -> List[Dict[str, Any]]:
-    """Build a deterministic LoRA stack from prompt rules and user requests."""
-    prompt_text = str(prompt or "")
-    prompt_text = re.sub(r"<\s*lora:[^>]+>", "", prompt_text)
-    model_is_sdxl = is_sdxl_model(model_name)
-
-    requested: List[Any]
-    if isinstance(requested_loras, str):
-        requested = [requested_loras]
-    elif isinstance(requested_loras, list):
-        requested = requested_loras
-    else:
-        requested = []
-
-    seen: Set[str] = set()
-    positions: List[Dict[str, Any]] = []
-    anatomies: List[Dict[str, Any]] = []
-    styles: List[Dict[str, Any]] = []
-
-    def add_entry(name: str, raw_weight: Optional[float], role: str) -> Optional[Dict[str, Any]]:
-        normalized = normalize_lora_name(name)
-        if normalized in seen:
-            return None
-        base_type = infer_lora_base_type(normalized)
-        if base_type == "sdxl" and not model_is_sdxl:
-            return None
-        if base_type == "sd15" and model_is_sdxl:
-            return None
-        if not resolve_lora_path(name):
-            return None
-        weight = clamp_lora_weight(raw_weight, role)
-        entry = {"name": name, "weight": weight, "normalized": normalized, "role": role}
-        seen.add(normalized)
-        return entry
-
-    for item in requested:
-        raw_weight: Optional[float] = None
-        if isinstance(item, dict):
-            name = str(item.get("name") or "").strip()
-            raw_weight = item.get("weight")
-        else:
-            name = str(item or "").strip()
-        if not name:
-            continue
-        normalized = normalize_lora_name(name)
         role = classify_lora_role(normalized)
-        entry = add_entry(name, raw_weight, role)
-        if not entry:
-            continue
-        if role == "position":
-            positions.append(entry)
-        elif role == "anatomy":
-            anatomies.append(entry)
-        else:
-            styles.append(entry)
+        weight = clamp_lora_weight(raw_weight, role)
+        adapter_name = f"lora_{role}_{lora_path.stem}"
+        lora_entries.append((lora_path, weight, adapter_name))
+        seen.add(normalized)
+    return lora_entries
 
-    baseline_candidates = (
-        ("perfectionstyle", "skintexturestylev3")
-        if model_is_sdxl
-        else ("perfectionstyleSD1.5", "skintexturestylesd1.5", "skintexturestylesd1.5v1")
-    )
-    baseline_norms = {normalize_lora_name(name) for name in baseline_candidates}
 
-    baseline_entry: Optional[Dict[str, Any]] = None
-    remaining_styles: List[Dict[str, Any]] = []
-    for style in styles:
-        if baseline_entry is None and style["normalized"] in baseline_norms:
-            baseline_entry = style
-            continue
-        remaining_styles.append(style)
-
-    auto_baseline: Optional[Dict[str, Any]] = None
-    if baseline_entry is None:
-        for candidate in baseline_candidates:
-            entry = add_entry(candidate, None, "style")
-            if entry:
-                auto_baseline = entry
-                break
-
-    def prompt_hits(patterns: Tuple[str, ...]) -> bool:
-        return any(re.search(pattern, prompt_text, flags=re.IGNORECASE) for pattern in patterns)
-
-    effect_entries: List[Dict[str, Any]] = []
-    effect_entries.extend(remaining_styles)
-
-    auto_effects: List[Dict[str, Any]] = []
-    if prompt_hits((r"\bsweat\b", r"\bsweaty\b", r"\bperspiration\b")):
-        entry = add_entry("Sweatingmyballsofmate", None, "style")
-        if entry:
-            auto_effects.append(entry)
-    if prompt_hits((r"\bcum\b", r"\bcumshot\b", r"\bcumming\b", r"\bejacu(?:late|lation|lating)\b", r"\bsemen\b", r"\bjizz\b")):
-        for candidate in ("CumOnCloth", "reverse_fellatio"):
-            entry = add_entry(candidate, None, "style")
-            if entry:
-                auto_effects.append(entry)
-                break
-    if model_is_sdxl and prompt_hits((r"\bbdsm\b", r"\bbondage\b", r"\bdominatrix\b", r"\bdomination\b", r"\bsubmissive\b", r"\bgag(?:ged)?\b", r"\bcollar\b", r"\bleash\b", r"\bspank(?:ing)?\b")):
-        entry = add_entry("bdsm_SDXL_1", None, "style")
-        if entry:
-            auto_effects.append(entry)
-    if model_is_sdxl and prompt_hits((r"\bcinematic lighting\b", r"\bdramatic lighting\b", r"\brim light\b", r"\bbacklight\b", r"\bvolumetric\b", r"\bstudio lighting\b")):
-        entry = add_entry("HyperLoRA_SDXL", None, "style")
-        if entry:
-            auto_effects.append(entry)
-
-    selected: List[Dict[str, Any]] = []
-    if positions and len(selected) < MAX_LORAS:
-        selected.append(positions[0])
-    if anatomies and len(selected) < MAX_LORAS:
-        selected.append(anatomies[0])
-
-    max_effects = 2
-    remaining_slots = max(0, MAX_LORAS - len(selected))
-    user_effects_without_baseline = min(max_effects, len(effect_entries), remaining_slots)
-    if baseline_entry is None and auto_baseline is not None and remaining_slots > 0:
-        # Only add auto baseline if it does not reduce user-requested effects.
-        slots_if_baseline = remaining_slots - 1
-        user_effects_with_baseline = min(max_effects, len(effect_entries), max(0, slots_if_baseline))
-        if user_effects_with_baseline == user_effects_without_baseline:
-            baseline_entry = auto_baseline
-
-    if baseline_entry is not None and len(selected) < MAX_LORAS:
-        selected.append(baseline_entry)
-
-    effect_slots = min(max_effects, MAX_LORAS - len(selected))
-    for entry in effect_entries:
-        if effect_slots <= 0:
-            break
-        selected.append(entry)
-        effect_slots -= 1
-    if effect_slots > 0:
-        for entry in auto_effects:
-            if effect_slots <= 0:
-                break
-            selected.append(entry)
-            effect_slots -= 1
-
-    return [{"name": entry["name"], "weight": entry["weight"]} for entry in selected]
+def _apply_explicit_loras(pipe: Any, entry: ModelEntry, lora_entries: List[Tuple[Path, float, str]]) -> Tuple[List[str], int]:
+    if not lora_entries:
+        return [], 0
+    lora_t0 = time.time()
+    adapter_names: List[str] = []
+    adapter_weights: List[float] = []
+    loaded: List[str] = []
+    if hasattr(pipe, "load_lora_weights"):
+        for lora_path, lora_weight, adapter_name in lora_entries:
+            adapter = adapter_name
+            try:
+                pipe.load_lora_weights(str(lora_path), adapter_name=adapter)
+            except TypeError:
+                pipe.load_lora_weights(str(lora_path))
+            except Exception as exc:
+                log(f"LoRA load failed for {entry.name}: {exc}", prefix="⚠️", lora=str(lora_path))
+                continue
+            adapter_names.append(adapter)
+            adapter_weights.append(lora_weight)
+            loaded.append(f"{lora_path.name}:{lora_weight:.2f}")
+            log(f"Loaded LoRA for {entry.name}", prefix="✅", lora=str(lora_path), weight=lora_weight)
+    if adapter_names:
+        if hasattr(pipe, "set_adapters"):
+            try:
+                pipe.set_adapters(adapter_names, adapter_weights)
+            except TypeError:
+                pipe.set_adapters(adapter_names)
+        elif hasattr(pipe, "fuse_lora"):
+            try:
+                pipe.fuse_lora()
+            except Exception as exc:
+                log(f"LoRA fuse failed for {entry.name}: {exc}", prefix="⚠️")
+    else:
+        log("Pipeline does not support LoRA loading", prefix="⚠️")
+    return loaded, int((time.time() - lora_t0) * 1000)
 
 
 def run_image_generation(
@@ -2083,7 +2092,6 @@ def run_image_generation(
     negative_prompt: str,
     job_settings: Optional[Dict[str, Any]] = None,
 ) -> (Dict[str, Any], int, Optional[str]):
-
     start_stats = read_gpu_stats()
     started = time.time()
     status = "success"
@@ -2091,66 +2099,59 @@ def run_image_generation(
 
     image_b64: Optional[str] = None
     loaded_loras: List[str] = []
+    pipeline_cache_hit = False
+    pipeline_load_ms = 0
+    lora_load_ms = 0
+    generation_ms = 0
     output_path = OUTPUTS_DIR / f"{task_id}.png"
-    # Derive XL flag from model entry pipeline — used for dtype selection and VAE upcast
-    _ep = (getattr(entry, "pipeline", "") or "sd15").lower()
-    is_xl = "sdxl" in _ep or ("xl" in _ep and "sd15" not in _ep)
-    # img2img params — extracted from job_settings before the pipeline block
+
+    width = IMAGE_WIDTH
+    height = IMAGE_HEIGHT
     use_img2img = False
     init_image_raw: Optional[str] = None
     img2img_strength = 0.75
-    if job_settings and isinstance(job_settings, dict):
-        init_image_raw = job_settings.get("init_image") or job_settings.get("init_image_url")
-        use_img2img = bool(init_image_raw)
-        try:
-            img2img_strength = float(job_settings.get("img2img_strength", 0.75) or 0.75)
-        except (TypeError, ValueError):
-            img2img_strength = 0.75
-    # Early width/height defaults for init image resize (overridden later from job_settings)
-    width = IMAGE_WIDTH
-    height = IMAGE_HEIGHT
     if job_settings and isinstance(job_settings, dict):
         try:
             width = int(job_settings.get("width", width) or width)
             height = int(job_settings.get("height", height) or height)
         except (TypeError, ValueError):
             pass
+        init_image_raw = job_settings.get("init_image") or job_settings.get("init_image_url")
+        use_img2img = bool(init_image_raw)
+        try:
+            img2img_strength = float(job_settings.get("img2img_strength", 0.75) or 0.75)
+        except (TypeError, ValueError):
+            img2img_strength = 0.75
+
     try:
         if not FAST_PREVIEW and torch is not None and diffusers is not None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            # SD1.5 models frequently hit fp16 dtype mismatches and fall back to
-            # fp32 anyway, wasting time on a failed first attempt.  Use fp32 for
-            # SD1.5 on CUDA directly to avoid the retry.  SDXL works fine in fp16.
-            if device == "cuda" and is_xl:
-                dtype = torch.float16
-            elif device == "cuda":
-                # SD1.5: use fp16 for the UNet but we'll upcast VAE to fp32 later
-                dtype = torch.float16
+            device, dtype, is_xl, pipeline_name = _resolve_image_runtime(entry)
+            requested_loras = job_settings.get("loras") if isinstance(job_settings, dict) else []
+            lora_entries = _collect_explicit_loras(requested_loras, entry, pipeline_name)
+            if lora_entries:
+                lora_summary = ", ".join(
+                    f"{adapter}:{weight:.2f} ({path.name})" for path, weight, adapter in lora_entries
+                )
             else:
-                dtype = torch.float32
-            # Load init image for img2img if provided
+                lora_summary = "none"
+            log(f"Loading LoRAs: {lora_summary}", prefix="🎛️")
+
             init_pil = None
             if use_img2img and init_image_raw:
                 try:
                     from PIL import Image as _PILImage
-                    import io
                     if init_image_raw.startswith("data:"):
-                        # data URL: strip prefix and decode
                         b64_part = init_image_raw.split(",", 1)[-1]
-                        import base64 as _b64
-                        img_bytes = _b64.b64decode(b64_part)
+                        img_bytes = base64.b64decode(b64_part)
                         init_pil = _PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
                     elif init_image_raw.startswith(("http://", "https://", "/")):
-                        # URL or API path: download
                         img_resp = requests.get(init_image_raw, timeout=30)
                         img_resp.raise_for_status()
                         init_pil = _PILImage.open(io.BytesIO(img_resp.content)).convert("RGB")
                     elif os.path.isfile(init_image_raw):
                         init_pil = _PILImage.open(init_image_raw).convert("RGB")
                     else:
-                        # Try base64 directly
-                        import base64 as _b64
-                        img_bytes = _b64.b64decode(init_image_raw)
+                        img_bytes = base64.b64decode(init_image_raw)
                         init_pil = _PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
                     if init_pil:
                         init_pil = init_pil.resize((width, height))
@@ -2160,235 +2161,112 @@ def run_image_generation(
                     init_pil = None
 
             pipe_mode = "img2img" if init_pil is not None else "txt2img"
-            log(f"Loading {pipe_mode} pipeline…", prefix="ℹ️", device=device)
-            load_t0 = time.time()
-            pipe = None
-            # For SD1.5-style checkpoints (triomerge, etc.) use StableDiffusionPipeline
-            # to match direct test behavior; reserve AutoPipeline/SDXL pipeline for SDXL types.
-            pipeline_name = (getattr(entry, "pipeline", "") or "sd15").lower()
-            if pipeline_name in {"sdxl"}:
-                if _SDXLPipe is not None:
-                    try:
-                        pipe = _SDXLPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
-                    except Exception as exc:
-                        log(f"StableDiffusionXLPipeline load failed: {exc}", prefix="⚠️")
-                auto_from_single = getattr(_AutoPipe, "from_single_file", None) if _AutoPipe is not None else None
-                if pipe is None and callable(auto_from_single):
-                    try:
-                        pipe = auto_from_single(str(model_path), torch_dtype=dtype, safety_checker=None)
-                    except Exception as exc:  # fallback to SD1.5 pipe
-                        log(f"AutoPipeline load failed: {exc}", prefix="⚠️")
-            if pipe is None and _SDPipe is not None:
-                pipe = _SDPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
-            if pipe is None:
-                raise RuntimeError("Failed to construct a text2image pipeline for model.")
-            # Optionally swap in a custom VAE for SD1.5-style checkpoints
-            if pipe is not None and getattr(entry, "vae_path", "") and pipeline_name != "sdxl":
-                vae_path = Path(str(getattr(entry, "vae_path", ""))).expanduser()
-                if vae_path.exists() and _AutoencoderKL is not None:
-                    try:
-                        custom_vae = _AutoencoderKL.from_single_file(str(vae_path), torch_dtype=dtype)
-                        pipe.vae = custom_vae
-                        log(f"Loaded custom VAE for {entry.name}", prefix="✅", vae=str(vae_path))
-                    except Exception as exc:
-                        log(f"Custom VAE load failed for {entry.name}: {exc}", prefix="⚠️", vae=str(vae_path))
-            # Optional LoRA attachment with safe stacking and role-aware weights.
-            lora_entries: List[Tuple[Path, float, str]] = []
-            requested: List[Any] = []
-            if job_settings and isinstance(job_settings, dict):
-                requested = job_settings.get("loras") or []
-            if isinstance(requested, str):
-                requested = [requested]
-            if not isinstance(requested, list):
-                requested = []
-            model_hint = f"{entry.name} {pipeline_name}".strip()
-            model_is_sdxl = is_sdxl_model(model_hint)
-            seen: Set[str] = set()
-            for item in requested:
-                if len(lora_entries) >= MAX_LORAS:
-                    break
-                raw_weight: Optional[float] = None
-                if isinstance(item, dict):
-                    name = str(item.get("name") or "").strip()
-                    raw_weight = item.get("weight")
-                else:
-                    name = str(item or "").strip()
-                if not name:
-                    continue
-                normalized = normalize_lora_name(name)
-                if normalized in seen:
-                    continue
-                base_type = infer_lora_base_type(normalized)
-                if base_type == "sdxl" and not model_is_sdxl:
-                    continue
-                if base_type == "sd15" and model_is_sdxl:
-                    continue
-                lora_path = resolve_lora_path(name)
-                if not lora_path:
-                    continue
-                role = classify_lora_role(normalized)
-                weight = clamp_lora_weight(raw_weight, role)
-                adapter_name = f"lora_{role}_{lora_path.stem}"
-                lora_entries.append((lora_path, weight, adapter_name))
-                seen.add(normalized)
-            if lora_entries:
-                lora_summary = ", ".join(
-                    f"{adapter}:{weight:.2f} ({path.name})" for path, weight, adapter in lora_entries
-                )
-            else:
-                lora_summary = "none"
-            log(f"Loading LoRAs: {lora_summary}", prefix="🎛️")
-            if lora_entries:
-                adapter_names: List[str] = []
-                adapter_weights: List[float] = []
-                if hasattr(pipe, "load_lora_weights"):
-                    for lora_path, lora_weight, adapter_name in lora_entries:
-                        adapter = adapter_name
-                        try:
-                            pipe.load_lora_weights(str(lora_path), adapter_name=adapter)
-                        except TypeError:
-                            pipe.load_lora_weights(str(lora_path))
-                        except Exception as exc:
-                            log(f"LoRA load failed for {entry.name}: {exc}", prefix="⚠️", lora=str(lora_path))
-                            continue
-                        adapter_names.append(adapter)
-                        adapter_weights.append(lora_weight)
-                        log(f"Loaded LoRA for {entry.name}", prefix="✅", lora=str(lora_path), weight=lora_weight)
-                if adapter_names:
-                    if hasattr(pipe, "set_adapters"):
-                        try:
-                            pipe.set_adapters(adapter_names, adapter_weights)
-                        except TypeError:
-                            pipe.set_adapters(adapter_names)
-                    elif hasattr(pipe, "fuse_lora"):
-                        try:
-                            pipe.fuse_lora()
-                        except Exception as exc:
-                            log(f"LoRA fuse failed for {entry.name}: {exc}", prefix="⚠️")
-                else:
-                    log("Pipeline does not support LoRA loading", prefix="⚠️")
-            if hasattr(pipe, "enable_attention_slicing"):
-                pipe.enable_attention_slicing("max")
-            # xformers can crash on some consumer GPUs/drivers; keep it opt-in.
-            if hasattr(pipe, "enable_xformers_memory_efficient_attention"):
-                if ENABLE_XFORMERS:
-                    try:
-                        pipe.enable_xformers_memory_efficient_attention()
-                        log("xformers memory-efficient attention enabled", prefix="✅")
-                    except Exception as exc:
-                        log(f"xformers unavailable, using default attention: {exc}", prefix="ℹ️")
-                else:
-                    log("xformers disabled (set HAI_ENABLE_XFORMERS=1 to enable)", prefix="ℹ️")
-            if hasattr(pipe, "set_progress_bar_config"):
-                pipe.set_progress_bar_config(disable=True)
-            if "_DPMSolver" in globals() and _DPMSolver is not None and hasattr(pipe, "scheduler"):
-                try:
-                    pipe.scheduler = _DPMSolver.from_config(pipe.scheduler.config)
-                except Exception as exc:
-                    log(f"DPM scheduler setup failed: {exc}", prefix="⚠️")
-            pipe = pipe.to(device)
-            if not is_xl and hasattr(pipe, "vae") and pipe.vae is not None:
-                try:
-                    pipe.vae.to(device=device, dtype=torch.float32)
-                    if hasattr(pipe.vae, "config") and hasattr(pipe.vae.config, "force_upcast"):
-                        pipe.vae.config.force_upcast = True
-                    log("Upcasted VAE to fp32 for SD1.5 stability", prefix="✅")
-                except Exception as exc:
-                    log(f"VAE upcast failed: {exc}", prefix="⚠️")
-            load_ms = int((time.time() - load_t0) * 1000)
-            log(f"Pipeline ready in {load_ms}ms", prefix="✅")
-
-            seed = None
-            if job_settings and isinstance(job_settings, dict):
-                seed = job_settings.get("seed")
+            log(f"Preparing {pipe_mode} pipeline…", prefix="ℹ️", device=device)
+            transient_pipeline = bool(lora_entries) or IMAGE_PIPELINE_CACHE_SIZE <= 0
+            pipe: Optional[Any] = None
             try:
-                seed = int(seed) if seed is not None else None
-            except (TypeError, ValueError):
-                seed = None
-            if seed is None:
-                seed = int(time.time()) & 0x7FFFFFFF
-            generator = torch.Generator(device=device).manual_seed(seed)
-            pos_text = prompt or "a high quality photo of a golden retriever on a beach at sunset"
-            neg_text = negative_prompt or ""
-            # Merge per-job overrides with model defaults from manifest
-            steps = IMAGE_STEPS
-            guidance = IMAGE_GUIDANCE
-            height = IMAGE_HEIGHT
-            width = IMAGE_WIDTH
-            sampler = None
-            if job_settings and isinstance(job_settings, dict):
-                steps = int(job_settings.get("steps", steps) or steps)
-                guidance = float(job_settings.get("guidance", guidance) or guidance)
-                height = int(job_settings.get("height", height) or height)
-                width = int(job_settings.get("width", width) or width)
-                sampler = str(job_settings.get("sampler") or "").strip().lower() or None
-                if job_settings.get("negative_prompt"):
-                    neg_text = str(job_settings.get("negative_prompt") or "")
-            # clamp to sane ranges
-            steps = max(5, min(50, steps))
-            guidance = max(1.0, min(15.0, guidance))
-            height = max(256, min(1536, height))
-            width = max(256, min(1536, width))
-            # Proactively truncate to CLIP token limit to avoid noisy warnings
-            if hasattr(pipe, "tokenizer") and hasattr(pipe.tokenizer, "model_max_length"):
-                try:
-                    encoded = pipe.tokenizer(
-                        pos_text,
-                        max_length=pipe.tokenizer.model_max_length,
-                        truncation=True,
-                        return_tensors="pt",
+                if transient_pipeline:
+                    pipe, pipeline_load_ms = _construct_base_image_pipeline(
+                        entry, model_path, pipeline_name, dtype, is_xl, device
                     )
-                    pos_text = pipe.tokenizer.batch_decode(
-                        encoded.input_ids, skip_special_tokens=True
-                    )[0]
-                    if neg_text:
-                        encoded_neg = pipe.tokenizer(
-                            neg_text,
+                else:
+                    pipe, pipeline_cache_hit, pipeline_load_ms = _acquire_base_image_pipeline(
+                        entry, model_path, pipeline_name, dtype, is_xl, device
+                    )
+                if not pipeline_cache_hit:
+                    log(f"Pipeline ready in {pipeline_load_ms}ms", prefix="✅")
+                if lora_entries and pipe is not None:
+                    loaded_loras, lora_load_ms = _apply_explicit_loras(pipe, entry, lora_entries)
+                if pipe is None:
+                    raise RuntimeError("Image pipeline is unavailable")
+
+                seed = job_settings.get("seed") if isinstance(job_settings, dict) else None
+                try:
+                    seed = int(seed) if seed is not None else None
+                except (TypeError, ValueError):
+                    seed = None
+                if seed is None:
+                    seed = int(time.time()) & 0x7FFFFFFF
+                generator = torch.Generator(device=device).manual_seed(seed)
+                pos_text = prompt or "a high quality photo of a golden retriever on a beach at sunset"
+                neg_text = negative_prompt or ""
+                steps = IMAGE_STEPS
+                guidance = IMAGE_GUIDANCE
+                img_h = IMAGE_HEIGHT
+                img_w = IMAGE_WIDTH
+                sampler = None
+                if job_settings and isinstance(job_settings, dict):
+                    steps = int(job_settings.get("steps", steps) or steps)
+                    guidance = float(job_settings.get("guidance", guidance) or guidance)
+                    img_h = int(job_settings.get("height", img_h) or img_h)
+                    img_w = int(job_settings.get("width", img_w) or img_w)
+                    sampler = str(job_settings.get("sampler") or "").strip().lower() or None
+                    if job_settings.get("negative_prompt"):
+                        neg_text = str(job_settings.get("negative_prompt") or "")
+                steps = max(5, min(50, steps))
+                guidance = max(1.0, min(15.0, guidance))
+                img_h = max(256, min(1536, img_h))
+                img_w = max(256, min(1536, img_w))
+                if hasattr(pipe, "tokenizer") and hasattr(pipe.tokenizer, "model_max_length"):
+                    try:
+                        encoded = pipe.tokenizer(
+                            pos_text,
                             max_length=pipe.tokenizer.model_max_length,
                             truncation=True,
                             return_tensors="pt",
                         )
-                        neg_text = pipe.tokenizer.batch_decode(
-                            encoded_neg.input_ids, skip_special_tokens=True
+                        pos_text = pipe.tokenizer.batch_decode(
+                            encoded.input_ids, skip_special_tokens=True
                         )[0]
-                except Exception as exc:
-                    log(f"Prompt truncation failed: {exc}", prefix="⚠️")
-            gen_t0 = time.time()
-            # Optional sampler switch if supported
-            if sampler and hasattr(pipe, "scheduler") and _DPMSolver is not None:
-                sampler_norm = sampler.replace("+", "p")
-                if "dpmpp" in sampler_norm:
-                    try:
-                        pipe.scheduler = _DPMSolver.from_config(pipe.scheduler.config)
+                        if neg_text:
+                            encoded_neg = pipe.tokenizer(
+                                neg_text,
+                                max_length=pipe.tokenizer.model_max_length,
+                                truncation=True,
+                                return_tensors="pt",
+                            )
+                            neg_text = pipe.tokenizer.batch_decode(
+                                encoded_neg.input_ids, skip_special_tokens=True
+                            )[0]
                     except Exception as exc:
-                        log(f"Sampler switch failed: {exc}", prefix="⚠️", sampler=sampler)
-            with torch.inference_mode():
-                result = pipe(
-                    pos_text,
-                    negative_prompt=neg_text or None,
-                    num_inference_steps=steps,
-                    guidance_scale=guidance,
-                    generator=generator,
-                    height=height,
-                    width=width,
-                )
-            gen_ms = int((time.time() - gen_t0) * 1000)
-            log(f"Generated in {gen_ms}ms", prefix="✅")
-            img = result.images[0]
-            img.save(output_path)
-            with output_path.open("rb") as fh:
-                image_b64 = base64.b64encode(fh.read()).decode("utf-8")
+                        log(f"Prompt truncation failed: {exc}", prefix="⚠️")
+                gen_t0 = time.time()
+                if sampler and hasattr(pipe, "scheduler") and _DPMSolver is not None:
+                    sampler_norm = sampler.replace("+", "p")
+                    if "dpmpp" in sampler_norm:
+                        try:
+                            pipe.scheduler = _DPMSolver.from_config(pipe.scheduler.config)
+                        except Exception as exc:
+                            log(f"Sampler switch failed: {exc}", prefix="⚠️", sampler=sampler)
+                with torch.inference_mode():
+                    result = pipe(
+                        pos_text,
+                        negative_prompt=neg_text or None,
+                        num_inference_steps=steps,
+                        guidance_scale=guidance,
+                        generator=generator,
+                        height=img_h,
+                        width=img_w,
+                    )
+                generation_ms = int((time.time() - gen_t0) * 1000)
+                log(f"Generated in {generation_ms}ms", prefix="✅")
+                img = result.images[0]
+                img.save(output_path)
+                with output_path.open("rb") as fh:
+                    image_b64 = base64.b64encode(fh.read()).decode("utf-8")
+            finally:
+                if transient_pipeline and pipe is not None:
+                    _release_image_pipeline(pipe)
         elif Image is not None:
             log("Using fast preview placeholder (no SD detected or FAST_PREVIEW enabled)", prefix="ℹ️")
-            # Fallback: deterministic gradient image with text-like bands so it isn't noisy
             w = h = 512
             if np is not None:
                 yy = np.linspace(0, 255, h, dtype=np.uint8)
                 xx = np.linspace(0, 255, w, dtype=np.uint8)
-                R = np.tile(xx, (h, 1))
-                G = np.tile(yy, (w, 1)).T
-                B = (R[::-1] // 2 + G // 2).astype(np.uint8)
-                arr = np.dstack([R, G, B])
+                red = np.tile(xx, (h, 1))
+                green = np.tile(yy, (w, 1)).T
+                blue = (red[::-1] // 2 + green // 2).astype(np.uint8)
+                arr = np.dstack([red, green, blue])
             else:
                 arr = None
             img = Image.fromarray(arr) if arr is not None else Image.new("RGB", (w, h), color=(40, 60, 80))
@@ -2396,7 +2274,6 @@ def run_image_generation(
             with output_path.open("rb") as fh:
                 image_b64 = base64.b64encode(fh.read()).decode("utf-8")
         else:
-            # No image libs available; simulate compute only
             time.sleep(random.uniform(1.2, 2.2))
     except Exception as exc:
         status = "failed"
@@ -2409,19 +2286,81 @@ def run_image_generation(
     util = int(max(util, 70 if ROLE == "creator" else util))
     metrics = {
         "status": status,
-            "model_name": entry.name,
-            "model_path": str(model_path),
-            "reward_weight": reward_weight,
+        "model_name": entry.name,
+        "model_path": str(model_path),
+        "reward_weight": reward_weight,
         "task_type": "image_gen",
         "inference_time_ms": round(duration * 1000, 3),
         "gpu_util_start": start_stats.get("utilization", 0),
         "gpu_util_end": end_stats.get("utilization", 0),
+        "pipeline_cache_hit": bool(pipeline_cache_hit),
+        "pipeline_load_ms": int(pipeline_load_ms),
+        "lora_load_ms": int(lora_load_ms),
+        "generation_ms": int(generation_ms),
     }
     if loaded_loras:
         metrics["loras"] = loaded_loras
     if status == "failed":
         metrics["error"] = error_msg or "image generation error"
     return metrics, util, image_b64
+
+
+def _iter_image_entries() -> List[ModelEntry]:
+    entries: List[ModelEntry] = []
+    for entry in REGISTRY.list_entries():
+        task_type = str(getattr(entry, "task_type", "IMAGE_GEN") or "IMAGE_GEN").upper()
+        if task_type == "IMAGE_GEN":
+            entries.append(entry)
+    return entries
+
+
+def _select_preload_image_entry() -> Optional[ModelEntry]:
+    if PRELOAD_IMAGE_MODEL:
+        try:
+            candidate = REGISTRY.get(PRELOAD_IMAGE_MODEL)
+        except Exception as exc:
+            log(f"Preload model '{PRELOAD_IMAGE_MODEL}' unavailable: {exc}", prefix="⚠️")
+        else:
+            task_type = str(getattr(candidate, "task_type", "IMAGE_GEN") or "IMAGE_GEN").upper()
+            if task_type == "IMAGE_GEN":
+                try:
+                    ensure_model_path(candidate)
+                    return candidate
+                except Exception as exc:
+                    log(f"Preload model '{PRELOAD_IMAGE_MODEL}' missing locally: {exc}", prefix="⚠️")
+            else:
+                log(f"Preload model '{PRELOAD_IMAGE_MODEL}' is not an IMAGE_GEN model", prefix="⚠️")
+    for entry in _iter_image_entries():
+        try:
+            ensure_model_path(entry)
+            return entry
+        except Exception:
+            continue
+    return None
+
+
+def preload_image_pipeline_on_startup() -> None:
+    if not PRELOAD_IMAGE_ON_STARTUP:
+        return
+    if FAST_PREVIEW or torch is None or diffusers is None:
+        return
+    if IMAGE_PIPELINE_CACHE_SIZE <= 0:
+        log("Skipping image preload because HAI_IMAGE_PIPELINE_CACHE_SIZE=0", prefix="ℹ️")
+        return
+    entry = _select_preload_image_entry()
+    if entry is None:
+        log("No local IMAGE_GEN model available for preload", prefix="⚠️")
+        return
+    try:
+        model_path = ensure_model_path(entry)
+        device, dtype, is_xl, pipeline_name = _resolve_image_runtime(entry)
+        _, cache_hit, load_ms = _acquire_base_image_pipeline(entry, model_path, pipeline_name, dtype, is_xl, device)
+        if cache_hit:
+            log(f"Image preload cache warm for {entry.name}", prefix="✅")
+        else:
+            log(f"Image preload complete for {entry.name} in {load_ms}ms", prefix="✅")
+    except Exception as exc:
+        log(f"Image preload failed for {entry.name}: {exc}", prefix="⚠️")
 
 
 # ---------------------------------------------------------------------------
@@ -2494,8 +2433,11 @@ def poll_tasks_loop() -> None:
 
 if __name__ == "__main__":
     log(f"Node ID: {NODE_NAME} · Role: {ROLE.upper()} · Version: {CLIENT_VERSION}")
-    if not refresh_manifest_with_backoff("startup", max_attempts=5):
+    manifest_ready = refresh_manifest_with_backoff("startup", max_attempts=5)
+    if not manifest_ready:
         log("Proceeding with degraded manifest state; heartbeat loop will keep retrying.", prefix="⚠️")
+    else:
+        preload_image_pipeline_on_startup()
     link_wallet(WALLET)
     # Graceful shutdown hooks
     atexit.register(disconnect)

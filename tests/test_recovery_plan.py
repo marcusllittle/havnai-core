@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import sqlite3
 import sys
 import time
@@ -15,6 +16,13 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "server"))
+
+try:
+    from eth_account import Account  # type: ignore
+    from eth_account.messages import encode_defunct  # type: ignore
+except Exception:  # pragma: no cover
+    Account = None  # type: ignore[assignment]
+    encode_defunct = None  # type: ignore[assignment]
 
 import app as app_module
 import job_helpers
@@ -171,7 +179,7 @@ class CoordinatorCapacityEndpointTests(unittest.TestCase):
                     "model": SDXL_MODEL,
                     "prompt": "face swap",
                     "base_image_url": "https://example.com/base.png",
-                    "source_image_url": "https://example.com/source.png",
+                    "face_source_url": "https://example.com/source.png",
                 },
             )
         self.assertEqual(resp.status_code, 503)
@@ -179,6 +187,179 @@ class CoordinatorCapacityEndpointTests(unittest.TestCase):
         self.assertEqual(body.get("error"), "no_capacity")
         self.assertEqual(body.get("task_type"), "FACE_SWAP")
         self.assertEqual(body.get("model"), SDXL_MODEL)
+
+
+class ExplicitLoraPolicyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.client = app_module.app.test_client()
+        self._manifest_backup = copy.deepcopy(app_module.MANIFEST_MODELS)
+        self._nodes_backup = copy.deepcopy(app_module.NODES)
+        app_module.MANIFEST_MODELS.clear()
+        app_module.NODES.clear()
+        now = app_module.unix_now()
+        app_module.MANIFEST_MODELS[SDXL_MODEL] = {
+            "name": SDXL_MODEL,
+            "pipeline": "sdxl",
+            "task_type": "IMAGE_GEN",
+            "reward_weight": 10.0,
+            "tags": [],
+        }
+        app_module.NODES["node-image"] = {
+            "role": "creator",
+            "last_seen_unix": now,
+            "supports": ["image"],
+            "models": [SDXL_MODEL],
+            "pipelines": ["sdxl"],
+        }
+
+    def tearDown(self) -> None:
+        app_module.MANIFEST_MODELS.clear()
+        app_module.MANIFEST_MODELS.update(self._manifest_backup)
+        app_module.NODES.clear()
+        app_module.NODES.update(self._nodes_backup)
+
+    def test_submit_job_does_not_inject_default_loras_or_auto_anatomy(self) -> None:
+        captured: dict = {}
+
+        def _capture_enqueue(wallet, model, task_type, data, weight, invite_code=None):
+            captured["wallet"] = wallet
+            captured["model"] = model
+            captured["task_type"] = task_type
+            captured["data"] = data
+            return "job-captured"
+
+        with patch.object(app_module, "rate_limit", return_value=True), patch.object(
+            app_module.invite, "enforce_invite_limits", return_value=(None, None)
+        ), patch.object(app_module.safety, "check_safety", return_value=None), patch.object(
+            app_module.credits, "check_and_deduct_credits", return_value=None
+        ), patch.object(
+            app_module, "refresh_manifest", return_value=None
+        ), patch.object(
+            app_module.job_helpers, "enqueue_job", side_effect=_capture_enqueue
+        ):
+            resp = self.client.post(
+                "/submit-job",
+                json={
+                    "wallet": VALID_WALLET,
+                    "model": SDXL_MODEL,
+                    "prompt": "portrait",
+                    "auto_anatomy": True,
+                },
+            )
+        self.assertEqual(resp.status_code, 200)
+        payload = json.loads(captured["data"])
+        self.assertNotIn("auto_anatomy", payload)
+        self.assertNotIn("loras", payload)
+
+
+class CreditsFallbackCostTests(unittest.TestCase):
+    def test_animatediff_task_fallback_uses_animatediff_default(self) -> None:
+        with patch.object(app_module.credits, "get_model_config", return_value=None):
+            cost = app_module.credits.resolve_credit_cost("missing-model", "ANIMATEDIFF")
+        self.assertEqual(cost, app_module.credits.DEFAULT_CREDIT_COSTS["animatediff"])
+
+
+class CreditConversionNonceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.client = app_module.app.test_client()
+        app_module.RATE_LIMIT_BUCKETS.clear()
+        if Account is None or encode_defunct is None:
+            self.skipTest("eth-account not installed")
+        self.account = Account.create()
+        self.wallet = self.account.address
+        app_module.credits.deposit_credits(self.wallet, 100.0, reason="test-seed")
+
+    def _issue_nonce(self, amount: float) -> dict:
+        resp = self.client.post(
+            "/wallet/nonce",
+            json={
+                "wallet": self.wallet,
+                "purpose": "convert_credits_to_hai",
+                "amount": amount,
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertIn("nonce", body)
+        self.assertIn("message", body)
+        return body
+
+    def _sign_message(self, message: str, private_key: bytes) -> str:
+        signed = Account.sign_message(encode_defunct(text=message), private_key=private_key)
+        return signed.signature.hex()
+
+    def test_convert_requires_nonce_and_signature(self) -> None:
+        resp = self.client.post(
+            "/credits/convert",
+            json={"wallet": self.wallet, "amount": 1.0},
+        )
+        self.assertEqual(resp.status_code, 400)
+        body = resp.get_json()
+        self.assertEqual(body.get("error"), "malformed_payload")
+
+    def test_nonce_signature_success_and_replay_rejected(self) -> None:
+        amount = 2.5
+        challenge = self._issue_nonce(amount)
+        signature = self._sign_message(challenge["message"], self.account.key)
+        payload = {
+            "wallet": self.wallet,
+            "amount": amount,
+            "nonce": challenge["nonce"],
+            "signature": signature,
+        }
+
+        resp = self.client.post("/credits/convert", json=payload)
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertIn("balance", body)
+        self.assertIn("remaining", body)
+        self.assertEqual(body.get("remaining"), body.get("balance"))
+
+        replay = self.client.post("/credits/convert", json=payload)
+        self.assertEqual(replay.status_code, 409)
+        replay_body = replay.get_json()
+        self.assertEqual(replay_body.get("error"), "nonce_used")
+
+    def test_nonce_expired_rejected(self) -> None:
+        amount = 1.0
+        challenge = self._issue_nonce(amount)
+        conn = app_module.get_db()
+        conn.execute(
+            "UPDATE wallet_nonces SET expires_at=? WHERE wallet=? AND nonce=?",
+            (app_module.unix_now() - 1.0, self.wallet, challenge["nonce"]),
+        )
+        conn.commit()
+        signature = self._sign_message(challenge["message"], self.account.key)
+        resp = self.client.post(
+            "/credits/convert",
+            json={
+                "wallet": self.wallet,
+                "amount": amount,
+                "nonce": challenge["nonce"],
+                "signature": signature,
+            },
+        )
+        self.assertEqual(resp.status_code, 400)
+        body = resp.get_json()
+        self.assertEqual(body.get("error"), "nonce_expired")
+
+    def test_signature_wallet_mismatch_rejected(self) -> None:
+        amount = 1.25
+        challenge = self._issue_nonce(amount)
+        other = Account.create()
+        wrong_signature = self._sign_message(challenge["message"], other.key)
+        resp = self.client.post(
+            "/credits/convert",
+            json={
+                "wallet": self.wallet,
+                "amount": amount,
+                "nonce": challenge["nonce"],
+                "signature": wrong_signature,
+            },
+        )
+        self.assertEqual(resp.status_code, 400)
+        body = resp.get_json()
+        self.assertEqual(body.get("error"), "invalid_signature")
 
 
 class ModelsListAvailabilityTests(unittest.TestCase):
@@ -270,4 +451,3 @@ class DashboardProxyPathTests(unittest.TestCase):
         html = resp.get_data(as_text=True)
         self.assertIn('window.NEXT_PUBLIC_API_BASE_URL = window.location.pathname.startsWith("/api/") ? "/api" : "";', html)
         self.assertIn('<script src="static/dashboard.js" type="module"></script>', html)
-

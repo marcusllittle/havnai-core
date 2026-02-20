@@ -47,8 +47,10 @@ def resolve_credit_cost(model_name: str, task_type: str = "") -> float:
     tt = (task_type or "").upper()
     if tt == "FACE_SWAP":
         return DEFAULT_CREDIT_COSTS.get("face_swap", 1.5)
-    if tt in ("VIDEO_GEN", "ANIMATEDIFF"):
+    if tt == "VIDEO_GEN":
         return DEFAULT_CREDIT_COSTS.get("ltx2", 3.0)
+    if tt == "ANIMATEDIFF":
+        return DEFAULT_CREDIT_COSTS.get("animatediff", 2.0)
     return 1.0
 
 

@@ -108,7 +108,7 @@ This repo is a standard Python/Flask application with a bundled node client. A m
    COPY shared/ shared/
    COPY VERSION .
 
-   RUN pip install --no-cache-dir flask flask-cors
+   RUN pip install --no-cache-dir -r server/requirements.txt
 
    ENV PORT=8080
    EXPOSE 8080
@@ -497,7 +497,7 @@ Contributions are welcome. To work on HavnAI Core:
    ```bash
    python -m venv .venv
    source .venv/bin/activate
-   pip install -r server/requirements.txt  # if present
+   pip install -r server/requirements.txt
    ```
 
 3. **Run the server**
@@ -511,6 +511,10 @@ Contributions are welcome. To work on HavnAI Core:
 
    - Add unit tests for new behavior (if a test harness exists in this repo).
    - Keep code consistent with existing style in `server/app.py` and `client/client.py`.
+   - Run a syntax gate before commit:
+     ```bash
+     python3 -m py_compile server/app.py client/client.py
+     ```
 
 5. **Open a PR**
 

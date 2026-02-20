@@ -315,6 +315,11 @@ PRELOAD_IMAGE_MODEL = str(
     or ""
 ).strip()
 ALLOW_REMOTE_LORA_DOWNLOAD = _env_flag("HAI_ALLOW_REMOTE_LORA_DOWNLOAD", False)
+ANIMATEDIFF_DEFAULT_BASE_MODEL = str(
+    os.environ.get("HAI_ANIMATEDIFF_DEFAULT_BASE_MODEL")
+    or ENV_VARS.get("HAI_ANIMATEDIFF_DEFAULT_BASE_MODEL")
+    or "realisticVision"
+).strip()
 
 REGISTRY.base_url = SERVER_BASE
 
@@ -421,9 +426,92 @@ def resolve_model_path_from_name(model_name: str) -> Optional[Path]:
     return None
 
 
+def _normalize_model_token(value: Optional[str]) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _iter_sd15_image_model_entries() -> List[Tuple[ModelEntry, Path]]:
+    entries: List[Tuple[ModelEntry, Path]] = []
+    for entry in REGISTRY.list_entries():
+        task_type = str(getattr(entry, "task_type", "IMAGE_GEN") or "IMAGE_GEN").upper()
+        pipeline = str(getattr(entry, "pipeline", "") or "").lower()
+        if task_type != "IMAGE_GEN":
+            continue
+        if "sd15" not in pipeline:
+            continue
+        try:
+            path = ensure_model_path(entry)
+        except Exception:
+            continue
+        entries.append((entry, path))
+    return entries
+
+
+def _select_sd15_entry_by_token(
+    entries: List[Tuple[ModelEntry, Path]],
+    token: Optional[str],
+) -> Optional[Tuple[ModelEntry, Path]]:
+    token_norm = _normalize_model_token(token)
+    if not token_norm:
+        return None
+
+    winner: Optional[Tuple[ModelEntry, Path]] = None
+    winner_score: Tuple[int, int] = (99, 99)
+    for entry, path in entries:
+        for candidate in (_normalize_model_token(entry.name), _normalize_model_token(path.stem)):
+            if not candidate:
+                continue
+            if candidate == token_norm:
+                score = (0, 0)
+            elif candidate.startswith(token_norm) or token_norm.startswith(candidate):
+                score = (1, abs(len(candidate) - len(token_norm)))
+            elif token_norm in candidate or candidate in token_norm:
+                score = (2, abs(len(candidate) - len(token_norm)))
+            else:
+                continue
+            if winner is None or score < winner_score:
+                winner = (entry, path)
+                winner_score = score
+    return winner
+
+
+def resolve_animatediff_base_model(
+    base_model_hint: Optional[str] = None,
+) -> Tuple[ModelEntry, Path, str]:
+    entries = _iter_sd15_image_model_entries()
+    if not entries:
+        raise RuntimeError("No local SD1.5 IMAGE_GEN model is available for AnimateDiff.")
+
+    for token, source in (
+        (base_model_hint, "task.base_model"),
+        (ANIMATEDIFF_DEFAULT_BASE_MODEL, "HAI_ANIMATEDIFF_DEFAULT_BASE_MODEL"),
+    ):
+        match = _select_sd15_entry_by_token(entries, token)
+        if match is not None:
+            entry, path = match
+            return entry, path, source
+
+    entry, path = entries[0]
+    return entry, path, "first_local_sd15"
+
+
+def _manifest_animatediff_model_names() -> List[str]:
+    names: Set[str] = set()
+    for entry in REGISTRY.list_entries():
+        task_type = str(getattr(entry, "task_type", "IMAGE_GEN") or "IMAGE_GEN").upper()
+        pipeline = str(getattr(entry, "pipeline", "") or "").lower()
+        name = str(getattr(entry, "name", "") or "").strip()
+        if not name:
+            continue
+        if task_type == "ANIMATEDIFF" or pipeline == "animatediff":
+            names.add(name)
+    names.add("animatediff")
+    return sorted(names)
+
+
 def discover_capabilities() -> Dict[str, List[str]]:
     pipelines: set[str] = set()
-    models: List[str] = []
+    models: set[str] = set()
     for entry in REGISTRY.list_entries():
         pipeline = str(getattr(entry, "pipeline", "") or "").lower()
         name = str(getattr(entry, "name", "") or "").strip()
@@ -432,14 +520,25 @@ def discover_capabilities() -> Dict[str, List[str]]:
         # LTX2 can be loaded from HF repo id; local path is optional.
         if pipeline == "ltx2":
             pipelines.add(pipeline)
-            models.append(name)
+            models.add(name)
             continue
         try:
             ensure_model_path(entry)
         except Exception:
             continue
         pipelines.add(pipeline or "sd15")
-        models.append(name)
+        models.add(name)
+
+    if _has_runner("engines.animatediff.animatediff_runner", "run_animatediff"):
+        try:
+            resolve_animatediff_base_model()
+        except Exception:
+            pass
+        else:
+            pipelines.add("animatediff")
+            for model_name in _manifest_animatediff_model_names():
+                models.add(model_name)
+
     return {"pipelines": sorted(pipelines), "models": sorted(models)}
 
 
@@ -503,12 +602,13 @@ def discover_supports(capabilities: Dict[str, List[str]]) -> List[str]:
     if "ltx2" in pipelines and "ltx2" in models and _has_runner("engines.ltx2.ltx2_runner", "run_ltx2"):
         supports.append("video")
 
-    if (
-        "animatediff" in pipelines
-        and "animatediff" in models
-        and _has_runner("engines.animatediff.animatediff_runner", "run_animatediff")
-    ):
-        supports.append("animatediff")
+    if _has_runner("engines.animatediff.animatediff_runner", "run_animatediff"):
+        try:
+            resolve_animatediff_base_model()
+        except Exception:
+            pass
+        else:
+            supports.append("animatediff")
 
     face_swap_ready = (
         torch is not None
@@ -1353,6 +1453,8 @@ def _run_animatediff_task(
     model_path: Path,
     reward_weight: float,
     task: Dict[str, Any],
+    resolved_base_model: Optional[str] = None,
+    resolution_source: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], int, Optional[str]]:
     try:
         from engines.animatediff.animatediff_runner import run_animatediff, video_to_b64 as ad_video_to_b64  # type: ignore
@@ -1374,6 +1476,8 @@ def _run_animatediff_task(
     task_payload["model_name"] = entry.name
     task_payload["reward_weight"] = reward_weight
     task_payload.setdefault("seed", random.randint(0, 2**31 - 1))
+    if resolved_base_model:
+        task_payload["base_model"] = resolved_base_model
 
     try:
         metrics, util_info, video_path = run_animatediff(
@@ -1401,6 +1505,10 @@ def _run_animatediff_task(
     if metrics.get("status") == "success" and not video_b64:
         metrics["status"] = "failed"
         metrics["error"] = "AnimateDiff produced no output video payload"
+    if resolved_base_model:
+        metrics["base_model_resolved"] = resolved_base_model
+    if resolution_source:
+        metrics["base_model_resolution_source"] = resolution_source
 
     if isinstance(util_info, dict):
         try:
@@ -1583,7 +1691,7 @@ def execute_task(task: Dict[str, Any]) -> None:
     model_path: Optional[Path] = None
     try:
         entry = ensure_model_entry(model_name)
-        if task_type in {"IMAGE_GEN", "ANIMATEDIFF", "FACE_SWAP"}:
+        if task_type in {"IMAGE_GEN", "FACE_SWAP"}:
             model_path = ensure_model_path(entry)
     except Exception as exc:
         metrics = {
@@ -1641,7 +1749,38 @@ def execute_task(task: Dict[str, Any]) -> None:
         elif task_type == "VIDEO_GEN":
             metrics, util, video_b64 = _run_ltx2_task(task_id, entry, reward_weight, task)
         elif task_type == "ANIMATEDIFF":
-            metrics, util, video_b64 = _run_animatediff_task(task_id, entry, model_path, reward_weight, task)
+            base_model_hint = str(task.get("base_model") or "").strip()
+            try:
+                resolved_entry, resolved_model_path, resolution_source = resolve_animatediff_base_model(base_model_hint)
+            except Exception as exc:
+                metrics = {
+                    "status": "failed",
+                    "task_type": "animatediff",
+                    "model_name": entry.name,
+                    "reward_weight": reward_weight,
+                    "error": f"AnimateDiff base model resolution failed: {exc}",
+                }
+            else:
+                if base_model_hint and resolution_source != "task.base_model":
+                    log(
+                        (
+                            f"AnimateDiff base_model '{base_model_hint}' not found; "
+                            f"using '{resolved_entry.name}' via {resolution_source}"
+                        ),
+                        prefix="ℹ️",
+                        task_id=task_id,
+                    )
+                ad_task = dict(task)
+                ad_task["base_model"] = resolved_entry.name
+                metrics, util, video_b64 = _run_animatediff_task(
+                    task_id,
+                    entry,
+                    resolved_model_path,
+                    reward_weight,
+                    ad_task,
+                    resolved_base_model=resolved_entry.name,
+                    resolution_source=resolution_source,
+                )
         elif task_type == "FACE_SWAP":
             metrics, util, image_b64 = _run_faceswap_task(task_id, entry, model_path, reward_weight, task)
         else:
@@ -1782,11 +1921,13 @@ LORA_BASE_TYPE = {
     "hyperlora_sdxl": "sdxl",
 }
 
-ROLE_WEIGHT_RANGES = {
-    "position": (0.0, 2.0, 0.6),
-    "anatomy": (0.5, 0.8, 0.65),
-    "style": (0.3, 0.4, 0.35),
+ROLE_WEIGHT_DEFAULTS = {
+    "position": 0.6,
+    "anatomy": 0.65,
+    "style": 1.0,
 }
+LORA_WEIGHT_MIN = 0.0
+LORA_WEIGHT_MAX = 2.0
 
 
 def is_sdxl_model(model_name: str) -> bool:
@@ -1836,17 +1977,14 @@ def classify_lora_role(normalized_name: str) -> str:
 
 
 def clamp_lora_weight(weight: Optional[float], role: str) -> float:
-    min_w, max_w, default_w = ROLE_WEIGHT_RANGES.get(role, (0.25, 0.45, 0.35))
+    default_w = ROLE_WEIGHT_DEFAULTS.get(role, 1.0)
     try:
         value = float(weight) if weight is not None else default_w
     except (TypeError, ValueError):
         value = default_w
     if not math.isfinite(value):
         value = default_w
-    if role == "position":
-        # Respect server-provided position weights without forcing a narrow clamp.
-        return value
-    return max(min_w, min(max_w, value))
+    return max(LORA_WEIGHT_MIN, min(LORA_WEIGHT_MAX, value))
 
 
 def resolve_lora_path(lora_name: str) -> Optional[Path]:
@@ -2023,6 +2161,8 @@ def _collect_explicit_loras(requested_raw: Any, entry: ModelEntry, pipeline_name
         if isinstance(item, dict):
             name = str(item.get("name") or "").strip()
             raw_weight = item.get("weight")
+            if raw_weight is None:
+                raw_weight = item.get("strength")
         else:
             name = str(item or "").strip()
         if not name:

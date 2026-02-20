@@ -51,6 +51,24 @@ function buildEndpointUrl(base, endpoint) {
   return `${base}${safeEndpoint}`;
 }
 
+function resolveAssetUrl(path) {
+  if (typeof path !== "string") {
+    return undefined;
+  }
+  const trimmed = path.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed;
+  }
+  if (trimmed.startsWith("/api/")) {
+    return trimmed;
+  }
+  const base = preferredApiBase !== null ? preferredApiBase : (resolveApiBases()[0] || "");
+  return buildEndpointUrl(base, trimmed);
+}
+
 function resolveApiBases() {
   const bases = [];
   if (preferredApiBase !== null) {
@@ -184,6 +202,8 @@ function renderJobFeed(feed) {
     const reward = Number(item.reward_hai ?? item.reward ?? 0).toFixed(6);
     const completed = item.completed_at ? new Date(item.completed_at).toLocaleTimeString() : "—";
     const status = (item.status || "QUEUED").toUpperCase();
+    const imageUrl = resolveAssetUrl(item.image_url);
+    const videoUrl = resolveAssetUrl(item.video_url);
     const statusMap = {
       QUEUED: "🟡 Queued",
       RUNNING: "🔵 Running",
@@ -192,9 +212,11 @@ function renderJobFeed(feed) {
     };
     const statusClass = status.toLowerCase();
     const statusLabel = statusMap[status] || status;
-    const preview = item.image_url
-      ? `<div class="job-card"><img src="${item.image_url}" alt="${item.job_id} preview" width="96" height="96" loading="lazy" /></div>`
-      : "—";
+    const preview = imageUrl
+      ? `<div class="job-card"><img src="${imageUrl}" alt="${item.job_id} preview" width="96" height="96" loading="lazy" /></div>`
+      : (videoUrl
+        ? `<a href="${videoUrl}" target="_blank" rel="noopener">Video</a>`
+        : "—");
     const rowClass = "job-type-creator";
     return `
       <tr class="${rowClass}">

@@ -512,15 +512,15 @@
       "task_type": "VIDEO_GEN",
       "reward_weight": 20.0,
       "video_defaults": {
-        "steps": 16,
-        "guidance": 5.0,
-        "frames": 12,
+        "steps": 20,
+        "guidance": 7.0,
+        "frames": 16,
         "fps": 8,
         "width": 512,
         "height": 512
       },
-      "defaults_source": "fallback",
-      "defaults_confidence": "fallback"
+      "defaults_source": "snapshot",
+      "defaults_confidence": "high"
     },
     {
       "name": "animatediff",
@@ -535,15 +535,15 @@
       "task_type": "ANIMATEDIFF",
       "reward_weight": 15.0,
       "video_defaults": {
-        "steps": 18,
-        "guidance": 5.5,
+        "steps": 25,
+        "guidance": 6.0,
         "frames": 16,
         "fps": 8,
         "width": 512,
         "height": 512
       },
-      "defaults_source": "fallback",
-      "defaults_confidence": "fallback"
+      "defaults_source": "snapshot",
+      "defaults_confidence": "high"
     }
   ]
 }

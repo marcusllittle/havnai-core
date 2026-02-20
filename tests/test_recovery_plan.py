@@ -628,6 +628,47 @@ class ManifestSnapshotImageDefaultsTests(unittest.TestCase):
             self.assertEqual(str(row.get("defaults_source")), "snapshot")
             self.assertEqual(str(row.get("defaults_confidence")), "high")
 
+    def test_video_models_match_snapshot_defaults(self) -> None:
+        manifest_path = ROOT / "server" / "manifests" / "registry.json"
+        with manifest_path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        models = {
+            str(entry.get("name", "")).lower(): entry
+            for entry in data.get("models", [])
+        }
+
+        expected_video = {
+            "ltx2": {
+                "steps": 20,
+                "guidance": 7.0,
+                "frames": 16,
+                "fps": 8,
+                "width": 512,
+                "height": 512,
+            },
+            "animatediff": {
+                "steps": 25,
+                "guidance": 6.0,
+                "frames": 16,
+                "fps": 8,
+                "width": 512,
+                "height": 512,
+            },
+        }
+
+        for name, defaults in expected_video.items():
+            self.assertIn(name, models)
+            row = models[name]
+            video_defaults = row.get("video_defaults") or {}
+            self.assertEqual(int(video_defaults.get("steps")), defaults["steps"])
+            self.assertAlmostEqual(float(video_defaults.get("guidance")), defaults["guidance"], places=6)
+            self.assertEqual(int(video_defaults.get("frames")), defaults["frames"])
+            self.assertEqual(int(video_defaults.get("fps")), defaults["fps"])
+            self.assertEqual(int(video_defaults.get("width")), defaults["width"])
+            self.assertEqual(int(video_defaults.get("height")), defaults["height"])
+            self.assertEqual(str(row.get("defaults_source")), "snapshot")
+            self.assertEqual(str(row.get("defaults_confidence")), "high")
+
 
 class DashboardProxyPathTests(unittest.TestCase):
     def setUp(self) -> None:

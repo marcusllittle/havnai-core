@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import sqlite3
 import sys
 import time
@@ -202,6 +203,10 @@ class ExplicitLoraPolicyTests(unittest.TestCase):
             "pipeline": "sdxl",
             "task_type": "IMAGE_GEN",
             "reward_weight": 10.0,
+            "steps": 28,
+            "guidance": 6.0,
+            "width": 768,
+            "height": 1152,
             "tags": [],
         }
         app_module.NODES["node-image"] = {
@@ -280,43 +285,125 @@ class ExplicitLoraPolicyTests(unittest.TestCase):
         parsed = json.loads(captured["data"])
         return parsed, log_event_mock
 
-    def test_hardcore_lora_submission_caps_auto_steps_to_30(self) -> None:
-        payload, log_event_mock = self._submit_and_capture_job_data(
+    def test_hardcore_keywords_do_not_force_legacy_steps_without_opt_in(self) -> None:
+        payload, _ = self._submit_and_capture_job_data(
             {
                 "wallet": VALID_WALLET,
                 "model": SDXL_MODEL,
                 "prompt": "doggy style sex portrait",
-                "loras": [{"name": "perfectionstyle", "weight": 0.6}],
             },
-            capture_log_events=True,
         )
+        self.assertEqual(int(payload.get("steps", 0)), 28)
+        self.assertEqual(float(payload.get("guidance", 0)), 6.0)
+
+    def test_hardcore_mode_true_applies_enhancer_without_forcing_40_7_5(self) -> None:
+        payload, _ = self._submit_and_capture_job_data(
+            {
+                "wallet": VALID_WALLET,
+                "model": SDXL_MODEL,
+                "prompt": "doggy style sex portrait",
+                "hardcore_mode": True,
+            }
+        )
+        self.assertEqual(int(payload.get("steps", 0)), 28)
+        self.assertEqual(float(payload.get("guidance", 0)), 6.0)
+        self.assertTrue(bool(payload.get("hardcore_mode")))
+
+    def test_legacy_auto_hardcore_switch_restores_legacy_step_behavior(self) -> None:
+        original_legacy_flag = app_module.ENABLE_LEGACY_AUTO_HARDCORE
+        try:
+            app_module.ENABLE_LEGACY_AUTO_HARDCORE = True
+            payload, log_event_mock = self._submit_and_capture_job_data(
+                {
+                    "wallet": VALID_WALLET,
+                    "model": SDXL_MODEL,
+                    "prompt": "doggy style sex portrait",
+                    "loras": [{"name": "perfectionstyle", "weight": 0.6}],
+                },
+                capture_log_events=True,
+            )
+        finally:
+            app_module.ENABLE_LEGACY_AUTO_HARDCORE = original_legacy_flag
         self.assertEqual(int(payload.get("steps", 0)), 30)
         self.assertEqual(float(payload.get("guidance", 0)), 7.5)
         self.assertIsNotNone(log_event_mock)
         event_names = [str(call.args[0]) for call in log_event_mock.call_args_list if call.args]
         self.assertIn("hardcore_lora_step_cap_applied", event_names)
 
-    def test_hardcore_without_loras_keeps_steps_40(self) -> None:
-        payload, _ = self._submit_and_capture_job_data(
-            {
-                "wallet": VALID_WALLET,
-                "model": SDXL_MODEL,
-                "prompt": "doggy style sex portrait",
-            }
-        )
-        self.assertEqual(int(payload.get("steps", 0)), 40)
 
-    def test_hardcore_with_lora_preserves_explicit_steps_override(self) -> None:
-        payload, _ = self._submit_and_capture_job_data(
+class DefaultResolutionPrecedenceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.profile = app_module.RUNTIME_PROFILE
+        self.model_cfg = {
+            "pipeline": "sdxl",
+            "steps": 29,
+            "guidance": 6.1,
+            "width": 832,
+            "height": 1216,
+            "video_defaults": {
+                "steps": 21,
+                "guidance": 6.1,
+                "frames": 15,
+                "fps": 8,
+                "width": 512,
+                "height": 512,
+            },
+            "face_swap_defaults": {
+                "num_steps": 18,
+                "guidance": 5.2,
+                "strength": 0.82,
+            },
+        }
+
+    def test_image_defaults_precedence_user_model_profile_env(self) -> None:
+        with patch.dict(
+            os.environ,
             {
-                "wallet": VALID_WALLET,
-                "model": SDXL_MODEL,
-                "prompt": "doggy style sex portrait",
-                "loras": [{"name": "perfectionstyle", "weight": 0.6}],
-                "steps": 26,
-            }
-        )
-        self.assertEqual(int(payload.get("steps", 0)), 26)
+                "HAVNAI_IMAGE_STEPS": "31",
+                "HAVNAI_IMAGE_GUIDANCE": "6.6",
+                "HAVNAI_IMAGE_WIDTH": "704",
+                "HAVNAI_IMAGE_HEIGHT": "1024",
+            },
+            clear=False,
+        ):
+            resolved, sources = app_module.resolve_image_defaults(self.model_cfg, {"steps": 22}, self.profile)
+        self.assertEqual(int(resolved["steps"]), 22)
+        self.assertEqual(sources["steps"], "user")
+        self.assertEqual(int(resolved["width"]), 832)
+        self.assertEqual(sources["width"], "model")
+
+    def test_video_defaults_precedence_user_model_profile_env(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"HAVNAI_LTX2_STEPS": "17", "HAVNAI_LTX2_GUIDANCE": "5.3"},
+            clear=False,
+        ):
+            resolved, sources = app_module.resolve_video_defaults(
+                self.model_cfg,
+                {"steps": 12, "fps": 6},
+                self.profile,
+                "VIDEO_GEN",
+            )
+        self.assertEqual(int(resolved["steps"]), 12)
+        self.assertEqual(sources["steps"], "user")
+        self.assertEqual(float(resolved["guidance"]), 6.1)
+        self.assertEqual(sources["guidance"], "model")
+
+    def test_faceswap_defaults_precedence_user_model_profile_env(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"HAVNAI_FACE_SWAP_STEPS": "13", "HAVNAI_FACE_SWAP_GUIDANCE": "4.7"},
+            clear=False,
+        ):
+            resolved, sources = app_module.resolve_faceswap_defaults(
+                self.model_cfg,
+                {"num_steps": 11},
+                self.profile,
+            )
+        self.assertEqual(int(resolved["num_steps"]), 11)
+        self.assertEqual(sources["num_steps"], "user")
+        self.assertAlmostEqual(float(resolved["guidance"]), 5.2, places=6)
+        self.assertEqual(sources["guidance"], "model")
 
 
 class CreditsFallbackCostTests(unittest.TestCase):
@@ -500,12 +587,17 @@ class ModelsListAvailabilityTests(unittest.TestCase):
         self.assertEqual(sdxl["online_nodes"], 1)
         self.assertTrue(sdxl["face_swap_available"])
         self.assertEqual(sdxl["face_swap_online_nodes"], 1)
+        self.assertIsInstance(sdxl.get("image_defaults"), dict)
+        self.assertIsInstance(sdxl.get("face_swap_defaults"), dict)
+        self.assertIsInstance(sdxl.get("defaults_source"), dict)
+        self.assertIsInstance(sdxl.get("defaults_confidence"), dict)
 
         ltx2 = models[LTX2_MODEL]
         self.assertTrue(ltx2["available"])
         self.assertEqual(ltx2["online_nodes"], 1)
         self.assertFalse(ltx2["face_swap_available"])
         self.assertEqual(ltx2["face_swap_online_nodes"], 0)
+        self.assertIsInstance(ltx2.get("video_defaults"), dict)
 
 
 class DashboardProxyPathTests(unittest.TestCase):

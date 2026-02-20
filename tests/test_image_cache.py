@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -43,6 +44,12 @@ class _FakeTorch:
     float16 = "float16"
     float32 = "float32"
     Generator = _FakeGenerator
+    class Tensor:  # pragma: no cover - test shim
+        pass
+
+    @staticmethod
+    def from_numpy(_value):
+        return _value
 
     @staticmethod
     def inference_mode() -> _FakeInferenceMode:
@@ -327,6 +334,101 @@ class ImageTimeoutAndProgressTests(unittest.TestCase):
         self.assertTrue(any(msg == "Denoise progress" for msg in messages))
         self.assertTrue(any(msg == "Denoise complete" for msg in messages))
         self.assertIsNotNone(image_b64)
+
+
+class FaceSwapGuidancePassThroughTests(unittest.TestCase):
+    def test_faceswap_guidance_from_task_reaches_pipeline(self) -> None:
+        class _FakeImageProj:
+            def to(self, **kwargs):
+                return self
+
+        class _FakeFaceSwapPipe:
+            def __init__(self) -> None:
+                self.kwargs = None
+                self.image_proj_model = _FakeImageProj()
+
+            def __call__(self, **kwargs):
+                self.kwargs = kwargs
+                image = client_module.Image.new("RGB", (64, 64), color=(20, 30, 40))
+                return SimpleNamespace(images=[image])
+
+        class _FakeFaceApp:
+            def get(self, _img):
+                return [{"embedding": [0.1, 0.2, 0.3]}]
+
+        class _FakeCv2:
+            COLOR_RGB2BGR = 0
+
+            @staticmethod
+            def cvtColor(arr, _code):
+                return arr
+
+        class _FakeNumpy:
+            ndarray = tuple
+
+            @staticmethod
+            def array(_obj):
+                return [[0]]
+
+        fake_pipe = _FakeFaceSwapPipe()
+        entry = SimpleNamespace(name="epicrealismXL_vxviiCrystalclear", pipeline="sdxl")
+        model_path = Path("/tmp/epicrealismXL_vxviiCrystalclear.safetensors")
+        task = {
+            "prompt": "faceswap portrait",
+            "base_image_url": "https://example.com/base.png",
+            "face_source_url": "https://example.com/face.png",
+            "num_steps": 14,
+            "guidance": 4.6,
+            "strength": 0.72,
+            "seed": 1234,
+        }
+        base_img = client_module.Image.new("RGB", (64, 64), color=(1, 2, 3))
+        face_img = client_module.Image.new("RGB", (64, 64), color=(5, 6, 7))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_key = f"{model_path}|controlnet-ref|/tmp/adapter.bin"
+            with patch.object(client_module, "torch", _FakeTorch()), patch.object(
+                client_module, "diffusers", object()
+            ), patch.object(
+                client_module, "cv2", _FakeCv2()
+            ), patch.object(
+                client_module, "np", _FakeNumpy()
+            ), patch.object(
+                client_module, "_FACE_SWAP_PIPE", fake_pipe
+            ), patch.object(
+                client_module, "_FACE_SWAP_PIPE_MODEL", cache_key
+            ), patch.object(
+                client_module, "_resolve_instantid_adapter_path", return_value=Path("/tmp/adapter.bin")
+            ), patch.object(
+                client_module, "_resolve_instantid_controlnet_ref", return_value="controlnet-ref"
+            ), patch.object(
+                client_module, "load_image_source_with_error", side_effect=[(base_img, None), (face_img, None)]
+            ), patch.object(
+                client_module, "get_face_analysis", return_value=_FakeFaceApp()
+            ), patch.object(
+                client_module, "pick_primary_face", side_effect=lambda faces: faces[0] if faces else None
+            ), patch.object(
+                client_module,
+                "prepare_mask_and_pose_control",
+                return_value=((base_img, base_img, base_img), (0, 0, 64, 64)),
+            ), patch.object(
+                client_module, "read_gpu_stats", return_value={"utilization": 0}
+            ), patch.object(
+                client_module, "OUTPUTS_DIR", Path(tmpdir)
+            ):
+                metrics, _util, image_b64 = client_module._run_faceswap_task(
+                    "job-face-guidance",
+                    entry,
+                    model_path,
+                    1.0,
+                    task,
+                )
+
+        self.assertEqual(metrics["status"], "success")
+        self.assertAlmostEqual(float(metrics.get("guidance", 0.0)), 4.6, places=6)
+        self.assertIsNotNone(image_b64)
+        self.assertIsNotNone(fake_pipe.kwargs)
+        self.assertAlmostEqual(float(fake_pipe.kwargs.get("guidance_scale", 0.0)), 4.6, places=6)
 
 
 class AnimateDiffCapabilityTests(unittest.TestCase):

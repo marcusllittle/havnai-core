@@ -1557,6 +1557,8 @@ def _run_faceswap_task(
         strength = max(0.0, min(1.0, strength))
         num_steps = coerce_int(task.get("num_steps"), 20)
         num_steps = max(5, min(60, num_steps))
+        guidance = coerce_float(task.get("guidance"), 5.0)
+        guidance = max(0.0, min(12.0, guidance))
         seed = task.get("seed")
         try:
             seed = int(seed) if seed is not None else random.randint(0, 2**31 - 1)
@@ -1627,7 +1629,7 @@ def _run_faceswap_task(
             control_image=control_image,
             image_embeds=image_embeds,
             num_inference_steps=num_steps,
-            guidance_scale=5.0,
+            guidance_scale=guidance,
             strength=strength,
             controlnet_conditioning_scale=0.8,
             generator=generator,
@@ -1659,6 +1661,7 @@ def _run_faceswap_task(
         "model_path": str(model_path),
         "reward_weight": reward_weight,
         "inference_time_ms": round((time.time() - started) * 1000, 3),
+        "guidance": guidance,
         "gpu_util_start": start_stats.get("utilization", 0),
         "gpu_util_end": end_stats.get("utilization", 0),
     }

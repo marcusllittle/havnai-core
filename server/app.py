@@ -1872,6 +1872,7 @@ def submit_job() -> Any:
 
     # Special-case AnimateDiff video jobs with rich structured payload
     is_animatediff = model_name == "animatediff" or pipeline_name == "animatediff"
+    hardcore_lora_step_cap_applied = False
 
     # Backward-compatible alias for legacy WAN i2v routing that now maps to VIDEO_GEN behavior.
     is_wan_i2v = (
@@ -2073,6 +2074,14 @@ def submit_job() -> Any:
         if hardcore_prompt:
             job_settings["steps"] = 40
             job_settings["guidance"] = 7.5
+        if (
+            hardcore_prompt
+            and loras_list
+            and payload.get("steps") is None
+            and int(job_settings.get("steps", 20) or 20) == 40
+        ):
+            job_settings["steps"] = 30
+            hardcore_lora_step_cap_applied = True
 
         requested_loras = job_settings.get("loras") or []
         log_event(
@@ -2105,6 +2114,8 @@ def submit_job() -> Any:
             overrides["seed"] = seed
         if overrides:
             job_settings["overrides"] = overrides
+            for key, value in overrides.items():
+                job_settings[key] = value
 
         job_data = json.dumps(job_settings)
         task_type = CREATOR_TASK_TYPE
@@ -2129,6 +2140,14 @@ def submit_job() -> Any:
             invite_code,
         )
     log_event("Public job queued", wallet=wallet, model=model_name, job_id=job_id)
+    if hardcore_lora_step_cap_applied:
+        log_event(
+            "hardcore_lora_step_cap_applied",
+            model=selected_model_name,
+            job_id=job_id,
+            steps_from=40,
+            steps_to=30,
+        )
     _emit_job_event("job_queued", job_id, wallet, model=model_name, task_type=task_type)
     return jsonify({"status": "queued", "job_id": job_id}), 200
 

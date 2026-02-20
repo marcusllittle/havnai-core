@@ -251,6 +251,73 @@ class ExplicitLoraPolicyTests(unittest.TestCase):
         self.assertNotIn("auto_anatomy", payload)
         self.assertNotIn("loras", payload)
 
+    def _submit_and_capture_job_data(self, payload: dict, *, capture_log_events: bool = False):
+        captured: dict = {}
+
+        def _capture_enqueue(wallet, model, task_type, data, weight, invite_code=None):
+            captured["wallet"] = wallet
+            captured["model"] = model
+            captured["task_type"] = task_type
+            captured["data"] = data
+            return "job-captured"
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(app_module, "rate_limit", return_value=True))
+            stack.enter_context(
+                patch.object(app_module.invite, "enforce_invite_limits", return_value=(None, None))
+            )
+            stack.enter_context(patch.object(app_module.safety, "check_safety", return_value=None))
+            stack.enter_context(patch.object(app_module.credits, "check_and_deduct_credits", return_value=None))
+            stack.enter_context(patch.object(app_module, "refresh_manifest", return_value=None))
+            stack.enter_context(
+                patch.object(app_module.job_helpers, "enqueue_job", side_effect=_capture_enqueue)
+            )
+            log_event_mock = None
+            if capture_log_events:
+                log_event_mock = stack.enter_context(patch.object(app_module, "log_event"))
+            resp = self.client.post("/submit-job", json=payload)
+        self.assertEqual(resp.status_code, 200)
+        parsed = json.loads(captured["data"])
+        return parsed, log_event_mock
+
+    def test_hardcore_lora_submission_caps_auto_steps_to_30(self) -> None:
+        payload, log_event_mock = self._submit_and_capture_job_data(
+            {
+                "wallet": VALID_WALLET,
+                "model": SDXL_MODEL,
+                "prompt": "doggy style sex portrait",
+                "loras": [{"name": "perfectionstyle", "weight": 0.6}],
+            },
+            capture_log_events=True,
+        )
+        self.assertEqual(int(payload.get("steps", 0)), 30)
+        self.assertEqual(float(payload.get("guidance", 0)), 7.5)
+        self.assertIsNotNone(log_event_mock)
+        event_names = [str(call.args[0]) for call in log_event_mock.call_args_list if call.args]
+        self.assertIn("hardcore_lora_step_cap_applied", event_names)
+
+    def test_hardcore_without_loras_keeps_steps_40(self) -> None:
+        payload, _ = self._submit_and_capture_job_data(
+            {
+                "wallet": VALID_WALLET,
+                "model": SDXL_MODEL,
+                "prompt": "doggy style sex portrait",
+            }
+        )
+        self.assertEqual(int(payload.get("steps", 0)), 40)
+
+    def test_hardcore_with_lora_preserves_explicit_steps_override(self) -> None:
+        payload, _ = self._submit_and_capture_job_data(
+            {
+                "wallet": VALID_WALLET,
+                "model": SDXL_MODEL,
+                "prompt": "doggy style sex portrait",
+                "loras": [{"name": "perfectionstyle", "weight": 0.6}],
+                "steps": 26,
+            }
+        )
+        self.assertEqual(int(payload.get("steps", 0)), 26)
+
 
 class CreditsFallbackCostTests(unittest.TestCase):
     def test_animatediff_task_fallback_uses_animatediff_default(self) -> None:

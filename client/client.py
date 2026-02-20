@@ -333,6 +333,7 @@ IMAGE_STEPS = int(os.environ.get("HAI_STEPS", "20"))
 IMAGE_GUIDANCE = float(os.environ.get("HAI_GUIDANCE", "7.0"))
 IMAGE_WIDTH = int(os.environ.get("HAI_WIDTH", "512"))
 IMAGE_HEIGHT = int(os.environ.get("HAI_HEIGHT", "512"))
+IMAGE_JOB_TIMEOUT_SECONDS = _env_int("HAI_IMAGE_JOB_TIMEOUT_SECONDS", 480)
 
 utilization_hint = random.randint(10, 25 if ROLE == "creator" else 15)
 
@@ -2235,18 +2236,50 @@ def _apply_explicit_loras(
             )
     if adapter_names:
         if hasattr(pipe, "set_adapters"):
+            log(
+                "LoRA adapters setting...",
+                prefix="ℹ️",
+                model_name=entry.name,
+                adapter_count=len(adapter_names),
+            )
             try:
                 pipe.set_adapters(adapter_names, adapter_weights)
             except TypeError:
                 pipe.set_adapters(adapter_names)
+            log(
+                "LoRA adapters set",
+                prefix="✅",
+                model_name=entry.name,
+                adapter_count=len(adapter_names),
+            )
         elif hasattr(pipe, "fuse_lora"):
+            log(
+                "LoRA adapters setting...",
+                prefix="ℹ️",
+                model_name=entry.name,
+                adapter_count=len(adapter_names),
+            )
             try:
                 pipe.fuse_lora()
             except Exception as exc:
                 log(f"LoRA fuse failed for {entry.name}: {exc}", prefix="⚠️")
+            else:
+                log(
+                    "LoRA adapters set",
+                    prefix="✅",
+                    model_name=entry.name,
+                    adapter_count=len(adapter_names),
+                )
     else:
         log("Pipeline does not support LoRA loading", prefix="⚠️")
     return loaded, applied_loras, int((time.time() - lora_t0) * 1000)
+
+
+class ImageGenerationTimeout(RuntimeError):
+    def __init__(self, timeout_seconds: int, elapsed_seconds: float) -> None:
+        self.timeout_seconds = int(timeout_seconds)
+        self.elapsed_seconds = float(elapsed_seconds)
+        super().__init__(f"image generation exceeded timeout ({self.timeout_seconds}s)")
 
 
 def run_image_generation(
@@ -2271,6 +2304,9 @@ def run_image_generation(
     pipeline_load_ms = 0
     lora_load_ms = 0
     generation_ms = 0
+    status_reason: Optional[str] = None
+    timeout_seconds_metric: Optional[int] = None
+    elapsed_ms_metric: Optional[int] = None
     output_path = OUTPUTS_DIR / f"{task_id}.png"
 
     width = IMAGE_WIDTH
@@ -2425,16 +2461,71 @@ def run_image_generation(
                             pipe.scheduler = _DPMSolver.from_config(pipe.scheduler.config)
                         except Exception as exc:
                             log(f"Sampler switch failed: {exc}", prefix="⚠️", sampler=sampler)
+                log(
+                    "Starting denoise",
+                    prefix="🎬",
+                    model_name=entry.name,
+                    steps=steps,
+                    guidance=guidance,
+                    width=img_w,
+                    height=img_h,
+                    seed=seed,
+                    lora_count=len(lora_entries),
+                    timeout_seconds=max(0, int(IMAGE_JOB_TIMEOUT_SECONDS)),
+                )
+                progress_interval = 5
+                timeout_seconds = int(IMAGE_JOB_TIMEOUT_SECONDS)
+
+                def _on_step_end(
+                    _pipe: Any,
+                    step_index: int,
+                    _timestep: Any,
+                    callback_kwargs: Dict[str, Any],
+                ) -> Dict[str, Any]:
+                    current_step = int(step_index) + 1
+                    if timeout_seconds > 0:
+                        elapsed_seconds = time.time() - gen_t0
+                        if elapsed_seconds > timeout_seconds:
+                            raise ImageGenerationTimeout(timeout_seconds, elapsed_seconds)
+                    if current_step % progress_interval == 0 or current_step >= steps:
+                        log(
+                            "Denoise progress",
+                            prefix="🧪",
+                            step=current_step,
+                            total_steps=steps,
+                        )
+                    return callback_kwargs
+
+                pipe_kwargs = {
+                    "prompt": pos_text,
+                    "negative_prompt": neg_text or None,
+                    "num_inference_steps": steps,
+                    "guidance_scale": guidance,
+                    "generator": generator,
+                    "height": img_h,
+                    "width": img_w,
+                }
                 with torch.inference_mode():
-                    result = pipe(
-                        pos_text,
-                        negative_prompt=neg_text or None,
-                        num_inference_steps=steps,
-                        guidance_scale=guidance,
-                        generator=generator,
-                        height=img_h,
-                        width=img_w,
-                    )
+                    try:
+                        result = pipe(
+                            **pipe_kwargs,
+                            callback_on_step_end=_on_step_end,
+                            callback_on_step_end_tensor_inputs=[],
+                        )
+                    except TypeError as exc:
+                        if "callback_on_step_end" not in str(exc) and "callback_on_step_end_tensor_inputs" not in str(exc):
+                            raise
+                        log(
+                            "Denoise callback unsupported; running without callback",
+                            prefix="⚠️",
+                            model_name=entry.name,
+                        )
+                        result = pipe(**pipe_kwargs)
+                log(
+                    "Denoise complete",
+                    prefix="✅",
+                    elapsed_ms=int((time.time() - gen_t0) * 1000),
+                )
                 generation_ms = int((time.time() - gen_t0) * 1000)
                 log(f"Generated in {generation_ms}ms", prefix="✅")
                 img = result.images[0]
@@ -2462,6 +2553,18 @@ def run_image_generation(
                 image_b64 = base64.b64encode(fh.read()).decode("utf-8")
         else:
             time.sleep(random.uniform(1.2, 2.2))
+    except ImageGenerationTimeout as exc:
+        status = "failed"
+        status_reason = "image_timeout"
+        error_msg = str(exc)
+        timeout_seconds_metric = int(exc.timeout_seconds)
+        elapsed_ms_metric = int(max(exc.elapsed_seconds, 0.0) * 1000)
+        log(
+            f"Image generation timeout: {error_msg}",
+            prefix="🚫",
+            timeout_seconds=timeout_seconds_metric,
+            elapsed_ms=elapsed_ms_metric,
+        )
     except Exception as exc:
         status = "failed"
         error_msg = str(exc)
@@ -2491,6 +2594,12 @@ def run_image_generation(
         metrics["requested_loras"] = requested_lora_metrics
     if applied_lora_metrics:
         metrics["applied_loras"] = applied_lora_metrics
+    if status_reason:
+        metrics["status_reason"] = status_reason
+    if timeout_seconds_metric is not None:
+        metrics["timeout_seconds"] = timeout_seconds_metric
+    if elapsed_ms_metric is not None:
+        metrics["elapsed_ms"] = elapsed_ms_metric
     if status == "failed":
         metrics["error"] = error_msg or "image generation error"
     return metrics, util, image_b64

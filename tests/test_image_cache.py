@@ -217,6 +217,118 @@ class LoraLoggingRegressionTests(unittest.TestCase):
         self.assertGreaterEqual(elapsed_ms, 0)
 
 
+class ImageTimeoutAndProgressTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._orig_cache_size = client_module.IMAGE_PIPELINE_CACHE_SIZE
+        self._orig_fast_preview = client_module.FAST_PREVIEW
+        self._orig_torch = client_module.torch
+        self._orig_diffusers = client_module.diffusers
+        self._orig_timeout = client_module.IMAGE_JOB_TIMEOUT_SECONDS
+        client_module.IMAGE_PIPELINE_CACHE_SIZE = 1
+        client_module.FAST_PREVIEW = False
+        client_module.torch = _FakeTorch()  # type: ignore[assignment]
+        client_module.diffusers = object()  # type: ignore[assignment]
+        client_module.IMAGE_JOB_TIMEOUT_SECONDS = 480
+        with client_module._IMAGE_PIPELINE_CACHE_LOCK:
+            client_module._IMAGE_PIPELINE_CACHE.clear()
+
+    def tearDown(self) -> None:
+        with client_module._IMAGE_PIPELINE_CACHE_LOCK:
+            client_module._IMAGE_PIPELINE_CACHE.clear()
+        client_module.IMAGE_PIPELINE_CACHE_SIZE = self._orig_cache_size
+        client_module.FAST_PREVIEW = self._orig_fast_preview
+        client_module.torch = self._orig_torch
+        client_module.diffusers = self._orig_diffusers
+        client_module.IMAGE_JOB_TIMEOUT_SECONDS = self._orig_timeout
+
+    def test_timeout_callback_marks_failed_with_image_timeout_reason(self) -> None:
+        class _TimeoutPipe:
+            def __call__(self, *args, **kwargs):
+                callback = kwargs.get("callback_on_step_end")
+                if callback is not None:
+                    for step_idx in range(20):
+                        callback(self, step_idx, None, {})
+                image = client_module.Image.new("RGB", (64, 64), color=(1, 2, 3))
+                return SimpleNamespace(images=[image])
+
+        entry = SimpleNamespace(name="timeout-model", pipeline="sdxl")
+        model_path = Path("/tmp/timeout-model.safetensors")
+        fake_pipe = _TimeoutPipe()
+        ticks = {"value": 0.0}
+
+        def _fake_time() -> float:
+            ticks["value"] += 2.0
+            return ticks["value"]
+
+        with patch.object(client_module, "read_gpu_stats", return_value={"utilization": 0}), patch.object(
+            client_module, "_resolve_image_runtime", return_value=("cpu", "float32", True, "sdxl")
+        ), patch.object(
+            client_module, "_collect_explicit_loras", return_value=[]
+        ), patch.object(
+            client_module, "_acquire_base_image_pipeline", return_value=(fake_pipe, False, 10)
+        ), patch.object(
+            client_module, "IMAGE_JOB_TIMEOUT_SECONDS", 8
+        ), patch.object(
+            client_module.time, "time", side_effect=_fake_time
+        ):
+            metrics, _, image_b64 = client_module.run_image_generation(
+                task_id="job-timeout",
+                entry=entry,
+                model_path=model_path,
+                reward_weight=1.0,
+                prompt="portrait",
+                negative_prompt="",
+                job_settings={"steps": 30, "guidance": 7.0},
+            )
+
+        self.assertEqual(metrics["status"], "failed")
+        self.assertEqual(metrics["status_reason"], "image_timeout")
+        self.assertEqual(metrics["timeout_seconds"], 8)
+        self.assertGreater(metrics["elapsed_ms"], 0)
+        self.assertIn("exceeded timeout", metrics.get("error", ""))
+        self.assertIsNone(image_b64)
+
+    def test_progress_callback_logs_start_progress_and_complete(self) -> None:
+        class _ProgressPipe:
+            def __call__(self, *args, **kwargs):
+                callback = kwargs.get("callback_on_step_end")
+                if callback is not None:
+                    for step_idx in range(10):
+                        callback(self, step_idx, None, {})
+                image = client_module.Image.new("RGB", (64, 64), color=(10, 20, 30))
+                return SimpleNamespace(images=[image])
+
+        entry = SimpleNamespace(name="progress-model", pipeline="sdxl")
+        model_path = Path("/tmp/progress-model.safetensors")
+        fake_pipe = _ProgressPipe()
+
+        with patch.object(client_module, "read_gpu_stats", return_value={"utilization": 0}), patch.object(
+            client_module, "_resolve_image_runtime", return_value=("cpu", "float32", True, "sdxl")
+        ), patch.object(
+            client_module, "_collect_explicit_loras", return_value=[]
+        ), patch.object(
+            client_module, "_acquire_base_image_pipeline", return_value=(fake_pipe, False, 12)
+        ), patch.object(
+            client_module, "log"
+        ) as log_mock:
+            metrics, _, image_b64 = client_module.run_image_generation(
+                task_id="job-progress",
+                entry=entry,
+                model_path=model_path,
+                reward_weight=1.0,
+                prompt="portrait",
+                negative_prompt="",
+                job_settings={"steps": 10, "guidance": 7.0},
+            )
+
+        messages = [str(call.args[0]) for call in log_mock.call_args_list if call.args]
+        self.assertEqual(metrics["status"], "success")
+        self.assertTrue(any(msg == "Starting denoise" for msg in messages))
+        self.assertTrue(any(msg == "Denoise progress" for msg in messages))
+        self.assertTrue(any(msg == "Denoise complete" for msg in messages))
+        self.assertIsNotNone(image_b64)
+
+
 class AnimateDiffCapabilityTests(unittest.TestCase):
     def test_resolve_animatediff_base_model_prefers_fuzzy_task_hint(self) -> None:
         entry_a = SimpleNamespace(name="realisticVisionV60B1_v51HyperVAE", pipeline="sd15", task_type="IMAGE_GEN")

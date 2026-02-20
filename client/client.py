@@ -2229,7 +2229,7 @@ def _apply_explicit_loras(
                 "LoRA adapter applied",
                 prefix="✅",
                 lora=str(lora_path),
-                filename=lora_path.name,
+                lora_filename=lora_path.name,
                 requested_weight=requested_weight,
                 applied_weight=lora_weight,
             )

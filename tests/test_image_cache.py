@@ -188,6 +188,35 @@ class LoraWeightPolicyTests(unittest.TestCase):
         self.assertAlmostEqual(collected[0][1], 1.0, places=6)
 
 
+class LoraLoggingRegressionTests(unittest.TestCase):
+    def test_apply_explicit_loras_does_not_collide_with_logrecord_fields(self) -> None:
+        class _LogSafePipe:
+            def __init__(self) -> None:
+                self.loaded = []
+                self.adapters = None
+
+            def load_lora_weights(self, path: str, adapter_name: str | None = None) -> None:
+                self.loaded.append((path, adapter_name))
+
+            def set_adapters(self, names, weights=None) -> None:
+                self.adapters = (names, weights)
+
+        pipe = _LogSafePipe()
+        entry = SimpleNamespace(name="cyberrealisticPony_v160")
+        lora_path = Path("/tmp/incase_style.safetensors")
+        lora_entries = [(lora_path, 0.25, "lora_style_incase_style", 0.25, "incase_style")]
+
+        loaded, applied, elapsed_ms = client_module._apply_explicit_loras(pipe, entry, lora_entries)
+
+        self.assertEqual(loaded, ["incase_style.safetensors:0.25"])
+        self.assertEqual(len(applied), 1)
+        self.assertEqual(applied[0]["filename"], "incase_style.safetensors")
+        self.assertAlmostEqual(applied[0]["requested_weight"], 0.25, places=6)
+        self.assertAlmostEqual(applied[0]["applied_weight"], 0.25, places=6)
+        self.assertIsNotNone(pipe.adapters)
+        self.assertGreaterEqual(elapsed_ms, 0)
+
+
 class AnimateDiffCapabilityTests(unittest.TestCase):
     def test_resolve_animatediff_base_model_prefers_fuzzy_task_hint(self) -> None:
         entry_a = SimpleNamespace(name="realisticVisionV60B1_v51HyperVAE", pipeline="sd15", task_type="IMAGE_GEN")

@@ -6,12 +6,25 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "client"))
 sys.path.insert(0, str(ROOT))
+
+# client/client.py exits if onnxruntime cannot be imported; provide a tiny stub for unit tests.
+if "onnxruntime" not in sys.modules:
+    class _FakeOrtModule:
+        @staticmethod
+        def get_available_providers():
+            return []
+
+        class InferenceSession:
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+    sys.modules["onnxruntime"] = _FakeOrtModule()
 
 import client as client_module  # type: ignore
 
@@ -51,8 +64,11 @@ class _FakeTorch:
 
 class _FakePipe:
     def __call__(self, *args, **kwargs):
-        image = client_module.Image.new("RGB", (64, 64), color=(10, 20, 30))
-        return SimpleNamespace(images=[image])
+        class _FakeImage:
+            def save(self, path: Path) -> None:
+                Path(path).write_bytes(b"fake-image-bytes")
+
+        return SimpleNamespace(images=[_FakeImage()])
 
 
 class ImagePipelineCacheTests(unittest.TestCase):
@@ -137,6 +153,117 @@ class ImagePipelineCacheTests(unittest.TestCase):
         construct_mock.assert_called_once()
         acquire_mock.assert_not_called()
         release_mock.assert_called_once_with(fake_pipe)
+
+
+class AnimateDiffCapabilityTests(unittest.TestCase):
+    def test_resolve_animatediff_base_model_prefers_fuzzy_task_hint(self) -> None:
+        entry_a = SimpleNamespace(name="realisticVisionV60B1_v51HyperVAE", pipeline="sd15", task_type="IMAGE_GEN")
+        entry_b = SimpleNamespace(name="lyriel_v16", pipeline="sd15", task_type="IMAGE_GEN")
+        path_a = Path("/tmp/realisticVisionV60B1_v51HyperVAE.safetensors")
+        path_b = Path("/tmp/lyriel_v16.safetensors")
+
+        def _ensure(entry):
+            if entry is entry_a:
+                return path_a
+            if entry is entry_b:
+                return path_b
+            raise FileNotFoundError("unexpected model")
+
+        with patch.object(client_module.REGISTRY, "list_entries", return_value=[entry_b, entry_a]), patch.object(
+            client_module, "ensure_model_path", side_effect=_ensure
+        ):
+            resolved_entry, resolved_path, source = client_module.resolve_animatediff_base_model("realisticVision")
+
+        self.assertIs(resolved_entry, entry_a)
+        self.assertEqual(resolved_path, path_a)
+        self.assertEqual(source, "task.base_model")
+
+    def test_discover_supports_adds_animatediff_when_runner_and_model_ready(self) -> None:
+        with patch.object(client_module, "_has_image_generation_model", return_value=False), patch.object(
+            client_module, "_has_sdxl_base_model", return_value=False
+        ), patch.object(
+            client_module, "_instantid_assets_ready", return_value=False
+        ), patch.object(
+            client_module, "resolve_animatediff_base_model", return_value=(SimpleNamespace(name="rv"), Path("/tmp/rv.safetensors"), "default")
+        ), patch.object(
+            client_module,
+            "_has_runner",
+            side_effect=lambda module_name, function_name: function_name == "run_animatediff",
+        ):
+            supports = client_module.discover_supports({"pipelines": [], "models": []})
+
+        self.assertIn("animatediff", supports)
+
+    def test_discover_capabilities_includes_animatediff_model_when_runtime_ready(self) -> None:
+        entry = SimpleNamespace(name="juggernautXL_ragnarokBy", pipeline="sdxl", task_type="IMAGE_GEN")
+        with patch.object(client_module.REGISTRY, "list_entries", return_value=[entry]), patch.object(
+            client_module, "ensure_model_path", return_value=Path("/tmp/juggernaut.safetensors")
+        ), patch.object(
+            client_module, "_has_runner", return_value=True
+        ), patch.object(
+            client_module, "resolve_animatediff_base_model", return_value=(SimpleNamespace(name="rv"), Path("/tmp/rv.safetensors"), "default")
+        ), patch.object(
+            client_module, "_manifest_animatediff_model_names", return_value=["animatediff"]
+        ):
+            caps = client_module.discover_capabilities()
+
+        self.assertIn("animatediff", [p.lower() for p in caps["pipelines"]])
+        self.assertIn("animatediff", [m.lower() for m in caps["models"]])
+
+    def test_execute_task_animatediff_uses_resolved_base_model_path(self) -> None:
+        task = {
+            "task_id": "job-ad-test",
+            "type": "ANIMATEDIFF",
+            "model_name": "animatediff",
+            "reward_weight": 1.0,
+            "prompt": "test",
+            "seed": 123,
+            "wallet": "0xabc",
+        }
+        ad_entry = SimpleNamespace(name="animatediff", pipeline="animatediff", task_type="ANIMATEDIFF")
+        resolved_entry = SimpleNamespace(name="realisticVisionV60B1_v51HyperVAE")
+        resolved_path = Path("/tmp/rv.safetensors")
+
+        fake_response = MagicMock()
+        fake_response.raise_for_status.return_value = None
+        fake_response.json.return_value = {"reward": 0.1}
+
+        with patch.object(client_module, "ensure_model_entry", return_value=ad_entry), patch.object(
+            client_module, "ensure_model_path", side_effect=RuntimeError("should not be called for animatediff")
+        ), patch.object(
+            client_module, "resolve_animatediff_base_model", return_value=(resolved_entry, resolved_path, "task.base_model")
+        ), patch.object(
+            client_module, "_run_animatediff_task", return_value=({"status": "success"}, 70, "dGVzdA==")
+        ) as run_ad_mock, patch.object(
+            client_module.SESSION, "post", return_value=fake_response
+        ):
+            client_module.execute_task(task)
+
+        args, kwargs = run_ad_mock.call_args
+        self.assertEqual(args[2], resolved_path)
+        self.assertEqual(kwargs["resolved_base_model"], resolved_entry.name)
+        self.assertEqual(kwargs["resolution_source"], "task.base_model")
+
+    def test_faceswap_metrics_include_cache_and_timing_keys_on_failure(self) -> None:
+        entry = SimpleNamespace(name="epicrealismXL_vxviiCrystalclear")
+        with patch.object(client_module, "read_gpu_stats", return_value={"utilization": 0}):
+            orig_diffusers = client_module.diffusers
+            try:
+                client_module.diffusers = None  # type: ignore[assignment]
+                metrics, _, _ = client_module._run_faceswap_task(
+                    "job-fs-metrics",
+                    entry,
+                    Path("/tmp/base.safetensors"),
+                    1.0,
+                    {},
+                )
+            finally:
+                client_module.diffusers = orig_diffusers
+
+        self.assertIn("pipeline_cache_hit", metrics)
+        self.assertIn("pipeline_load_ms", metrics)
+        self.assertIn("face_detect_ms", metrics)
+        self.assertIn("generation_ms", metrics)
 
 
 if __name__ == "__main__":

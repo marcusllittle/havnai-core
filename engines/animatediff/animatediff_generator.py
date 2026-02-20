@@ -5,6 +5,8 @@ import inspect
 import logging
 import os
 import threading
+import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Optional
 
@@ -36,26 +38,64 @@ except Exception:  # pragma: no cover
     Image = None  # type: ignore
 
 _PIPE_LOCK = threading.Lock()
-_PIPE: Optional[Any] = None
-_PIPE_ID: Optional[str] = None
-_ADAPTER_ID: Optional[str] = None
-_PIPE_MODE: Optional[str] = None
+_PIPE_CACHE: "OrderedDict[str, Any]" = OrderedDict()
 _LOGGER = logging.getLogger(__name__)
+_LAST_PIPELINE_CACHE_HIT = False
+_LAST_PIPELINE_LOAD_MS = 0
+
+
+def _read_animatediff_pipeline_cache_size() -> int:
+    raw = os.environ.get("HAI_ANIMATEDIFF_PIPELINE_CACHE_SIZE") or "1"
+    try:
+        return max(0, int(str(raw).strip()))
+    except Exception:
+        return 1
+
+
+_ANIMATEDIFF_PIPELINE_CACHE_SIZE = _read_animatediff_pipeline_cache_size()
+
+
+def _set_last_pipeline_stats(cache_hit: bool, load_ms: int) -> None:
+    global _LAST_PIPELINE_CACHE_HIT, _LAST_PIPELINE_LOAD_MS
+    _LAST_PIPELINE_CACHE_HIT = bool(cache_hit)
+    _LAST_PIPELINE_LOAD_MS = max(0, int(load_ms))
+
+
+def get_last_pipeline_stats() -> dict:
+    return {
+        "pipeline_cache_hit": bool(_LAST_PIPELINE_CACHE_HIT),
+        "pipeline_load_ms": int(_LAST_PIPELINE_LOAD_MS),
+    }
+
+
+def _release_pipeline(pipe: Any) -> None:
+    if pipe is None:
+        return
+    try:
+        if hasattr(pipe, "unload_lora_weights"):
+            pipe.unload_lora_weights()
+    except Exception:
+        pass
+    if torch is not None and torch.cuda.is_available():
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+
+def _animatediff_cache_key(model_id: str, adapter_id: str, mode: str) -> str:
+    return f"{model_id}|{adapter_id}|{mode}"
 
 
 def unload_pipeline() -> None:
     """Release the cached AnimateDiff pipeline and free GPU memory."""
-    global _PIPE, _PIPE_ID, _ADAPTER_ID, _PIPE_MODE
     with _PIPE_LOCK:
-        if _PIPE is not None:
-            del _PIPE
-            _PIPE = None
-            _PIPE_ID = None
-            _ADAPTER_ID = None
-            _PIPE_MODE = None
-            if torch is not None and torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            _LOGGER.info("AnimateDiff pipeline unloaded")
+        to_release = list(_PIPE_CACHE.values())
+        _PIPE_CACHE.clear()
+    for pipe in to_release:
+        _release_pipeline(pipe)
+    if to_release:
+        _LOGGER.info("AnimateDiff pipeline unloaded")
 
 
 def load_animatediff_pipeline(
@@ -73,82 +113,103 @@ def load_animatediff_pipeline(
     ):
         raise RuntimeError("AnimateDiff dependencies are unavailable")
 
-    global _PIPE, _PIPE_ID, _ADAPTER_ID, _PIPE_MODE
-    with _PIPE_LOCK:
-        mode = "i2v" if use_init_image else "t2v"
-        if _PIPE is None or _PIPE_ID != model_id or _ADAPTER_ID != adapter_id or _PIPE_MODE != mode:
-            # Temporarily disable HF_HUB_OFFLINE for model loading so downloads
-            # can succeed when the model isn't cached yet.
-            _offline_was = os.environ.pop("HF_HUB_OFFLINE", None)
-            try:
-                model_path = Path(model_id).expanduser()
-                base_kwargs = {
-                    "torch_dtype": torch.float16,
-                    "safety_checker": None,
-                    "requires_safety_checker": False,
-                    "feature_extractor": None,
-                }
-                if use_init_image:
-                    if AnimateDiffVideoToVideoPipeline is None or StableDiffusionImg2ImgPipeline is None:
-                        raise RuntimeError("AnimateDiff init_image requires AnimateDiffVideoToVideoPipeline")
-                    if model_path.exists() and model_path.is_file() and hasattr(StableDiffusionImg2ImgPipeline, "from_single_file"):
-                        base = StableDiffusionImg2ImgPipeline.from_single_file(
-                            str(model_path), **base_kwargs
-                        )
-                    else:
-                        base = StableDiffusionImg2ImgPipeline.from_pretrained(
-                            model_id, **base_kwargs
-                        )
-                else:
-                    if model_path.exists() and model_path.is_file() and hasattr(StableDiffusionPipeline, "from_single_file"):
-                        base = StableDiffusionPipeline.from_single_file(
-                            str(model_path), **base_kwargs
-                        )
-                    else:
-                        base = StableDiffusionPipeline.from_pretrained(
-                            model_id, **base_kwargs
-                        )
-                adapter = MotionAdapter.from_pretrained(adapter_id, torch_dtype=torch.float16)
-                if use_init_image and AnimateDiffVideoToVideoPipeline is not None:
-                    pipe = AnimateDiffVideoToVideoPipeline.from_pipe(base, motion_adapter=adapter)
-                else:
-                    pipe = AnimateDiffPipeline.from_pipe(base, motion_adapter=adapter)
-            finally:
-                if _offline_was is not None:
-                    os.environ["HF_HUB_OFFLINE"] = _offline_was
-            if DDIMScheduler is not None:
-                try:
-                    pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
-                except Exception:
-                    pass
-            offload_enabled = False
-            # Enable CPU offload for GPUs with < 14GB VRAM (covers RTX 3060 12GB).
-            # AnimateDiff + motion adapter need ~10-12GB; without offload, 12GB cards OOM.
-            force_offload = os.environ.get("ANIMATEDIFF_CPU_OFFLOAD", "").lower() in ("1", "true", "yes")
-            disable_offload = os.environ.get("ANIMATEDIFF_NO_OFFLOAD", "").lower() in ("1", "true", "yes")
+    mode = "i2v" if use_init_image else "t2v"
+    cache_key = _animatediff_cache_key(model_id, adapter_id, mode)
 
-            if not disable_offload and (force_offload or (torch.cuda.is_available() and torch.cuda.get_device_properties(0).total_memory < 14 * 1024**3)):
-                try:
-                    pipe.enable_model_cpu_offload()
-                    offload_enabled = True
-                    _LOGGER.info("CPU offload enabled (low VRAM or forced)")
-                except Exception:
-                    pass
-            try:
-                if hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_slicing"):
-                    pipe.vae.enable_slicing()
-                else:
-                    pipe.enable_vae_slicing()
-            except Exception:
-                pass
-            if not offload_enabled:
-                _PIPE = pipe.to(device)
+    if _ANIMATEDIFF_PIPELINE_CACHE_SIZE > 0:
+        with _PIPE_LOCK:
+            cached = _PIPE_CACHE.pop(cache_key, None)
+            if cached is not None:
+                _PIPE_CACHE[cache_key] = cached
+                _set_last_pipeline_stats(True, 0)
+                return cached
+
+    build_started = time.time()
+    # Temporarily disable HF_HUB_OFFLINE for model loading so downloads
+    # can succeed when the model isn't cached yet.
+    _offline_was = os.environ.pop("HF_HUB_OFFLINE", None)
+    try:
+        model_path = Path(model_id).expanduser()
+        base_kwargs = {
+            "torch_dtype": torch.float16,
+            "safety_checker": None,
+            "requires_safety_checker": False,
+            "feature_extractor": None,
+        }
+        if use_init_image:
+            if AnimateDiffVideoToVideoPipeline is None or StableDiffusionImg2ImgPipeline is None:
+                raise RuntimeError("AnimateDiff init_image requires AnimateDiffVideoToVideoPipeline")
+            if model_path.exists() and model_path.is_file() and hasattr(StableDiffusionImg2ImgPipeline, "from_single_file"):
+                base = StableDiffusionImg2ImgPipeline.from_single_file(
+                    str(model_path), **base_kwargs
+                )
             else:
-                _PIPE = pipe
-            _PIPE_ID = model_id
-            _ADAPTER_ID = adapter_id
-            _PIPE_MODE = mode
-        return _PIPE
+                base = StableDiffusionImg2ImgPipeline.from_pretrained(
+                    model_id, **base_kwargs
+                )
+        else:
+            if model_path.exists() and model_path.is_file() and hasattr(StableDiffusionPipeline, "from_single_file"):
+                base = StableDiffusionPipeline.from_single_file(
+                    str(model_path), **base_kwargs
+                )
+            else:
+                base = StableDiffusionPipeline.from_pretrained(
+                    model_id, **base_kwargs
+                )
+        adapter = MotionAdapter.from_pretrained(adapter_id, torch_dtype=torch.float16)
+        if use_init_image and AnimateDiffVideoToVideoPipeline is not None:
+            pipe = AnimateDiffVideoToVideoPipeline.from_pipe(base, motion_adapter=adapter)
+        else:
+            pipe = AnimateDiffPipeline.from_pipe(base, motion_adapter=adapter)
+    finally:
+        if _offline_was is not None:
+            os.environ["HF_HUB_OFFLINE"] = _offline_was
+    if DDIMScheduler is not None:
+        try:
+            pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
+        except Exception:
+            pass
+    offload_enabled = False
+    # Enable CPU offload for GPUs with < 14GB VRAM (covers RTX 3060 12GB).
+    # AnimateDiff + motion adapter need ~10-12GB; without offload, 12GB cards OOM.
+    force_offload = os.environ.get("ANIMATEDIFF_CPU_OFFLOAD", "").lower() in ("1", "true", "yes")
+    disable_offload = os.environ.get("ANIMATEDIFF_NO_OFFLOAD", "").lower() in ("1", "true", "yes")
+
+    if not disable_offload and (
+        force_offload
+        or (torch.cuda.is_available() and torch.cuda.get_device_properties(0).total_memory < 14 * 1024**3)
+    ):
+        try:
+            pipe.enable_model_cpu_offload()
+            offload_enabled = True
+            _LOGGER.info("CPU offload enabled (low VRAM or forced)")
+        except Exception:
+            pass
+    try:
+        if hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_slicing"):
+            pipe.vae.enable_slicing()
+        else:
+            pipe.enable_vae_slicing()
+    except Exception:
+        pass
+    if not offload_enabled:
+        pipe = pipe.to(device)
+    load_ms = int((time.time() - build_started) * 1000)
+
+    if _ANIMATEDIFF_PIPELINE_CACHE_SIZE <= 0:
+        _set_last_pipeline_stats(False, load_ms)
+        return pipe
+
+    evicted: list[Any] = []
+    with _PIPE_LOCK:
+        _PIPE_CACHE[cache_key] = pipe
+        while len(_PIPE_CACHE) > _ANIMATEDIFF_PIPELINE_CACHE_SIZE:
+            _, old_pipe = _PIPE_CACHE.popitem(last=False)
+            evicted.append(old_pipe)
+    for old_pipe in evicted:
+        _release_pipeline(old_pipe)
+    _set_last_pipeline_stats(False, load_ms)
+    return pipe
 
 
 def generate_animatediff_frames(
@@ -168,6 +229,7 @@ def generate_animatediff_frames(
     if torch is None:
         raise RuntimeError("torch is required for AnimateDiff generation")
 
+    transient_pipeline = _ANIMATEDIFF_PIPELINE_CACHE_SIZE <= 0
     pipe = load_animatediff_pipeline(model_id, adapter_id, use_init_image=init_image is not None)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
@@ -228,5 +290,9 @@ def generate_animatediff_frames(
         else:
             _LOGGER.warning("AnimateDiff init_image provided but no supported image param found.")
 
-    result = pipe(**call_kwargs)
-    return result.frames[0]
+    try:
+        result = pipe(**call_kwargs)
+        return result.frames[0]
+    finally:
+        if transient_pipeline:
+            _release_pipeline(pipe)

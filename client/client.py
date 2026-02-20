@@ -88,8 +88,8 @@ except Exception:  # pragma: no cover
     FaceAnalysis = None  # type: ignore
 
 _FACE_ANALYSIS = None
-_FACE_SWAP_PIPE = None
-_FACE_SWAP_PIPE_MODEL = ""
+_FACE_SWAP_PIPELINE_CACHE: "OrderedDict[str, Any]" = OrderedDict()
+_FACE_SWAP_PIPELINE_CACHE_LOCK = threading.Lock()
 _IMAGE_PIPELINE_CACHE: "OrderedDict[str, Any]" = OrderedDict()
 _IMAGE_PIPELINE_CACHE_LOCK = threading.Lock()
 
@@ -315,6 +315,27 @@ PRELOAD_IMAGE_MODEL = str(
     or ""
 ).strip()
 ALLOW_REMOTE_LORA_DOWNLOAD = _env_flag("HAI_ALLOW_REMOTE_LORA_DOWNLOAD", False)
+SD15_FORCE_VAE_FP32 = _env_flag("HAI_SD15_FORCE_VAE_FP32", False)
+VIDEO_PIPELINE_CACHE_SIZE = max(0, _env_int("HAI_VIDEO_PIPELINE_CACHE_SIZE", 1))
+ANIMATEDIFF_PIPELINE_CACHE_SIZE = max(0, _env_int("HAI_ANIMATEDIFF_PIPELINE_CACHE_SIZE", 1))
+FACE_SWAP_PIPELINE_CACHE_SIZE = max(0, _env_int("HAI_FACE_SWAP_PIPELINE_CACHE_SIZE", 1))
+PRELOAD_VIDEO_ON_STARTUP = _env_flag("HAI_PRELOAD_VIDEO_ON_STARTUP", True)
+PRELOAD_VIDEO_MODEL = str(
+    os.environ.get("HAI_PRELOAD_VIDEO_MODEL")
+    or ENV_VARS.get("HAI_PRELOAD_VIDEO_MODEL")
+    or ""
+).strip()
+PRELOAD_FACE_SWAP_ASSETS_ON_STARTUP = _env_flag("HAI_PRELOAD_FACE_SWAP_ASSETS_ON_STARTUP", True)
+PRELOAD_FACE_SWAP_PIPELINE_ON_STARTUP = _env_flag("HAI_PRELOAD_FACE_SWAP_PIPELINE_ON_STARTUP", False)
+ANIMATEDIFF_DEFAULT_BASE_MODEL = str(
+    os.environ.get("HAI_ANIMATEDIFF_DEFAULT_BASE_MODEL")
+    or ENV_VARS.get("HAI_ANIMATEDIFF_DEFAULT_BASE_MODEL")
+    or "realisticVision"
+).strip()
+
+# Downstream engine modules read cache controls directly from os.environ.
+os.environ.setdefault("HAI_VIDEO_PIPELINE_CACHE_SIZE", str(VIDEO_PIPELINE_CACHE_SIZE))
+os.environ.setdefault("HAI_ANIMATEDIFF_PIPELINE_CACHE_SIZE", str(ANIMATEDIFF_PIPELINE_CACHE_SIZE))
 
 REGISTRY.base_url = SERVER_BASE
 
@@ -421,9 +442,92 @@ def resolve_model_path_from_name(model_name: str) -> Optional[Path]:
     return None
 
 
+def _normalize_model_token(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _iter_sd15_image_model_entries() -> List[Tuple[ModelEntry, Path]]:
+    entries: List[Tuple[ModelEntry, Path]] = []
+    for entry in REGISTRY.list_entries():
+        task_type = str(getattr(entry, "task_type", "IMAGE_GEN") or "IMAGE_GEN").upper()
+        pipeline = str(getattr(entry, "pipeline", "") or "").lower()
+        if task_type != "IMAGE_GEN":
+            continue
+        if "sd15" not in pipeline:
+            continue
+        try:
+            path = ensure_model_path(entry)
+        except Exception:
+            continue
+        entries.append((entry, path))
+    return entries
+
+
+def _select_sd15_entry_by_token(
+    entries: List[Tuple[ModelEntry, Path]],
+    token: Optional[str],
+) -> Optional[Tuple[ModelEntry, Path]]:
+    token_norm = _normalize_model_token(token)
+    if not token_norm:
+        return None
+
+    winner: Optional[Tuple[ModelEntry, Path]] = None
+    winner_score: Tuple[int, int] = (99, 99)
+    for entry, path in entries:
+        for candidate in (_normalize_model_token(entry.name), _normalize_model_token(path.stem)):
+            if not candidate:
+                continue
+            if candidate == token_norm:
+                score = (0, 0)
+            elif candidate.startswith(token_norm) or token_norm.startswith(candidate):
+                score = (1, abs(len(candidate) - len(token_norm)))
+            elif token_norm in candidate or candidate in token_norm:
+                score = (2, abs(len(candidate) - len(token_norm)))
+            else:
+                continue
+            if winner is None or score < winner_score:
+                winner = (entry, path)
+                winner_score = score
+    return winner
+
+
+def resolve_animatediff_base_model(
+    base_model_hint: Optional[str] = None,
+) -> Tuple[ModelEntry, Path, str]:
+    entries = _iter_sd15_image_model_entries()
+    if not entries:
+        raise RuntimeError("No local SD1.5 IMAGE_GEN model is available for AnimateDiff.")
+
+    for token, source in (
+        (base_model_hint, "task.base_model"),
+        (ANIMATEDIFF_DEFAULT_BASE_MODEL, "HAI_ANIMATEDIFF_DEFAULT_BASE_MODEL"),
+    ):
+        match = _select_sd15_entry_by_token(entries, token)
+        if match is not None:
+            entry, path = match
+            return entry, path, source
+
+    entry, path = entries[0]
+    return entry, path, "first_local_sd15"
+
+
+def _manifest_animatediff_model_names() -> List[str]:
+    names: Set[str] = set()
+    for entry in REGISTRY.list_entries():
+        task_type = str(getattr(entry, "task_type", "IMAGE_GEN") or "IMAGE_GEN").upper()
+        pipeline = str(getattr(entry, "pipeline", "") or "").lower()
+        name = str(getattr(entry, "name", "") or "").strip()
+        if not name:
+            continue
+        if task_type == "ANIMATEDIFF" or pipeline == "animatediff":
+            names.add(name)
+    names.add("animatediff")
+    return sorted(names)
+
+
 def discover_capabilities() -> Dict[str, List[str]]:
     pipelines: set[str] = set()
-    models: List[str] = []
+    models: set[str] = set()
     for entry in REGISTRY.list_entries():
         pipeline = str(getattr(entry, "pipeline", "") or "").lower()
         name = str(getattr(entry, "name", "") or "").strip()
@@ -432,14 +536,25 @@ def discover_capabilities() -> Dict[str, List[str]]:
         # LTX2 can be loaded from HF repo id; local path is optional.
         if pipeline == "ltx2":
             pipelines.add(pipeline)
-            models.append(name)
+            models.add(name)
             continue
         try:
             ensure_model_path(entry)
         except Exception:
             continue
         pipelines.add(pipeline or "sd15")
-        models.append(name)
+        models.add(name)
+
+    if _has_runner("engines.animatediff.animatediff_runner", "run_animatediff"):
+        try:
+            resolve_animatediff_base_model()
+        except Exception:
+            pass
+        else:
+            pipelines.add("animatediff")
+            for model_name in _manifest_animatediff_model_names():
+                models.add(model_name)
+
     return {"pipelines": sorted(pipelines), "models": sorted(models)}
 
 
@@ -503,12 +618,13 @@ def discover_supports(capabilities: Dict[str, List[str]]) -> List[str]:
     if "ltx2" in pipelines and "ltx2" in models and _has_runner("engines.ltx2.ltx2_runner", "run_ltx2"):
         supports.append("video")
 
-    if (
-        "animatediff" in pipelines
-        and "animatediff" in models
-        and _has_runner("engines.animatediff.animatediff_runner", "run_animatediff")
-    ):
-        supports.append("animatediff")
+    if _has_runner("engines.animatediff.animatediff_runner", "run_animatediff"):
+        try:
+            resolve_animatediff_base_model()
+        except Exception:
+            pass
+        else:
+            supports.append("animatediff")
 
     face_swap_ready = (
         torch is not None
@@ -1286,6 +1402,102 @@ def _load_instantid_controlnet(dtype: Any) -> Any:
     return ControlNetModel.from_pretrained(controlnet_ref, **load_kwargs)
 
 
+def _release_faceswap_pipeline(pipe: Any) -> None:
+    if pipe is None:
+        return
+    try:
+        if hasattr(pipe, "unload_ip_adapter"):
+            pipe.unload_ip_adapter()
+    except Exception:
+        pass
+    try:
+        if hasattr(pipe, "unload_lora_weights"):
+            pipe.unload_lora_weights()
+    except Exception:
+        pass
+    gc.collect()
+    if torch is not None and torch.cuda.is_available():
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+
+def _faceswap_pipeline_cache_key(
+    model_path: Path,
+    controlnet_ref: str,
+    adapter_path: Path,
+    dtype: Any,
+    device: str,
+) -> str:
+    try:
+        model_ref = str(model_path.resolve())
+    except Exception:
+        model_ref = str(model_path)
+    return f"{model_ref}|{controlnet_ref}|{adapter_path}|{dtype}|{device}"
+
+
+def _build_faceswap_pipeline(
+    model_path: Path,
+    controlnet_ref: str,
+    adapter_path: Path,
+    dtype: Any,
+    device: str,
+) -> Tuple[Any, int]:
+    from pipeline_stable_diffusion_xl_instantid_inpaint import (  # type: ignore
+        StableDiffusionXLInstantIDInpaintPipeline,
+    )
+
+    load_t0 = time.time()
+    controlnet = _load_instantid_controlnet(dtype)
+    pipe = StableDiffusionXLInstantIDInpaintPipeline.from_single_file(
+        str(model_path),
+        controlnet=controlnet,
+        torch_dtype=dtype,
+        safety_checker=None,
+    )
+    pipe.load_ip_adapter_instantid(str(adapter_path))
+    pipe.set_ip_adapter_scale(0.8)
+    pipe.to(device)
+    # InstantID projection module is not always moved by generic pipeline .to(...).
+    if hasattr(pipe, "image_proj_model") and pipe.image_proj_model is not None:
+        pipe.image_proj_model.to(device=device, dtype=dtype)
+    if hasattr(pipe, "enable_attention_slicing"):
+        pipe.enable_attention_slicing("max")
+    load_ms = int((time.time() - load_t0) * 1000)
+    return pipe, load_ms
+
+
+def _acquire_faceswap_pipeline(
+    model_path: Path,
+    controlnet_ref: str,
+    adapter_path: Path,
+    dtype: Any,
+    device: str,
+) -> Tuple[Any, bool, int, bool]:
+    if FACE_SWAP_PIPELINE_CACHE_SIZE <= 0:
+        pipe, load_ms = _build_faceswap_pipeline(model_path, controlnet_ref, adapter_path, dtype, device)
+        return pipe, False, load_ms, True
+
+    cache_key = _faceswap_pipeline_cache_key(model_path, controlnet_ref, adapter_path, dtype, device)
+    with _FACE_SWAP_PIPELINE_CACHE_LOCK:
+        cached_pipe = _FACE_SWAP_PIPELINE_CACHE.pop(cache_key, None)
+        if cached_pipe is not None:
+            _FACE_SWAP_PIPELINE_CACHE[cache_key] = cached_pipe
+            return cached_pipe, True, 0, False
+
+    pipe, load_ms = _build_faceswap_pipeline(model_path, controlnet_ref, adapter_path, dtype, device)
+    evicted: List[Any] = []
+    with _FACE_SWAP_PIPELINE_CACHE_LOCK:
+        _FACE_SWAP_PIPELINE_CACHE[cache_key] = pipe
+        while len(_FACE_SWAP_PIPELINE_CACHE) > FACE_SWAP_PIPELINE_CACHE_SIZE:
+            _, old_pipe = _FACE_SWAP_PIPELINE_CACHE.popitem(last=False)
+            evicted.append(old_pipe)
+    for old_pipe in evicted:
+        _release_faceswap_pipeline(old_pipe)
+    return pipe, False, load_ms, False
+
+
 def _run_ltx2_task(
     task_id: str,
     entry: ModelEntry,
@@ -1353,6 +1565,8 @@ def _run_animatediff_task(
     model_path: Path,
     reward_weight: float,
     task: Dict[str, Any],
+    resolved_base_model: Optional[str] = None,
+    resolution_source: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], int, Optional[str]]:
     try:
         from engines.animatediff.animatediff_runner import run_animatediff, video_to_b64 as ad_video_to_b64  # type: ignore
@@ -1374,6 +1588,8 @@ def _run_animatediff_task(
     task_payload["model_name"] = entry.name
     task_payload["reward_weight"] = reward_weight
     task_payload.setdefault("seed", random.randint(0, 2**31 - 1))
+    if resolved_base_model:
+        task_payload["base_model"] = resolved_base_model
 
     try:
         metrics, util_info, video_path = run_animatediff(
@@ -1401,6 +1617,10 @@ def _run_animatediff_task(
     if metrics.get("status") == "success" and not video_b64:
         metrics["status"] = "failed"
         metrics["error"] = "AnimateDiff produced no output video payload"
+    if resolved_base_model:
+        metrics["base_model_resolved"] = resolved_base_model
+    if resolution_source:
+        metrics["base_model_resolution_source"] = resolution_source
 
     if isinstance(util_info, dict):
         try:
@@ -1422,8 +1642,6 @@ def _run_faceswap_task(
     reward_weight: float,
     task: Dict[str, Any],
 ) -> Tuple[Dict[str, Any], int, Optional[str]]:
-    global _FACE_SWAP_PIPE, _FACE_SWAP_PIPE_MODEL
-
     start_stats = read_gpu_stats()
     end_stats: Dict[str, Any] = {}
     started = time.time()
@@ -1431,16 +1649,18 @@ def _run_faceswap_task(
     error_msg = ""
     image_b64: Optional[str] = None
     util = utilization_hint
+    pipeline_cache_hit = False
+    pipeline_load_ms = 0
+    face_detect_ms = 0
+    generation_ms = 0
+    transient_pipeline = False
+    pipe: Any = None
 
     try:
         if torch is None or diffusers is None:
             raise RuntimeError("diffusers + torch are required for face swap")
         if Image is None or np is None or cv2 is None:
             raise RuntimeError("pillow + numpy + opencv are required for face swap")
-
-        from pipeline_stable_diffusion_xl_instantid_inpaint import (  # type: ignore
-            StableDiffusionXLInstantIDInpaintPipeline,
-        )
 
         prompt = str(task.get("prompt") or "").strip() or "portrait, photorealistic, high detail"
         negative_prompt = str(task.get("negative_prompt") or "").strip()
@@ -1461,9 +1681,11 @@ def _run_faceswap_task(
         if source_image is None:
             raise RuntimeError(f"Failed to load face source: {source_error or 'unknown error'}")
 
+        detect_t0 = time.time()
         face_app = get_face_analysis()
         base_faces = face_app.get(cv2.cvtColor(np.array(base_image), cv2.COLOR_RGB2BGR))
         source_faces = face_app.get(cv2.cvtColor(np.array(source_image), cv2.COLOR_RGB2BGR))
+        face_detect_ms = int((time.time() - detect_t0) * 1000)
         base_face = pick_primary_face(base_faces)
         source_face = pick_primary_face(source_faces)
         if base_face is None:
@@ -1479,29 +1701,18 @@ def _run_faceswap_task(
         controlnet_ref = _resolve_instantid_controlnet_ref()
         dtype = torch.float16 if torch.cuda.is_available() else torch.float32
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        pipeline_cache_key = f"{model_path}|{controlnet_ref}|{adapter_path}"
-        if _FACE_SWAP_PIPE is None or _FACE_SWAP_PIPE_MODEL != pipeline_cache_key:
-            controlnet = _load_instantid_controlnet(dtype)
-            pipe = StableDiffusionXLInstantIDInpaintPipeline.from_single_file(
-                str(model_path),
-                controlnet=controlnet,
-                torch_dtype=dtype,
-                safety_checker=None,
-            )
-            pipe.load_ip_adapter_instantid(str(adapter_path))
-            pipe.set_ip_adapter_scale(0.8)
-            pipe.to(device)
-            # InstantID adds a custom projection module that is not always moved by
-            # generic pipeline .to(...), so force placement to avoid cpu/cuda mismatch.
-            if hasattr(pipe, "image_proj_model") and pipe.image_proj_model is not None:
-                pipe.image_proj_model.to(device=device, dtype=dtype)
-            if hasattr(pipe, "enable_attention_slicing"):
-                pipe.enable_attention_slicing("max")
-            _FACE_SWAP_PIPE = pipe
-            _FACE_SWAP_PIPE_MODEL = pipeline_cache_key
+        pipe, pipeline_cache_hit, pipeline_load_ms, transient_pipeline = _acquire_faceswap_pipeline(
+            model_path=model_path,
+            controlnet_ref=controlnet_ref,
+            adapter_path=adapter_path,
+            dtype=dtype,
+            device=device,
+        )
+        if not pipeline_cache_hit:
+            log(f"Face swap pipeline ready in {pipeline_load_ms}ms", prefix="✅", task_id=task_id)
 
-        if hasattr(_FACE_SWAP_PIPE, "image_proj_model") and _FACE_SWAP_PIPE.image_proj_model is not None:
-            _FACE_SWAP_PIPE.image_proj_model.to(device=device, dtype=dtype)
+        if hasattr(pipe, "image_proj_model") and pipe.image_proj_model is not None:
+            pipe.image_proj_model.to(device=device, dtype=dtype)
 
         image_embeds: Any = source_face["embedding"]
         if isinstance(image_embeds, np.ndarray):
@@ -1510,7 +1721,8 @@ def _run_faceswap_task(
             image_embeds = image_embeds.to(device=device, dtype=dtype)
 
         generator = torch.Generator(device=device).manual_seed(seed)
-        result = _FACE_SWAP_PIPE(
+        gen_t0 = time.time()
+        result = pipe(
             prompt=prompt,
             negative_prompt=negative_prompt or None,
             image=cropped_image,
@@ -1523,6 +1735,8 @@ def _run_faceswap_task(
             controlnet_conditioning_scale=0.8,
             generator=generator,
         )
+        generation_ms = int((time.time() - gen_t0) * 1000)
+        log(f"Face swap generated in {generation_ms}ms", prefix="✅", task_id=task_id)
         swapped_crop = result.images[0]
         swapped_crop = swapped_crop.resize((crop_w, crop_h), resample=Image.LANCZOS)
         composed = base_image.copy()
@@ -1537,6 +1751,8 @@ def _run_faceswap_task(
         error_msg = str(exc)
         log(f"Face swap generation failed: {error_msg}", prefix="🚫", task_id=task_id)
     finally:
+        if transient_pipeline and pipe is not None:
+            _release_faceswap_pipeline(pipe)
         end_stats = read_gpu_stats()
         try:
             util = int(max(start_stats.get("utilization", 0), end_stats.get("utilization", 0), utilization_hint))
@@ -1552,6 +1768,10 @@ def _run_faceswap_task(
         "inference_time_ms": round((time.time() - started) * 1000, 3),
         "gpu_util_start": start_stats.get("utilization", 0),
         "gpu_util_end": end_stats.get("utilization", 0),
+        "pipeline_cache_hit": bool(pipeline_cache_hit),
+        "pipeline_load_ms": int(pipeline_load_ms),
+        "face_detect_ms": int(face_detect_ms),
+        "generation_ms": int(generation_ms),
     }
     if status != "success":
         metrics["error"] = error_msg or "face swap error"
@@ -1583,7 +1803,7 @@ def execute_task(task: Dict[str, Any]) -> None:
     model_path: Optional[Path] = None
     try:
         entry = ensure_model_entry(model_name)
-        if task_type in {"IMAGE_GEN", "ANIMATEDIFF", "FACE_SWAP"}:
+        if task_type in {"IMAGE_GEN", "FACE_SWAP"}:
             model_path = ensure_model_path(entry)
     except Exception as exc:
         metrics = {
@@ -1641,7 +1861,38 @@ def execute_task(task: Dict[str, Any]) -> None:
         elif task_type == "VIDEO_GEN":
             metrics, util, video_b64 = _run_ltx2_task(task_id, entry, reward_weight, task)
         elif task_type == "ANIMATEDIFF":
-            metrics, util, video_b64 = _run_animatediff_task(task_id, entry, model_path, reward_weight, task)
+            base_model_hint = str(task.get("base_model") or "").strip()
+            try:
+                resolved_entry, resolved_model_path, resolution_source = resolve_animatediff_base_model(base_model_hint)
+            except Exception as exc:
+                metrics = {
+                    "status": "failed",
+                    "task_type": "animatediff",
+                    "model_name": entry.name,
+                    "reward_weight": reward_weight,
+                    "error": f"AnimateDiff base model resolution failed: {exc}",
+                }
+            else:
+                if base_model_hint and resolution_source != "task.base_model":
+                    log(
+                        (
+                            f"AnimateDiff base_model '{base_model_hint}' not found; "
+                            f"using '{resolved_entry.name}' via {resolution_source}"
+                        ),
+                        prefix="ℹ️",
+                        task_id=task_id,
+                    )
+                ad_task = dict(task)
+                ad_task["base_model"] = resolved_entry.name
+                metrics, util, video_b64 = _run_animatediff_task(
+                    task_id,
+                    entry,
+                    resolved_model_path,
+                    reward_weight,
+                    ad_task,
+                    resolved_base_model=resolved_entry.name,
+                    resolution_source=resolution_source,
+                )
         elif task_type == "FACE_SWAP":
             metrics, util, image_b64 = _run_faceswap_task(task_id, entry, model_path, reward_weight, task)
         else:
@@ -1886,10 +2137,27 @@ def _image_pipeline_cache_key(model_path: Path, pipeline_name: str, device: str,
 def _release_image_pipeline(pipe: Any) -> None:
     if pipe is None:
         return
-    try:
-        pipe.to("cpu")
-    except Exception:
-        pass
+    should_move_to_cpu = True
+    if torch is not None:
+        try:
+            pipe_dtype = getattr(pipe, "dtype", None)
+            if pipe_dtype == torch.float16:
+                should_move_to_cpu = False
+        except Exception:
+            pass
+        if should_move_to_cpu:
+            for attr in ("unet", "vae", "text_encoder", "text_encoder_2", "transformer"):
+                module = getattr(pipe, attr, None)
+                if module is None:
+                    continue
+                if getattr(module, "dtype", None) == torch.float16:
+                    should_move_to_cpu = False
+                    break
+    if should_move_to_cpu:
+        try:
+            pipe.to("cpu")
+        except Exception:
+            pass
     try:
         if hasattr(pipe, "unload_lora_weights"):
             pipe.unload_lora_weights()
@@ -1923,12 +2191,18 @@ def _configure_image_pipeline(pipe: Any, entry: ModelEntry, is_xl: bool, device:
         except Exception as exc:
             log(f"DPM scheduler setup failed: {exc}", prefix="⚠️")
     pipe = pipe.to(device)
-    if torch is not None and not is_xl and hasattr(pipe, "vae") and pipe.vae is not None:
+    if (
+        torch is not None
+        and not is_xl
+        and SD15_FORCE_VAE_FP32
+        and hasattr(pipe, "vae")
+        and pipe.vae is not None
+    ):
         try:
             pipe.vae.to(device=device, dtype=torch.float32)
             if hasattr(pipe.vae, "config") and hasattr(pipe.vae.config, "force_upcast"):
                 pipe.vae.config.force_upcast = True
-            log("Upcasted VAE to fp32 for SD1.5 stability", prefix="✅")
+            log("Upcasted VAE to fp32 for SD1.5 stability (HAI_SD15_FORCE_VAE_FP32=1)", prefix="✅")
         except Exception as exc:
             log(f"VAE upcast failed: {exc}", prefix="⚠️")
     return pipe
@@ -2363,6 +2637,203 @@ def preload_image_pipeline_on_startup() -> None:
         log(f"Image preload failed for {entry.name}: {exc}", prefix="⚠️")
 
 
+def _iter_video_entries() -> List[ModelEntry]:
+    entries: List[ModelEntry] = []
+    for entry in REGISTRY.list_entries():
+        task_type = str(getattr(entry, "task_type", "IMAGE_GEN") or "IMAGE_GEN").upper()
+        pipeline = str(getattr(entry, "pipeline", "") or "").lower()
+        if task_type in {"VIDEO_GEN", "ANIMATEDIFF"} or pipeline in {"ltx2", "animatediff"}:
+            entries.append(entry)
+    return entries
+
+
+def _video_mode_for_entry(entry: ModelEntry) -> str:
+    task_type = str(getattr(entry, "task_type", "IMAGE_GEN") or "IMAGE_GEN").upper()
+    pipeline = str(getattr(entry, "pipeline", "") or "").lower()
+    if task_type == "ANIMATEDIFF" or pipeline == "animatediff":
+        return "animatediff"
+    return "video"
+
+
+def _select_preload_video_entry() -> Optional[ModelEntry]:
+    entries = _iter_video_entries()
+    if not entries:
+        return None
+
+    token = PRELOAD_VIDEO_MODEL.strip()
+    if token:
+        token_norm = _normalize_model_token(token)
+        for entry in entries:
+            if _normalize_model_token(entry.name) == token_norm:
+                return entry
+        if token_norm == "animatediff":
+            for entry in entries:
+                if _video_mode_for_entry(entry) == "animatediff":
+                    return entry
+        if token_norm == "ltx2":
+            for entry in entries:
+                if _video_mode_for_entry(entry) == "video":
+                    return entry
+        # Treat unknown preload token as an AnimateDiff base model hint if possible.
+        for entry in entries:
+            if _video_mode_for_entry(entry) != "animatediff":
+                continue
+            try:
+                resolve_animatediff_base_model(token)
+                return entry
+            except Exception:
+                continue
+
+    for entry in entries:
+        if _video_mode_for_entry(entry) == "video":
+            return entry
+        if _video_mode_for_entry(entry) == "animatediff":
+            try:
+                resolve_animatediff_base_model()
+            except Exception:
+                continue
+            return entry
+    return None
+
+
+def preload_video_pipeline_on_startup() -> None:
+    if not PRELOAD_VIDEO_ON_STARTUP:
+        return
+    if FAST_PREVIEW or torch is None:
+        return
+
+    entry = _select_preload_video_entry()
+    if entry is None:
+        log("No video model available for preload", prefix="⚠️")
+        return
+
+    mode = _video_mode_for_entry(entry)
+    if mode == "video":
+        if VIDEO_PIPELINE_CACHE_SIZE <= 0:
+            log("Skipping video preload because HAI_VIDEO_PIPELINE_CACHE_SIZE=0", prefix="ℹ️")
+            return
+        try:
+            from engines.ltx2.ltx2_generator import (  # type: ignore
+                get_last_pipeline_stats as ltx2_last_pipeline_stats,
+                load_latte_pipeline,
+            )
+        except Exception as exc:
+            log(f"Video preload unavailable (LTX2 import): {exc}", prefix="⚠️")
+            return
+
+        model_ref = LTX2_MODEL_PATH or str(getattr(entry, "path", "") or LTX2_MODEL_ID)
+        try:
+            load_latte_pipeline(model_ref)
+            stats = ltx2_last_pipeline_stats()
+            cache_hit = bool(stats.get("pipeline_cache_hit"))
+            load_ms = int(stats.get("pipeline_load_ms", 0) or 0)
+            if cache_hit:
+                log(f"Video preload cache warm for {entry.name}", prefix="✅")
+            else:
+                log(f"Video preload complete for {entry.name} in {load_ms}ms", prefix="✅")
+        except Exception as exc:
+            log(f"Video preload failed for {entry.name}: {exc}", prefix="⚠️")
+        return
+
+    if ANIMATEDIFF_PIPELINE_CACHE_SIZE <= 0:
+        log("Skipping AnimateDiff preload because HAI_ANIMATEDIFF_PIPELINE_CACHE_SIZE=0", prefix="ℹ️")
+        return
+    try:
+        from engines.animatediff.animatediff_generator import (  # type: ignore
+            get_last_pipeline_stats as animatediff_last_pipeline_stats,
+            load_animatediff_pipeline,
+        )
+    except Exception as exc:
+        log(f"AnimateDiff preload unavailable: {exc}", prefix="⚠️")
+        return
+
+    try:
+        base_entry, model_path, source = resolve_animatediff_base_model(PRELOAD_VIDEO_MODEL or None)
+        load_animatediff_pipeline(str(model_path), ANIMATEDIFF_ADAPTER_ID, use_init_image=False)
+        stats = animatediff_last_pipeline_stats()
+        cache_hit = bool(stats.get("pipeline_cache_hit"))
+        load_ms = int(stats.get("pipeline_load_ms", 0) or 0)
+        if cache_hit:
+            log(
+                f"AnimateDiff preload cache warm using {base_entry.name}",
+                prefix="✅",
+                source=source,
+            )
+        else:
+            log(
+                f"AnimateDiff preload complete using {base_entry.name} in {load_ms}ms",
+                prefix="✅",
+                source=source,
+            )
+    except Exception as exc:
+        log(f"AnimateDiff preload failed: {exc}", prefix="⚠️")
+
+
+def _select_preload_faceswap_entry() -> Optional[Tuple[ModelEntry, Path]]:
+    for entry in _iter_image_entries():
+        pipeline = str(getattr(entry, "pipeline", "") or "").lower()
+        if "sdxl" not in pipeline:
+            continue
+        try:
+            model_path = ensure_model_path(entry)
+            return entry, model_path
+        except Exception:
+            continue
+    return None
+
+
+def preload_faceswap_runtime_on_startup() -> None:
+    if not PRELOAD_FACE_SWAP_ASSETS_ON_STARTUP and not PRELOAD_FACE_SWAP_PIPELINE_ON_STARTUP:
+        return
+    if torch is None:
+        return
+
+    if PRELOAD_FACE_SWAP_ASSETS_ON_STARTUP:
+        warm_t0 = time.time()
+        try:
+            _resolve_instantid_adapter_path()
+            _resolve_instantid_controlnet_ref()
+            if FaceAnalysis is not None:
+                get_face_analysis()
+            warm_ms = int((time.time() - warm_t0) * 1000)
+            log(f"Face swap assets warmed in {warm_ms}ms", prefix="✅")
+        except Exception as exc:
+            log(f"Face swap asset warmup failed: {exc}", prefix="⚠️")
+
+    if not PRELOAD_FACE_SWAP_PIPELINE_ON_STARTUP:
+        return
+    if FACE_SWAP_PIPELINE_CACHE_SIZE <= 0:
+        log("Skipping face swap pipeline preload because HAI_FACE_SWAP_PIPELINE_CACHE_SIZE=0", prefix="ℹ️")
+        return
+    if diffusers is None or Image is None or np is None or cv2 is None:
+        return
+
+    preload_target = _select_preload_faceswap_entry()
+    if preload_target is None:
+        log("No local SDXL model available for face swap preload", prefix="⚠️")
+        return
+
+    entry, model_path = preload_target
+    try:
+        adapter_path = _resolve_instantid_adapter_path()
+        controlnet_ref = _resolve_instantid_controlnet_ref()
+        dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        _, cache_hit, load_ms, _ = _acquire_faceswap_pipeline(
+            model_path=model_path,
+            controlnet_ref=controlnet_ref,
+            adapter_path=adapter_path,
+            dtype=dtype,
+            device=device,
+        )
+        if cache_hit:
+            log(f"Face swap pipeline cache warm for {entry.name}", prefix="✅")
+        else:
+            log(f"Face swap pipeline preload complete for {entry.name} in {load_ms}ms", prefix="✅")
+    except Exception as exc:
+        log(f"Face swap pipeline preload failed: {exc}", prefix="⚠️")
+
+
 # ---------------------------------------------------------------------------
 # Background loops
 # ---------------------------------------------------------------------------
@@ -2438,6 +2909,8 @@ if __name__ == "__main__":
         log("Proceeding with degraded manifest state; heartbeat loop will keep retrying.", prefix="⚠️")
     else:
         preload_image_pipeline_on_startup()
+        preload_video_pipeline_on_startup()
+        preload_faceswap_runtime_on_startup()
     link_wallet(WALLET)
     # Graceful shutdown hooks
     atexit.register(disconnect)

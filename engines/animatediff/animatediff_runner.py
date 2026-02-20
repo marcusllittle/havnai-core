@@ -38,7 +38,7 @@ try:
 except Exception:  # pragma: no cover
     requests = None  # type: ignore
 
-from .animatediff_generator import generate_animatediff_frames
+from .animatediff_generator import generate_animatediff_frames, get_last_pipeline_stats
 
 LogFn = Callable[[str], None]
 
@@ -199,12 +199,16 @@ def run_animatediff(
     started = time.time()
     status = "success"
     error_msg = ""
+    pipeline_cache_hit = False
+    pipeline_load_ms = 0
+    generation_ms = 0
     try:
         if torch is None:
             raise RuntimeError("torch is not available")
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA is not available")
         try:
+            gen_t0 = time.time()
             video_frames = generate_animatediff_frames(
                 prompt=prompt,
                 negative_prompt=negative_prompt,
@@ -219,9 +223,14 @@ def run_animatediff(
             init_image=init_image,
             strength=strength,
         )
+            generation_ms = int((time.time() - gen_t0) * 1000)
+            cache_stats = get_last_pipeline_stats()
+            pipeline_cache_hit = bool(cache_stats.get("pipeline_cache_hit"))
+            pipeline_load_ms = int(cache_stats.get("pipeline_load_ms", 0) or 0)
         except RuntimeError as exc:
             if init_image is not None and "init_image" in str(exc) and "support" in str(exc).lower():
                 log_fn(f"[{job_id}] AnimateDiff pipeline does not support init_image; retrying without init image.")
+                gen_t0 = time.time()
                 video_frames = generate_animatediff_frames(
                     prompt=prompt,
                     negative_prompt=negative_prompt,
@@ -236,6 +245,10 @@ def run_animatediff(
                     init_image=None,
                     strength=None,
                 )
+                generation_ms = int((time.time() - gen_t0) * 1000)
+                cache_stats = get_last_pipeline_stats()
+                pipeline_cache_hit = bool(cache_stats.get("pipeline_cache_hit"))
+                pipeline_load_ms = int(cache_stats.get("pipeline_load_ms", 0) or 0)
             else:
                 raise
         frames_np = None
@@ -302,6 +315,9 @@ def run_animatediff(
         "seed": seed,
         "elapsed_ms": total_ms,
         "init_image": bool(init_image_raw),
+        "pipeline_cache_hit": bool(pipeline_cache_hit),
+        "pipeline_load_ms": int(pipeline_load_ms),
+        "generation_ms": int(generation_ms),
         "output_path": str(output_path) if status == "success" else None,
     }
     if status != "success":

@@ -203,6 +203,18 @@ class TestLTX2RunnerJobValidation(unittest.TestCase):
         self.assertEqual(metrics["status"], "failed")
         self.assertIn("seed", metrics["error"])
 
+    def test_runtime_failure_includes_cache_timing_metrics(self):
+        from engines.ltx2 import ltx2_runner
+
+        fake_torch = MagicMock()
+        fake_torch.cuda.is_available.return_value = False
+        with patch.object(ltx2_runner, "torch", fake_torch):
+            metrics, _, _ = self._run_ltx2({"prompt": "test", "seed": 123})
+
+        self.assertIn("pipeline_cache_hit", metrics)
+        self.assertIn("pipeline_load_ms", metrics)
+        self.assertIn("generation_ms", metrics)
+
 
 class TestAnimateDiffRunnerJobValidation(unittest.TestCase):
     """Test that the AnimateDiff runner validates jobs correctly (no GPU needed)."""
@@ -224,6 +236,18 @@ class TestAnimateDiffRunnerJobValidation(unittest.TestCase):
     def test_empty_prompt_fails(self):
         metrics, _, path = self._run_ad({"prompt": "  ", "seed": 42})
         self.assertEqual(metrics["status"], "failed")
+
+    def test_runtime_failure_includes_cache_timing_metrics(self):
+        from engines.animatediff import animatediff_runner
+
+        fake_torch = MagicMock()
+        fake_torch.cuda.is_available.return_value = False
+        with patch.object(animatediff_runner, "torch", fake_torch):
+            metrics, _, _ = self._run_ad({"prompt": "test", "seed": 123})
+
+        self.assertIn("pipeline_cache_hit", metrics)
+        self.assertIn("pipeline_load_ms", metrics)
+        self.assertIn("generation_ms", metrics)
 
 
 # ---------------------------------------------------------------------------

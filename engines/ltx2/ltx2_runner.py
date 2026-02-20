@@ -34,7 +34,7 @@ try:
 except Exception:  # pragma: no cover
     requests = None  # type: ignore
 
-from .ltx2_generator import generate_video_frames
+from .ltx2_generator import generate_video_frames, get_last_pipeline_stats
 
 LogFn = Callable[[str], None]
 
@@ -268,6 +268,9 @@ def run_ltx2(
     started = time.time()
     status = "success"
     error_msg = ""
+    pipeline_cache_hit = False
+    pipeline_load_ms = 0
+    generation_ms = 0
 
     # --- step-level progress callback ---
     _timed_out = threading.Event()
@@ -333,7 +336,12 @@ def run_ltx2(
             )
 
         try:
+            gen_t0 = time.time()
             video_frames = _generate(frames)
+            generation_ms = int((time.time() - gen_t0) * 1000)
+            cache_stats = get_last_pipeline_stats()
+            pipeline_cache_hit = bool(cache_stats.get("pipeline_cache_hit"))
+            pipeline_load_ms = int(cache_stats.get("pipeline_load_ms", 0) or 0)
         except RuntimeError as exc:
             if _should_retry_with_16_frames(exc, requested_frames):
                 frames = 16
@@ -341,7 +349,12 @@ def run_ltx2(
                     f"[{job_id}] LTX2 frame mismatch for {requested_frames} frames; "
                     f"retrying with fixed 16-frame generation"
                 )
+                gen_t0 = time.time()
                 video_frames = _generate(frames)
+                generation_ms = int((time.time() - gen_t0) * 1000)
+                cache_stats = get_last_pipeline_stats()
+                pipeline_cache_hit = bool(cache_stats.get("pipeline_cache_hit"))
+                pipeline_load_ms = int(cache_stats.get("pipeline_load_ms", 0) or 0)
             else:
                 raise
 
@@ -439,6 +452,9 @@ def run_ltx2(
         "seed": seed,
         "timeout": timeout,
         "timed_out": "timeout" in error_msg.lower() if error_msg else False,
+        "pipeline_cache_hit": bool(pipeline_cache_hit),
+        "pipeline_load_ms": int(pipeline_load_ms),
+        "generation_ms": int(generation_ms),
         "output_path": str(output_path) if status == "success" else None,
     }
     if status == "failed":

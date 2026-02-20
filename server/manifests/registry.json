@@ -17,8 +17,8 @@
       "strengths": "Elite realism and very strong flash/daylight skin performance.",
       "weaknesses": "Backgrounds and hands can occasionally look too stiff or polished.",
       "sampler": "dpm++_sde_karras",
-      "steps": 24,
-      "guidance": 5.8,
+      "steps": 30,
+      "guidance": 6.0,
       "width": 832,
       "height": 1216,
       "negative_prompt_default": "extra fingers, extra hands, extra arms, twisted wrists, deformed hands, dislocated joints, malformed feet, backward feet, duplicate face, background ghosts, extra people, bad anatomy, low quality, blurry",
@@ -27,8 +27,8 @@
         "guidance": 4.5,
         "strength": 0.75
       },
-      "defaults_source": "fallback",
-      "defaults_confidence": "fallback"
+      "defaults_source": "snapshot",
+      "defaults_confidence": "high"
     },
     {
       "name": "epicrealismXL_vxviiCrystalclear",
@@ -46,8 +46,8 @@
       "strengths": "Very crisp detail and strong daylight realism.",
       "weaknesses": "Backgrounds sometimes too symmetrical or flat.",
       "sampler": "dpm++_sde_karras",
-      "steps": 24,
-      "guidance": 5.8,
+      "steps": 30,
+      "guidance": 6.0,
       "width": 832,
       "height": 1216,
       "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, action wrist hyperflex, prop-hand glow fusion, twisted ankles, malformed feet, duplicate people, background ghosts, clothing merging, bad anatomy, low quality, blurry",
@@ -56,8 +56,8 @@
         "guidance": 4.5,
         "strength": 0.75
       },
-      "defaults_source": "fallback",
-      "defaults_confidence": "fallback"
+      "defaults_source": "snapshot",
+      "defaults_confidence": "high"
     },
     {
       "name": "babesByStableYogiPony_xlV4",
@@ -74,8 +74,8 @@
       "strengths": "Experimental SDXL checkpoint for evaluation.",
       "weaknesses": "Needs testing before wider rollout.",
       "sampler": "dpmpp_2m_karras",
-      "steps": 24,
-      "guidance": 5.8,
+      "steps": 28,
+      "guidance": 6.0,
       "width": 768,
       "height": 1152,
       "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, action wrist hyperflex, prop-hand glow fusion, twisted ankles, malformed feet, duplicate people, background ghosts, clothing merging, bad anatomy, low quality, blurry",
@@ -84,8 +84,8 @@
         "guidance": 4.5,
         "strength": 0.75
       },
-      "defaults_source": "fallback",
-      "defaults_confidence": "fallback"
+      "defaults_source": "snapshot",
+      "defaults_confidence": "high"
     },
     {
       "name": "epicrealismXL_purefix",
@@ -102,8 +102,8 @@
       "strengths": "Experimental SDXL checkpoint for evaluation.",
       "weaknesses": "Needs testing before wider rollout.",
       "sampler": "dpmpp_2m_karras",
-      "steps": 24,
-      "guidance": 5.8,
+      "steps": 28,
+      "guidance": 6.0,
       "width": 768,
       "height": 1152,
       "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, action wrist hyperflex, prop-hand glow fusion, twisted ankles, malformed feet, duplicate people, background ghosts, clothing merging, bad anatomy, low quality, blurry",
@@ -112,8 +112,8 @@
         "guidance": 4.5,
         "strength": 0.75
       },
-      "defaults_source": "fallback",
-      "defaults_confidence": "fallback"
+      "defaults_source": "snapshot",
+      "defaults_confidence": "high"
     },
     {
       "name": "perfectdeliberate_v60",
@@ -130,8 +130,8 @@
       "strengths": "Experimental SDXL checkpoint for evaluation.",
       "weaknesses": "Needs testing before wider rollout.",
       "sampler": "dpmpp_2m_karras",
-      "steps": 24,
-      "guidance": 5.8,
+      "steps": 28,
+      "guidance": 6.0,
       "width": 768,
       "height": 1152,
       "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, action wrist hyperflex, prop-hand glow fusion, twisted ankles, malformed feet, duplicate people, background ghosts, clothing merging, bad anatomy, low quality, blurry",
@@ -140,8 +140,8 @@
         "guidance": 4.5,
         "strength": 0.75
       },
-      "defaults_source": "fallback",
-      "defaults_confidence": "fallback"
+      "defaults_source": "snapshot",
+      "defaults_confidence": "high"
     },
     {
       "name": "zavychromaxl_v100",
@@ -158,8 +158,8 @@
       "strengths": "Experimental SDXL checkpoint for evaluation.",
       "weaknesses": "Needs testing before wider rollout.",
       "sampler": "dpmpp_2m_karras",
-      "steps": 24,
-      "guidance": 5.8,
+      "steps": 28,
+      "guidance": 6.0,
       "width": 768,
       "height": 1152,
       "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, action wrist hyperflex, prop-hand glow fusion, twisted ankles, malformed feet, duplicate people, background ghosts, clothing merging, bad anatomy, low quality, blurry",
@@ -168,8 +168,8 @@
         "guidance": 4.5,
         "strength": 0.75
       },
-      "defaults_source": "fallback",
-      "defaults_confidence": "fallback"
+      "defaults_source": "snapshot",
+      "defaults_confidence": "high"
     },
     {
       "name": "perfectdeliberate_v5SD15",
@@ -188,13 +188,13 @@
       "strengths": "Solid realism when hands are not visible.",
       "weaknesses": "Hands deform frequently (SD1.5 weakness).",
       "sampler": "dpm++_sde_karras",
-      "steps": 24,
-      "guidance": 6.2,
+      "steps": 40,
+      "guidance": 7.5,
       "width": 672,
       "height": 1344,
       "negative_prompt_default": "duplicate face, multiple faces, extra hands, extra fingers, deformed hands, merged limbs, bad anatomy, mangled",
-      "defaults_source": "fallback",
-      "defaults_confidence": "fallback"
+      "defaults_source": "snapshot",
+      "defaults_confidence": "high"
     },
     {
       "name": "divineelegancemix_V10",
@@ -214,12 +214,12 @@
       "weaknesses": "Needs testing before wider rollout.",
       "sampler": "euler_a",
       "steps": 23,
-      "guidance": 6.2,
+      "guidance": 6.3,
       "width": 576,
       "height": 768,
       "negative_prompt_default": "duplicate face, multiple faces, extra hands, extra fingers, deformed hands, merged limbs, bad anatomy, mangled",
-      "defaults_source": "fallback",
-      "defaults_confidence": "fallback"
+      "defaults_source": "snapshot",
+      "defaults_confidence": "high"
     },
     {
       "name": "uberRealisticPornMerge_v23Final",
@@ -238,13 +238,13 @@
       "strengths": "Strong glossy skin aesthetic in bright studio lighting.",
       "weaknesses": "Can produce overexposed skin and accessory artifacts.",
       "sampler": "dpm++_sde_karras",
-      "steps": 24,
-      "guidance": 6.2,
+      "steps": 40,
+      "guidance": 7.5,
       "width": 672,
       "height": 1344,
       "negative_prompt_default": "extra limbs, bad hands, missing hands, cropped hands, deformed hands, extra fingers, bad anatomy, overexposed skin, artifacts",
-      "defaults_source": "fallback",
-      "defaults_confidence": "fallback"
+      "defaults_source": "snapshot",
+      "defaults_confidence": "high"
     },
     {
       "name": "triomerge_v10",
@@ -266,13 +266,13 @@
       "strengths": "Excellent stylized fantasy art with rich details, magical effects, and intricate armor. Very responsive to portrait composition.",
       "weaknesses": "Tends to add automatic jewelry/headpieces. Struggles with strict realism. Can duplicate heads/faces at square resolutions or high CFG.",
       "sampler": "euler_a",
-      "steps": 24,
-      "guidance": 6.2,
+      "steps": 28,
+      "guidance": 6.5,
       "width": 576,
       "height": 768,
       "negative_prompt_default": "duplicate, cloned face, multiple heads, two heads, extra heads, duplicate face, multiple faces, deformed, bad anatomy, distorted face, asymmetry, out of frame, cropped head, extra limbs, merged limbs, fused fingers, bad hands, low quality, blurry",
-      "defaults_source": "fallback",
-      "defaults_confidence": "fallback"
+      "defaults_source": "snapshot",
+      "defaults_confidence": "high"
     },
     {
       "name": "unstablePornhwa_beta",
@@ -295,13 +295,13 @@
       "strengths": "Excellent high-quality manhwa/webtoon style with clean lineart, soft shading, detailed eyes, and authentic Korean comic aesthetic. Very consistent character rendering.",
       "weaknesses": "Flat shading in some cases, slightly stylized/fantasy proportions, not suitable for strict realism. Can produce minor anatomy issues at square resolutions.",
       "sampler": "dpm++_sde_karras",
-      "steps": 24,
-      "guidance": 6.2,
+      "steps": 40,
+      "guidance": 7.5,
       "width": 672,
       "height": 1344,
       "negative_prompt_default": "duplicate, cloned face, multiple heads, two heads, extra heads, duplicate face, multiple faces, deformed, bad anatomy, distorted face, asymmetry, extra limbs, bad hands, fused fingers, low quality, blurry, text, watermark, signature",
-      "defaults_source": "fallback",
-      "defaults_confidence": "fallback"
+      "defaults_source": "snapshot",
+      "defaults_confidence": "high"
     },
     {
       "name": "disneyPixarCartoon_v10",
@@ -326,13 +326,13 @@
       "strengths": "Outstanding Pixar/Disney-style cartoon rendering with big expressive eyes, vibrant colors, soft lighting, and playful 3D animated movie aesthetics. Produces clean, wholesome, masterpiece-level cute characters consistently.",
       "weaknesses": "Not realistic. Can occasionally produce floating/disembodied parts or minor artifacts at square resolutions or without proper negatives. Typical stylized cartoon limitations.",
       "sampler": "euler_a",
-      "steps": 24,
-      "guidance": 6.2,
+      "steps": 28,
+      "guidance": 6.5,
       "width": 576,
       "height": 768,
       "negative_prompt_default": "duplicate head, floating hair, disembodied parts, extra limbs, extra fingers, bad hands, bad anatomy, deformed, blurry, low quality, realistic, photo, text, watermark, signature, ugly, poorly drawn face",
-      "defaults_source": "fallback",
-      "defaults_confidence": "fallback"
+      "defaults_source": "snapshot",
+      "defaults_confidence": "high"
     },
     {
       "name": "kizukiAnimeHentai_animeHentaiV4",
@@ -360,15 +360,15 @@
       "strengths": "Outstanding anime/hentai-style rendering with sharp eyes, vibrant hair, and masterpiece-level detail. Excellent for both solo and multi-girl (yuri) scenes when using the appropriate negative mode.",
       "weaknesses": "Not realistic. Exaggerated proportions typical of hentai. Multi-character scenes require the enhanced negative to avoid body fusion/merging.",
       "sampler": "dpm++_sde_karras",
-      "steps": 24,
-      "guidance": 6.2,
+      "steps": 40,
+      "guidance": 7.5,
       "width": 672,
       "height": 1344,
       "negative_prompt_default": "extra limbs, extra fingers, fused fingers, bad hands, mutated hands, bad anatomy, distorted face, deformed, blurry, low quality, realistic, photo, duplicate, cloned face, multiple heads, text, watermark, signature, ugly, poorly drawn",
       "negative_prompt_multi_girl": "merged bodies, fused bodies, body fusion, conjoined, shared torso, merged breasts, malformed chest, extra torso, cloned body, duplicate body, merged limbs, fused torso, siamese twins, extra breasts, malformed anatomy, body overlap",
       "notes": "Use 'negative_prompt_default' for solo (1girl) scenes \u2014 gives clean, perfect results. Append or replace with 'negative_prompt_multi_girl' terms when generating 2girls, yuri, couples, or any scene with physical contact to prevent merging/fusion artifacts.",
-      "defaults_source": "fallback",
-      "defaults_confidence": "fallback"
+      "defaults_source": "snapshot",
+      "defaults_confidence": "high"
     },
     {
       "name": "aMixIllustrious_aMix",
@@ -385,8 +385,8 @@
       "strengths": "Custom SDXL checkpoint.",
       "weaknesses": "Needs evaluation.",
       "sampler": "dpmpp_2m_karras",
-      "steps": 24,
-      "guidance": 5.8,
+      "steps": 28,
+      "guidance": 6.0,
       "width": 768,
       "height": 1152,
       "face_swap_defaults": {
@@ -394,8 +394,8 @@
         "guidance": 4.5,
         "strength": 0.75
       },
-      "defaults_source": "fallback",
-      "defaults_confidence": "fallback"
+      "defaults_source": "snapshot",
+      "defaults_confidence": "high"
     },
     {
       "name": "cyberrealisticPony_v160",
@@ -412,8 +412,8 @@
       "strengths": "Custom SDXL checkpoint.",
       "weaknesses": "Needs evaluation.",
       "sampler": "dpmpp_2m_karras",
-      "steps": 24,
-      "guidance": 5.8,
+      "steps": 28,
+      "guidance": 6.0,
       "width": 768,
       "height": 1152,
       "face_swap_defaults": {
@@ -421,8 +421,8 @@
         "guidance": 4.5,
         "strength": 0.75
       },
-      "defaults_source": "fallback",
-      "defaults_confidence": "fallback"
+      "defaults_source": "snapshot",
+      "defaults_confidence": "high"
     },
     {
       "name": "ponyDiffusionV6XL_v615",
@@ -442,12 +442,12 @@
       "weaknesses": "Needs evaluation.",
       "sampler": "euler_a",
       "steps": 20,
-      "guidance": 6.2,
+      "guidance": 6.3,
       "width": 576,
       "height": 768,
       "negative_prompt_default": "extra limbs, bad hands, bad anatomy, distorted face",
-      "defaults_source": "fallback",
-      "defaults_confidence": "fallback"
+      "defaults_source": "snapshot",
+      "defaults_confidence": "high"
     },
     {
       "name": "realisticVisionV60B1_v51HyperVAE",
@@ -467,12 +467,12 @@
       "weaknesses": "Needs evaluation.",
       "sampler": "euler_a",
       "steps": 20,
-      "guidance": 6.2,
+      "guidance": 6.3,
       "width": 576,
       "height": 768,
       "negative_prompt_default": "extra limbs, bad hands, bad anatomy, distorted face",
-      "defaults_source": "fallback",
-      "defaults_confidence": "fallback"
+      "defaults_source": "snapshot",
+      "defaults_confidence": "high"
     },
     {
       "name": "lyriel_v16",
@@ -492,12 +492,12 @@
       "weaknesses": "Needs evaluation.",
       "sampler": "euler_a",
       "steps": 20,
-      "guidance": 6.2,
+      "guidance": 6.3,
       "width": 576,
       "height": 768,
       "negative_prompt_default": "extra limbs, bad hands, bad anatomy, distorted face",
-      "defaults_source": "fallback",
-      "defaults_confidence": "fallback"
+      "defaults_source": "snapshot",
+      "defaults_confidence": "high"
     },
     {
       "name": "ltx2",

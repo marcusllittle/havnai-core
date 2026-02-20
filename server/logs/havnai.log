@@ -870,3 +870,26 @@
 {"time": "2026-02-20T03:34:09.607496Z", "level": "WARNING", "message": "Credit conversion rejected"}
 {"time": "2026-02-20T03:34:09.620942Z", "level": "INFO", "message": "Enhanced prompt: portrait, (ultra-realistic 8k:1.05), (detailed skin pores:1.03), focused eyes, clear pupils, natural gaze, natural teeth, realistic mouth structure, no extra breasts, no multiple breasts, not deformed, no multiple legs | Selected model: epicrealismxl_vxviicrystalclear | Injected LoRAs: [] | Extra negatives: "}
 {"time": "2026-02-20T03:34:09.621782Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2026-02-20T21:11:45.026727Z", "level": "INFO", "message": "Telemetry online with 0 cached node(s)."}
+{"time": "2026-02-20T21:11:45.053898Z", "level": "INFO", "message": "Enhanced prompt: portrait photo, (ultra-realistic 8k:1.05), (detailed skin pores:1.03), focused eyes, clear pupils, natural gaze, natural teeth, realistic mouth structure, no extra breasts, no multiple breasts, not deformed, no multiple legs | Selected model: epicrealismxl_vxviicrystalclear | Requested LoRAs: [] | Extra negatives: "}
+{"time": "2026-02-20T21:11:45.074518Z", "level": "INFO", "message": "Credits deposited"}
+{"time": "2026-02-20T21:11:45.089045Z", "level": "INFO", "message": "Credits deposited"}
+{"time": "2026-02-20T21:11:45.106639Z", "level": "INFO", "message": "Wallet nonce issued"}
+{"time": "2026-02-20T21:11:45.129782Z", "level": "WARNING", "message": "Credit conversion rejected"}
+{"time": "2026-02-20T21:11:45.144693Z", "level": "INFO", "message": "Credits deposited"}
+{"time": "2026-02-20T21:11:45.161367Z", "level": "INFO", "message": "Wallet nonce issued"}
+{"time": "2026-02-20T21:11:45.200712Z", "level": "INFO", "message": "Credits deducted"}
+{"time": "2026-02-20T21:11:45.201481Z", "level": "INFO", "message": "Credits converted to HAI"}
+{"time": "2026-02-20T21:11:45.208757Z", "level": "WARNING", "message": "Credit conversion rejected"}
+{"time": "2026-02-20T21:11:45.224117Z", "level": "INFO", "message": "Credits deposited"}
+{"time": "2026-02-20T21:11:45.241415Z", "level": "INFO", "message": "Wallet nonce issued"}
+{"time": "2026-02-20T21:11:45.262706Z", "level": "WARNING", "message": "Credit conversion rejected"}
+{"time": "2026-02-20T21:11:45.276670Z", "level": "INFO", "message": "Enhanced prompt: doggy style sex portrait, (ultra-realistic 8k:1.05), (detailed skin pores:1.03), focused eyes, clear pupils, natural gaze, natural teeth, realistic mouth structure, no extra breasts, no multiple breasts, not deformed, no multiple legs | Selected model: epicrealismxl_vxviicrystalclear | Requested LoRAs: [] | Extra negatives: "}
+{"time": "2026-02-20T21:11:45.277461Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2026-02-20T21:11:45.279711Z", "level": "INFO", "message": "Enhanced prompt: (doggystyle:1.05) style sex portrait, (deep penetration:0.9), (pov from behind male viewer:1.1), (ass focus:1.1), (deep vaginal penetration:1.05), (penis inside:1.0), onegirl, solo female, faceless male, detailed, masterpiece, ultra detailed skin, sharp focus, photorealistic, masterpiece, best quality, highres, 8k, intricate details, cinematic lighting, nude, no clothes, fully naked, ultra sharp skin texture, photorealistic details, highres, masterpiece, perfect anatomy, smooth proportions, no overlays, clean insertion, (ultra-realistic 8k:1.05), (detailed skin pores:1.03), focused eyes, clear pupils, natural gaze, natural teeth, realistic mouth structure, no extra breasts, no multiple breasts, not deformed, no multiple legs | Selected model: epicrealismxl_vxviicrystalclear | Requested LoRAs: [] | Extra negatives: merged bodies, conjoined twins, extra torso, duplicate torso, extra limbs, extra arms, extra legs, deformed anatomy, body fusion, siamese, malformed chest, missing penis, censored, bar censor, mosaic censor, multiple girls, two women, duplicate face, cloned face, multiple heads, extra face, second woman, lesbian, yuri, girl on girl, blurry, lowres, soft focus, pixelated, artifacts, low quality, duplicate ass, layered buttocks, overlapping anatomy, double pussy, ghosting, transparent overlay, cloned body parts, merged bodies, extra torso, body fusion, layered anatomy, double buttocks, ass fusion, penis overlay, genital merge, thigh overlap, facesitting, sitting on face, cunnilingus, oral sex, anilingus, rimjob, blowjob"}
+{"time": "2026-02-20T21:11:45.280451Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2026-02-20T21:11:45.287923Z", "level": "INFO", "message": "Enhanced prompt: portrait, (ultra-realistic 8k:1.05), (detailed skin pores:1.03), focused eyes, clear pupils, natural gaze, natural teeth, realistic mouth structure, no extra breasts, no multiple breasts, not deformed, no multiple legs | Selected model: epicrealismxl_vxviicrystalclear | Requested LoRAs: [] | Extra negatives: "}
+{"time": "2026-02-20T21:11:45.288714Z", "level": "INFO", "message": "Public job queued"}
+{"time": "2026-02-20T21:11:45.316750Z", "level": "WARNING", "message": "Job canceled by operator"}
+{"time": "2026-02-20T21:11:45.436994Z", "level": "WARNING", "message": "Results rejected (job not running/owned by node)"}
+{"time": "2026-02-20T21:11:45.470454Z", "level": "WARNING", "message": "Stale running job auto-failed"}

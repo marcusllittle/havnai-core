@@ -600,6 +600,35 @@ class ModelsListAvailabilityTests(unittest.TestCase):
         self.assertIsInstance(ltx2.get("video_defaults"), dict)
 
 
+class ManifestSnapshotImageDefaultsTests(unittest.TestCase):
+    def test_representative_image_models_match_snapshot_defaults(self) -> None:
+        manifest_path = ROOT / "server" / "manifests" / "registry.json"
+        with manifest_path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        models = {
+            str(entry.get("name", "")).lower(): entry
+            for entry in data.get("models", [])
+            if str(entry.get("task_type", "")).upper() == "IMAGE_GEN"
+        }
+
+        expected = {
+            "cyberrealisticpony_v160": {"steps": 28, "guidance": 6.0, "width": 768, "height": 1152},
+            "juggernautxl_ragnarokby": {"steps": 30, "guidance": 6.0, "width": 832, "height": 1216},
+            "perfectdeliberate_v5sd15": {"steps": 40, "guidance": 7.5, "width": 672, "height": 1344},
+            "uberrealisticpornmerge_v23final": {"steps": 40, "guidance": 7.5, "width": 672, "height": 1344},
+        }
+
+        for name, defaults in expected.items():
+            self.assertIn(name, models)
+            row = models[name]
+            self.assertEqual(int(row.get("steps")), defaults["steps"])
+            self.assertAlmostEqual(float(row.get("guidance")), defaults["guidance"], places=6)
+            self.assertEqual(int(row.get("width")), defaults["width"])
+            self.assertEqual(int(row.get("height")), defaults["height"])
+            self.assertEqual(str(row.get("defaults_source")), "snapshot")
+            self.assertEqual(str(row.get("defaults_confidence")), "high")
+
+
 class DashboardProxyPathTests(unittest.TestCase):
     def setUp(self) -> None:
         self.client = app_module.app.test_client()

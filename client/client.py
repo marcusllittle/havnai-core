@@ -231,7 +231,7 @@ def load_env_file() -> Dict[str, str]:
             key, value = line.split("=", 1)
             env[key.strip()] = value.strip()
     defaults = {
-        "SERVER_URL": os.environ.get("SERVER_URL") or os.environ.get("HAVNAI_SERVER") or "http://127.0.0.1:5001",
+        "SERVER_URL": os.environ.get("SERVER_URL") or os.environ.get("HAVNAI_SERVER") or "https://joinhavn.io/api",
         "WALLET": env.get("WALLET", "0xYOUR_WALLET_ADDRESS"),
         "CREATOR_MODE": env.get("CREATOR_MODE", "false"),
         "NODE_NAME": env.get("NODE_NAME", socket.gethostname()),
@@ -273,7 +273,7 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-SERVER_BASE = ENV_VARS.get("SERVER_URL", "http://127.0.0.1:5001").rstrip("/")
+SERVER_BASE = ENV_VARS.get("SERVER_URL", "https://joinhavn.io/api").rstrip("/")
 JOIN_TOKEN = ENV_VARS.get("JOIN_TOKEN", "").strip()
 ROLE = "creator" if ENV_VARS.get("CREATOR_MODE", "false").lower() in {"1", "true", "yes"} else "worker"
 NODE_NAME = ENV_VARS.get("NODE_NAME", socket.gethostname())
@@ -1921,11 +1921,6 @@ LORA_BASE_TYPE = {
     "hyperlora_sdxl": "sdxl",
 }
 
-ROLE_WEIGHT_DEFAULTS = {
-    "position": 0.6,
-    "anatomy": 0.65,
-    "style": 1.0,
-}
 LORA_WEIGHT_MIN = 0.0
 LORA_WEIGHT_MAX = 2.0
 
@@ -1976,8 +1971,8 @@ def classify_lora_role(normalized_name: str) -> str:
     return "style"
 
 
-def clamp_lora_weight(weight: Optional[float], role: str) -> float:
-    default_w = ROLE_WEIGHT_DEFAULTS.get(role, 1.0)
+def clamp_lora_weight(weight: Optional[float], _role: str) -> float:
+    default_w = 1.0
     try:
         value = float(weight) if weight is not None else default_w
     except (TypeError, ValueError):
@@ -2143,7 +2138,11 @@ def _acquire_base_image_pipeline(
     return pipe, False, load_ms
 
 
-def _collect_explicit_loras(requested_raw: Any, entry: ModelEntry, pipeline_name: str) -> List[Tuple[Path, float, str]]:
+def _collect_explicit_loras(
+    requested_raw: Any,
+    entry: ModelEntry,
+    pipeline_name: str,
+) -> List[Tuple[Path, float, str, Optional[float], str]]:
     requested = requested_raw
     if isinstance(requested, str):
         requested = [requested]
@@ -2152,7 +2151,7 @@ def _collect_explicit_loras(requested_raw: Any, entry: ModelEntry, pipeline_name
 
     model_hint = f"{entry.name} {pipeline_name}".strip()
     model_is_sdxl = is_sdxl_model(model_hint)
-    lora_entries: List[Tuple[Path, float, str]] = []
+    lora_entries: List[Tuple[Path, float, str, Optional[float], str]] = []
     seen: Set[str] = set()
     for item in requested:
         if len(lora_entries) >= MAX_LORAS:
@@ -2181,20 +2180,31 @@ def _collect_explicit_loras(requested_raw: Any, entry: ModelEntry, pipeline_name
         role = classify_lora_role(normalized)
         weight = clamp_lora_weight(raw_weight, role)
         adapter_name = f"lora_{role}_{lora_path.stem}"
-        lora_entries.append((lora_path, weight, adapter_name))
+        requested_weight: Optional[float] = None
+        if raw_weight is not None:
+            try:
+                requested_weight = float(raw_weight)
+            except (TypeError, ValueError):
+                requested_weight = None
+        lora_entries.append((lora_path, weight, adapter_name, requested_weight, name))
         seen.add(normalized)
     return lora_entries
 
 
-def _apply_explicit_loras(pipe: Any, entry: ModelEntry, lora_entries: List[Tuple[Path, float, str]]) -> Tuple[List[str], int]:
+def _apply_explicit_loras(
+    pipe: Any,
+    entry: ModelEntry,
+    lora_entries: List[Tuple[Path, float, str, Optional[float], str]],
+) -> Tuple[List[str], List[Dict[str, Any]], int]:
     if not lora_entries:
-        return [], 0
+        return [], [], 0
     lora_t0 = time.time()
     adapter_names: List[str] = []
     adapter_weights: List[float] = []
     loaded: List[str] = []
+    applied_loras: List[Dict[str, Any]] = []
     if hasattr(pipe, "load_lora_weights"):
-        for lora_path, lora_weight, adapter_name in lora_entries:
+        for lora_path, lora_weight, adapter_name, requested_weight, requested_name in lora_entries:
             adapter = adapter_name
             try:
                 pipe.load_lora_weights(str(lora_path), adapter_name=adapter)
@@ -2206,7 +2216,23 @@ def _apply_explicit_loras(pipe: Any, entry: ModelEntry, lora_entries: List[Tuple
             adapter_names.append(adapter)
             adapter_weights.append(lora_weight)
             loaded.append(f"{lora_path.name}:{lora_weight:.2f}")
-            log(f"Loaded LoRA for {entry.name}", prefix="✅", lora=str(lora_path), weight=lora_weight)
+            applied_entry = {
+                "name": requested_name or lora_path.stem,
+                "path": str(lora_path),
+                "filename": lora_path.name,
+                "applied_weight": float(lora_weight),
+            }
+            if requested_weight is not None:
+                applied_entry["requested_weight"] = float(requested_weight)
+            applied_loras.append(applied_entry)
+            log(
+                "LoRA adapter applied",
+                prefix="✅",
+                lora=str(lora_path),
+                filename=lora_path.name,
+                requested_weight=requested_weight,
+                applied_weight=lora_weight,
+            )
     if adapter_names:
         if hasattr(pipe, "set_adapters"):
             try:
@@ -2220,7 +2246,7 @@ def _apply_explicit_loras(pipe: Any, entry: ModelEntry, lora_entries: List[Tuple
                 log(f"LoRA fuse failed for {entry.name}: {exc}", prefix="⚠️")
     else:
         log("Pipeline does not support LoRA loading", prefix="⚠️")
-    return loaded, int((time.time() - lora_t0) * 1000)
+    return loaded, applied_loras, int((time.time() - lora_t0) * 1000)
 
 
 def run_image_generation(
@@ -2239,6 +2265,8 @@ def run_image_generation(
 
     image_b64: Optional[str] = None
     loaded_loras: List[str] = []
+    requested_lora_metrics: List[Dict[str, Any]] = []
+    applied_lora_metrics: List[Dict[str, Any]] = []
     pipeline_cache_hit = False
     pipeline_load_ms = 0
     lora_load_ms = 0
@@ -2270,8 +2298,27 @@ def run_image_generation(
             lora_entries = _collect_explicit_loras(requested_loras, entry, pipeline_name)
             if lora_entries:
                 lora_summary = ", ".join(
-                    f"{adapter}:{weight:.2f} ({path.name})" for path, weight, adapter in lora_entries
+                    (
+                        f"{name}:{weight:.2f}"
+                        if requested_weight is None
+                        else f"{name}:{weight:.2f} (req={requested_weight:.2f})"
+                    )
+                    for path, weight, adapter, requested_weight, name in lora_entries
                 )
+                requested_lora_metrics = [
+                    {
+                        "name": name or path.stem,
+                        "path": str(path),
+                        "filename": path.name,
+                        "weight": float(weight),
+                        **(
+                            {"requested_weight": float(requested_weight)}
+                            if requested_weight is not None
+                            else {}
+                        ),
+                    }
+                    for path, weight, adapter, requested_weight, name in lora_entries
+                ]
             else:
                 lora_summary = "none"
             log(f"Loading LoRAs: {lora_summary}", prefix="🎛️")
@@ -2316,7 +2363,7 @@ def run_image_generation(
                 if not pipeline_cache_hit:
                     log(f"Pipeline ready in {pipeline_load_ms}ms", prefix="✅")
                 if lora_entries and pipe is not None:
-                    loaded_loras, lora_load_ms = _apply_explicit_loras(pipe, entry, lora_entries)
+                    loaded_loras, applied_lora_metrics, lora_load_ms = _apply_explicit_loras(pipe, entry, lora_entries)
                 if pipe is None:
                     raise RuntimeError("Image pipeline is unavailable")
 
@@ -2440,6 +2487,10 @@ def run_image_generation(
     }
     if loaded_loras:
         metrics["loras"] = loaded_loras
+    if requested_lora_metrics:
+        metrics["requested_loras"] = requested_lora_metrics
+    if applied_lora_metrics:
+        metrics["applied_loras"] = applied_lora_metrics
     if status == "failed":
         metrics["error"] = error_msg or "image generation error"
     return metrics, util, image_b64

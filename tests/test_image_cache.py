@@ -104,7 +104,7 @@ class ImagePipelineCacheTests(unittest.TestCase):
         entry = SimpleNamespace(name="m2", pipeline="sd15")
         model_path = Path("/tmp/model-b.safetensors")
         fake_pipe = _FakePipe()
-        lora_entries = [(Path("/tmp/test.safetensors"), 0.55, "lora_style_test")]
+        lora_entries = [(Path("/tmp/test.safetensors"), 0.55, "lora_style_test", 0.55, "test")]
 
         with patch.object(client_module, "read_gpu_stats", return_value={"utilization": 0}), patch.object(
             client_module, "_resolve_image_runtime", return_value=("cpu", "float32", False, "sd15")
@@ -115,7 +115,9 @@ class ImagePipelineCacheTests(unittest.TestCase):
         ) as construct_mock, patch.object(
             client_module, "_acquire_base_image_pipeline", side_effect=RuntimeError("cache path should not be used")
         ) as acquire_mock, patch.object(
-            client_module, "_apply_explicit_loras", return_value=(["test.safetensors:0.55"], 7)
+            client_module,
+            "_apply_explicit_loras",
+            return_value=(["test.safetensors:0.55"], [{"name": "test", "applied_weight": 0.55}], 7),
         ), patch.object(
             client_module, "_release_image_pipeline"
         ) as release_mock:
@@ -137,6 +139,53 @@ class ImagePipelineCacheTests(unittest.TestCase):
         construct_mock.assert_called_once()
         acquire_mock.assert_not_called()
         release_mock.assert_called_once_with(fake_pipe)
+
+
+class LoraWeightPolicyTests(unittest.TestCase):
+    def test_collect_explicit_loras_preserves_exact_user_weight(self) -> None:
+        entry = SimpleNamespace(name="m1", pipeline="sdxl")
+        with patch.object(client_module, "resolve_lora_path", return_value=Path("/tmp/incase_style.safetensors")):
+            collected = client_module._collect_explicit_loras(
+                [{"name": "incase_style", "weight": 0.74}],
+                entry,
+                "sdxl",
+            )
+        self.assertEqual(len(collected), 1)
+        self.assertAlmostEqual(collected[0][1], 0.74, places=6)
+        self.assertAlmostEqual(collected[0][3], 0.74, places=6)
+
+    def test_collect_explicit_loras_accepts_strength_fallback(self) -> None:
+        entry = SimpleNamespace(name="m1", pipeline="sdxl")
+        with patch.object(client_module, "resolve_lora_path", return_value=Path("/tmp/incase_style.safetensors")):
+            collected = client_module._collect_explicit_loras(
+                [{"name": "incase_style", "strength": 0.66}],
+                entry,
+                "sdxl",
+            )
+        self.assertEqual(len(collected), 1)
+        self.assertAlmostEqual(collected[0][1], 0.66, places=6)
+
+    def test_collect_explicit_loras_defaults_to_one_when_unspecified(self) -> None:
+        entry = SimpleNamespace(name="m1", pipeline="sdxl")
+        with patch.object(client_module, "resolve_lora_path", return_value=Path("/tmp/incase_style.safetensors")):
+            collected = client_module._collect_explicit_loras(
+                [{"name": "incase_style"}],
+                entry,
+                "sdxl",
+            )
+        self.assertEqual(len(collected), 1)
+        self.assertAlmostEqual(collected[0][1], 1.0, places=6)
+
+    def test_collect_explicit_loras_defaults_to_one_for_known_roles(self) -> None:
+        entry = SimpleNamespace(name="m1", pipeline="sd15")
+        with patch.object(client_module, "resolve_lora_path", return_value=Path("/tmp/POVDoggy.safetensors")):
+            collected = client_module._collect_explicit_loras(
+                [{"name": "POVDoggy"}],
+                entry,
+                "sd15",
+            )
+        self.assertEqual(len(collected), 1)
+        self.assertAlmostEqual(collected[0][1], 1.0, places=6)
 
 
 class AnimateDiffCapabilityTests(unittest.TestCase):

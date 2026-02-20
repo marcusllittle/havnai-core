@@ -451,3 +451,188 @@ class DashboardProxyPathTests(unittest.TestCase):
         html = resp.get_data(as_text=True)
         self.assertIn('window.NEXT_PUBLIC_API_BASE_URL = window.location.pathname.startsWith("/api/") ? "/api" : "";', html)
         self.assertIn('<script src="static/dashboard.js" type="module"></script>', html)
+
+
+class JobCancellationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.client = app_module.app.test_client()
+        self._token_backup = app_module.SERVER_JOIN_TOKEN
+        app_module.SERVER_JOIN_TOKEN = "test-join-token"
+        self.job_id = f"job-cancel-{int(time.time() * 1000)}"
+        payload = json.dumps(
+            {
+                "prompt": "portrait",
+                "loras": [{"name": "incase_style", "weight": 0.74}],
+                "requested_loras": [{"name": "incase_style", "weight": 0.74}],
+            }
+        )
+        conn = app_module.get_db()
+        conn.execute(
+            """
+            INSERT INTO jobs (id, wallet, model, data, task_type, weight, status, node_id, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, 'queued', NULL, ?)
+            """,
+            (self.job_id, VALID_WALLET, SDXL_MODEL, payload, "IMAGE_GEN", 10.0, time.time()),
+        )
+        conn.commit()
+
+    def tearDown(self) -> None:
+        app_module.SERVER_JOIN_TOKEN = self._token_backup
+        conn = app_module.get_db()
+        conn.execute("DELETE FROM rewards WHERE task_id=?", (self.job_id,))
+        conn.execute("DELETE FROM jobs WHERE id=?", (self.job_id,))
+        conn.commit()
+
+    def test_cancel_endpoint_requires_join_token(self) -> None:
+        resp = self.client.post(f"/jobs/{self.job_id}/cancel")
+        self.assertEqual(resp.status_code, 403)
+
+    def test_cancel_endpoint_marks_job_failed_with_reason(self) -> None:
+        resp = self.client.post(
+            f"/jobs/{self.job_id}/cancel",
+            headers={"X-Join-Token": "test-join-token"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertEqual(body.get("status"), "failed")
+        self.assertEqual(body.get("status_reason"), "canceled_by_operator")
+
+        detail = self.client.get(f"/jobs/{self.job_id}")
+        self.assertEqual(detail.status_code, 200)
+        payload = detail.get_json()
+        self.assertEqual(str(payload.get("status", "")).lower(), "failed")
+        self.assertEqual(payload.get("status_reason"), "canceled_by_operator")
+
+
+class StaleRunningReconcileTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.client = app_module.app.test_client()
+        self._nodes_backup = copy.deepcopy(app_module.NODES)
+        self._timeout_backup = app_module.STUCK_RUNNING_TIMEOUT_SECONDS
+        app_module.STUCK_RUNNING_TIMEOUT_SECONDS = 60
+        self.offline_node = "node-offline-reconcile"
+        app_module.NODES[self.offline_node] = {
+            "role": "creator",
+            "last_seen_unix": app_module.unix_now() - (app_module.ONLINE_THRESHOLD + 120),
+            "supports": ["image"],
+            "models": [SDXL_MODEL],
+            "pipelines": ["sdxl"],
+            "current_task": {"task_id": "placeholder"},
+        }
+        self.job_id = f"job-stale-{int(time.time() * 1000)}"
+        payload = json.dumps({"prompt": "stale job", "loras": [{"name": "incase_style", "weight": 0.5}]})
+        now = time.time()
+        conn = app_module.get_db()
+        conn.execute(
+            """
+            INSERT INTO jobs (id, wallet, model, data, task_type, weight, status, node_id, timestamp, assigned_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)
+            """,
+            (self.job_id, VALID_WALLET, SDXL_MODEL, payload, "IMAGE_GEN", 10.0, self.offline_node, now - 600, now - 600),
+        )
+        conn.commit()
+
+    def tearDown(self) -> None:
+        app_module.STUCK_RUNNING_TIMEOUT_SECONDS = self._timeout_backup
+        app_module.NODES.clear()
+        app_module.NODES.update(self._nodes_backup)
+        conn = app_module.get_db()
+        conn.execute("DELETE FROM rewards WHERE task_id=?", (self.job_id,))
+        conn.execute("DELETE FROM jobs WHERE id=?", (self.job_id,))
+        conn.commit()
+
+    def test_reconcile_marks_stale_running_job_failed(self) -> None:
+        reconciled = app_module._reconcile_stale_running_jobs()
+        self.assertGreaterEqual(reconciled, 1)
+
+        detail = self.client.get(f"/jobs/{self.job_id}")
+        self.assertEqual(detail.status_code, 200)
+        payload = detail.get_json()
+        self.assertEqual(str(payload.get("status", "")).lower(), "failed")
+        self.assertEqual(payload.get("status_reason"), "node_offline_timeout")
+
+
+class JobObservabilityFieldsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.client = app_module.app.test_client()
+        self.job_id = f"job-observe-{int(time.time() * 1000)}"
+        payload = json.dumps(
+            {
+                "prompt": "portrait",
+                "loras": [{"name": "incase_style", "weight": 0.74}],
+                "requested_loras": [{"name": "incase_style", "weight": 0.74}],
+                "applied_loras": [{"name": "incase_style", "requested_weight": 0.74, "applied_weight": 0.74}],
+                "status_reason": "success",
+            }
+        )
+        now = time.time()
+        conn = app_module.get_db()
+        conn.execute(
+            """
+            INSERT INTO jobs (id, wallet, model, data, task_type, weight, status, node_id, timestamp, assigned_at, completed_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'success', ?, ?, ?, ?)
+            """,
+            (self.job_id, VALID_WALLET, SDXL_MODEL, payload, "IMAGE_GEN", 10.0, "node-observe", now - 20, now - 10, now - 1),
+        )
+        conn.commit()
+
+    def tearDown(self) -> None:
+        conn = app_module.get_db()
+        conn.execute("DELETE FROM rewards WHERE task_id=?", (self.job_id,))
+        conn.execute("DELETE FROM jobs WHERE id=?", (self.job_id,))
+        conn.commit()
+
+    def test_job_detail_exposes_lora_and_status_reason_fields(self) -> None:
+        resp = self.client.get(f"/jobs/{self.job_id}")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertEqual(body.get("status_reason"), "success")
+        self.assertEqual(body.get("lora_summary"), "incase_style:0.74")
+        self.assertEqual(body.get("requested_loras")[0]["name"], "incase_style")
+        self.assertEqual(body.get("applied_loras")[0]["name"], "incase_style")
+
+    def test_jobs_recent_exposes_lora_summary(self) -> None:
+        resp = self.client.get("/jobs/recent?limit=200")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        feed = body.get("jobs", [])
+        match = next((item for item in feed if item.get("job_id") == self.job_id), None)
+        self.assertIsNotNone(match)
+        self.assertEqual(match.get("lora_summary"), "incase_style:0.74")
+
+
+class ResultsConflictReasonTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.client = app_module.app.test_client()
+        self.job_id = f"job-conflict-{int(time.time() * 1000)}"
+        conn = app_module.get_db()
+        conn.execute(
+            """
+            INSERT INTO jobs (id, wallet, model, data, task_type, weight, status, node_id, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, 'queued', NULL, ?)
+            """,
+            (self.job_id, VALID_WALLET, SDXL_MODEL, json.dumps({"prompt": "conflict"}), "IMAGE_GEN", 10.0, time.time()),
+        )
+        conn.commit()
+
+    def tearDown(self) -> None:
+        conn = app_module.get_db()
+        conn.execute("DELETE FROM rewards WHERE task_id=?", (self.job_id,))
+        conn.execute("DELETE FROM jobs WHERE id=?", (self.job_id,))
+        conn.commit()
+
+    def test_results_conflict_includes_reason(self) -> None:
+        resp = self.client.post(
+            "/results",
+            json={
+                "node_id": "node-test-conflict",
+                "task_id": self.job_id,
+                "status": "failed",
+                "metrics": {"status": "failed", "error": "test conflict"},
+                "utilization": 0,
+            },
+        )
+        self.assertEqual(resp.status_code, 409)
+        body = resp.get_json()
+        self.assertEqual(body.get("error"), "conflict")
+        self.assertIn("reason", body)

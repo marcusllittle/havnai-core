@@ -77,7 +77,6 @@ from common.prompt_enhancers import (
     SHARPNESS_NEGATIVE,
     enhance_prompt_for_positions,
     has_hardcore_keywords,
-    resolve_position_lora_weight,
 )
 
 # Reward weights bootstrap – enriched at runtime via registration
@@ -96,6 +95,10 @@ DB_CONN: Optional[sqlite3.Connection] = None
 RATE_LIMIT_BUCKETS: Dict[str, deque] = defaultdict(deque)
 
 ONLINE_THRESHOLD = 120  # seconds before a node is considered offline
+STUCK_RUNNING_TIMEOUT_SECONDS = max(
+    60,
+    int(os.getenv("HAVNAI_STUCK_RUNNING_TIMEOUT_SECONDS", "600")),
+)  # 10 minutes by default
 WALLET_REGEX = re.compile(r"^0x[a-fA-F0-9]{40}$")
 JOB_ID_REGEX = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -929,7 +932,7 @@ def get_job_summary(limit: int = 50, offset: int = 0) -> Dict[str, Any]:
     offset_int = int(offset)
     rows = conn.execute(
         f"""
-        SELECT jobs.id, jobs.wallet, jobs.model, jobs.task_type, jobs.status, jobs.weight,
+        SELECT jobs.id, jobs.wallet, jobs.model, jobs.task_type, jobs.status, jobs.weight, jobs.data,
                jobs.completed_at, jobs.timestamp, rewards.reward_hai
         FROM jobs
         LEFT JOIN rewards ON rewards.task_id = jobs.id
@@ -941,6 +944,13 @@ def get_job_summary(limit: int = 50, offset: int = 0) -> Dict[str, Any]:
     ).fetchall()
     feed = []
     for row in rows:
+        payload = _load_job_payload(row["data"])
+        requested_loras = _coerce_lora_entries(payload.get("requested_loras") or payload.get("loras"))
+        applied_loras = _coerce_lora_entries(payload.get("applied_loras"))
+        if not applied_loras:
+            applied_loras = _coerce_lora_entries(payload.get("loras_applied"))
+        status_reason = _status_reason_from_payload(payload, row["status"])
+        lora_summary = _build_lora_summary(requested_loras or applied_loras)
         completed_at = row["completed_at"]
         completed_iso = (
             datetime.fromtimestamp(completed_at, timezone.utc).isoformat().replace("+00:00", "Z")
@@ -978,6 +988,10 @@ def get_job_summary(limit: int = 50, offset: int = 0) -> Dict[str, Any]:
                 "image_url": image_url,
                 "video_url": video_url,
                 "output_path": output_path,
+                "status_reason": status_reason,
+                "requested_loras": requested_loras,
+                "applied_loras": applied_loras,
+                "lora_summary": lora_summary,
             }
         )
     return {
@@ -1136,6 +1150,236 @@ def pending_tasks_for_node(node_id: str) -> List[Dict[str, Any]]:
             continue
         tasks.append(task)
     return tasks
+
+
+def _load_job_payload(raw_data: Any) -> Dict[str, Any]:
+    if isinstance(raw_data, dict):
+        return dict(raw_data)
+    if isinstance(raw_data, str):
+        try:
+            parsed = json.loads(raw_data)
+        except Exception:
+            return {}
+        if isinstance(parsed, dict):
+            return dict(parsed)
+    return {}
+
+
+def _coerce_lora_entries(raw_loras: Any) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    if not isinstance(raw_loras, list):
+        return normalized
+
+    for item in raw_loras:
+        if isinstance(item, dict):
+            name = str(item.get("name") or item.get("adapter") or item.get("filename") or "").strip()
+            if not name:
+                continue
+            entry: Dict[str, Any] = {"name": name}
+            for key in ("weight", "requested_weight", "applied_weight"):
+                value = item.get(key)
+                if value is None:
+                    continue
+                try:
+                    entry[key] = float(value)
+                except (TypeError, ValueError):
+                    continue
+            normalized.append(entry)
+            continue
+
+        if isinstance(item, str):
+            text = item.strip()
+            if not text:
+                continue
+            name = text
+            applied_weight: Optional[float] = None
+            if ":" in text:
+                base, maybe_weight = text.rsplit(":", 1)
+                base = base.strip()
+                if base:
+                    name = base
+                try:
+                    applied_weight = float(maybe_weight.strip())
+                except (TypeError, ValueError):
+                    applied_weight = None
+            entry = {"name": name}
+            if applied_weight is not None:
+                entry["applied_weight"] = applied_weight
+            normalized.append(entry)
+    return normalized
+
+
+def _build_lora_summary(entries: List[Dict[str, Any]]) -> Optional[str]:
+    if not entries:
+        return None
+    parts: List[str] = []
+    for entry in entries:
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            continue
+        weight = entry.get("requested_weight")
+        if weight is None:
+            weight = entry.get("weight")
+        if weight is None:
+            weight = entry.get("applied_weight")
+        if weight is None:
+            parts.append(name)
+            continue
+        try:
+            parts.append(f"{name}:{float(weight):.2f}")
+        except (TypeError, ValueError):
+            parts.append(name)
+    summary = ", ".join(parts).strip()
+    return summary or None
+
+
+def _status_reason_from_payload(payload: Dict[str, Any], status: Optional[str]) -> str:
+    for key in ("status_reason", "error", "failure_reason"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    normalized_status = str(status or "").strip().lower()
+    if normalized_status in {"completed", "success"}:
+        return "success"
+    if normalized_status in {"failed", "error"}:
+        return "failed"
+    if normalized_status in {"queued", "running"}:
+        return normalized_status
+    return normalized_status or "unknown"
+
+
+def _persist_failed_job_state(
+    job_id: str,
+    reason: str,
+    *,
+    allowed_statuses: Tuple[str, ...] = ("queued", "running"),
+    node_id: Optional[str] = None,
+) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+    conn = get_db()
+    row = conn.execute("SELECT id, status, node_id, data FROM jobs WHERE id=?", (job_id,)).fetchone()
+    if not row:
+        return False, "job_not_found", None
+
+    current_status = str(row["status"] or "").strip().lower()
+    valid_statuses = {value.lower() for value in allowed_statuses}
+    if current_status not in valid_statuses:
+        return False, f"job_state_{current_status or 'unknown'}", dict(row)
+
+    owner = row["node_id"] or node_id
+    payload = _load_job_payload(row["data"])
+    payload["reward"] = 0.0
+    payload["reward_status"] = "failed"
+    payload["status_reason"] = reason
+    if not str(payload.get("error") or "").strip():
+        payload["error"] = reason
+
+    requested_loras = _coerce_lora_entries(payload.get("requested_loras") or payload.get("loras"))
+    if requested_loras:
+        payload["requested_loras"] = requested_loras
+    applied_loras = _coerce_lora_entries(payload.get("applied_loras"))
+    if applied_loras:
+        payload["applied_loras"] = applied_loras
+
+    completed_at = unix_now()
+    try:
+        conn.execute(
+            "UPDATE jobs SET status='failed', node_id=?, completed_at=?, data=? WHERE id=?",
+            (owner, completed_at, json.dumps(payload), job_id),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    return True, "ok", {
+        "id": job_id,
+        "status": "failed",
+        "node_id": owner,
+        "completed_at": completed_at,
+        "data": payload,
+    }
+
+
+def _describe_result_conflict(task_id: str, node_id: str) -> Tuple[str, str]:
+    job = get_job(task_id)
+    if not job:
+        return "job_not_found", "Job record no longer exists."
+    status = str(job.get("status") or "").strip().lower()
+    owner = str(job.get("node_id") or "").strip()
+    if status != "running":
+        if status in {"success", "failed", "completed"}:
+            return "job_already_finalized", f"Job is already in terminal state '{status}'."
+        if status == "queued":
+            return "job_state_conflict", "Job is queued, not running."
+        return "job_state_conflict", f"Job status is '{status or 'unknown'}'."
+    if owner and owner != node_id:
+        return "job_not_owned", f"Job is assigned to node '{owner}'."
+    return "job_state_conflict", "Job state changed before result submission."
+
+
+def _reconcile_stale_running_jobs() -> int:
+    cutoff = unix_now() - STUCK_RUNNING_TIMEOUT_SECONDS
+    reconciled = 0
+    nodes_changed = False
+    with LOCK:
+        conn = get_db()
+        rows = conn.execute(
+            """
+            SELECT id, node_id, assigned_at
+            FROM jobs
+            WHERE status='running'
+              AND assigned_at IS NOT NULL
+              AND assigned_at <= ?
+            """,
+            (cutoff,),
+        ).fetchall()
+        if not rows:
+            return 0
+
+        now = unix_now()
+        for row in rows:
+            job_id = str(row["id"])
+            node_id = str(row["node_id"] or "").strip() or None
+            node = NODES.get(node_id) if node_id else None
+            if node is not None and _node_is_online(node, now=now):
+                continue
+
+            ok, _, _ = _persist_failed_job_state(
+                job_id,
+                "node_offline_timeout",
+                allowed_statuses=("running",),
+                node_id=node_id,
+            )
+            if not ok:
+                continue
+
+            TASKS.pop(job_id, None)
+            if node and isinstance(node.get("current_task"), dict):
+                current_task_id = str(node.get("current_task", {}).get("task_id") or "")
+                if current_task_id == job_id:
+                    node["current_task"] = None
+                    nodes_changed = True
+
+            log_event(
+                "Stale running job auto-failed",
+                level="warning",
+                job_id=job_id,
+                node_id=node_id,
+                reason="node_offline_timeout",
+            )
+            _emit_job_event(
+                "job_failed",
+                job_id,
+                "",
+                node_id=node_id,
+                status="failed",
+                reason="node_offline_timeout",
+            )
+            reconciled += 1
+
+        if nodes_changed:
+            save_nodes()
+    return reconciled
 
 
 # ---------------------------------------------------------------------------
@@ -1566,7 +1810,7 @@ def submit_job() -> Any:
     raw_prompt = str(payload.get("prompt") or payload.get("data") or "")
     auto_model_request = not model_name or model_name in {"auto", "auto_image", "auto-image"}
     hardcore_prompt = has_hardcore_keywords(raw_prompt)
-    enhanced_prompt, model_override, position_lora, position_negative = enhance_prompt_for_positions(raw_prompt)
+    enhanced_prompt, model_override, _position_lora, position_negative = enhance_prompt_for_positions(raw_prompt)
 
     if model_override:
         # Drop overrides that are no longer available in the manifest.
@@ -1759,11 +2003,6 @@ def submit_job() -> Any:
         task_type = "ANIMATEDIFF"
     else:
         prompt_text = enhanced_prompt
-        if position_lora:
-            lora_weight = resolve_position_lora_weight(position_lora)
-            lora_tag = f"<lora:{position_lora}:{lora_weight:.2f}>"
-            if lora_tag not in prompt_text:
-                prompt_text = f"{prompt_text}, {lora_tag}" if prompt_text else lora_tag
         if hardcore_prompt and HARDCORE_POSITIVE_SUFFIX.lower() not in prompt_text.lower():
             prompt_text = f"{prompt_text}, {HARDCORE_POSITIVE_SUFFIX}" if prompt_text else HARDCORE_POSITIVE_SUFFIX
         if prompt_text:
@@ -1794,18 +2033,9 @@ def submit_job() -> Any:
                     name = str(item).strip()
                     if name:
                         loras_list.append({"name": name})
-        if position_lora:
-            def normalize_lora_ref(name: str) -> str:
-                base = Path(name).name
-                if base.lower().endswith(".safetensors"):
-                    base = base[:-len(".safetensors")]
-                return base.strip().lower()
-
-            position_norm = normalize_lora_ref(position_lora)
-            if not any(normalize_lora_ref(str(entry.get("name") or "")) == position_norm for entry in loras_list):
-                loras_list.append({"name": position_lora, "weight": resolve_position_lora_weight(position_lora)})
         if loras_list:
             job_settings["loras"] = loras_list
+            job_settings["requested_loras"] = loras_list
         if seed is not None:
             job_settings["seed"] = seed
         base_negative = str(cfg.get("negative_prompt_default") or "").strip() if cfg else ""
@@ -1844,11 +2074,11 @@ def submit_job() -> Any:
             job_settings["steps"] = 40
             job_settings["guidance"] = 7.5
 
-        injected_loras = job_settings.get("loras") or []
+        requested_loras = job_settings.get("loras") or []
         log_event(
             "Enhanced prompt: "
             f"{prompt_text} | Selected model: {model_name_raw or model_name} | "
-            f"Injected LoRAs: {injected_loras} | Extra negatives: {position_negative or ''}"
+            f"Requested LoRAs: {requested_loras} | Extra negatives: {position_negative or ''}"
         )
 
         overrides: Dict[str, Any] = {}
@@ -2073,6 +2303,7 @@ def register() -> Any:
         return jsonify({"error": "rate limit"}), 429
     if not check_join_token():
         return jsonify({"error": "unauthorized"}), 403
+    _reconcile_stale_running_jobs()
 
     data = request.get_json() or {}
     node_id = data.get("node_id")
@@ -2196,6 +2427,7 @@ def get_creator_tasks() -> Any:
     node_id = request.args.get("node_id")
     if not node_id:
         return jsonify({"tasks": []}), 200
+    _reconcile_stale_running_jobs()
 
     with LOCK:
         node_info = NODES.get(node_id)
@@ -2472,7 +2704,19 @@ def submit_results() -> Any:
                     node_id=node_id,
                 )
                 TASKS.pop(task_id, None)
-                return jsonify({"error": "conflict"}), 409
+                reason, message = _describe_result_conflict(task_id, node_id)
+                return (
+                    jsonify(
+                        {
+                            "error": "conflict",
+                            "reason": reason,
+                            "message": message,
+                            "task_id": task_id,
+                            "node_id": node_id,
+                        }
+                    ),
+                    409,
+                )
 
         if node:
             node["rewards"] = round(node.get("rewards", 0.0) + reward, 6)
@@ -2527,6 +2771,11 @@ def submit_results() -> Any:
                 "model_name": model_name,
                 "reward": reward,
                 "reward_factors": reward_factors,
+                "status_reason": (
+                    str(metrics.get("status_reason") or metrics.get("error") or status)
+                    if isinstance(metrics, dict)
+                    else str(status)
+                ),
                 "wallet": wallet,
                 "task_type": task_type,
                 "image_url": image_url,
@@ -2581,6 +2830,26 @@ def submit_results() -> Any:
                 payload["reward"] = reward
                 payload["reward_factors"] = reward_factors
                 payload["reward_status"] = status
+                requested_loras = _coerce_lora_entries(payload.get("requested_loras") or payload.get("loras"))
+                if requested_loras:
+                    payload["requested_loras"] = requested_loras
+                applied_loras: List[Dict[str, Any]] = []
+                if isinstance(metrics, dict):
+                    applied_loras = _coerce_lora_entries(metrics.get("applied_loras"))
+                    if not applied_loras:
+                        applied_loras = _coerce_lora_entries(metrics.get("loras"))
+                if applied_loras:
+                    payload["applied_loras"] = applied_loras
+                status_reason = (
+                    str(metrics.get("status_reason") or metrics.get("error") or status)
+                    if isinstance(metrics, dict)
+                    else str(status)
+                )
+                payload["status_reason"] = status_reason
+                if status != "success" and isinstance(metrics, dict):
+                    metric_error = str(metrics.get("error") or "").strip()
+                    if metric_error:
+                        payload["error"] = metric_error
                 try:
                     conn = get_db()
                     conn.execute("UPDATE jobs SET data=? WHERE id=?", (json.dumps(payload), task_id))
@@ -3125,6 +3394,7 @@ def jobs_recent() -> Any:
         limit  – max jobs to return (default 50, max 200)
         offset – number of jobs to skip (default 0)
     """
+    _reconcile_stale_running_jobs()
     limit = _clamp(_coerce_int(request.args.get("limit"), 50), 1, 200)
     offset = max(0, _coerce_int(request.args.get("offset"), 0))
     summary = get_job_summary(limit=limit, offset=offset)
@@ -3149,7 +3419,15 @@ def job_detail(job_id: str) -> Any:
         payload = json.loads(raw_data) if isinstance(raw_data, str) else {}
     except Exception:
         payload = {}
-    reward_factors = payload.get("reward_factors") if isinstance(payload, dict) else None
+    if not isinstance(payload, dict):
+        payload = {}
+    reward_factors = payload.get("reward_factors")
+    requested_loras = _coerce_lora_entries(payload.get("requested_loras") or payload.get("loras"))
+    applied_loras = _coerce_lora_entries(payload.get("applied_loras"))
+    if not applied_loras:
+        applied_loras = _coerce_lora_entries(payload.get("loras_applied"))
+    status_reason = _status_reason_from_payload(payload, job.get("status"))
+    lora_summary = _build_lora_summary(requested_loras or applied_loras)
 
     return jsonify(
         {
@@ -3166,8 +3444,79 @@ def job_detail(job_id: str) -> Any:
             "reward_timestamp": reward_ts,
             "reward_factors": reward_factors,
             "data": payload,
+            "requested_loras": requested_loras,
+            "applied_loras": applied_loras,
+            "status_reason": status_reason,
+            "lora_summary": lora_summary,
         }
     )
+
+
+@app.route("/jobs/<job_id>/cancel", methods=["POST"])
+def cancel_job(job_id: str) -> Any:
+    if not SERVER_JOIN_TOKEN:
+        return jsonify({"error": "join_token_not_configured"}), 503
+    if not check_join_token():
+        return jsonify({"error": "unauthorized"}), 403
+    if not JOB_ID_REGEX.match(job_id):
+        return jsonify({"error": "invalid_job_id"}), 400
+
+    with LOCK:
+        job = get_job(job_id)
+        if not job:
+            return jsonify({"error": "job_not_found", "job_id": job_id}), 404
+        ok, reason_code, failed_job = _persist_failed_job_state(
+            job_id,
+            "canceled_by_operator",
+            allowed_statuses=("queued", "running"),
+            node_id=str(job.get("node_id") or "").strip() or None,
+        )
+        if not ok:
+            return (
+                jsonify(
+                    {
+                        "error": "job_cancel_conflict",
+                        "reason": reason_code,
+                        "job_id": job_id,
+                        "status": job.get("status"),
+                    }
+                ),
+                409,
+            )
+
+        TASKS.pop(job_id, None)
+        node_id = str(job.get("node_id") or "").strip()
+        if node_id:
+            node = NODES.get(node_id)
+            if node and isinstance(node.get("current_task"), dict):
+                current_task_id = str(node.get("current_task", {}).get("task_id") or "")
+                if current_task_id == job_id:
+                    node["current_task"] = None
+                    save_nodes()
+
+        log_event(
+            "Job canceled by operator",
+            level="warning",
+            job_id=job_id,
+            node_id=node_id or None,
+            reason="canceled_by_operator",
+        )
+        _emit_job_event(
+            "job_failed",
+            job_id,
+            str(job.get("wallet") or ""),
+            node_id=node_id or None,
+            status="failed",
+            reason="canceled_by_operator",
+        )
+        return jsonify(
+            {
+                "status": "failed",
+                "job_id": job_id,
+                "status_reason": "canceled_by_operator",
+                "job": failed_job,
+            }
+        )
 
 
 @app.route("/quota", methods=["GET"])

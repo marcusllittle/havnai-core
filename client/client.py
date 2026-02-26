@@ -1662,7 +1662,7 @@ def execute_task(task: Dict[str, Any]) -> None:
             job_settings = None
             prompt_raw = task.get("prompt")
             try:
-                task_loras = None  # LoRA support removed in MVP
+                task_loras = task.get("loras") if isinstance(task, dict) else None
                 if task_loras:
                     if job_settings is None:
                         job_settings = {}
@@ -2189,9 +2189,15 @@ def run_image_generation(
     try:
         if not FAST_PREVIEW and torch is not None and diffusers is not None:
             device, dtype, is_xl, pipeline_name = _resolve_image_runtime(entry)
-            # LoRA support removed in MVP
-            requested_loras = []
-            lora_entries = []
+            requested_loras = job_settings.get("loras") if isinstance(job_settings, dict) else []
+            lora_entries = _collect_explicit_loras(requested_loras, entry, pipeline_name)
+            if lora_entries:
+                lora_summary = ", ".join(
+                    f"{adapter}:{weight:.2f} ({path.name})" for path, weight, adapter in lora_entries
+                )
+            else:
+                lora_summary = "none"
+            log(f"Loading LoRAs: {lora_summary}", prefix="🎛️")
 
             init_pil = None
             if use_img2img and init_image_raw:

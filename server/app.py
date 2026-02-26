@@ -73,6 +73,7 @@ from common.prompt_enhancers import (
     SHARPNESS_NEGATIVE,
     enhance_prompt_for_positions,
     has_hardcore_keywords,
+    resolve_position_lora_weight,
 )
 
 # Reward weights bootstrap – enriched at runtime via registration
@@ -707,9 +708,6 @@ def load_manifest() -> None:
     except Exception as exc:
         LOGGER.error("Failed to parse manifest: %s", exc)
         return
-    # MVP: only SDXL pipelines are supported for image generation.
-    # Non-image task types (ltx2, animatediff, etc.) are kept as-is.
-    _SDXL_ALLOWED_PIPELINES = {"sdxl", "ltx2", "animatediff"}
     models = raw.get("models", []) if isinstance(raw, dict) else []
     for entry in models:
         if not isinstance(entry, dict):
@@ -719,17 +717,13 @@ def load_manifest() -> None:
             continue
         key = name.lower()
         pipeline = str(entry.get("pipeline", "")).strip().lower()
-        task_type = str(entry.get("task_type", CREATOR_TASK_TYPE)).upper()
-        # Filter out non-SDXL image models (SD 1.5 etc.)
-        if task_type == CREATOR_TASK_TYPE and pipeline and pipeline not in _SDXL_ALLOWED_PIPELINES:
-            continue
         path_str = str(entry.get("path", "")).strip()
         artifact_type = str(entry.get("type", "")).strip() or "checkpoint"
         weight = float(entry.get("weight", MODEL_WEIGHTS.get(key, 10.0)))
         MODEL_WEIGHTS[key] = weight
         entry_data = {
             "name": name,
-            "pipeline": pipeline or "sdxl",
+            "pipeline": pipeline or "sd15",
             "path": path_str,
             "type": artifact_type,
             "tags": entry.get("tags", []),
@@ -1408,7 +1402,7 @@ def submit_job() -> Any:
     raw_prompt = str(payload.get("prompt") or payload.get("data") or "")
     auto_model_request = not model_name or model_name in {"auto", "auto_image", "auto-image"}
     hardcore_prompt = has_hardcore_keywords(raw_prompt)
-    enhanced_prompt, model_override, _position_lora, position_negative = enhance_prompt_for_positions(raw_prompt)
+    enhanced_prompt, model_override, position_lora, position_negative = enhance_prompt_for_positions(raw_prompt)
 
     if model_override:
         # Drop overrides that are no longer available in the manifest.
@@ -1595,6 +1589,11 @@ def submit_job() -> Any:
         task_type = "ANIMATEDIFF"
     else:
         prompt_text = enhanced_prompt
+        if position_lora:
+            lora_weight = resolve_position_lora_weight(position_lora)
+            lora_tag = f"<lora:{position_lora}:{lora_weight:.2f}>"
+            if lora_tag not in prompt_text:
+                prompt_text = f"{prompt_text}, {lora_tag}" if prompt_text else lora_tag
         if hardcore_prompt and HARDCORE_POSITIVE_SUFFIX.lower() not in prompt_text.lower():
             prompt_text = f"{prompt_text}, {HARDCORE_POSITIVE_SUFFIX}" if prompt_text else HARDCORE_POSITIVE_SUFFIX
         if prompt_text:
@@ -1609,6 +1608,34 @@ def submit_job() -> Any:
             seed = None
         # Pass through per-image overrides for the node to honor.
         job_settings: Dict[str, Any] = {"prompt": prompt_text}
+        payload_loras = payload.get("loras") or []
+        loras_list: List[Dict[str, Any]] = []
+        if isinstance(payload_loras, list):
+            for item in payload_loras:
+                if isinstance(item, dict):
+                    name = str(item.get("name") or "").strip()
+                    if not name:
+                        continue
+                    entry: Dict[str, Any] = {"name": name}
+                    if "weight" in item:
+                        entry["weight"] = item.get("weight")
+                    loras_list.append(entry)
+                else:
+                    name = str(item).strip()
+                    if name:
+                        loras_list.append({"name": name})
+        if position_lora:
+            def normalize_lora_ref(name: str) -> str:
+                base = Path(name).name
+                if base.lower().endswith(".safetensors"):
+                    base = base[:-len(".safetensors")]
+                return base.strip().lower()
+
+            position_norm = normalize_lora_ref(position_lora)
+            if not any(normalize_lora_ref(str(entry.get("name") or "")) == position_norm for entry in loras_list):
+                loras_list.append({"name": position_lora, "weight": resolve_position_lora_weight(position_lora)})
+        if loras_list:
+            job_settings["loras"] = loras_list
         if seed is not None:
             job_settings["seed"] = seed
         base_negative = str(cfg.get("negative_prompt_default") or "").strip() if cfg else ""
@@ -1647,10 +1674,11 @@ def submit_job() -> Any:
             job_settings["steps"] = 40
             job_settings["guidance"] = 7.5
 
+        injected_loras = job_settings.get("loras") or []
         log_event(
             "Enhanced prompt: "
             f"{prompt_text} | Selected model: {model_name_raw or model_name} | "
-            f"Extra negatives: {position_negative or ''}"
+            f"Injected LoRAs: {injected_loras} | Extra negatives: {position_negative or ''}"
         )
 
         overrides: Dict[str, Any] = {}
@@ -2011,6 +2039,7 @@ def get_creator_tasks() -> Any:
                     raw_data = job.get("data")
                     prompt_text = raw_data or ""
                     negative_prompt = ""
+                    loras: List[str] = []
                     image_overrides: Dict[str, Any] = {}
                     try:
                         parsed = json.loads(raw_data) if isinstance(raw_data, str) else None
@@ -2019,6 +2048,9 @@ def get_creator_tasks() -> Any:
                     if isinstance(parsed, dict):
                         prompt_text = str(parsed.get("prompt") or "")
                         negative_prompt = str(parsed.get("negative_prompt") or "")
+                        parsed_loras = parsed.get("loras") or []
+                        if isinstance(parsed_loras, list):
+                            loras = [item for item in parsed_loras if item]
                         # Forward per-image overrides stored in job settings.
                         for key in ("steps", "guidance", "width", "height", "sampler", "seed"):
                             if key not in parsed:
@@ -2064,6 +2096,7 @@ def get_creator_tasks() -> Any:
                             "data": raw_data,
                             "prompt": prompt_for_node,
                             "negative_prompt": negative_prompt,
+                            "loras": loras,
                             "queued_at": job.get("timestamp"),
                         }
                     if job_task_type == CREATOR_TASK_TYPE and image_overrides:
@@ -2099,6 +2132,7 @@ def get_creator_tasks() -> Any:
                 "wallet": task.get("wallet"),
                 "prompt": task.get("prompt") or task.get("data", ""),
                 "negative_prompt": task.get("negative_prompt") or "",
+                "loras": task.get("loras") or [],
                 "queued_at": task.get("queued_at"),
                 "assigned_at": task.get("assigned_at"),
             }

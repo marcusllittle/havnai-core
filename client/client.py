@@ -1784,8 +1784,9 @@ LORA_BASE_TYPE = {
 
 ROLE_WEIGHT_RANGES = {
     "position": (0.0, 2.0, 0.6),
-    "anatomy": (0.5, 0.8, 0.65),
-    "style": (0.3, 0.4, 0.35),
+    "anatomy": (0.0, 2.0, 0.65),
+    "style": (0.0, 2.0, 0.35),
+    "general": (0.0, 2.0, 0.6),
 }
 
 
@@ -1831,21 +1832,18 @@ def classify_lora_role(normalized_name: str) -> str:
             return "anatomy"
     if normalized_name in STYLE_LORA_NAMES:
         return "style"
-    # Unknown LoRAs are treated conservatively as style to keep weights low.
-    return "style"
+    return "general"
 
 
 def clamp_lora_weight(weight: Optional[float], role: str) -> float:
-    min_w, max_w, default_w = ROLE_WEIGHT_RANGES.get(role, (0.25, 0.45, 0.35))
+    min_w, max_w, default_w = ROLE_WEIGHT_RANGES.get(role, (0.0, 2.0, 0.6))
     try:
         value = float(weight) if weight is not None else default_w
     except (TypeError, ValueError):
         value = default_w
     if not math.isfinite(value):
         value = default_w
-    if role == "position":
-        # Respect server-provided position weights without forcing a narrow clamp.
-        return value
+    # Respect user-provided weights — only clamp to the safe 0.0-2.0 range.
     return max(min_w, min(max_w, value))
 
 
@@ -2032,11 +2030,14 @@ def _collect_explicit_loras(requested_raw: Any, entry: ModelEntry, pipeline_name
             continue
         base_type = infer_lora_base_type(normalized)
         if base_type == "sdxl" and not model_is_sdxl:
+            log(f"Skipping LoRA '{name}': SDXL LoRA incompatible with SD1.5 model {entry.name}", prefix="⚠️")
             continue
         if base_type == "sd15" and model_is_sdxl:
+            log(f"Skipping LoRA '{name}': SD1.5 LoRA incompatible with SDXL model {entry.name}", prefix="⚠️")
             continue
         lora_path = resolve_lora_path(name)
         if not lora_path:
+            log(f"Skipping LoRA '{name}': file not found on disk", prefix="⚠️")
             continue
         role = classify_lora_role(normalized)
         weight = clamp_lora_weight(raw_weight, role)

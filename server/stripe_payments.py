@@ -206,6 +206,156 @@ def handle_webhook_event(payload: bytes, sig_header: str) -> Dict[str, Any]:
     return {"status": "ignored", "event_type": event["type"]}
 
 
+# ---------------------------------------------------------------------------
+# Subscription tiers – monthly plans with credits + $HAI rewards.
+# ---------------------------------------------------------------------------
+
+SUBSCRIPTION_TIERS: List[Dict[str, Any]] = [
+    {
+        "id": "basic",
+        "name": "Basic",
+        "credits_per_month": 100,
+        "hai_reward_per_month": 10.0,
+        "price_cents": 999,
+        "description": "100 credits/month + 10 $HAI",
+    },
+    {
+        "id": "standard",
+        "name": "Standard",
+        "credits_per_month": 350,
+        "hai_reward_per_month": 40.0,
+        "price_cents": 2499,
+        "description": "350 credits/month + 40 $HAI",
+    },
+    {
+        "id": "premium",
+        "name": "Premium",
+        "credits_per_month": 1000,
+        "hai_reward_per_month": 120.0,
+        "price_cents": 5999,
+        "description": "1000 credits/month + 120 $HAI",
+    },
+]
+
+
+def _get_tier(tier_id: str) -> Optional[Dict[str, Any]]:
+    for tier in SUBSCRIPTION_TIERS:
+        if tier["id"] == tier_id:
+            return tier
+    return None
+
+
+def init_subscription_tables(conn: "sqlite3.Connection") -> None:
+    """Create the subscriptions tracking table if it doesn't exist."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS stripe_subscriptions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            stripe_subscription_id TEXT UNIQUE NOT NULL,
+            wallet TEXT NOT NULL,
+            tier_id TEXT NOT NULL,
+            credits_per_month REAL NOT NULL,
+            hai_reward_per_month REAL NOT NULL,
+            price_cents INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at REAL NOT NULL,
+            cancelled_at REAL
+        )
+        """
+    )
+    conn.commit()
+
+
+def create_subscription(wallet: str, tier_id: str, success_url: str, cancel_url: str) -> Dict[str, Any]:
+    """Create a Stripe Checkout Session for a monthly subscription.
+
+    Returns dict with ``session_id`` and ``checkout_url`` for the frontend redirect.
+    """
+    import stripe
+    stripe.api_key = STRIPE_SECRET_KEY
+
+    tier = _get_tier(tier_id)
+    if not tier:
+        raise ValueError(f"Unknown subscription tier: {tier_id}")
+
+    session = stripe.checkout.Session.create(
+        payment_method_types=["card"],
+        line_items=[
+            {
+                "price_data": {
+                    "currency": "usd",
+                    "unit_amount": tier["price_cents"],
+                    "recurring": {"interval": "month"},
+                    "product_data": {
+                        "name": f"HavnAI {tier['name']} Plan",
+                        "description": tier["description"],
+                    },
+                },
+                "quantity": 1,
+            }
+        ],
+        mode="subscription",
+        success_url=success_url,
+        cancel_url=cancel_url,
+        metadata={
+            "wallet": wallet,
+            "tier_id": tier_id,
+            "credits_per_month": str(tier["credits_per_month"]),
+            "hai_reward_per_month": str(tier["hai_reward_per_month"]),
+        },
+    )
+
+    conn = get_db()
+    conn.execute(
+        """
+        INSERT INTO stripe_subscriptions
+            (stripe_subscription_id, wallet, tier_id, credits_per_month, hai_reward_per_month, price_cents, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'active', ?)
+        """,
+        (session.id, wallet, tier_id, tier["credits_per_month"], tier["hai_reward_per_month"], tier["price_cents"], time.time()),
+    )
+    conn.commit()
+
+    log_event(
+        "Stripe subscription created",
+        wallet=wallet,
+        tier_id=tier_id,
+        session_id=session.id,
+    )
+
+    return {
+        "session_id": session.id,
+        "checkout_url": session.url,
+    }
+
+
+def get_subscription_status(wallet: str) -> Optional[Dict[str, Any]]:
+    """Return the active subscription for a wallet, if any."""
+    conn = get_db()
+    row = conn.execute(
+        """
+        SELECT stripe_subscription_id, tier_id, credits_per_month, hai_reward_per_month,
+               price_cents, status, created_at
+        FROM stripe_subscriptions
+        WHERE wallet = ? AND status = 'active'
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (wallet,),
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "subscription_id": row["stripe_subscription_id"],
+        "tier_id": row["tier_id"],
+        "credits_per_month": row["credits_per_month"],
+        "hai_reward_per_month": row["hai_reward_per_month"],
+        "price_cents": row["price_cents"],
+        "status": row["status"],
+        "created_at": row["created_at"],
+    }
+
+
 def get_payment_history(wallet: str, limit: int = 20) -> List[Dict[str, Any]]:
     """Return recent payment records for a wallet."""
     conn = get_db()

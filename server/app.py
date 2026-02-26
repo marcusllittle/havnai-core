@@ -62,11 +62,7 @@ CLIENT_PATH = BASE_DIR / "client" / "client.py"
 CLIENT_REGISTRY = BASE_DIR / "client" / "registry.py"
 CLIENT_REQUIREMENTS = BASE_DIR / "client" / "requirements-node.txt"
 VERSION_FILE = BASE_DIR / "VERSION"
-LORA_STORAGE_DIR = Path(os.getenv("HAVNAI_LORA_STORAGE_DIR", "/mnt/d/havnai-storage/models/loras"))
-
 CREATOR_TASK_TYPE = "IMAGE_GEN"
-
-SUPPORTED_LORA_EXTS = {".safetensors", ".ckpt", ".pt", ".bin"}
 
 # Ensure local packages (e.g., havnai.*) are importable when running server/app.py directly
 if str(BASE_DIR) not in sys.path:
@@ -77,7 +73,6 @@ from common.prompt_enhancers import (
     SHARPNESS_NEGATIVE,
     enhance_prompt_for_positions,
     has_hardcore_keywords,
-    resolve_position_lora_weight,
 )
 
 # Reward weights bootstrap – enriched at runtime via registration
@@ -125,8 +120,8 @@ TASK_SUPPORT_MAP = {
 # Individual settings can still be overridden via HAVNAI_LTX2_STEPS, etc.
 # ---------------------------------------------------------------------------
 _GPU_PROFILES: Dict[str, Dict[str, Any]] = {
-    "fast_3060": {"steps": 20, "frames": 16, "fps": 8, "width": 512, "height": 512, "guidance": 7.0},
-    "quality":   {"steps": 30, "frames": 16, "fps": 8, "width": 512, "height": 512, "guidance": 7.0},
+    "fast_3060": {"steps": 30, "frames": 16, "fps": 8, "width": 512, "height": 512, "guidance": 7.0},
+    "quality":   {"steps": 30, "frames": 24, "fps": 8, "width": 512, "height": 512, "guidance": 7.0},
 }
 _GPU_PROFILE_NAME = os.getenv("HAVNAI_GPU_PROFILE", "fast_3060").strip().lower()
 GPU_PROFILE = _GPU_PROFILES.get(_GPU_PROFILE_NAME, _GPU_PROFILES["fast_3060"])
@@ -547,56 +542,6 @@ def rate_limit(key: str, limit: int, per_seconds: int = 60) -> bool:
 # Safety filtering moved to server/safety.py
 
 
-def _download_lora_asset(lora: Dict[str, Any], dest_dir: Path) -> Path:
-    filename = str(lora.get("filename") or lora.get("name") or "").strip()
-    if not filename:
-        raise RuntimeError("lora filename missing")
-    local_path = dest_dir / filename
-    if local_path.exists():
-        return local_path
-    url = str(lora.get("url") or "").strip()
-    if not url:
-        raise RuntimeError(f"lora url missing for {filename}")
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    temp_path = local_path.with_suffix(local_path.suffix + ".part")
-    last_error: Optional[Exception] = None
-    for attempt in range(2):
-        try:
-            resp = requests.get(url, stream=True, timeout=120, headers={"User-Agent": "HavnAI/1.0"})
-            resp.raise_for_status()
-            with temp_path.open("wb") as handle:
-                for chunk in resp.iter_content(chunk_size=1024 * 1024):
-                    if chunk:
-                        handle.write(chunk)
-            temp_path.replace(local_path)
-            return local_path
-        except Exception as exc:
-            last_error = exc
-            try:
-                if temp_path.exists():
-                    temp_path.unlink()
-            except Exception:
-                pass
-            log_event(
-                "LoRA download failed",
-                level="warning",
-                filename=filename,
-                url=url,
-                attempt=attempt + 1,
-                error=str(exc),
-            )
-            if attempt == 0:
-                time.sleep(1)
-    log_event(
-        "LoRA download failed after retry",
-        level="error",
-        filename=filename,
-        url=url,
-        error=str(last_error),
-    )
-    raise RuntimeError(f"LoRA download failed: {last_error}")
-
-
 # ---------------------------------------------------------------------------
 # Directory bootstrap
 # ---------------------------------------------------------------------------
@@ -727,6 +672,7 @@ def init_db() -> None:
 
 init_db()
 stripe_payments.init_stripe_tables(get_db())
+stripe_payments.init_subscription_tables(get_db())
 
 # Inject dependencies into extracted modules (initial injection)
 _inject_module_dependencies()
@@ -761,6 +707,9 @@ def load_manifest() -> None:
     except Exception as exc:
         LOGGER.error("Failed to parse manifest: %s", exc)
         return
+    # MVP: only SDXL pipelines are supported for image generation.
+    # Non-image task types (ltx2, animatediff, etc.) are kept as-is.
+    _SDXL_ALLOWED_PIPELINES = {"sdxl", "ltx2", "animatediff"}
     models = raw.get("models", []) if isinstance(raw, dict) else []
     for entry in models:
         if not isinstance(entry, dict):
@@ -770,13 +719,17 @@ def load_manifest() -> None:
             continue
         key = name.lower()
         pipeline = str(entry.get("pipeline", "")).strip().lower()
+        task_type = str(entry.get("task_type", CREATOR_TASK_TYPE)).upper()
+        # Filter out non-SDXL image models (SD 1.5 etc.)
+        if task_type == CREATOR_TASK_TYPE and pipeline and pipeline not in _SDXL_ALLOWED_PIPELINES:
+            continue
         path_str = str(entry.get("path", "")).strip()
         artifact_type = str(entry.get("type", "")).strip() or "checkpoint"
         weight = float(entry.get("weight", MODEL_WEIGHTS.get(key, 10.0)))
         MODEL_WEIGHTS[key] = weight
         entry_data = {
             "name": name,
-            "pipeline": pipeline or "sd15",
+            "pipeline": pipeline or "sdxl",
             "path": path_str,
             "type": artifact_type,
             "tags": entry.get("tags", []),
@@ -824,7 +777,6 @@ def load_nodes() -> Dict[str, Dict[str, Any]]:
         node.setdefault("gpu", {})
         node.setdefault("pipelines", [])
         node.setdefault("models", [])
-        node.setdefault("loras", [])
         node.setdefault("rewards", 0.0)
         node.setdefault("utilization", 0.0)
         node.setdefault("avg_utilization", node.get("utilization", 0.0))
@@ -875,7 +827,6 @@ def load_node_wallets() -> None:
             "start_time": unix_now(),
             "role": "worker",
             "last_seen": iso_now(),
-            "loras": [],
         })
         node["wallet"] = row["wallet"]
         if row["node_name"]:
@@ -1343,90 +1294,10 @@ def favicon() -> Any:
 # /models/list is defined below (models_list) with full tier/pipeline metadata
 
 
-def _normalize_lora_catalog(raw_loras: Any) -> List[Dict[str, Any]]:
-    if not raw_loras or not isinstance(raw_loras, list):
-        return []
-    normalized: List[Dict[str, Any]] = []
-    for entry in raw_loras:
-        if isinstance(entry, dict):
-            name = str(entry.get("name") or "").strip()
-            filename = str(entry.get("filename") or "").strip()
-            label = str(entry.get("label") or "").strip()
-            if not name and filename:
-                name = Path(filename).stem or filename
-            if not name:
-                continue
-            item: Dict[str, Any] = {"name": name}
-            if filename:
-                item["filename"] = filename
-            if label:
-                item["label"] = label
-            # Preserve pipeline compatibility field (sd15 / sdxl)
-            pipeline = str(entry.get("pipeline") or "").strip().lower()
-            if pipeline:
-                item["pipeline"] = pipeline
-            normalized.append(item)
-            continue
-        if isinstance(entry, str):
-            name = entry.strip()
-            if name:
-                normalized.append({"name": name})
-    return normalized
-
-
 @app.route("/loras/list")
 def list_loras() -> Any:
-    # Optional pipeline filter: /loras/list?pipeline=sdxl or ?pipeline=sd15
-    pipeline_filter = request.args.get("pipeline", "").strip().lower()
-    loras: List[Dict[str, Any]] = []
-    nodes_with_loras: List[str] = []
-    with LOCK:
-        for node_id, node in NODES.items():
-            node_loras = _normalize_lora_catalog(node.get("loras"))
-            if node_loras:
-                nodes_with_loras.append(node_id)
-                loras.extend(node_loras)
-    if loras:
-        seen = set()
-        deduped: List[Dict[str, Any]] = []
-        for entry in loras:
-            key = str(entry.get("filename") or entry.get("name") or "").strip().lower()
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            deduped.append(entry)
-        deduped.sort(key=lambda item: str(item.get("label") or item.get("name") or "").lower())
-        if pipeline_filter:
-            deduped = [e for e in deduped if _lora_matches_pipeline(e, pipeline_filter)]
-        return jsonify({"loras": deduped, "nodes": nodes_with_loras, "source": "nodes"})
-    path = LORA_STORAGE_DIR
-    if path.exists():
-        for entry in sorted(path.iterdir()):
-            if not entry.is_file():
-                continue
-            if entry.suffix.lower() not in SUPPORTED_LORA_EXTS:
-                continue
-            loras.append({"name": entry.stem, "filename": entry.name})
-    loras.sort(key=lambda item: str(item.get("name") or "").lower())
-    if pipeline_filter:
-        loras = [e for e in loras if _lora_matches_pipeline(e, pipeline_filter)]
-    return jsonify({"loras": loras, "path": str(path), "source": "local"})
-
-
-def _lora_matches_pipeline(lora: Dict[str, Any], target_pipeline: str) -> bool:
-    """Check if a LoRA is compatible with the target pipeline.
-
-    Returns True if the LoRA has no pipeline metadata (unknown = show it)
-    or if the pipeline matches.
-    """
-    lora_pipeline = str(lora.get("pipeline") or "").lower()
-    if not lora_pipeline:
-        return True  # No metadata — show in all pipelines
-    if target_pipeline == "sdxl":
-        return "sdxl" in lora_pipeline or "xl" in lora_pipeline
-    if target_pipeline == "sd15":
-        return lora_pipeline == "sd15" or lora_pipeline == "sd1.5"
-    return True
+    """LoRA support has been removed in the MVP. Returns empty list."""
+    return jsonify({"loras": [], "nodes": [], "source": "none"})
 
 
 @app.route("/installers/<path:filename>")
@@ -1477,35 +1348,6 @@ def _clamp_float(value: Any, default: float, min_val: float, max_val: float) -> 
     return max(min_val, min(max_val, v))
 
 
-def _normalize_loras(raw_loras: Any) -> List[Dict[str, Any]]:
-    if not raw_loras or not isinstance(raw_loras, list):
-        return []
-    normalized: List[Dict[str, Any]] = []
-    for entry in raw_loras:
-        if isinstance(entry, dict):
-            name = str(entry.get("name") or "").strip()
-            if not name:
-                continue
-            item: Dict[str, Any] = {"name": name}
-            weight = entry.get("weight")
-            if weight is not None:
-                try:
-                    item["weight"] = float(weight)
-                except (TypeError, ValueError):
-                    pass
-            # Preserve pipeline compatibility field for validation
-            pipeline = str(entry.get("pipeline") or "").strip().lower()
-            if pipeline:
-                item["pipeline"] = pipeline
-            normalized.append(item)
-            continue
-        if isinstance(entry, str):
-            name = entry.strip()
-            if name:
-                normalized.append({"name": name})
-    return normalized
-
-
 def build_faceswap_settings(payload: Dict[str, Any], prompt_text: str) -> Dict[str, Any]:
     base_image_url = str(
         payload.get("base_image_url")
@@ -1526,7 +1368,7 @@ def build_faceswap_settings(payload: Dict[str, Any], prompt_text: str) -> Dict[s
         or ""
     ).strip()
     strength = _coerce_float(payload.get("strength", 0.8), 0.8)
-    num_steps = _coerce_int(payload.get("num_steps", payload.get("steps", 20)), 20)
+    num_steps = _coerce_int(payload.get("num_steps", payload.get("steps", 30)), 30)
     strength = max(0.0, min(1.0, strength))
     num_steps = _clamp(num_steps, 5, 60)
     settings: Dict[str, Any] = {
@@ -1566,7 +1408,7 @@ def submit_job() -> Any:
     raw_prompt = str(payload.get("prompt") or payload.get("data") or "")
     auto_model_request = not model_name or model_name in {"auto", "auto_image", "auto-image"}
     hardcore_prompt = has_hardcore_keywords(raw_prompt)
-    enhanced_prompt, model_override, position_lora, position_negative = enhance_prompt_for_positions(raw_prompt)
+    enhanced_prompt, model_override, _position_lora, position_negative = enhance_prompt_for_positions(raw_prompt)
 
     if model_override:
         # Drop overrides that are no longer available in the manifest.
@@ -1710,11 +1552,6 @@ def submit_job() -> Any:
             seed = int(seed) if seed is not None else None
         except (TypeError, ValueError):
             seed = None
-        lora_strength = payload.get("lora_strength")
-        try:
-            lora_strength = float(lora_strength) if lora_strength is not None else None
-        except (TypeError, ValueError):
-            lora_strength = None
         strength = payload.get("strength")
         try:
             strength = float(strength) if strength is not None else None
@@ -1748,7 +1585,6 @@ def submit_job() -> Any:
             "width": width,
             "height": height,
             "seed": seed,
-            "lora_strength": lora_strength,
             "init_image": init_image,
             "scheduler": scheduler,
             "strength": strength,
@@ -1759,11 +1595,6 @@ def submit_job() -> Any:
         task_type = "ANIMATEDIFF"
     else:
         prompt_text = enhanced_prompt
-        if position_lora:
-            lora_weight = resolve_position_lora_weight(position_lora)
-            lora_tag = f"<lora:{position_lora}:{lora_weight:.2f}>"
-            if lora_tag not in prompt_text:
-                prompt_text = f"{prompt_text}, {lora_tag}" if prompt_text else lora_tag
         if hardcore_prompt and HARDCORE_POSITIVE_SUFFIX.lower() not in prompt_text.lower():
             prompt_text = f"{prompt_text}, {HARDCORE_POSITIVE_SUFFIX}" if prompt_text else HARDCORE_POSITIVE_SUFFIX
         if prompt_text:
@@ -1778,34 +1609,6 @@ def submit_job() -> Any:
             seed = None
         # Pass through per-image overrides for the node to honor.
         job_settings: Dict[str, Any] = {"prompt": prompt_text}
-        payload_loras = payload.get("loras") or []
-        loras_list: List[Dict[str, Any]] = []
-        if isinstance(payload_loras, list):
-            for item in payload_loras:
-                if isinstance(item, dict):
-                    name = str(item.get("name") or "").strip()
-                    if not name:
-                        continue
-                    entry: Dict[str, Any] = {"name": name}
-                    if "weight" in item:
-                        entry["weight"] = item.get("weight")
-                    loras_list.append(entry)
-                else:
-                    name = str(item).strip()
-                    if name:
-                        loras_list.append({"name": name})
-        if position_lora:
-            def normalize_lora_ref(name: str) -> str:
-                base = Path(name).name
-                if base.lower().endswith(".safetensors"):
-                    base = base[:-len(".safetensors")]
-                return base.strip().lower()
-
-            position_norm = normalize_lora_ref(position_lora)
-            if not any(normalize_lora_ref(str(entry.get("name") or "")) == position_norm for entry in loras_list):
-                loras_list.append({"name": position_lora, "weight": resolve_position_lora_weight(position_lora)})
-        if loras_list:
-            job_settings["loras"] = loras_list
         if seed is not None:
             job_settings["seed"] = seed
         base_negative = str(cfg.get("negative_prompt_default") or "").strip() if cfg else ""
@@ -1844,11 +1647,10 @@ def submit_job() -> Any:
             job_settings["steps"] = 40
             job_settings["guidance"] = 7.5
 
-        injected_loras = job_settings.get("loras") or []
         log_event(
             "Enhanced prompt: "
             f"{prompt_text} | Selected model: {model_name_raw or model_name} | "
-            f"Injected LoRAs: {injected_loras} | Extra negatives: {position_negative or ''}"
+            f"Extra negatives: {position_negative or ''}"
         )
 
         overrides: Dict[str, Any] = {}
@@ -1950,9 +1752,9 @@ def generate_video_job() -> Any:
             frames = int(float(duration) * fps)
         except (TypeError, ValueError):
             frames = None
-    frames = _clamp(_coerce_int(frames or 16, 16), 1, 16)
+    frames = _clamp(_coerce_int(frames or 16, 16), 1, 24)
 
-    steps = _clamp(_coerce_int(payload.get("steps", 25), 25), 1, 50)
+    steps = _clamp(_coerce_int(payload.get("steps", 30), 30), 1, 50)
     guidance = _coerce_float(payload.get("guidance", 6.0), 6.0)
     guidance = max(0.0, min(guidance, 12.0))
     width = _clamp(_coerce_int(payload.get("width", 512), 512), 256, 512)
@@ -1972,9 +1774,6 @@ def generate_video_job() -> Any:
     motion_type = payload.get("motion_type")
     if motion_type:
         settings["motion_type"] = motion_type
-    lora_list = payload.get("lora_list")
-    if lora_list:
-        settings["lora_list"] = lora_list
     init_image = payload.get("init_image")
     if init_image:
         settings["init_image"] = init_image
@@ -2096,7 +1895,6 @@ def register() -> Any:
                 "start_time": data.get("start_time", unix_now()),
                 "role": data.get("role", "worker"),
                 "node_name": data.get("node_name") or node_id,
-                "loras": [],
             }
             NODES[node_id] = node
             log_event("Node registered", node_id=node_id, role=node["role"], version=data.get("version"))
@@ -2119,8 +1917,6 @@ def register() -> Any:
             )
         else:
             node["supports"] = node.get("supports", [])
-        if "loras" in data:
-            node["loras"] = _normalize_lora_catalog(data.get("loras"))
         util = data.get("gpu", {}).get("utilization") if isinstance(data.get("gpu"), dict) else data.get("utilization")
         util = float(util or node.get("utilization", 0.0))
         node["utilization"] = util
@@ -2211,13 +2007,10 @@ def get_creator_tasks() -> Any:
                     model_spec: Optional[Dict[str, Any]] = None
                     if isinstance(cfg, dict):
                         model_spec = {"name": job["model"], "pipeline": cfg.get("pipeline")}
-                        if cfg.get("lora") is not None:
-                            model_spec["lora"] = cfg.get("lora")
-                    # Decode prompt/negative_prompt for standard IMAGE_GEN jobs stored as JSON
+                        # Decode prompt/negative_prompt for standard IMAGE_GEN jobs stored as JSON
                     raw_data = job.get("data")
                     prompt_text = raw_data or ""
                     negative_prompt = ""
-                    loras: List[str] = []
                     image_overrides: Dict[str, Any] = {}
                     try:
                         parsed = json.loads(raw_data) if isinstance(raw_data, str) else None
@@ -2226,9 +2019,6 @@ def get_creator_tasks() -> Any:
                     if isinstance(parsed, dict):
                         prompt_text = str(parsed.get("prompt") or "")
                         negative_prompt = str(parsed.get("negative_prompt") or "")
-                        parsed_loras = parsed.get("loras") or []
-                        if isinstance(parsed_loras, list):
-                            loras = [item for item in parsed_loras if item]
                         # Forward per-image overrides stored in job settings.
                         for key in ("steps", "guidance", "width", "height", "sampler", "seed"):
                             if key not in parsed:
@@ -2274,7 +2064,6 @@ def get_creator_tasks() -> Any:
                             "data": raw_data,
                             "prompt": prompt_for_node,
                             "negative_prompt": negative_prompt,
-                            "loras": loras,
                             "queued_at": job.get("timestamp"),
                         }
                     if job_task_type == CREATOR_TASK_TYPE and image_overrides:
@@ -2310,7 +2099,6 @@ def get_creator_tasks() -> Any:
                 "wallet": task.get("wallet"),
                 "prompt": task.get("prompt") or task.get("data", ""),
                 "negative_prompt": task.get("negative_prompt") or "",
-                "loras": task.get("loras") or [],
                 "queued_at": task.get("queued_at"),
                 "assigned_at": task.get("assigned_at"),
             }
@@ -2348,7 +2136,6 @@ def get_creator_tasks() -> Any:
                         "width",
                         "height",
                         "seed",
-                        "lora_strength",
                         "init_image",
                         "strength",
                         "scheduler",
@@ -3115,6 +2902,51 @@ def payments_history() -> Any:
         return jsonify({"error": "invalid wallet"}), 400
     history = stripe_payments.get_payment_history(wallet)
     return jsonify({"wallet": wallet, "payments": history})
+
+
+@app.route("/stripe/create-subscription", methods=["POST"])
+def stripe_create_subscription() -> Any:
+    """Create a Stripe subscription for monthly credits + $HAI rewards."""
+    if not stripe_payments.STRIPE_ENABLED:
+        return jsonify({"error": "payments_disabled", "message": "Stripe payments are not enabled."}), 503
+    data = request.get_json() or {}
+    wallet = str(data.get("wallet", "")).strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    tier_id = str(data.get("tier_id", "")).strip()
+    if not tier_id:
+        return jsonify({"error": "missing tier_id"}), 400
+    success_url = str(data.get("success_url", "")).strip()
+    cancel_url = str(data.get("cancel_url", "")).strip()
+    if not success_url or not cancel_url:
+        return jsonify({"error": "missing success_url or cancel_url"}), 400
+    try:
+        result = stripe_payments.create_subscription(wallet, tier_id, success_url, cancel_url)
+        return jsonify(result)
+    except ValueError as exc:
+        return jsonify({"error": "invalid_tier", "message": str(exc)}), 400
+    except Exception as exc:
+        log_event("Stripe subscription error", level="error", error=str(exc))
+        return jsonify({"error": "subscription_failed", "message": "Could not create subscription."}), 500
+
+
+@app.route("/stripe/subscription-tiers", methods=["GET"])
+def stripe_subscription_tiers() -> Any:
+    """Return available subscription tiers."""
+    return jsonify({
+        "tiers": stripe_payments.SUBSCRIPTION_TIERS,
+        "stripe_enabled": stripe_payments.STRIPE_ENABLED,
+    })
+
+
+@app.route("/stripe/subscription-status", methods=["GET"])
+def stripe_subscription_status() -> Any:
+    """Return the active subscription for a wallet."""
+    wallet = request.args.get("wallet", "").strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    status = stripe_payments.get_subscription_status(wallet)
+    return jsonify({"wallet": wallet, "subscription": status})
 
 
 @app.route("/jobs/recent", methods=["GET"])

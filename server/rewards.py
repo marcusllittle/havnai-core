@@ -66,11 +66,19 @@ def compute_reward(
         runtime_sec = max(0.0, runtime_sec)
         runtime_factor = max(1.0, runtime_sec / baseline_runtime) if baseline_runtime > 0 else 1.0
 
+        # Quality factor: reward higher-step (higher quality) generations.
+        # Jobs completed at 30–35 steps receive a 1.2x bonus.
+        steps_used = metrics.get("steps") or metrics.get("num_steps")
+        if isinstance(steps_used, (int, float)) and 30 <= int(steps_used) <= 35:
+            quality_factor = 1.2
+        else:
+            quality_factor = 1.0
+
         # Success / failure factor
         status_norm = (status or "").lower()
         success_factor = 1.0 if status_norm == "success" else 0.0
 
-        reward = base_reward * weight_factor * compute_cost_factor * runtime_factor * success_factor
+        reward = base_reward * weight_factor * compute_cost_factor * runtime_factor * quality_factor * success_factor
         reward = round(float(reward), 6)
 
         factors = {
@@ -78,12 +86,11 @@ def compute_reward(
             "weight_factor": weight_factor,
             "compute_cost_factor": compute_cost_factor,
             "runtime_factor": runtime_factor,
+            "quality_factor": quality_factor,
             "success_factor": success_factor,
             "runtime_seconds": runtime_sec,
             "model_weight": model_weight,
             "pipeline": pipeline_norm,
-            # TODO: future quality verification boost
-            # "quality_factor": 1.0,
         }
         return reward, factors
     except Exception as exc:  # pragma: no cover - defensive

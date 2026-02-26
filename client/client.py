@@ -319,6 +319,12 @@ INSTANTID_CONTROLNET_REPO = (
     or "InstantX/InstantID"
 )
 ENABLE_XFORMERS = _env_flag("HAI_ENABLE_XFORMERS", False)
+FACE_SWAP_USE_XFORMERS = _env_flag("HAVNAI_FACE_SWAP_USE_XFORMERS", True)
+FACE_SWAP_PROFILE = (
+    os.environ.get("HAVNAI_FACE_SWAP_PROFILE")
+    or ENV_VARS.get("HAVNAI_FACE_SWAP_PROFILE")
+    or "auto"
+).strip().lower()
 SAFE_CUDA_KERNELS = _env_flag("HAI_SAFE_CUDA_KERNELS", True)
 IMAGE_PIPELINE_CACHE_SIZE = max(0, _env_int("HAI_IMAGE_PIPELINE_CACHE_SIZE", 1))
 PRELOAD_IMAGE_ON_STARTUP = _env_flag("HAI_PRELOAD_IMAGE_ON_STARTUP", True)
@@ -1257,14 +1263,45 @@ def _is_cuda_oom_error(exc: Exception) -> bool:
     )
 
 
-def _faceswap_attempt_profiles(requested_steps: int) -> List[Dict[str, Any]]:
-    # Start with best-quality crop and gracefully degrade on OOM.
-    profiles: List[Dict[str, Any]] = [
-        {"max_side": 1280, "min_side": 1024, "steps": requested_steps, "guidance": 5.0},
-        {"max_side": 1024, "min_side": 832, "steps": min(requested_steps, 26), "guidance": 4.8},
-        {"max_side": 896, "min_side": 704, "steps": min(requested_steps, 22), "guidance": 4.5},
+def _cuda_total_vram_gb() -> float:
+    if torch is None or not torch.cuda.is_available():
+        return 0.0
+    try:
+        props = torch.cuda.get_device_properties(0)
+        return float(props.total_memory) / float(1024**3)
+    except Exception:
+        return 0.0
+
+
+def _faceswap_attempt_profiles(requested_steps: int, requested_guidance: float) -> List[Dict[str, Any]]:
+    # Auto profile favors responsiveness on 12 GB cards (e.g. RTX 3060).
+    profile = FACE_SWAP_PROFILE
+    if profile in {"", "auto"}:
+        vram_gb = _cuda_total_vram_gb()
+        profile = "balanced_3060" if 0 < vram_gb <= 12.5 else "quality"
+
+    base_guidance = max(0.0, min(12.0, float(requested_guidance)))
+
+    if profile in {"quality", "high"}:
+        return [
+            {"max_side": 1280, "min_side": 1024, "steps": requested_steps, "guidance": base_guidance},
+            {"max_side": 1024, "min_side": 832, "steps": min(requested_steps, 24), "guidance": max(0.0, base_guidance - 0.2)},
+            {"max_side": 896, "min_side": 704, "steps": min(requested_steps, 20), "guidance": max(0.0, base_guidance - 0.4)},
+        ]
+
+    if profile in {"fast", "fast_3060"}:
+        return [
+            {"max_side": 896, "min_side": 704, "steps": min(requested_steps, 14), "guidance": max(0.0, base_guidance - 0.2)},
+            {"max_side": 832, "min_side": 640, "steps": min(requested_steps, 12), "guidance": max(0.0, base_guidance - 0.4)},
+            {"max_side": 768, "min_side": 576, "steps": min(requested_steps, 10), "guidance": max(0.0, base_guidance - 0.6)},
+        ]
+
+    # Default balanced_3060 profile.
+    return [
+        {"max_side": 960, "min_side": 768, "steps": min(requested_steps, 18), "guidance": base_guidance},
+        {"max_side": 896, "min_side": 704, "steps": min(requested_steps, 16), "guidance": max(0.0, base_guidance - 0.2)},
+        {"max_side": 832, "min_side": 640, "steps": min(requested_steps, 14), "guidance": max(0.0, base_guidance - 0.4)},
     ]
-    return profiles
 
 
 def _candidate_instantid_adapter_paths() -> List[Path]:
@@ -1503,6 +1540,8 @@ def _run_faceswap_task(
         strength = max(0.0, min(1.0, strength))
         num_steps = coerce_int(task.get("num_steps"), 20)
         num_steps = max(5, min(60, num_steps))
+        guidance = coerce_float(task.get("guidance"), 4.8)
+        guidance = max(0.0, min(12.0, guidance))
         seed = task.get("seed")
         try:
             seed = int(seed) if seed is not None else random.randint(0, 2**31 - 1)
@@ -1546,12 +1585,18 @@ def _run_faceswap_task(
             # generic pipeline .to(...), so force placement to avoid cpu/cuda mismatch.
             if hasattr(pipe, "image_proj_model") and pipe.image_proj_model is not None:
                 pipe.image_proj_model.to(device=device, dtype=dtype)
-            if hasattr(pipe, "enable_attention_slicing"):
+            xformers_enabled = False
+            if FACE_SWAP_USE_XFORMERS and hasattr(pipe, "enable_xformers_memory_efficient_attention"):
+                try:
+                    pipe.enable_xformers_memory_efficient_attention()
+                    xformers_enabled = True
+                    log("Face swap xformers attention enabled", prefix="✅", task_id=task_id)
+                except Exception as exc:
+                    log(f"Face swap xformers unavailable: {exc}", prefix="ℹ️", task_id=task_id)
+            if hasattr(pipe, "enable_attention_slicing") and not xformers_enabled:
                 pipe.enable_attention_slicing("max")
-            if hasattr(pipe, "enable_vae_slicing"):
-                pipe.enable_vae_slicing()
-            if hasattr(pipe, "enable_vae_tiling"):
-                pipe.enable_vae_tiling()
+            if hasattr(pipe, "set_progress_bar_config"):
+                pipe.set_progress_bar_config(disable=True)
             _FACE_SWAP_PIPE = pipe
             _FACE_SWAP_PIPE_MODEL = pipeline_cache_key
 
@@ -1563,7 +1608,7 @@ def _run_faceswap_task(
             image_embeds = torch.from_numpy(image_embeds)
         if isinstance(image_embeds, torch.Tensor):
             image_embeds = image_embeds.to(device=device, dtype=dtype)
-        attempt_profiles = _faceswap_attempt_profiles(num_steps)
+        attempt_profiles = _faceswap_attempt_profiles(num_steps, guidance)
         composed: Optional["Image.Image"] = None
         last_exc: Optional[Exception] = None
 
@@ -1581,6 +1626,14 @@ def _run_faceswap_task(
             guidance_scale = float(profile["guidance"])
             attempt_steps = int(profile["steps"])
             generator = torch.Generator(device=device).manual_seed(seed)
+            log(
+                "Face swap attempt "
+                f"{idx}/{len(attempt_profiles)} "
+                f"@ {cropped_image.size[0]}x{cropped_image.size[1]} "
+                f"steps={attempt_steps} guidance={guidance_scale:.2f}",
+                prefix="🎭",
+                task_id=task_id,
+            )
 
             try:
                 result = _FACE_SWAP_PIPE(
@@ -1600,6 +1653,11 @@ def _run_faceswap_task(
                 swapped_crop = swapped_crop.resize((crop_w, crop_h), resample=Image.LANCZOS)
                 composed = base_image.copy()
                 composed.paste(swapped_crop, (crop_x, crop_y))
+                log(
+                    f"Face swap attempt {idx} finished successfully",
+                    prefix="✅",
+                    task_id=task_id,
+                )
                 break
             except Exception as exc:
                 last_exc = exc

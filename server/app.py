@@ -2683,6 +2683,7 @@ def get_creator_tasks() -> Any:
                         "face_source_url",
                         "strength",
                         "num_steps",
+                        "guidance",
                         "seed",
                     ):
                         if key in fs_settings and fs_settings[key] is not None:

@@ -324,7 +324,7 @@ BACKOFF_BASE = 5
 MAX_BACKOFF = 60
 START_TIME = time.time()
 
-IMAGE_STEPS = int(os.environ.get("HAI_STEPS", "30"))
+IMAGE_STEPS = int(os.environ.get("HAI_STEPS", "20"))
 IMAGE_GUIDANCE = float(os.environ.get("HAI_GUIDANCE", "7.0"))
 IMAGE_WIDTH = int(os.environ.get("HAI_WIDTH", "512"))
 IMAGE_HEIGHT = int(os.environ.get("HAI_HEIGHT", "512"))

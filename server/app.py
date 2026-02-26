@@ -73,7 +73,6 @@ from common.prompt_enhancers import (
     SHARPNESS_NEGATIVE,
     enhance_prompt_for_positions,
     has_hardcore_keywords,
-    resolve_position_lora_weight,
 )
 
 # Reward weights bootstrap – enriched at runtime via registration
@@ -137,6 +136,12 @@ LTX2_DEFAULT_GUIDANCE = float(os.getenv("HAVNAI_LTX2_GUIDANCE", str(GPU_PROFILE[
 
 # Hard timeout (seconds) for a single video generation job.  0 = no limit.
 LTX2_JOB_TIMEOUT = int(os.getenv("HAVNAI_LTX2_JOB_TIMEOUT", "300"))
+ENABLE_LEGACY_AUTO_HARDCORE = os.getenv("HAVNAI_ENABLE_LEGACY_AUTO_HARDCORE", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 # Reward configuration (can be overridden via environment variables)
 REWARD_CONFIG: Dict[str, float] = {
@@ -1326,6 +1331,16 @@ def _coerce_float(value: Any, default: float) -> float:
         return default
 
 
+def _is_truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
 def _clamp(value: int, min_val: int, max_val: int) -> int:
     return max(min_val, min(max_val, value))
 
@@ -1401,8 +1416,21 @@ def submit_job() -> Any:
     weight = payload.get("weight")
     raw_prompt = str(payload.get("prompt") or payload.get("data") or "")
     auto_model_request = not model_name or model_name in {"auto", "auto_image", "auto-image"}
-    hardcore_prompt = has_hardcore_keywords(raw_prompt)
-    enhanced_prompt, model_override, position_lora, position_negative = enhance_prompt_for_positions(raw_prompt)
+    explicit_hardcore_mode = _is_truthy(payload.get("hardcore_mode"))
+    legacy_auto_hardcore = ENABLE_LEGACY_AUTO_HARDCORE and has_hardcore_keywords(raw_prompt)
+    hardcore_prompt = explicit_hardcore_mode or legacy_auto_hardcore
+    enhanced_prompt = raw_prompt
+    model_override: Optional[str] = None
+    position_negative: Optional[str] = None
+    if hardcore_prompt:
+        (
+            enhanced_prompt,
+            auto_model_override,
+            _position_lora,
+            position_negative,
+        ) = enhance_prompt_for_positions(raw_prompt)
+        if legacy_auto_hardcore and not explicit_hardcore_mode:
+            model_override = auto_model_override
 
     if model_override:
         # Drop overrides that are no longer available in the manifest.
@@ -1589,11 +1617,6 @@ def submit_job() -> Any:
         task_type = "ANIMATEDIFF"
     else:
         prompt_text = enhanced_prompt
-        if position_lora:
-            lora_weight = resolve_position_lora_weight(position_lora)
-            lora_tag = f"<lora:{position_lora}:{lora_weight:.2f}>"
-            if lora_tag not in prompt_text:
-                prompt_text = f"{prompt_text}, {lora_tag}" if prompt_text else lora_tag
         if hardcore_prompt and HARDCORE_POSITIVE_SUFFIX.lower() not in prompt_text.lower():
             prompt_text = f"{prompt_text}, {HARDCORE_POSITIVE_SUFFIX}" if prompt_text else HARDCORE_POSITIVE_SUFFIX
         if prompt_text:
@@ -1624,18 +1647,9 @@ def submit_job() -> Any:
                     name = str(item).strip()
                     if name:
                         loras_list.append({"name": name})
-        if position_lora:
-            def normalize_lora_ref(name: str) -> str:
-                base = Path(name).name
-                if base.lower().endswith(".safetensors"):
-                    base = base[:-len(".safetensors")]
-                return base.strip().lower()
-
-            position_norm = normalize_lora_ref(position_lora)
-            if not any(normalize_lora_ref(str(entry.get("name") or "")) == position_norm for entry in loras_list):
-                loras_list.append({"name": position_lora, "weight": resolve_position_lora_weight(position_lora)})
         if loras_list:
             job_settings["loras"] = loras_list
+            job_settings["requested_loras"] = loras_list
         if seed is not None:
             job_settings["seed"] = seed
         base_negative = str(cfg.get("negative_prompt_default") or "").strip() if cfg else ""
@@ -1670,15 +1684,15 @@ def submit_job() -> Any:
                 job_settings["height"] = cfg["height"]
             if cfg.get("sampler"):
                 job_settings["sampler"] = cfg["sampler"]
-        if hardcore_prompt:
+        if legacy_auto_hardcore and not explicit_hardcore_mode:
             job_settings["steps"] = 40
             job_settings["guidance"] = 7.5
 
-        injected_loras = job_settings.get("loras") or []
+        requested_loras = job_settings.get("loras") or []
         log_event(
             "Enhanced prompt: "
             f"{prompt_text} | Selected model: {model_name_raw or model_name} | "
-            f"Injected LoRAs: {injected_loras} | Extra negatives: {position_negative or ''}"
+            f"Requested LoRAs: {requested_loras} | Extra negatives: {position_negative or ''}"
         )
 
         overrides: Dict[str, Any] = {}

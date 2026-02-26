@@ -1368,7 +1368,7 @@ def build_faceswap_settings(payload: Dict[str, Any], prompt_text: str) -> Dict[s
         or ""
     ).strip()
     strength = _coerce_float(payload.get("strength", 0.8), 0.8)
-    num_steps = _coerce_int(payload.get("num_steps", payload.get("steps", 30)), 30)
+    num_steps = _coerce_int(payload.get("num_steps", payload.get("steps", 20)), 20)
     strength = max(0.0, min(1.0, strength))
     num_steps = _clamp(num_steps, 5, 60)
     settings: Dict[str, Any] = {

@@ -1164,6 +1164,8 @@ def prepare_mask_and_pose_control(
     padding: int = 60,
     mask_grow: int = 40,
     resize: bool = True,
+    resize_max_side: int = 1280,
+    resize_min_side: int = 1024,
 ) -> Tuple[Tuple["Image.Image", "Image.Image", "Image.Image"], Tuple[int, int, int, int]]:
     if np is None or cv2 is None:
         raise RuntimeError("opencv + numpy required for face swap preprocessing")
@@ -1203,13 +1205,32 @@ def prepare_mask_and_pose_control(
     original_width, original_height = image.size
     kps -= [p_x1, p_y1]
     if resize:
-        mask = resize_img(mask)
-        image = resize_img(image)
+        mask = resize_img(mask, max_side=resize_max_side, min_side=resize_min_side)
+        image = resize_img(image, max_side=resize_max_side, min_side=resize_min_side)
         new_width, new_height = image.size
         kps *= [new_width / original_width, new_height / original_height]
     control_image = draw_kps(image, kps)
 
     return (mask, image, control_image), (p_x1, p_y1, original_width, original_height)
+
+
+def _is_cuda_oom_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (
+        "out of memory" in text
+        or "cudaerrormemoryallocation" in text
+        or "cublas_status_alloc_failed" in text
+    )
+
+
+def _faceswap_attempt_profiles(requested_steps: int) -> List[Dict[str, Any]]:
+    # Start with best-quality crop and gracefully degrade on OOM.
+    profiles: List[Dict[str, Any]] = [
+        {"max_side": 1280, "min_side": 1024, "steps": requested_steps, "guidance": 5.0},
+        {"max_side": 1024, "min_side": 832, "steps": min(requested_steps, 26), "guidance": 4.8},
+        {"max_side": 896, "min_side": 704, "steps": min(requested_steps, 22), "guidance": 4.5},
+    ]
+    return profiles
 
 
 def _candidate_instantid_adapter_paths() -> List[Path]:
@@ -1471,10 +1492,6 @@ def _run_faceswap_task(
         if source_face is None:
             raise RuntimeError("No face detected in face source image")
 
-        crop_inputs, crop_region = prepare_mask_and_pose_control(base_image, base_face, padding=70, mask_grow=48)
-        mask_image, cropped_image, control_image = crop_inputs
-        crop_x, crop_y, crop_w, crop_h = crop_region
-
         adapter_path = _resolve_instantid_adapter_path()
         controlnet_ref = _resolve_instantid_controlnet_ref()
         dtype = torch.float16 if torch.cuda.is_available() else torch.float32
@@ -1497,6 +1514,10 @@ def _run_faceswap_task(
                 pipe.image_proj_model.to(device=device, dtype=dtype)
             if hasattr(pipe, "enable_attention_slicing"):
                 pipe.enable_attention_slicing("max")
+            if hasattr(pipe, "enable_vae_slicing"):
+                pipe.enable_vae_slicing()
+            if hasattr(pipe, "enable_vae_tiling"):
+                pipe.enable_vae_tiling()
             _FACE_SWAP_PIPE = pipe
             _FACE_SWAP_PIPE_MODEL = pipeline_cache_key
 
@@ -1508,25 +1529,67 @@ def _run_faceswap_task(
             image_embeds = torch.from_numpy(image_embeds)
         if isinstance(image_embeds, torch.Tensor):
             image_embeds = image_embeds.to(device=device, dtype=dtype)
+        attempt_profiles = _faceswap_attempt_profiles(num_steps)
+        composed: Optional["Image.Image"] = None
+        last_exc: Optional[Exception] = None
 
-        generator = torch.Generator(device=device).manual_seed(seed)
-        result = _FACE_SWAP_PIPE(
-            prompt=prompt,
-            negative_prompt=negative_prompt or None,
-            image=cropped_image,
-            mask_image=mask_image,
-            control_image=control_image,
-            image_embeds=image_embeds,
-            num_inference_steps=num_steps,
-            guidance_scale=5.0,
-            strength=strength,
-            controlnet_conditioning_scale=0.8,
-            generator=generator,
-        )
-        swapped_crop = result.images[0]
-        swapped_crop = swapped_crop.resize((crop_w, crop_h), resample=Image.LANCZOS)
-        composed = base_image.copy()
-        composed.paste(swapped_crop, (crop_x, crop_y))
+        for idx, profile in enumerate(attempt_profiles, start=1):
+            crop_inputs, crop_region = prepare_mask_and_pose_control(
+                base_image,
+                base_face,
+                padding=70,
+                mask_grow=48,
+                resize_max_side=int(profile["max_side"]),
+                resize_min_side=int(profile["min_side"]),
+            )
+            mask_image, cropped_image, control_image = crop_inputs
+            crop_x, crop_y, crop_w, crop_h = crop_region
+            guidance_scale = float(profile["guidance"])
+            attempt_steps = int(profile["steps"])
+            generator = torch.Generator(device=device).manual_seed(seed)
+
+            try:
+                result = _FACE_SWAP_PIPE(
+                    prompt=prompt,
+                    negative_prompt=negative_prompt or None,
+                    image=cropped_image,
+                    mask_image=mask_image,
+                    control_image=control_image,
+                    image_embeds=image_embeds,
+                    num_inference_steps=attempt_steps,
+                    guidance_scale=guidance_scale,
+                    strength=strength,
+                    controlnet_conditioning_scale=0.8,
+                    generator=generator,
+                )
+                swapped_crop = result.images[0]
+                swapped_crop = swapped_crop.resize((crop_w, crop_h), resample=Image.LANCZOS)
+                composed = base_image.copy()
+                composed.paste(swapped_crop, (crop_x, crop_y))
+                break
+            except Exception as exc:
+                last_exc = exc
+                if (
+                    idx < len(attempt_profiles)
+                    and torch.cuda.is_available()
+                    and _is_cuda_oom_error(exc)
+                ):
+                    log(
+                        "Face swap hit CUDA OOM "
+                        f"(attempt {idx}/{len(attempt_profiles)} @ {attempt_steps} steps). "
+                        "Retrying with lower VRAM settings.",
+                        prefix="⚠️",
+                        task_id=task_id,
+                    )
+                    try:
+                        torch.cuda.empty_cache()
+                    except Exception:
+                        pass
+                    continue
+                raise
+
+        if composed is None:
+            raise RuntimeError(str(last_exc) if last_exc else "face swap produced no image")
 
         output_path = OUTPUTS_DIR / f"{task_id}.png"
         composed.save(output_path)

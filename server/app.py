@@ -120,8 +120,8 @@ TASK_SUPPORT_MAP = {
 # Individual settings can still be overridden via HAVNAI_LTX2_STEPS, etc.
 # ---------------------------------------------------------------------------
 _GPU_PROFILES: Dict[str, Dict[str, Any]] = {
-    "fast_3060": {"steps": 30, "frames": 16, "fps": 8, "width": 512, "height": 512, "guidance": 7.0},
-    "quality":   {"steps": 30, "frames": 24, "fps": 8, "width": 512, "height": 512, "guidance": 7.0},
+    "fast_3060": {"steps": 20, "frames": 16, "fps": 8, "width": 512, "height": 512, "guidance": 7.0},
+    "quality":   {"steps": 30, "frames": 16, "fps": 8, "width": 512, "height": 512, "guidance": 7.0},
 }
 _GPU_PROFILE_NAME = os.getenv("HAVNAI_GPU_PROFILE", "fast_3060").strip().lower()
 GPU_PROFILE = _GPU_PROFILES.get(_GPU_PROFILE_NAME, _GPU_PROFILES["fast_3060"])
@@ -136,6 +136,36 @@ LTX2_DEFAULT_GUIDANCE = float(os.getenv("HAVNAI_LTX2_GUIDANCE", str(GPU_PROFILE[
 
 # Hard timeout (seconds) for a single video generation job.  0 = no limit.
 LTX2_JOB_TIMEOUT = int(os.getenv("HAVNAI_LTX2_JOB_TIMEOUT", "300"))
+
+# Runtime defaults profile used when payload and model defaults do not provide values.
+_RUNTIME_DEFAULT_PROFILES: Dict[str, Dict[str, Dict[str, Any]]] = {
+    "aggressive": {
+        "image_sdxl": {"steps": 24, "guidance": 5.8, "width": 768, "height": 1152},
+        "image_sd15": {"steps": 24, "guidance": 6.2, "width": 576, "height": 768},
+        "video_ltx2": {"steps": 16, "guidance": 5.0, "frames": 12, "fps": 8, "width": 512, "height": 512},
+        "video_animatediff": {"steps": 18, "guidance": 5.5, "frames": 16, "fps": 8, "width": 512, "height": 512},
+        "face_swap": {"num_steps": 14, "guidance": 4.5, "strength": 0.75},
+    },
+    "balanced": {
+        "image_sdxl": {"steps": 28, "guidance": 6.0, "width": 768, "height": 1152},
+        "image_sd15": {"steps": 28, "guidance": 6.5, "width": 576, "height": 768},
+        "video_ltx2": {"steps": 20, "guidance": 6.0, "frames": 16, "fps": 8, "width": 512, "height": 512},
+        "video_animatediff": {"steps": 22, "guidance": 6.0, "frames": 16, "fps": 8, "width": 512, "height": 512},
+        "face_swap": {"num_steps": 18, "guidance": 5.0, "strength": 0.8},
+    },
+    "quality": {
+        "image_sdxl": {"steps": 32, "guidance": 6.5, "width": 832, "height": 1216},
+        "image_sd15": {"steps": 36, "guidance": 7.0, "width": 640, "height": 896},
+        "video_ltx2": {"steps": 28, "guidance": 7.0, "frames": 16, "fps": 8, "width": 512, "height": 512},
+        "video_animatediff": {"steps": 28, "guidance": 7.0, "frames": 16, "fps": 8, "width": 512, "height": 512},
+        "face_swap": {"num_steps": 24, "guidance": 6.0, "strength": 0.85},
+    },
+}
+RUNTIME_PROFILE_NAME = os.getenv("HAVNAI_RUNTIME_PROFILE", "aggressive").strip().lower()
+RUNTIME_PROFILE = _RUNTIME_DEFAULT_PROFILES.get(
+    RUNTIME_PROFILE_NAME,
+    _RUNTIME_DEFAULT_PROFILES["aggressive"],
+)
 ENABLE_LEGACY_AUTO_HARDCORE = os.getenv("HAVNAI_ENABLE_LEGACY_AUTO_HARDCORE", "").strip().lower() in {
     "1",
     "true",
@@ -1357,7 +1387,364 @@ def _clamp_float(value: Any, default: float, min_val: float, max_val: float) -> 
     return max(min_val, min(max_val, v))
 
 
-def build_faceswap_settings(payload: Dict[str, Any], prompt_text: str) -> Dict[str, Any]:
+def _try_parse_int(value: Any) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _try_parse_float(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_default_value(
+    *,
+    payload: Dict[str, Any],
+    payload_keys: Tuple[str, ...],
+    model_defaults: Dict[str, Any],
+    model_keys: Tuple[str, ...],
+    profile_defaults: Dict[str, Any],
+    profile_key: str,
+    env_candidates: Tuple[str, ...],
+    parse_value: Any,
+) -> Tuple[Any, str]:
+    for key in payload_keys:
+        parsed = parse_value(payload.get(key))
+        if parsed is not None:
+            return parsed, "user"
+
+    for key in model_keys:
+        parsed = parse_value(model_defaults.get(key))
+        if parsed is not None:
+            return parsed, "model"
+
+    parsed_profile = parse_value(profile_defaults.get(profile_key))
+    if parsed_profile is not None:
+        return parsed_profile, "profile"
+
+    for env_key in env_candidates:
+        parsed = parse_value(os.getenv(env_key))
+        if parsed is not None:
+            return parsed, "env"
+
+    return parse_value(0), "profile"
+
+
+def _resolve_str_default(
+    *,
+    payload: Dict[str, Any],
+    payload_keys: Tuple[str, ...],
+    model_defaults: Dict[str, Any],
+    model_keys: Tuple[str, ...],
+    profile_defaults: Dict[str, Any],
+    profile_key: str,
+    env_candidates: Tuple[str, ...],
+) -> Tuple[str, str]:
+    for key in payload_keys:
+        raw = payload.get(key)
+        if raw is None:
+            continue
+        value = str(raw).strip()
+        if value:
+            return value, "user"
+
+    for key in model_keys:
+        raw = model_defaults.get(key)
+        if raw is None:
+            continue
+        value = str(raw).strip()
+        if value:
+            return value, "model"
+
+    profile_raw = profile_defaults.get(profile_key)
+    if profile_raw is not None:
+        value = str(profile_raw).strip()
+        if value:
+            return value, "profile"
+
+    for env_key in env_candidates:
+        env_raw = os.getenv(env_key)
+        if env_raw:
+            value = str(env_raw).strip()
+            if value:
+                return value, "env"
+
+    return "", "profile"
+
+
+def resolve_image_defaults(
+    model_cfg: Dict[str, Any],
+    payload: Dict[str, Any],
+    profile: Dict[str, Dict[str, Any]],
+) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    pipeline = str(model_cfg.get("pipeline") or "sd15").lower()
+    profile_key = "image_sdxl" if "sdxl" in pipeline or "xl" in pipeline else "image_sd15"
+    profile_defaults = dict(profile.get(profile_key) or {})
+    model_defaults = dict(model_cfg or {})
+
+    steps, steps_source = _resolve_default_value(
+        payload=payload,
+        payload_keys=("steps",),
+        model_defaults=model_defaults,
+        model_keys=("steps",),
+        profile_defaults=profile_defaults,
+        profile_key="steps",
+        env_candidates=("HAVNAI_IMAGE_STEPS", "HAI_STEPS"),
+        parse_value=_try_parse_int,
+    )
+    guidance, guidance_source = _resolve_default_value(
+        payload=payload,
+        payload_keys=("guidance",),
+        model_defaults=model_defaults,
+        model_keys=("guidance",),
+        profile_defaults=profile_defaults,
+        profile_key="guidance",
+        env_candidates=("HAVNAI_IMAGE_GUIDANCE", "HAI_GUIDANCE"),
+        parse_value=_try_parse_float,
+    )
+    width, width_source = _resolve_default_value(
+        payload=payload,
+        payload_keys=("width",),
+        model_defaults=model_defaults,
+        model_keys=("width",),
+        profile_defaults=profile_defaults,
+        profile_key="width",
+        env_candidates=("HAVNAI_IMAGE_WIDTH", "HAI_WIDTH"),
+        parse_value=_try_parse_int,
+    )
+    height, height_source = _resolve_default_value(
+        payload=payload,
+        payload_keys=("height",),
+        model_defaults=model_defaults,
+        model_keys=("height",),
+        profile_defaults=profile_defaults,
+        profile_key="height",
+        env_candidates=("HAVNAI_IMAGE_HEIGHT", "HAI_HEIGHT"),
+        parse_value=_try_parse_int,
+    )
+    sampler, sampler_source = _resolve_str_default(
+        payload=payload,
+        payload_keys=("sampler",),
+        model_defaults=model_defaults,
+        model_keys=("sampler",),
+        profile_defaults=profile_defaults,
+        profile_key="sampler",
+        env_candidates=("HAVNAI_IMAGE_SAMPLER",),
+    )
+
+    resolved = {
+        "steps": _clamp(int(steps), 5, 50),
+        "guidance": max(1.0, min(15.0, float(guidance))),
+        "width": _clamp(int(width), 256, 1536),
+        "height": _clamp(int(height), 256, 1536),
+    }
+    sources = {
+        "steps": steps_source,
+        "guidance": guidance_source,
+        "width": width_source,
+        "height": height_source,
+    }
+    if sampler:
+        resolved["sampler"] = sampler
+        sources["sampler"] = sampler_source
+    return resolved, sources
+
+
+def resolve_video_defaults(
+    model_cfg: Dict[str, Any],
+    payload: Dict[str, Any],
+    profile: Dict[str, Dict[str, Any]],
+    task_type: str,
+) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    normalized_task = _normalize_task_type(task_type)
+    is_animatediff = normalized_task == "ANIMATEDIFF"
+    profile_key = "video_animatediff" if is_animatediff else "video_ltx2"
+    profile_defaults = dict(profile.get(profile_key) or {})
+    model_defaults = dict((model_cfg or {}).get("video_defaults") or {})
+
+    if is_animatediff:
+        env_steps = ("HAVNAI_ANIMATEDIFF_STEPS", "HAVNAI_VIDEO_STEPS")
+        env_guidance = ("HAVNAI_ANIMATEDIFF_GUIDANCE", "HAVNAI_VIDEO_GUIDANCE")
+        env_frames = ("HAVNAI_ANIMATEDIFF_FRAMES", "HAVNAI_VIDEO_FRAMES")
+        env_fps = ("HAVNAI_ANIMATEDIFF_FPS", "HAVNAI_VIDEO_FPS")
+        env_width = ("HAVNAI_ANIMATEDIFF_WIDTH", "HAVNAI_VIDEO_WIDTH")
+        env_height = ("HAVNAI_ANIMATEDIFF_HEIGHT", "HAVNAI_VIDEO_HEIGHT")
+    else:
+        env_steps = ("HAVNAI_LTX2_STEPS", "HAVNAI_VIDEO_STEPS")
+        env_guidance = ("HAVNAI_LTX2_GUIDANCE", "HAVNAI_VIDEO_GUIDANCE")
+        env_frames = ("HAVNAI_LTX2_FRAMES", "HAVNAI_VIDEO_FRAMES")
+        env_fps = ("HAVNAI_LTX2_FPS", "HAVNAI_VIDEO_FPS")
+        env_width = ("HAVNAI_LTX2_WIDTH", "HAVNAI_VIDEO_WIDTH")
+        env_height = ("HAVNAI_LTX2_HEIGHT", "HAVNAI_VIDEO_HEIGHT")
+
+    steps, steps_source = _resolve_default_value(
+        payload=payload,
+        payload_keys=("steps",),
+        model_defaults=model_defaults,
+        model_keys=("steps",),
+        profile_defaults=profile_defaults,
+        profile_key="steps",
+        env_candidates=env_steps,
+        parse_value=_try_parse_int,
+    )
+    guidance, guidance_source = _resolve_default_value(
+        payload=payload,
+        payload_keys=("guidance",),
+        model_defaults=model_defaults,
+        model_keys=("guidance",),
+        profile_defaults=profile_defaults,
+        profile_key="guidance",
+        env_candidates=env_guidance,
+        parse_value=_try_parse_float,
+    )
+    width, width_source = _resolve_default_value(
+        payload=payload,
+        payload_keys=("width",),
+        model_defaults=model_defaults,
+        model_keys=("width",),
+        profile_defaults=profile_defaults,
+        profile_key="width",
+        env_candidates=env_width,
+        parse_value=_try_parse_int,
+    )
+    height, height_source = _resolve_default_value(
+        payload=payload,
+        payload_keys=("height",),
+        model_defaults=model_defaults,
+        model_keys=("height",),
+        profile_defaults=profile_defaults,
+        profile_key="height",
+        env_candidates=env_height,
+        parse_value=_try_parse_int,
+    )
+    frames, frames_source = _resolve_default_value(
+        payload=payload,
+        payload_keys=("frames",),
+        model_defaults=model_defaults,
+        model_keys=("frames",),
+        profile_defaults=profile_defaults,
+        profile_key="frames",
+        env_candidates=env_frames,
+        parse_value=_try_parse_int,
+    )
+    fps, fps_source = _resolve_default_value(
+        payload=payload,
+        payload_keys=("fps",),
+        model_defaults=model_defaults,
+        model_keys=("fps",),
+        profile_defaults=profile_defaults,
+        profile_key="fps",
+        env_candidates=env_fps,
+        parse_value=_try_parse_int,
+    )
+
+    if is_animatediff:
+        width_val = int(width)
+        height_val = int(height)
+        if width_val not in {512, 768}:
+            width_val = 512
+        if height_val not in {512, 768}:
+            height_val = 512
+        resolved = {
+            "steps": _clamp(int(steps), 1, 50),
+            "guidance": max(0.0, min(12.0, float(guidance))),
+            "width": width_val,
+            "height": height_val,
+            "frames": _clamp(int(frames), 1, 64),
+            "fps": _clamp(int(fps), 1, 24),
+        }
+    else:
+        resolved = {
+            "steps": _clamp(int(steps), 1, 50),
+            "guidance": max(0.0, min(12.0, float(guidance))),
+            "width": _clamp(int(width), 256, 768),
+            "height": _clamp(int(height), 256, 768),
+            "frames": _clamp(int(frames), 1, 16),
+            "fps": _clamp(int(fps), 1, 12),
+        }
+    sources = {
+        "steps": steps_source,
+        "guidance": guidance_source,
+        "width": width_source,
+        "height": height_source,
+        "frames": frames_source,
+        "fps": fps_source,
+    }
+    return resolved, sources
+
+
+def resolve_faceswap_defaults(
+    model_cfg: Dict[str, Any],
+    payload: Dict[str, Any],
+    profile: Dict[str, Dict[str, Any]],
+) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    profile_defaults = dict(profile.get("face_swap") or {})
+    model_defaults = dict((model_cfg or {}).get("face_swap_defaults") or {})
+
+    num_steps, num_steps_source = _resolve_default_value(
+        payload=payload,
+        payload_keys=("num_steps", "steps"),
+        model_defaults=model_defaults,
+        model_keys=("num_steps", "steps"),
+        profile_defaults=profile_defaults,
+        profile_key="num_steps",
+        env_candidates=("HAVNAI_FACE_SWAP_STEPS",),
+        parse_value=_try_parse_int,
+    )
+    guidance, guidance_source = _resolve_default_value(
+        payload=payload,
+        payload_keys=("guidance",),
+        model_defaults=model_defaults,
+        model_keys=("guidance",),
+        profile_defaults=profile_defaults,
+        profile_key="guidance",
+        env_candidates=("HAVNAI_FACE_SWAP_GUIDANCE",),
+        parse_value=_try_parse_float,
+    )
+    strength, strength_source = _resolve_default_value(
+        payload=payload,
+        payload_keys=("strength",),
+        model_defaults=model_defaults,
+        model_keys=("strength",),
+        profile_defaults=profile_defaults,
+        profile_key="strength",
+        env_candidates=("HAVNAI_FACE_SWAP_STRENGTH",),
+        parse_value=_try_parse_float,
+    )
+
+    resolved = {
+        "num_steps": _clamp(int(num_steps), 5, 60),
+        "guidance": max(0.0, min(12.0, float(guidance))),
+        "strength": max(0.0, min(1.0, float(strength))),
+    }
+    sources = {
+        "num_steps": num_steps_source,
+        "guidance": guidance_source,
+        "strength": strength_source,
+    }
+    return resolved, sources
+
+
+def _resolve_confidence(default_sources: Dict[str, str]) -> str:
+    unique_sources = {str(value) for value in default_sources.values() if value}
+    if not unique_sources:
+        return "fallback"
+    if unique_sources == {"model"}:
+        return "high"
+    if unique_sources <= {"model", "profile"}:
+        return "medium"
+    return "fallback"
+
+
+def build_faceswap_settings(
+    payload: Dict[str, Any],
+    prompt_text: str,
+    model_cfg: Dict[str, Any],
+) -> Dict[str, Any]:
     base_image_url = str(
         payload.get("base_image_url")
         or payload.get("base_image_b64")
@@ -1376,16 +1763,16 @@ def build_faceswap_settings(payload: Dict[str, Any], prompt_text: str) -> Dict[s
         or payload.get("face_source_path")
         or ""
     ).strip()
-    strength = _coerce_float(payload.get("strength", 0.8), 0.8)
-    num_steps = _coerce_int(payload.get("num_steps", payload.get("steps", 20)), 20)
-    strength = max(0.0, min(1.0, strength))
-    num_steps = _clamp(num_steps, 5, 60)
+    resolved_defaults, default_sources = resolve_faceswap_defaults(model_cfg, payload, RUNTIME_PROFILE)
     settings: Dict[str, Any] = {
         "prompt": prompt_text,
         "base_image_url": base_image_url,
         "face_source_url": face_source_url,
-        "strength": strength,
-        "num_steps": num_steps,
+        "strength": resolved_defaults["strength"],
+        "num_steps": resolved_defaults["num_steps"],
+        "guidance": resolved_defaults["guidance"],
+        "defaults_source": {"face_swap": default_sources},
+        "defaults_confidence": {"face_swap": _resolve_confidence(default_sources)},
     }
     seed = payload.get("seed")
     try:
@@ -1492,6 +1879,7 @@ def submit_job() -> Any:
 
     # Special-case AnimateDiff video jobs with rich structured payload
     is_animatediff = model_name == "animatediff" or pipeline_name == "animatediff"
+    hardcore_lora_step_cap_applied = False
 
     # Backward-compatible alias for legacy WAN i2v routing that now maps to VIDEO_GEN behavior.
     is_wan_i2v = (
@@ -1517,17 +1905,25 @@ def submit_job() -> Any:
             or payload.get("init_image_b64")
             or None
         )
+        resolved_video_defaults, video_default_sources = resolve_video_defaults(
+            cfg,
+            payload,
+            RUNTIME_PROFILE,
+            "VIDEO_GEN",
+        )
         settings: Dict[str, Any] = {
             "prompt": prompt_text,
             "negative_prompt": negative_prompt,
             "seed": seed,
-            "steps": _clamp_int(payload.get("steps", LTX2_DEFAULT_STEPS), LTX2_DEFAULT_STEPS, 1, 50),
-            "guidance": _clamp_float(payload.get("guidance", LTX2_DEFAULT_GUIDANCE), LTX2_DEFAULT_GUIDANCE, 0.0, 12.0),
-            "width": _clamp_int(payload.get("width", LTX2_DEFAULT_WIDTH), LTX2_DEFAULT_WIDTH, 256, 768),
-            "height": _clamp_int(payload.get("height", LTX2_DEFAULT_HEIGHT), LTX2_DEFAULT_HEIGHT, 256, 768),
-            "frames": _clamp_int(payload.get("frames", LTX2_DEFAULT_FRAMES), LTX2_DEFAULT_FRAMES, 1, 16),
-            "fps": _clamp_int(payload.get("fps", LTX2_DEFAULT_FPS), LTX2_DEFAULT_FPS, 1, 12),
+            "steps": resolved_video_defaults["steps"],
+            "guidance": resolved_video_defaults["guidance"],
+            "width": resolved_video_defaults["width"],
+            "height": resolved_video_defaults["height"],
+            "frames": resolved_video_defaults["frames"],
+            "fps": resolved_video_defaults["fps"],
             "timeout": LTX2_JOB_TIMEOUT,
+            "defaults_source": {"video": video_default_sources},
+            "defaults_confidence": {"video": _resolve_confidence(video_default_sources)},
         }
         if init_image:
             settings["init_image"] = init_image
@@ -1547,33 +1943,30 @@ def submit_job() -> Any:
             if prompt_text and "best quality" not in prompt_lower and "masterpiece" not in prompt_lower:
                 prompt_text = f"{prompt_text}, {get_video_positive_suffix(model_name)}"
 
-        # Core AnimateDiff controls – validated/coerced into safe ranges
-        try:
-            frames = int(payload.get("frames", 16))
-        except (TypeError, ValueError):
-            frames = 16
-        try:
-            fps = int(payload.get("fps", 8))
-        except (TypeError, ValueError):
-            fps = 8
-        frames = max(1, min(frames, 64))
-        fps = max(1, min(fps, 24))  # Increased max fps from 60 to 24 for realistic smooth video
+        resolved_video_defaults, video_default_sources = resolve_video_defaults(
+            cfg,
+            payload,
+            RUNTIME_PROFILE,
+            "ANIMATEDIFF",
+        )
+        frames = int(resolved_video_defaults["frames"])
+        fps = int(resolved_video_defaults["fps"])
 
         motion = str(payload.get("motion") or "").strip().lower() or "zoom-in"
         base_model = str(payload.get("base_model") or "realisticVision")
-        width = int(payload.get("width", 512) or 512)
-        height = int(payload.get("height", 512) or 512)
-        # Clamp to supported grid
-        if width not in {512, 768}:
-            width = 512
-        if height not in {512, 768}:
-            height = 512
+        width = int(resolved_video_defaults["width"])
+        height = int(resolved_video_defaults["height"])
 
         seed = payload.get("seed")
         try:
             seed = int(seed) if seed is not None else None
         except (TypeError, ValueError):
             seed = None
+        lora_strength = payload.get("lora_strength")
+        try:
+            lora_strength = float(lora_strength) if lora_strength is not None else None
+        except (TypeError, ValueError):
+            lora_strength = None
         strength = payload.get("strength")
         try:
             strength = float(strength) if strength is not None else None
@@ -1607,11 +2000,14 @@ def submit_job() -> Any:
             "width": width,
             "height": height,
             "seed": seed,
+            "lora_strength": lora_strength,
             "init_image": init_image,
             "scheduler": scheduler,
             "strength": strength,
             "extend_remaining": extend_chunks,
             "extend_total": extend_chunks,
+            "defaults_source": {"video": video_default_sources},
+            "defaults_confidence": {"video": _resolve_confidence(video_default_sources)},
         }
         job_data = json.dumps(settings)
         task_type = "ANIMATEDIFF"
@@ -1672,21 +2068,26 @@ def submit_job() -> Any:
         if pose_image_path:
             job_settings["pose_image_path"] = str(pose_image_path)
 
-        # Per-model defaults from manifest (steps/guidance/size/sampler/negative)
-        if cfg:
-            if cfg.get("steps") is not None:
-                job_settings["steps"] = cfg["steps"]
-            if cfg.get("guidance") is not None:
-                job_settings["guidance"] = cfg["guidance"]
-            if cfg.get("width") is not None:
-                job_settings["width"] = cfg["width"]
-            if cfg.get("height") is not None:
-                job_settings["height"] = cfg["height"]
-            if cfg.get("sampler"):
-                job_settings["sampler"] = cfg["sampler"]
+        resolved_image_defaults, image_default_sources = resolve_image_defaults(
+            cfg,
+            payload,
+            RUNTIME_PROFILE,
+        )
+        job_settings.update(resolved_image_defaults)
+        job_settings["defaults_source"] = {"image": image_default_sources}
+        job_settings["defaults_confidence"] = {"image": _resolve_confidence(image_default_sources)}
         if legacy_auto_hardcore and not explicit_hardcore_mode:
             job_settings["steps"] = 40
             job_settings["guidance"] = 7.5
+        if (
+            legacy_auto_hardcore
+            and not explicit_hardcore_mode
+            and loras_list
+            and payload.get("steps") is None
+            and int(job_settings.get("steps", 20) or 20) == 40
+        ):
+            job_settings["steps"] = 30
+            hardcore_lora_step_cap_applied = True
 
         requested_loras = job_settings.get("loras") or []
         log_event(
@@ -1719,6 +2120,8 @@ def submit_job() -> Any:
             overrides["seed"] = seed
         if overrides:
             job_settings["overrides"] = overrides
+            for key, value in overrides.items():
+                job_settings[key] = value
 
         job_data = json.dumps(job_settings)
         task_type = CREATOR_TASK_TYPE
@@ -1743,6 +2146,14 @@ def submit_job() -> Any:
             invite_code,
         )
     log_event("Public job queued", wallet=wallet, model=model_name, job_id=job_id)
+    if hardcore_lora_step_cap_applied:
+        log_event(
+            "hardcore_lora_step_cap_applied",
+            model=selected_model_name,
+            job_id=job_id,
+            steps_from=40,
+            steps_to=30,
+        )
     _emit_job_event("job_queued", job_id, wallet, model=model_name, task_type=task_type)
     return jsonify({"status": "queued", "job_id": job_id}), 200
 
@@ -1786,36 +2197,40 @@ def generate_video_job() -> Any:
     if seed is None:
         seed = random.randint(0, 2**31 - 1)
 
-    fps = _clamp(_coerce_int(payload.get("fps", 8), 8), 1, 8)
+    resolved_video_defaults, video_default_sources = resolve_video_defaults(
+        cfg,
+        payload,
+        RUNTIME_PROFILE,
+        "VIDEO_GEN",
+    )
+    fps = int(resolved_video_defaults["fps"])
+    frames = int(resolved_video_defaults["frames"])
     duration = payload.get("duration")
-    frames = payload.get("frames")
-    if frames is None and duration is not None:
+    if payload.get("frames") is None and duration is not None:
         try:
-            frames = int(float(duration) * fps)
+            frames = _clamp(int(float(duration) * fps), 1, 16)
         except (TypeError, ValueError):
-            frames = None
-    frames = _clamp(_coerce_int(frames or 16, 16), 1, 24)
-
-    steps = _clamp(_coerce_int(payload.get("steps", 30), 30), 1, 50)
-    guidance = _coerce_float(payload.get("guidance", 6.0), 6.0)
-    guidance = max(0.0, min(guidance, 12.0))
-    width = _clamp(_coerce_int(payload.get("width", 512), 512), 256, 512)
-    height = _clamp(_coerce_int(payload.get("height", 512), 512), 256, 512)
+            pass
 
     settings: Dict[str, Any] = {
         "prompt": prompt_text,
         "negative_prompt": str(payload.get("negative_prompt") or "").strip(),
         "seed": seed,
-        "steps": steps,
-        "guidance": guidance,
-        "width": width,
-        "height": height,
+        "steps": int(resolved_video_defaults["steps"]),
+        "guidance": float(resolved_video_defaults["guidance"]),
+        "width": int(resolved_video_defaults["width"]),
+        "height": int(resolved_video_defaults["height"]),
         "frames": frames,
         "fps": fps,
+        "defaults_source": {"video": video_default_sources},
+        "defaults_confidence": {"video": _resolve_confidence(video_default_sources)},
     }
     motion_type = payload.get("motion_type")
     if motion_type:
         settings["motion_type"] = motion_type
+    lora_list = payload.get("lora_list")
+    if lora_list:
+        settings["lora_list"] = lora_list
     init_image = payload.get("init_image")
     if init_image:
         settings["init_image"] = init_image
@@ -1866,10 +2281,6 @@ def submit_faceswap_job_endpoint() -> Any:
     if not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid wallet"}), 400
 
-    settings = build_faceswap_settings(payload, prompt_text)
-    if not settings.get("base_image_url") or not settings.get("face_source_url"):
-        return jsonify({"error": "base_image and face_source are required"}), 400
-
     refresh_manifest()
     cfg = get_model_config(model_name)
     if not cfg:
@@ -1877,6 +2288,10 @@ def submit_faceswap_job_endpoint() -> Any:
     pipeline_norm = str(cfg.get("pipeline", "")).lower()
     if "sdxl" not in pipeline_norm:
         return jsonify({"error": "faceswap requires an SDXL base model"}), 400
+
+    settings = build_faceswap_settings(payload, prompt_text, cfg)
+    if not settings.get("base_image_url") or not settings.get("face_source_url"):
+        return jsonify({"error": "base_image and face_source are required"}), 400
 
     weight = payload.get("weight")
     if weight is None:
@@ -3178,6 +3593,11 @@ def models_list() -> Any:
               "online_nodes": int,
               "face_swap_available": bool,
               "face_swap_online_nodes": int,
+              "image_defaults": dict | null,
+              "video_defaults": dict | null,
+              "face_swap_defaults": dict | null,
+              "defaults_source": dict | null,
+              "defaults_confidence": dict | null,
               "tags": list[str],
               "strengths": str | null,
               "weaknesses": str | null
@@ -3211,6 +3631,43 @@ def models_list() -> Any:
         pipeline = str(model_data.get("pipeline", "sd15")).lower()
         weight = float(model_data.get("reward_weight", 10.0))
 
+        image_defaults: Optional[Dict[str, Any]] = None
+        video_defaults: Optional[Dict[str, Any]] = None
+        face_swap_defaults: Optional[Dict[str, Any]] = None
+        defaults_source: Dict[str, Dict[str, str]] = {}
+        defaults_confidence: Dict[str, str] = {}
+
+        if native_task_type == CREATOR_TASK_TYPE:
+            image_defaults, image_sources = resolve_image_defaults(model_data, {}, RUNTIME_PROFILE)
+            image_defaults = {
+                "steps": image_defaults.get("steps"),
+                "guidance": image_defaults.get("guidance"),
+                "width": image_defaults.get("width"),
+                "height": image_defaults.get("height"),
+                "sampler": image_defaults.get("sampler"),
+            }
+            defaults_source["image"] = image_sources
+            defaults_confidence["image"] = _resolve_confidence(image_sources)
+
+        if native_task_type in {"VIDEO_GEN", "ANIMATEDIFF"}:
+            video_defaults, video_sources = resolve_video_defaults(
+                model_data,
+                {},
+                RUNTIME_PROFILE,
+                native_task_type,
+            )
+            defaults_source["video"] = video_sources
+            defaults_confidence["video"] = _resolve_confidence(video_sources)
+
+        if "sdxl" in pipeline:
+            face_swap_defaults, face_swap_sources = resolve_faceswap_defaults(
+                model_data,
+                {},
+                RUNTIME_PROFILE,
+            )
+            defaults_source["face_swap"] = face_swap_sources
+            defaults_confidence["face_swap"] = _resolve_confidence(face_swap_sources)
+
         online_nodes = _eligible_online_node_count(model_key_norm, native_task_type)
         face_swap_online_nodes = (
             _eligible_online_node_count(model_key_norm, "FACE_SWAP")
@@ -3233,6 +3690,11 @@ def models_list() -> Any:
                 "tags": model_data.get("tags", []),
                 "strengths": model_data.get("strengths"),
                 "weaknesses": model_data.get("weaknesses"),
+                "image_defaults": image_defaults,
+                "video_defaults": video_defaults,
+                "face_swap_defaults": face_swap_defaults,
+                "defaults_source": defaults_source or None,
+                "defaults_confidence": defaults_confidence or None,
             }
         )
 

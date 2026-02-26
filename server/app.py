@@ -142,6 +142,15 @@ LTX2_DEFAULT_GUIDANCE = float(os.getenv("HAVNAI_LTX2_GUIDANCE", str(GPU_PROFILE[
 # Hard timeout (seconds) for a single video generation job.  0 = no limit.
 LTX2_JOB_TIMEOUT = int(os.getenv("HAVNAI_LTX2_JOB_TIMEOUT", "300"))
 
+# ---------------------------------------------------------------------------
+# Stale job reaper configuration
+# ---------------------------------------------------------------------------
+IMAGE_JOB_TIMEOUT = int(os.getenv("HAVNAI_IMAGE_JOB_TIMEOUT", "300"))      # 5 min
+VIDEO_JOB_TIMEOUT = int(os.getenv("HAVNAI_VIDEO_JOB_TIMEOUT", "600"))      # 10 min
+QUEUED_JOB_TIMEOUT = int(os.getenv("HAVNAI_QUEUED_JOB_TIMEOUT", "1800"))   # 30 min
+MAX_JOB_RETRIES = int(os.getenv("HAVNAI_MAX_JOB_RETRIES", "3"))
+REAPER_INTERVAL = int(os.getenv("HAVNAI_REAPER_INTERVAL", "60"))           # seconds
+
 # Reward configuration (can be overridden via environment variables)
 REWARD_CONFIG: Dict[str, float] = {
     "baseline_runtime": float(os.getenv("REWARD_BASELINE_RUNTIME", "8.0")),
@@ -667,6 +676,10 @@ def init_db() -> None:
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
     if "invite_code" not in columns:
         conn.execute("ALTER TABLE jobs ADD COLUMN invite_code TEXT")
+    if "retry_count" not in columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN retry_count INTEGER DEFAULT 0")
+    if "status_reason" not in columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN status_reason TEXT")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS rewards (
@@ -2067,6 +2080,33 @@ def submit_faceswap_job_endpoint() -> Any:
     return jsonify({"status": "queued", "job_id": job_id}), 200
 
 
+@app.route("/jobs/<job_id>/cancel", methods=["POST"])
+def cancel_job_endpoint(job_id: str) -> Any:
+    if not rate_limit(f"cancel-job:{request.remote_addr}", limit=30):
+        return jsonify({"error": "rate limit"}), 429
+    if not job_id:
+        return jsonify({"error": "missing job_id"}), 400
+    job = get_job(job_id)
+    if not job:
+        return jsonify({"error": "job_not_found"}), 404
+    with LOCK:
+        cancelled = job_helpers.cancel_job(job_id)
+    if not cancelled:
+        return jsonify({"error": "job_not_cancellable", "status": job.get("status")}), 409
+    wallet = job.get("wallet", "")
+    TASKS.pop(job_id, None)
+    _emit_job_event("job_cancelled", job_id, wallet, reason="cancelled")
+    log_event("Job cancelled by user", job_id=job_id, wallet=wallet)
+    # Refund credits if the credits system is active
+    try:
+        model_name = job.get("model", "")
+        task_type = job.get("task_type", CREATOR_TASK_TYPE)
+        credits.refund_credits(wallet, model_name, task_type)
+    except Exception:
+        pass  # refund is best-effort; credits module may not have refund_credits
+    return jsonify({"status": "cancelled", "job_id": job_id}), 200
+
+
 @app.route("/register", methods=["POST"])
 def register() -> Any:
     if not rate_limit(f"register:{request.remote_addr}", limit=30):
@@ -3158,10 +3198,12 @@ def job_detail(job_id: str) -> Any:
             "model": job.get("model"),
             "task_type": job.get("task_type"),
             "status": job.get("status"),
+            "status_reason": job.get("status_reason"),
             "weight": job.get("weight"),
             "node_id": job.get("node_id"),
             "timestamp": job.get("timestamp"),
             "completed_at": job.get("completed_at"),
+            "retry_count": job.get("retry_count", 0),
             "reward": reward_value,
             "reward_timestamp": reward_ts,
             "reward_factors": reward_factors,
@@ -3415,6 +3457,62 @@ def _emit_node_event(event: str, node_id: str, **extra: Any) -> None:
     """Publish a node event to the nodes SSE channel."""
     data = {"node_id": node_id, "event": event, **extra}
     sse_broker.publish("nodes", event, data)
+
+
+# ---------------------------------------------------------------------------
+# Stale job reaper — recovers stuck jobs automatically
+# ---------------------------------------------------------------------------
+
+
+def _run_reaper_cycle() -> None:
+    """Single reaper pass: reset stuck running jobs and timeout stale queued jobs."""
+    now = unix_now()
+
+    # 1. Reset running jobs whose assigned node is offline
+    running_results = job_helpers.reset_stuck_running_jobs(
+        now=now,
+        image_timeout=IMAGE_JOB_TIMEOUT,
+        video_timeout=VIDEO_JOB_TIMEOUT,
+        max_retries=MAX_JOB_RETRIES,
+        is_node_online_fn=_node_is_online,
+    )
+    for item in running_results:
+        action = item["action"]
+        job_id = item["job_id"]
+        wallet = item.get("wallet", "")
+        reason = item.get("reason", "")
+        if action == "requeued":
+            _emit_job_event("job_requeued", job_id, wallet, reason=reason)
+            log_event("Reaper requeued stuck job", job_id=job_id, reason=reason)
+        elif action == "failed":
+            _emit_job_event("job_failed", job_id, wallet, reason=reason)
+            log_event("Reaper failed job (max retries)", job_id=job_id, reason=reason)
+
+    # 2. Timeout queued jobs that have been waiting too long
+    queued_results = job_helpers.timeout_stale_queued_jobs(
+        now=now,
+        queued_timeout=QUEUED_JOB_TIMEOUT,
+    )
+    for item in queued_results:
+        job_id = item["job_id"]
+        wallet = item.get("wallet", "")
+        _emit_job_event("job_failed", job_id, wallet, reason="timed_out")
+        log_event("Reaper timed out queued job", job_id=job_id)
+
+
+def _job_reaper_loop() -> None:
+    """Background thread that periodically cleans up stuck jobs."""
+    while True:
+        try:
+            _run_reaper_cycle()
+        except Exception as exc:
+            log_event(f"Reaper cycle error: {exc}", level="error")
+        time.sleep(REAPER_INTERVAL)
+
+
+# Start the reaper thread (daemon so it dies with the main process)
+_reaper_thread = threading.Thread(target=_job_reaper_loop, daemon=True)
+_reaper_thread.start()
 
 
 # ---------------------------------------------------------------------------

@@ -47,8 +47,10 @@ def resolve_credit_cost(model_name: str, task_type: str = "") -> float:
     tt = (task_type or "").upper()
     if tt == "FACE_SWAP":
         return DEFAULT_CREDIT_COSTS.get("face_swap", 1.5)
-    if tt in ("VIDEO_GEN", "ANIMATEDIFF"):
+    if tt == "VIDEO_GEN":
         return DEFAULT_CREDIT_COSTS.get("ltx2", 3.0)
+    if tt == "ANIMATEDIFF":
+        return DEFAULT_CREDIT_COSTS.get("animatediff", 2.0)
     return 1.0
 
 
@@ -147,3 +149,19 @@ def check_and_deduct_credits(
             "cost": cost,
         }), 402
     return None
+
+
+
+def convert_credits_to_hai(wallet: str, amount: float) -> Tuple[bool, float]:
+    """Convert credits to HAI tokens. This is a stub that deducts credits and records equivalent HAI reward.
+
+    Returns a tuple of (success, remaining_credits).
+    """
+    # Deduct credits from the wallet
+    ok, remaining = deduct_credits(wallet, amount)
+    if not ok:
+        return False, remaining
+    # TODO: Integrate with blockchain or reward system to mint/transfer HAI tokens
+    # For now, simply log the event
+    log_event("Credits converted to HAI", wallet=wallet, amount=amount, remaining_credits=remaining)
+    return True, remaining

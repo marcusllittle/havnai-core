@@ -13,6 +13,8 @@ import threading
 import time
 import uuid
 import random
+import secrets
+from urllib.parse import urlparse
 import requests
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
@@ -35,6 +37,13 @@ import blockchain
 import analytics
 import validators
 import workflows
+
+try:
+    from eth_account import Account  # type: ignore
+    from eth_account.messages import encode_defunct  # type: ignore
+except Exception:  # pragma: no cover
+    Account = None  # type: ignore[assignment]
+    encode_defunct = None  # type: ignore[assignment]
 
 # ---------------------------------------------------------------------------
 # Paths & constants
@@ -98,6 +107,8 @@ INVITE_CONFIG_PATH = Path(
 )
 INVITE_GATING = os.getenv("HAVNAI_INVITE_GATING", "").strip().lower() in {"1", "true", "yes"}
 CREDITS_ENABLED = os.getenv("HAVNAI_CREDITS_ENABLED", "").strip().lower() in {"1", "true", "yes"}
+WALLET_NONCE_PURPOSE_CONVERT = "convert_credits_to_hai"
+WALLET_NONCE_TTL_SECONDS = max(60, int(os.getenv("HAVNAI_WALLET_NONCE_TTL_SECONDS", "300")))
 
 SUPPORTED_TASK_TYPES = {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP"}
 TASK_SUPPORT_MAP = {
@@ -687,6 +698,28 @@ def init_db() -> None:
             updated_at REAL NOT NULL
         )
         """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS wallet_nonces (
+            wallet TEXT NOT NULL,
+            nonce TEXT NOT NULL,
+            purpose TEXT NOT NULL,
+            amount REAL NOT NULL,
+            message TEXT NOT NULL,
+            issued_at REAL NOT NULL,
+            expires_at REAL NOT NULL,
+            used_at REAL,
+            created_at REAL NOT NULL,
+            PRIMARY KEY(wallet, nonce)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_wallet_nonces_expiry ON wallet_nonces (expires_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_wallet_nonces_used ON wallet_nonces (used_at)"
     )
     conn.execute("UPDATE jobs SET status='queued', node_id=NULL WHERE status='running'")
     conn.commit()
@@ -1743,15 +1776,8 @@ def submit_job() -> Any:
             seed = int(seed) if seed is not None else None
         except (TypeError, ValueError):
             seed = None
-        auto_anatomy_raw = payload.get("auto_anatomy")
-        if isinstance(auto_anatomy_raw, bool):
-            auto_anatomy = auto_anatomy_raw
-        elif isinstance(auto_anatomy_raw, str):
-            auto_anatomy = auto_anatomy_raw.strip().lower() in {"1", "true", "yes"}
-        else:
-            auto_anatomy = False
         # Pass through per-image overrides for the node to honor.
-        job_settings: Dict[str, Any] = {"prompt": prompt_text, "auto_anatomy": auto_anatomy}
+        job_settings: Dict[str, Any] = {"prompt": prompt_text}
         payload_loras = payload.get("loras") or []
         loras_list: List[Dict[str, Any]] = []
         if isinstance(payload_loras, list):
@@ -1768,15 +1794,6 @@ def submit_job() -> Any:
                     name = str(item).strip()
                     if name:
                         loras_list.append({"name": name})
-        if not loras_list:
-            pipeline_norm = str(cfg.get("pipeline", "")).lower() if cfg else ""
-            if pipeline_norm == "sdxl" or "sdxl" in pipeline_norm:
-                loras_list = [{"name": "perfectionstyle", "weight": 0.35}]
-            elif pipeline_norm in {"sd15", "sd1.5", ""}:
-                loras_list = [
-                    {"name": "DetailedPerfectionSD1.5", "weight": 0.6},
-                    {"name": "perfectionstyleSD1.5", "weight": 0.3},
-                ]
         if position_lora:
             def normalize_lora_ref(name: str) -> str:
                 base = Path(name).name
@@ -2213,7 +2230,7 @@ def get_creator_tasks() -> Any:
                         if isinstance(parsed_loras, list):
                             loras = [item for item in parsed_loras if item]
                         # Forward per-image overrides stored in job settings.
-                        for key in ("steps", "guidance", "width", "height", "sampler", "seed", "auto_anatomy"):
+                        for key in ("steps", "guidance", "width", "height", "sampler", "seed"):
                             if key not in parsed:
                                 continue
                             value = parsed.get(key)
@@ -2233,11 +2250,6 @@ def get_creator_tasks() -> Any:
                                 value_str = str(value).strip()
                                 if value_str:
                                     image_overrides[key] = value_str
-                            elif key == "auto_anatomy":
-                                if isinstance(value, bool):
-                                    image_overrides[key] = value
-                                elif isinstance(value, str):
-                                    image_overrides[key] = value.strip().lower() in {"1", "true", "yes"}
                     # Always send plain prompt text to the node (avoid passing raw JSON)
                     prompt_for_node = prompt_text
 
@@ -2304,7 +2316,7 @@ def get_creator_tasks() -> Any:
             }
             if task_payload["type"].upper() == CREATOR_TASK_TYPE:
                 # Forward generation overrides for image tasks only.
-                for key in ("steps", "guidance", "width", "height", "sampler", "seed", "auto_anatomy"):
+                for key in ("steps", "guidance", "width", "height", "sampler", "seed"):
                     if key in task and task[key] is not None:
                         task_payload[key] = task[key]
             # If this is a WAN I2V video job, attempt to expose structured settings to the node
@@ -2711,6 +2723,55 @@ def rewards_endpoint() -> Any:
 # ---------------------------------------------------------------------------
 
 
+def _request_origin_and_domain() -> Tuple[str, str]:
+    origin = str(request.headers.get("Origin", "")).strip()
+    if not origin:
+        referer = str(request.headers.get("Referer", "")).strip()
+        if referer:
+            parsed_referer = urlparse(referer)
+            if parsed_referer.scheme and parsed_referer.netloc:
+                origin = f"{parsed_referer.scheme}://{parsed_referer.netloc}"
+    if not origin:
+        origin = f"{request.scheme}://{request.host}"
+    parsed = urlparse(origin)
+    domain = parsed.netloc or request.host
+    return origin, domain
+
+
+def _build_convert_nonce_message(
+    wallet: str,
+    amount: float,
+    nonce: str,
+    issued_at_iso: str,
+    expires_at_iso: str,
+    origin: str,
+    domain: str,
+) -> str:
+    return "\n".join(
+        [
+            "HavnAI Wallet Signature",
+            f"action: {WALLET_NONCE_PURPOSE_CONVERT}",
+            f"wallet: {wallet}",
+            f"amount: {amount:.8f}",
+            f"nonce: {nonce}",
+            f"issued_at: {issued_at_iso}",
+            f"expires_at: {expires_at_iso}",
+            f"origin: {origin}",
+            f"domain: {domain}",
+        ]
+    )
+
+
+def _parse_positive_amount(raw_amount: Any) -> Tuple[Optional[float], Optional[Any]]:
+    try:
+        amount = float(raw_amount)
+    except (TypeError, ValueError):
+        return None, (jsonify({"error": "invalid_amount", "message": "amount must be a number"}), 400)
+    if amount <= 0:
+        return None, (jsonify({"error": "invalid_amount", "message": "amount must be positive"}), 400)
+    return amount, None
+
+
 @app.route("/credits/balance", methods=["GET"])
 def credits_balance() -> Any:
     """Return credit balance for a wallet."""
@@ -2768,6 +2829,214 @@ def credits_deposit() -> Any:
         "balance": new_balance,
         "reason": reason,
     })
+
+
+@app.route("/wallet/nonce", methods=["POST"])
+def wallet_nonce() -> Any:
+    if not rate_limit(f"wallet-nonce:{request.remote_addr}", limit=30):
+        return jsonify({"error": "rate limit"}), 429
+    if Account is None or encode_defunct is None:
+        return jsonify(
+            {
+                "error": "signature_verification_unavailable",
+                "message": "eth-account is required for wallet signature verification",
+            }
+        ), 500
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "malformed_payload", "message": "JSON object payload required"}), 400
+
+    wallet = str(data.get("wallet", "")).strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    if not rate_limit(f"wallet-nonce:wallet:{wallet}", limit=20):
+        return jsonify({"error": "rate limit", "detail": "per-wallet limit exceeded"}), 429
+
+    purpose = str(data.get("purpose") or WALLET_NONCE_PURPOSE_CONVERT).strip()
+    if purpose != WALLET_NONCE_PURPOSE_CONVERT:
+        return jsonify(
+            {
+                "error": "unsupported_purpose",
+                "message": f"purpose must be '{WALLET_NONCE_PURPOSE_CONVERT}'",
+            }
+        ), 400
+
+    amount, amount_error = _parse_positive_amount(data.get("amount"))
+    if amount_error:
+        return amount_error
+    assert amount is not None
+
+    now_ts = unix_now()
+    issued_at_iso = datetime.fromtimestamp(now_ts, timezone.utc).isoformat().replace("+00:00", "Z")
+    expires_ts = now_ts + float(WALLET_NONCE_TTL_SECONDS)
+    expires_at_iso = datetime.fromtimestamp(expires_ts, timezone.utc).isoformat().replace("+00:00", "Z")
+    nonce = secrets.token_hex(16)
+    origin, domain = _request_origin_and_domain()
+    message = _build_convert_nonce_message(wallet, amount, nonce, issued_at_iso, expires_at_iso, origin, domain)
+
+    conn = get_db()
+    conn.execute(
+        """
+        INSERT INTO wallet_nonces (
+            wallet, nonce, purpose, amount, message, issued_at, expires_at, used_at, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)
+        """,
+        (wallet, nonce, purpose, amount, message, now_ts, expires_ts, now_ts),
+    )
+    conn.execute("DELETE FROM wallet_nonces WHERE expires_at < ? AND used_at IS NOT NULL", (now_ts - 86400.0,))
+    conn.commit()
+
+    log_event(
+        "Wallet nonce issued",
+        wallet=wallet,
+        purpose=purpose,
+        amount=amount,
+        nonce_prefix=nonce[:8],
+        expires_at=expires_at_iso,
+        origin=origin,
+    )
+    return jsonify(
+        {
+            "nonce": nonce,
+            "message": message,
+            "issued_at": issued_at_iso,
+            "expires_at": expires_at_iso,
+        }
+    )
+
+
+@app.route("/credits/convert", methods=["POST"])
+def credits_convert() -> Any:
+    """Convert credits to HAI tokens with wallet signature + nonce verification."""
+    if not rate_limit(f"credits-convert:{request.remote_addr}", limit=30):
+        return jsonify({"error": "rate limit"}), 429
+    if Account is None or encode_defunct is None:
+        return jsonify(
+            {
+                "error": "signature_verification_unavailable",
+                "message": "eth-account is required for wallet signature verification",
+            }
+        ), 500
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "malformed_payload", "message": "JSON object payload required"}), 400
+
+    wallet = str(data.get("wallet", "")).strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    if not rate_limit(f"credits-convert:wallet:{wallet}", limit=15):
+        return jsonify({"error": "rate limit", "detail": "per-wallet limit exceeded"}), 429
+
+    amount, amount_error = _parse_positive_amount(data.get("amount"))
+    if amount_error:
+        return amount_error
+    assert amount is not None
+
+    nonce = str(data.get("nonce", "")).strip()
+    signature = str(data.get("signature", "")).strip()
+    if not nonce or not signature:
+        return jsonify(
+            {
+                "error": "malformed_payload",
+                "message": "wallet, amount, nonce, and signature are required",
+            }
+        ), 400
+
+    conn = get_db()
+    row = conn.execute(
+        """
+        SELECT wallet, nonce, purpose, amount, message, issued_at, expires_at, used_at
+        FROM wallet_nonces
+        WHERE wallet=? AND nonce=?
+        """,
+        (wallet, nonce),
+    ).fetchone()
+    if not row:
+        log_event("Credit conversion rejected", level="warning", wallet=wallet, reason="nonce_not_found")
+        return jsonify({"error": "invalid_nonce", "message": "nonce not found"}), 400
+
+    nonce_purpose = str(row["purpose"] or "").strip()
+    if nonce_purpose != WALLET_NONCE_PURPOSE_CONVERT:
+        log_event("Credit conversion rejected", level="warning", wallet=wallet, reason="nonce_purpose_mismatch")
+        return jsonify({"error": "invalid_nonce", "message": "nonce purpose mismatch"}), 400
+
+    try:
+        nonce_amount = float(row["amount"])
+    except (TypeError, ValueError):
+        log_event("Credit conversion rejected", level="warning", wallet=wallet, reason="nonce_amount_invalid")
+        return jsonify({"error": "invalid_nonce", "message": "nonce amount invalid"}), 400
+    if abs(nonce_amount - amount) > 1e-9:
+        log_event("Credit conversion rejected", level="warning", wallet=wallet, reason="nonce_amount_mismatch")
+        return jsonify({"error": "invalid_nonce", "message": "nonce amount mismatch"}), 400
+
+    now_ts = unix_now()
+    expires_at = float(row["expires_at"] or 0.0)
+    if row["used_at"] is not None:
+        log_event("Credit conversion rejected", level="warning", wallet=wallet, reason="nonce_used")
+        return jsonify({"error": "nonce_used", "message": "nonce already used"}), 409
+    if now_ts > expires_at:
+        log_event("Credit conversion rejected", level="warning", wallet=wallet, reason="nonce_expired")
+        return jsonify({"error": "nonce_expired", "message": "nonce expired"}), 400
+
+    message = str(row["message"] or "")
+    try:
+        recovered = Account.recover_message(encode_defunct(text=message), signature=signature)
+    except Exception as exc:
+        log_event(
+            "Credit conversion rejected",
+            level="warning",
+            wallet=wallet,
+            reason="signature_parse_failed",
+            error=str(exc),
+        )
+        return jsonify({"error": "invalid_signature", "message": "signature verification failed"}), 400
+
+    if recovered.lower() != wallet.lower():
+        log_event(
+            "Credit conversion rejected",
+            level="warning",
+            wallet=wallet,
+            reason="signature_wallet_mismatch",
+            recovered=recovered,
+        )
+        return jsonify({"error": "invalid_signature", "message": "signature wallet mismatch"}), 400
+
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            "UPDATE wallet_nonces SET used_at=? WHERE wallet=? AND nonce=? AND used_at IS NULL",
+            (now_ts, wallet, nonce),
+        )
+        if cur.rowcount != 1:
+            conn.rollback()
+            log_event("Credit conversion rejected", level="warning", wallet=wallet, reason="nonce_replay")
+            return jsonify({"error": "nonce_used", "message": "nonce already used"}), 409
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    success, remaining = credits.convert_credits_to_hai(wallet, amount)
+    if not success:
+        return jsonify({
+            "error": "insufficient_credits",
+            "balance": remaining,
+            "remaining": remaining,
+            "cost": amount,
+        }), 402
+    return jsonify({
+        "wallet": wallet,
+        "converted": amount,
+        "balance": remaining,
+        "remaining": remaining,
+        "message": "Credits converted to HAI",
+        "credits_enabled": CREDITS_ENABLED,
+    })
+
+
+
 
 
 @app.route("/credits/cost", methods=["GET"])

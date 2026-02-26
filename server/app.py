@@ -276,6 +276,16 @@ _NEGATIVE_STYLE_REALISM = (
     "digital art, anime, fake, 3d modeling, drawing, sketch"
 )
 
+NO_WATERMARK_NEGATIVE = (
+    "watermark, signature, text, logo, username, artist name, artist signature, "
+    "copyright, qr code, url, website, subtitle, caption, timestamp"
+)
+
+SFW_NEGATIVE_PROMPT = (
+    "nsfw, nude, nudity, naked, explicit, explicit content, porn, erotic, sexual, "
+    "nipples, areola, exposed breasts, bare breasts, vagina, penis, genital, uncensored"
+)
+
 GLOBAL_NEGATIVE_SD15 = ", ".join([
     "FastNegativeV2",
     _NEGATIVE_HAND_SD15,
@@ -364,6 +374,27 @@ def get_video_positive_suffix(model_name: str) -> str:
     if "animat" in model_lower:
         return POSITIVE_VIDEO_ANIMATEDIFF
     return POSITIVE_VIDEO_LTXL
+
+
+def _merge_negative_prompts(*prompts: Any) -> str:
+    merged: List[str] = []
+    seen: set[str] = set()
+    for prompt in prompts:
+        if prompt is None:
+            continue
+        text = str(prompt).strip()
+        if not text:
+            continue
+        for token in text.split(","):
+            cleaned = token.strip()
+            if not cleaned:
+                continue
+            key = cleaned.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(cleaned)
+    return ", ".join(merged)
 
 # ---------------------------------------------------------------------------
 # Version helpers
@@ -1744,6 +1775,7 @@ def build_faceswap_settings(
     payload: Dict[str, Any],
     prompt_text: str,
     model_cfg: Dict[str, Any],
+    sfw_mode: bool = False,
 ) -> Dict[str, Any]:
     base_image_url = str(
         payload.get("base_image_url")
@@ -1764,6 +1796,17 @@ def build_faceswap_settings(
         or ""
     ).strip()
     resolved_defaults, default_sources = resolve_faceswap_defaults(model_cfg, payload, RUNTIME_PROFILE)
+    user_negative = str(payload.get("negative_prompt") or "").strip()
+    base_negative = str(model_cfg.get("negative_prompt_default") or "").strip()
+    pipeline_negative = get_pipeline_negative(str(model_cfg.get("pipeline") or "sdxl"))
+    sfw_negative = SFW_NEGATIVE_PROMPT if sfw_mode else ""
+    combined_negative = _merge_negative_prompts(
+        user_negative,
+        base_negative,
+        pipeline_negative,
+        NO_WATERMARK_NEGATIVE,
+        sfw_negative,
+    )
     settings: Dict[str, Any] = {
         "prompt": prompt_text,
         "base_image_url": base_image_url,
@@ -1774,6 +1817,8 @@ def build_faceswap_settings(
         "defaults_source": {"face_swap": default_sources},
         "defaults_confidence": {"face_swap": _resolve_confidence(default_sources)},
     }
+    if combined_negative:
+        settings["negative_prompt"] = combined_negative
     seed = payload.get("seed")
     try:
         seed = int(seed) if seed is not None else None
@@ -1804,6 +1849,7 @@ def submit_job() -> Any:
     raw_prompt = str(payload.get("prompt") or payload.get("data") or "")
     auto_model_request = not model_name or model_name in {"auto", "auto_image", "auto-image"}
     explicit_hardcore_mode = _is_truthy(payload.get("hardcore_mode"))
+    sfw_mode = _is_truthy(payload.get("sfw_mode"))
     legacy_auto_hardcore = ENABLE_LEGACY_AUTO_HARDCORE and has_hardcore_keywords(raw_prompt)
     hardcore_prompt = explicit_hardcore_mode or legacy_auto_hardcore
     enhanced_prompt = raw_prompt
@@ -1891,7 +1937,12 @@ def submit_job() -> Any:
     if is_wan_i2v:
         # Persist VIDEO_GEN controls inside the job data blob as JSON.
         prompt_text = enhanced_prompt
-        negative_prompt = str(payload.get("negative_prompt") or "").strip()
+        negative_prompt = _merge_negative_prompts(
+            str(payload.get("negative_prompt") or "").strip(),
+            get_video_negative(model_name),
+            NO_WATERMARK_NEGATIVE,
+            SFW_NEGATIVE_PROMPT if sfw_mode else "",
+        )
         seed = payload.get("seed")
         try:
             seed = int(seed) if seed is not None else None
@@ -1931,11 +1982,15 @@ def submit_job() -> Any:
         task_type = "VIDEO_GEN"
     elif is_animatediff:
         prompt_text = enhanced_prompt
-        negative_prompt = str(payload.get("negative_prompt") or "")
+        negative_prompt = str(payload.get("negative_prompt") or "").strip()
         raw_prompt = str(payload.get("raw_prompt", "")).lower() in ("1", "true", "yes")
-        # Apply default video negative prompt if not provided
-        if not negative_prompt and not raw_prompt:
-            negative_prompt = get_video_negative(model_name)
+        default_video_negative = "" if raw_prompt else get_video_negative(model_name)
+        negative_prompt = _merge_negative_prompts(
+            negative_prompt,
+            default_video_negative,
+            NO_WATERMARK_NEGATIVE,
+            SFW_NEGATIVE_PROMPT if sfw_mode else "",
+        )
 
         # Append positive quality suffix if prompt doesn't have quality tokens
         if not raw_prompt:
@@ -2049,16 +2104,20 @@ def submit_job() -> Any:
         if seed is not None:
             job_settings["seed"] = seed
         base_negative = str(cfg.get("negative_prompt_default") or "").strip() if cfg else ""
-        combined_negative = ", ".join(
-            filter(None, [negative_prompt, base_negative, GLOBAL_NEGATIVE_PROMPT])
+        combined_negative = _merge_negative_prompts(
+            negative_prompt,
+            base_negative,
+            get_pipeline_negative(pipeline_name),
+            NO_WATERMARK_NEGATIVE,
+            SFW_NEGATIVE_PROMPT if sfw_mode else "",
         )
         if position_negative:
-            combined_negative = f"{combined_negative}, {position_negative}" if combined_negative else position_negative
+            combined_negative = _merge_negative_prompts(combined_negative, position_negative)
         if hardcore_prompt:
             for extra_negative in (ANTI_OVERLAY_NEGATIVE, SHARPNESS_NEGATIVE):
                 if not extra_negative:
                     continue
-                combined_negative = f"{combined_negative}, {extra_negative}" if combined_negative else extra_negative
+                combined_negative = _merge_negative_prompts(combined_negative, extra_negative)
         if combined_negative:
             job_settings["negative_prompt"] = combined_negative
         pose_image = payload.get("pose_image") or payload.get("pose_image_b64") or ""
@@ -2214,7 +2273,12 @@ def generate_video_job() -> Any:
 
     settings: Dict[str, Any] = {
         "prompt": prompt_text,
-        "negative_prompt": str(payload.get("negative_prompt") or "").strip(),
+        "negative_prompt": _merge_negative_prompts(
+            str(payload.get("negative_prompt") or "").strip(),
+            get_video_negative(model_name),
+            NO_WATERMARK_NEGATIVE,
+            SFW_NEGATIVE_PROMPT if _is_truthy(payload.get("sfw_mode")) else "",
+        ),
         "seed": seed,
         "steps": int(resolved_video_defaults["steps"]),
         "guidance": float(resolved_video_defaults["guidance"]),
@@ -2289,7 +2353,7 @@ def submit_faceswap_job_endpoint() -> Any:
     if "sdxl" not in pipeline_norm:
         return jsonify({"error": "faceswap requires an SDXL base model"}), 400
 
-    settings = build_faceswap_settings(payload, prompt_text, cfg)
+    settings = build_faceswap_settings(payload, prompt_text, cfg, sfw_mode=_is_truthy(payload.get("sfw_mode")))
     if not settings.get("base_image_url") or not settings.get("face_source_url"):
         return jsonify({"error": "base_image and face_source are required"}), 400
 

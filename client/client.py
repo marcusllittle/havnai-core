@@ -273,6 +273,19 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_csv(name: str) -> List[str]:
+    raw = os.environ.get(name)
+    if raw is None:
+        raw = ENV_VARS.get(name)
+    if raw is None:
+        return []
+    return [part.strip() for part in str(raw).split(",") if part and part.strip()]
+
+
+def _normalize_model_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
 SERVER_BASE = ENV_VARS.get("SERVER_URL", "http://127.0.0.1:5001").rstrip("/")
 JOIN_TOKEN = ENV_VARS.get("JOIN_TOKEN", "").strip()
 ROLE = "creator" if ENV_VARS.get("CREATOR_MODE", "false").lower() in {"1", "true", "yes"} else "worker"
@@ -315,6 +328,11 @@ PRELOAD_IMAGE_MODEL = str(
     or ""
 ).strip()
 ALLOW_REMOTE_LORA_DOWNLOAD = _env_flag("HAI_ALLOW_REMOTE_LORA_DOWNLOAD", False)
+_allowed_models_from_env = (
+    _env_csv("HAI_ALLOWED_MODELS")
+    or _env_csv("HAVNAI_ALLOWED_MODELS")
+)
+ALLOWED_MODEL_KEYS = {_normalize_model_key(name) for name in _allowed_models_from_env if _normalize_model_key(name)}
 
 REGISTRY.base_url = SERVER_BASE
 
@@ -360,7 +378,15 @@ def endpoint(path: str) -> str:
     return f"{SERVER_BASE}{path}"
 
 
+def _is_model_allowed(model_name: str) -> bool:
+    if not ALLOWED_MODEL_KEYS:
+        return True
+    return _normalize_model_key(model_name) in ALLOWED_MODEL_KEYS
+
+
 def ensure_model_entry(model_name: str) -> ModelEntry:
+    if not _is_model_allowed(model_name):
+        raise RuntimeError(f"Model '{model_name}' is not allowed on this node")
     try:
         return REGISTRY.get(model_name)
     except (KeyError, ManifestError) as exc:
@@ -429,6 +455,8 @@ def discover_capabilities() -> Dict[str, List[str]]:
         name = str(getattr(entry, "name", "") or "").strip()
         if not name:
             continue
+        if not _is_model_allowed(name):
+            continue
         # LTX2 can be loaded from HF repo id; local path is optional.
         if pipeline == "ltx2":
             pipelines.add(pipeline)
@@ -455,6 +483,9 @@ def _has_sdxl_base_model() -> bool:
     for entry in REGISTRY.list_entries():
         pipeline = str(getattr(entry, "pipeline", "") or "").lower()
         task_type = str(getattr(entry, "task_type", "IMAGE_GEN") or "IMAGE_GEN").upper()
+        name = str(getattr(entry, "name", "") or "").strip()
+        if not name or not _is_model_allowed(name):
+            continue
         if task_type != "IMAGE_GEN":
             continue
         if "sdxl" not in pipeline:
@@ -470,6 +501,9 @@ def _has_sdxl_base_model() -> bool:
 def _has_image_generation_model() -> bool:
     for entry in REGISTRY.list_entries():
         task_type = str(getattr(entry, "task_type", "IMAGE_GEN") or "IMAGE_GEN").upper()
+        name = str(getattr(entry, "name", "") or "").strip()
+        if not name or not _is_model_allowed(name):
+            continue
         if task_type != "IMAGE_GEN":
             continue
         try:
@@ -1638,6 +1672,31 @@ def execute_task(task: Dict[str, Any]) -> None:
 
     log(f"Executing {task_type.lower()} task {task_id[:8]} · {model_name}", prefix="🚀")
 
+    if not _is_model_allowed(model_name):
+        log(
+            f"Rejecting task for disallowed model '{model_name}'",
+            prefix="⚠️",
+            task_id=task_id,
+        )
+        payload = {
+            "node_id": NODE_NAME,
+            "task_id": task_id,
+            "status": "failed",
+            "metrics": {
+                "task_type": task_type.lower(),
+                "model_name": model_name,
+                "reward_weight": reward_weight,
+                "error": f"Model '{model_name}' is not allowed on this node",
+            },
+            "utilization": utilization_hint,
+            "submitted_at": time.time(),
+        }
+        try:
+            SESSION.post(endpoint("/results"), data=json.dumps(payload), timeout=15).raise_for_status()
+        except Exception as exc:
+            log(f"Failed to submit disallowed-model result: {exc}", prefix="🚫", task_id=task_id)
+        return
+
     image_b64: Optional[str] = None
     video_b64: Optional[str] = None
     metrics: Dict[str, Any]
@@ -2372,6 +2431,9 @@ def _iter_image_entries() -> List[ModelEntry]:
     entries: List[ModelEntry] = []
     for entry in REGISTRY.list_entries():
         task_type = str(getattr(entry, "task_type", "IMAGE_GEN") or "IMAGE_GEN").upper()
+        name = str(getattr(entry, "name", "") or "").strip()
+        if not name or not _is_model_allowed(name):
+            continue
         if task_type == "IMAGE_GEN":
             entries.append(entry)
     return entries

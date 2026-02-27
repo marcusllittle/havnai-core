@@ -149,8 +149,8 @@ _RUNTIME_DEFAULT_PROFILES: Dict[str, Dict[str, Dict[str, Any]]] = {
     "balanced": {
         "image_sdxl": {"steps": 28, "guidance": 6.0, "width": 768, "height": 1152},
         "image_sd15": {"steps": 28, "guidance": 6.5, "width": 576, "height": 768},
-        "video_ltx2": {"steps": 20, "guidance": 6.0, "frames": 16, "fps": 8, "width": 512, "height": 512},
-        "video_animatediff": {"steps": 22, "guidance": 6.0, "frames": 16, "fps": 8, "width": 512, "height": 512},
+        "video_ltx2": {"steps": 25, "guidance": 7.0, "frames": 16, "fps": 8, "width": 512, "height": 512},
+        "video_animatediff": {"steps": 25, "guidance": 7.5, "frames": 16, "fps": 8, "width": 512, "height": 512},
         "face_swap": {"num_steps": 18, "guidance": 5.0, "strength": 0.8},
     },
     "quality": {
@@ -161,7 +161,7 @@ _RUNTIME_DEFAULT_PROFILES: Dict[str, Dict[str, Dict[str, Any]]] = {
         "face_swap": {"num_steps": 24, "guidance": 6.0, "strength": 0.85},
     },
 }
-RUNTIME_PROFILE_NAME = os.getenv("HAVNAI_RUNTIME_PROFILE", "aggressive").strip().lower()
+RUNTIME_PROFILE_NAME = os.getenv("HAVNAI_RUNTIME_PROFILE", "balanced").strip().lower()
 RUNTIME_PROFILE = _RUNTIME_DEFAULT_PROFILES.get(
     RUNTIME_PROFILE_NAME,
     _RUNTIME_DEFAULT_PROFILES["aggressive"],
@@ -1937,6 +1937,10 @@ def submit_job() -> Any:
     if is_wan_i2v:
         # Persist VIDEO_GEN controls inside the job data blob as JSON.
         prompt_text = enhanced_prompt
+        # Append positive quality suffix if prompt doesn't have quality tokens
+        prompt_lower = prompt_text.lower()
+        if prompt_text and "best quality" not in prompt_lower and "masterpiece" not in prompt_lower:
+            prompt_text = f"{prompt_text}, {get_video_positive_suffix(model_name)}"
         negative_prompt = _merge_negative_prompts(
             str(payload.get("negative_prompt") or "").strip(),
             get_video_negative(model_name),
@@ -2243,6 +2247,13 @@ def generate_video_job() -> Any:
     cfg = get_model_config(model_name)
     if not cfg:
         return jsonify({"error": "unknown model"}), 400
+
+    # Append positive quality suffix if prompt doesn't have quality tokens
+    raw_prompt_flag = str(payload.get("raw_prompt", "")).lower() in ("1", "true", "yes")
+    if not raw_prompt_flag:
+        prompt_lower = prompt_text.lower()
+        if "best quality" not in prompt_lower and "masterpiece" not in prompt_lower:
+            prompt_text = f"{prompt_text}, {get_video_positive_suffix(model_name)}"
 
     weight = payload.get("weight")
     if weight is None:

@@ -106,6 +106,12 @@ CREDITS_ENABLED = os.getenv("HAVNAI_CREDITS_ENABLED", "").strip().lower() in {"1
 WALLET_NONCE_PURPOSE_CONVERT = "convert_credits_to_hai"
 WALLET_NONCE_TTL_SECONDS = max(60, int(os.getenv("HAVNAI_WALLET_NONCE_TTL_SECONDS", "300")))
 
+# Startup warnings for missing configuration
+if not SERVER_JOIN_TOKEN:
+    LOGGER.warning("SERVER_JOIN_TOKEN is not set — admin endpoints are unprotected!")
+if not CORS_ORIGINS:
+    LOGGER.warning("CORS_ORIGINS is not set — using default allowlist (joinhavn.io + localhost)")
+
 SUPPORTED_TASK_TYPES = {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP"}
 TASK_SUPPORT_MAP = {
     CREATOR_TASK_TYPE: "image",
@@ -426,7 +432,13 @@ if CORS_ORIGINS and CORS_ORIGINS != "*":
     origins = [origin.strip() for origin in CORS_ORIGINS.split(",") if origin.strip()]
     CORS(app, resources={r"/*": {"origins": origins}})
 else:
-    CORS(app)
+    # Default to the production domain when no explicit origins are set.
+    # In local dev, set CORS_ORIGINS="*" if you need wide-open access.
+    CORS(app, resources={r"/*": {"origins": [
+        "https://joinhavn.io",
+        "https://www.joinhavn.io",
+        "http://localhost:3000",
+    ]}})
 
 app.config["APP_VERSION"] = APP_VERSION
 
@@ -1862,8 +1874,8 @@ def submit_job() -> Any:
     invite_code, invite_error = invite.enforce_invite_limits(payload)
     if invite_error:
         return invite_error
-    prompt_raw = str(payload.get("prompt") or payload.get("data") or "")
-    negative_raw = str(payload.get("negative_prompt") or "")
+    prompt_raw = str(payload.get("prompt") or payload.get("data") or "")[:4000]
+    negative_raw = str(payload.get("negative_prompt") or "")[:2000]
     block_reason = safety.check_safety(prompt_raw, negative_raw)
     if block_reason:
         return jsonify({"error": "prompt_blocked", "reason": block_reason}), 400
@@ -3486,11 +3498,15 @@ def payments_webhook() -> Any:
     payload = request.get_data()
     sig_header = request.headers.get("Stripe-Signature", "")
     try:
+        import stripe as _stripe_mod
         result = stripe_payments.handle_webhook_event(payload, sig_header)
         return jsonify(result)
+    except _stripe_mod.error.SignatureVerificationError:
+        log_event("Stripe webhook: invalid signature", level="warning")
+        return jsonify({"error": "invalid_signature"}), 401
     except Exception as exc:
         log_event("Stripe webhook error", level="error", error=str(exc))
-        return jsonify({"error": "webhook_failed", "message": str(exc)}), 400
+        return jsonify({"error": "webhook_failed"}), 400
 
 
 @app.route("/payments/history", methods=["GET"])
@@ -4206,8 +4222,8 @@ def api_gallery_create_listing() -> Any:
     if job_row["status"] not in ("completed", "success"):
         return jsonify({"error": "job_not_completed"}), 400
 
-    title = str(data.get("title", "")).strip() or f"Generation #{job_id[:8]}"
-    description = str(data.get("description", "")).strip()
+    title = str(data.get("title", "")).strip()[:200] or f"Generation #{job_id[:8]}"
+    description = str(data.get("description", "")).strip()[:2000]
     price = data.get("price_credits")
     try:
         price_credits = float(price)
@@ -4254,6 +4270,8 @@ def api_gallery_listing_detail(listing_id: int) -> Any:
 @app.route("/gallery/listings/<int:listing_id>/purchase", methods=["POST"])
 def api_gallery_purchase(listing_id: int) -> Any:
     """Purchase a gallery listing using credits."""
+    if not rate_limit(f"gallery-purchase:{request.remote_addr}", limit=10):
+        return jsonify({"error": "rate limit"}), 429
     data = request.get_json() or {}
     buyer_wallet = str(data.get("wallet", "")).strip()
     if not buyer_wallet or not WALLET_REGEX.match(buyer_wallet):
@@ -4417,6 +4435,8 @@ if RESET_ON_STARTUP:
 
 @app.route("/logs", methods=["GET"])
 def logs_endpoint() -> Any:
+    if not check_join_token():
+        abort(403)
     with LOCK:
         entries = list(EVENT_LOGS)[-50:]
     return jsonify({"logs": entries})

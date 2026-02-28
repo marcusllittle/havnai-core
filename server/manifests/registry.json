@@ -55,8 +55,8 @@
         "experimental"
       ],
       "task_type": "IMAGE_GEN",
-      "weight": 3,
-      "reward_weight": 3,
+      "weight": 5,
+      "reward_weight": 5,
       "strengths": "Experimental SDXL checkpoint for evaluation.",
       "weaknesses": "Needs testing before wider rollout.",
       "sampler": "dpmpp_2m_karras",
@@ -97,8 +97,8 @@
         "experimental"
       ],
       "task_type": "IMAGE_GEN",
-      "weight": 3,
-      "reward_weight": 3,
+      "weight": 10,
+      "reward_weight": 10,
       "strengths": "Experimental SDXL checkpoint for evaluation.",
       "weaknesses": "Needs testing before wider rollout.",
       "sampler": "dpmpp_2m_karras",

@@ -106,12 +106,6 @@ CREDITS_ENABLED = os.getenv("HAVNAI_CREDITS_ENABLED", "").strip().lower() in {"1
 WALLET_NONCE_PURPOSE_CONVERT = "convert_credits_to_hai"
 WALLET_NONCE_TTL_SECONDS = max(60, int(os.getenv("HAVNAI_WALLET_NONCE_TTL_SECONDS", "300")))
 
-# Startup warnings for missing configuration
-if not SERVER_JOIN_TOKEN:
-    LOGGER.warning("SERVER_JOIN_TOKEN is not set — admin endpoints are unprotected!")
-if not CORS_ORIGINS:
-    LOGGER.warning("CORS_ORIGINS is not set — using default allowlist (joinhavn.io + localhost)")
-
 SUPPORTED_TASK_TYPES = {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP"}
 TASK_SUPPORT_MAP = {
     CREATOR_TASK_TYPE: "image",
@@ -482,6 +476,12 @@ def setup_logging() -> logging.Logger:
 
 
 LOGGER = setup_logging()
+
+# Startup warnings for missing configuration
+if not SERVER_JOIN_TOKEN:
+    LOGGER.warning("SERVER_JOIN_TOKEN is not set — admin endpoints are unprotected!")
+if not CORS_ORIGINS:
+    LOGGER.warning("CORS_ORIGINS is not set — using default allowlist (joinhavn.io + localhost)")
 
 
 def log_event(message: str, level: str = "info", **extra: Any) -> None:

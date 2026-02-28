@@ -19,6 +19,8 @@ if TYPE_CHECKING:
 get_db: Callable[[], sqlite3.Connection]
 log_event: Callable[..., None]
 WALLET_REGEX: Any  # re.Pattern
+build_result_payload: Callable[[str], Optional[Dict[str, Any]]]
+build_result_payload = lambda job_id: None
 
 
 def init_gallery_tables(conn: sqlite3.Connection) -> None:
@@ -79,7 +81,9 @@ def create_listing(
         (job_id, seller_wallet),
     ).fetchone()
     if existing:
-        return get_listing(existing["id"]) or {}
+        listing = get_listing(existing["id"]) or {}
+        listing["already_listed"] = True
+        return listing
 
     cursor = conn.execute(
         """
@@ -94,7 +98,9 @@ def create_listing(
     conn.commit()
     listing_id = cursor.lastrowid
     log_event("Gallery listing created", listing_id=listing_id, job_id=job_id, wallet=seller_wallet)
-    return get_listing(listing_id) or {"id": listing_id}
+    listing = get_listing(listing_id) or {"id": listing_id}
+    listing["already_listed"] = False
+    return listing
 
 
 def get_listing(listing_id: int) -> Optional[Dict[str, Any]]:
@@ -204,11 +210,18 @@ def purchase_listing(listing_id: int, buyer_wallet: str) -> Dict[str, Any]:
 
     now = time.time()
 
-    # Mark as sold
-    conn.execute(
-        "UPDATE gallery_listings SET sold = 1, updated_at = ? WHERE id = ?",
+    # Claim the listing atomically so concurrent buyers cannot both win.
+    cur = conn.execute(
+        """
+        UPDATE gallery_listings
+        SET sold = 1, updated_at = ?
+        WHERE id = ? AND listed = 1 AND sold = 0
+        """,
         (now, listing_id),
     )
+    if cur.rowcount <= 0:
+        conn.rollback()
+        return {"ok": False, "error": "listing_not_found"}
 
     # Record sale
     conn.execute(
@@ -266,7 +279,7 @@ def buyer_purchases(wallet: str) -> List[Dict[str, Any]]:
         """,
         (wallet,),
     ).fetchall()
-    return [dict(row) for row in rows]
+    return [_purchase_to_dict(row) for row in rows]
 
 
 def _listing_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
@@ -274,4 +287,28 @@ def _listing_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
     d = dict(row)
     d["listed"] = bool(d.get("listed", 0))
     d["sold"] = bool(d.get("sold", 0))
+    result_payload = build_result_payload(str(d.get("job_id", "")).strip()) or {}
+    image_url = result_payload.get("image_url")
+    video_url = result_payload.get("video_url")
+    d["image_url"] = image_url
+    d["video_url"] = video_url
+    d["preview_url"] = video_url or image_url
+    if d["sold"]:
+        d["status"] = "sold"
+    elif not d["listed"]:
+        d["status"] = "delisted"
+    else:
+        d["status"] = "active"
+    return d
+
+
+def _purchase_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
+    """Convert a purchase row to a serializable dict with preview metadata."""
+    d = dict(row)
+    result_payload = build_result_payload(str(d.get("job_id", "")).strip()) or {}
+    image_url = result_payload.get("image_url")
+    video_url = result_payload.get("video_url")
+    d["image_url"] = image_url
+    d["video_url"] = video_url
+    d["preview_url"] = video_url or image_url
     return d

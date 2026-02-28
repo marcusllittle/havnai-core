@@ -326,6 +326,7 @@ FACE_SWAP_PROFILE = (
     or "auto"
 ).strip().lower()
 SAFE_CUDA_KERNELS = _env_flag("HAI_SAFE_CUDA_KERNELS", True)
+LTX2_LOW_VRAM_CAPS = _env_flag("HAVNAI_LTX2_LOW_VRAM_CAPS", True)
 IMAGE_PIPELINE_CACHE_SIZE = max(0, _env_int("HAI_IMAGE_PIPELINE_CACHE_SIZE", 1))
 PRELOAD_IMAGE_ON_STARTUP = _env_flag("HAI_PRELOAD_IMAGE_ON_STARTUP", True)
 PRELOAD_IMAGE_MODEL = str(
@@ -1291,9 +1292,9 @@ def _faceswap_attempt_profiles(requested_steps: int, requested_guidance: float) 
 
     if profile in {"fast", "fast_3060"}:
         return [
-            {"max_side": 896, "min_side": 704, "steps": min(requested_steps, 14), "guidance": max(0.0, base_guidance - 0.2)},
-            {"max_side": 832, "min_side": 640, "steps": min(requested_steps, 12), "guidance": max(0.0, base_guidance - 0.4)},
-            {"max_side": 768, "min_side": 576, "steps": min(requested_steps, 10), "guidance": max(0.0, base_guidance - 0.6)},
+            {"max_side": 768, "min_side": 576, "steps": min(requested_steps, 10), "guidance": max(0.0, base_guidance - 0.2)},
+            {"max_side": 704, "min_side": 512, "steps": min(requested_steps, 8), "guidance": max(0.0, base_guidance - 0.4)},
+            {"max_side": 640, "min_side": 512, "steps": min(requested_steps, 6), "guidance": max(0.0, base_guidance - 0.6)},
         ]
 
     # Default balanced_3060 profile.
@@ -1405,6 +1406,35 @@ def _run_ltx2_task(
     task_payload["model_name"] = entry.name
     task_payload["reward_weight"] = reward_weight
     task_payload.setdefault("seed", random.randint(0, 2**31 - 1))
+
+    vram_gb = _cuda_total_vram_gb()
+    if LTX2_LOW_VRAM_CAPS and 0 < vram_gb <= 12.5:
+        original_steps = coerce_int(task_payload.get("steps"), 20)
+        original_guidance = coerce_float(task_payload.get("guidance"), 7.0)
+        original_width = coerce_int(task_payload.get("width"), 512)
+        original_height = coerce_int(task_payload.get("height"), 512)
+        original_frames = coerce_int(task_payload.get("frames"), 16)
+        original_timeout = coerce_int(task_payload.get("timeout"), 300)
+
+        task_payload["steps"] = max(4, min(original_steps, 8))
+        task_payload["guidance"] = max(0.0, min(original_guidance, 5.5))
+        task_payload["width"] = max(256, min(original_width, 384))
+        task_payload["height"] = max(256, min(original_height, 384))
+        # Latte-1 commonly expects 16-frame blocks; forcing 16 avoids extra retry overhead.
+        task_payload["frames"] = 16
+        task_payload["timeout"] = max(original_timeout, 900)
+
+        log(
+            "LTX2 low-VRAM caps applied "
+            f"(VRAM={vram_gb:.1f}GB): "
+            f"steps {original_steps}->{task_payload['steps']}, "
+            f"guidance {original_guidance:.2f}->{task_payload['guidance']:.2f}, "
+            f"size {original_width}x{original_height}->{task_payload['width']}x{task_payload['height']}, "
+            f"frames {original_frames}->{task_payload['frames']}, "
+            f"timeout {original_timeout}s->{task_payload['timeout']}s",
+            prefix="⚠️",
+            task_id=task_id,
+        )
 
     try:
         metrics, util, video_path = run_ltx2(

@@ -477,6 +477,23 @@ def log_event(message: str, level: str = "info", **extra: Any) -> None:
     EVENT_LOGS.append({"timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "level": level, "message": message})
 
 
+def _build_result_payload(job_id: str) -> Optional[Dict[str, Any]]:
+    """Resolve output URLs for a completed job if artifacts exist."""
+    if not job_id:
+        return None
+
+    image_path = OUTPUTS_DIR / f"{job_id}.png"
+    video_path = OUTPUTS_DIR / "videos" / f"{job_id}.mp4"
+    payload: Dict[str, Any] = {"job_id": job_id}
+    if image_path.exists():
+        payload["image_url"] = f"/static/outputs/{job_id}.png"
+    if video_path.exists():
+        payload["video_url"] = f"/static/outputs/videos/{job_id}.mp4"
+    if "image_url" not in payload and "video_url" not in payload:
+        return None
+    return payload
+
+
 # ---------------------------------------------------------------------------
 # Dependency injection for modules
 # ---------------------------------------------------------------------------
@@ -540,6 +557,7 @@ def _inject_module_dependencies() -> None:
     gallery.get_db = get_db  # type: ignore[attr-defined]
     gallery.log_event = log_event  # type: ignore[attr-defined]
     gallery.WALLET_REGEX = WALLET_REGEX  # type: ignore[attr-defined]
+    gallery.build_result_payload = _build_result_payload  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
@@ -4385,17 +4403,8 @@ def get_result(job_id: str) -> Any:
     if not job_id:
         return jsonify({"error": "missing job_id"}), 400
 
-    image_path = OUTPUTS_DIR / f"{job_id}.png"
-    videos_dir = OUTPUTS_DIR / "videos"
-    video_path = videos_dir / f"{job_id}.mp4"
-
-    payload: Dict[str, Any] = {"job_id": job_id}
-    if image_path.exists():
-        payload["image_url"] = f"/static/outputs/{job_id}.png"
-    if video_path.exists():
-        payload["video_url"] = f"/static/outputs/videos/{job_id}.mp4"
-
-    if "image_url" not in payload and "video_url" not in payload:
+    payload = _build_result_payload(job_id)
+    if payload is None:
         return jsonify({"error": "result_not_found", "job_id": job_id}), 404
     return jsonify(payload), 200
 

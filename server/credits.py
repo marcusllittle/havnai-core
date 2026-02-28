@@ -32,6 +32,7 @@ def resolve_credit_cost(model_name: str, task_type: str = "") -> float:
 
     Priority: manifest credit_cost → pipeline default → 1.0 fallback.
     """
+    tt = (task_type or "").upper()
     cfg = get_model_config(model_name)
     if cfg:
         explicit = cfg.get("credit_cost")
@@ -40,11 +41,12 @@ def resolve_credit_cost(model_name: str, task_type: str = "") -> float:
                 return float(explicit)
             except (TypeError, ValueError):
                 pass
+        if tt == "FACE_SWAP":
+            return DEFAULT_CREDIT_COSTS.get("face_swap", 1.5)
         pipeline = str(cfg.get("pipeline", "")).lower()
         if pipeline in DEFAULT_CREDIT_COSTS:
             return DEFAULT_CREDIT_COSTS[pipeline]
     # Fall back on task_type for non-manifest models
-    tt = (task_type or "").upper()
     if tt == "FACE_SWAP":
         return DEFAULT_CREDIT_COSTS.get("face_swap", 1.5)
     if tt == "VIDEO_GEN":

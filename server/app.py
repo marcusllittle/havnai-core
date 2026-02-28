@@ -3403,6 +3403,41 @@ def credits_cost() -> Any:
     })
 
 
+@app.route("/credits/reference", methods=["GET"])
+def credits_reference() -> Any:
+    """Return the current default pricing reference used for common job types."""
+    return jsonify({
+        "credits_enabled": CREDITS_ENABLED,
+        "reference": [
+            {
+                "id": "sdxl_image",
+                "label": "SDXL Image",
+                "credits_per_job": float(credits.DEFAULT_CREDIT_COSTS.get("sdxl", 1.0)),
+            },
+            {
+                "id": "sd15_image",
+                "label": "SD1.5 Image",
+                "credits_per_job": float(credits.DEFAULT_CREDIT_COSTS.get("sd15", 0.5)),
+            },
+            {
+                "id": "face_swap",
+                "label": "Face Swap",
+                "credits_per_job": float(credits.DEFAULT_CREDIT_COSTS.get("face_swap", 1.5)),
+            },
+            {
+                "id": "animatediff_video",
+                "label": "AnimateDiff Video",
+                "credits_per_job": float(credits.DEFAULT_CREDIT_COSTS.get("animatediff", 2.0)),
+            },
+            {
+                "id": "ltx2_video",
+                "label": "LTX2 Video",
+                "credits_per_job": float(credits.DEFAULT_CREDIT_COSTS.get("ltx2", 3.0)),
+            },
+        ],
+    })
+
+
 # ---------------------------------------------------------------------------
 # Stripe payment endpoints
 # ---------------------------------------------------------------------------

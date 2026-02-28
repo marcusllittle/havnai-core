@@ -75,9 +75,11 @@ except ImportError:  # pragma: no cover
     _DPMSolver = None  # type: ignore
     _AutoencoderKL = None  # type: ignore
 try:
-    from PIL import Image  # type: ignore
+    from PIL import Image, ImageDraw, ImageFont  # type: ignore
 except Exception:  # pragma: no cover
     Image = None  # type: ignore
+    ImageDraw = None  # type: ignore
+    ImageFont = None  # type: ignore
 try:
     import cv2  # type: ignore
 except Exception:  # pragma: no cover
@@ -273,6 +275,27 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        raw = ENV_VARS.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_str(name: str, default: str = "") -> str:
+    raw = os.environ.get(name)
+    if raw is None:
+        raw = ENV_VARS.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip()
+
+
 def _env_csv(name: str) -> List[str]:
     raw = os.environ.get(name)
     if raw is None:
@@ -286,6 +309,136 @@ def _normalize_model_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
 
 
+def _watermark_asset_candidates() -> List[Path]:
+    candidates: List[Path] = []
+    if WATERMARK_PATH:
+        candidates.append(Path(WATERMARK_PATH).expanduser())
+    candidates.append(REPO_ROOT / "static" / "HavnAI-logo.png")
+    candidates.append(REPO_ROOT.parent / "havnai-web" / "HavnAI-logo.png")
+    return candidates
+
+
+def _resolve_watermark_asset_path() -> Optional[Path]:
+    for candidate in _watermark_asset_candidates():
+        try:
+            if candidate.exists() and candidate.is_file():
+                return candidate
+        except Exception:
+            continue
+    return None
+
+
+def _load_watermark_image() -> Any:
+    if Image is None or not WATERMARK_ENABLED:
+        return None
+
+    asset_path = _resolve_watermark_asset_path()
+    if asset_path is None:
+        return None
+
+    cache_key = str(asset_path.resolve())
+    with _WATERMARK_IMAGE_LOCK:
+        if _WATERMARK_IMAGE_CACHE_KEY == cache_key and _WATERMARK_IMAGE_CACHE is not None:
+            return _WATERMARK_IMAGE_CACHE.copy()
+
+        try:
+            watermark = Image.open(asset_path).convert("RGBA")
+            pixels = watermark.load()
+            for y in range(watermark.height):
+                for x in range(watermark.width):
+                    r, g, b, a = pixels[x, y]
+                    if a <= 0:
+                        continue
+                    if r <= 20 and g <= 20 and b <= 20:
+                        pixels[x, y] = (r, g, b, 0)
+            if WATERMARK_OPACITY < 1.0:
+                alpha = watermark.getchannel("A").point(lambda value: int(value * WATERMARK_OPACITY))
+                watermark.putalpha(alpha)
+            globals()["_WATERMARK_IMAGE_CACHE"] = watermark
+            globals()["_WATERMARK_IMAGE_CACHE_KEY"] = cache_key
+            return watermark.copy()
+        except Exception as exc:
+            log(f"Failed to load watermark asset {asset_path}: {exc}", prefix="⚠️")
+            globals()["_WATERMARK_IMAGE_CACHE"] = None
+            globals()["_WATERMARK_IMAGE_CACHE_KEY"] = cache_key
+            return None
+
+
+def _load_watermark_font(size: int) -> Any:
+    if ImageFont is None:
+        return None
+    try:
+        return ImageFont.truetype("DejaVuSans-Bold.ttf", size)
+    except Exception:
+        try:
+            return ImageFont.load_default()
+        except Exception:
+            return None
+
+
+def _apply_text_watermark(image: Any) -> Any:
+    if Image is None or ImageDraw is None:
+        return image
+
+    text = (WATERMARK_TEXT or "HAVNAI").strip()
+    if not text:
+        return image
+
+    base = image.convert("RGBA")
+    overlay = Image.new("RGBA", base.size, (255, 255, 255, 0))
+    draw = ImageDraw.Draw(overlay)
+    font = _load_watermark_font(max(18, int(min(base.size) * 0.06)))
+    if font is None:
+        return image
+
+    try:
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_width = max(1, bbox[2] - bbox[0])
+        text_height = max(1, bbox[3] - bbox[1])
+    except Exception:
+        text_width = max(1, len(text) * 10)
+        text_height = max(1, int(min(base.size) * 0.06))
+
+    margin = max(12, int(min(base.size) * WATERMARK_MARGIN_PCT))
+    x = max(margin, base.width - text_width - margin)
+    y = max(margin, base.height - text_height - margin)
+    draw.text((x + 2, y + 2), text, font=font, fill=(0, 0, 0, 120))
+    draw.text((x, y), text, font=font, fill=(255, 255, 255, int(255 * 0.75)))
+    return Image.alpha_composite(base, overlay).convert(image.mode if image.mode != "RGBA" else "RGBA")
+
+
+def _apply_output_watermark(image: Any, task_id: str = "") -> Any:
+    if Image is None or not WATERMARK_ENABLED:
+        return image
+    try:
+        base = image.convert("RGBA")
+        watermark = _load_watermark_image()
+        if watermark is None:
+            return _apply_text_watermark(image)
+
+        max_width = max(WATERMARK_MIN_WIDTH, int(base.width * WATERMARK_MAX_WIDTH_PCT))
+        scale = max_width / max(1, watermark.width)
+        target_height = max(1, int(watermark.height * scale))
+        watermark = watermark.resize((max_width, target_height), Image.LANCZOS)
+
+        margin = max(12, int(min(base.size) * WATERMARK_MARGIN_PCT))
+        x = max(margin, base.width - watermark.width - margin)
+        y = max(margin, base.height - watermark.height - margin)
+
+        overlay = Image.new("RGBA", base.size, (255, 255, 255, 0))
+        overlay.alpha_composite(watermark, (x, y))
+        return Image.alpha_composite(base, overlay).convert(image.mode if image.mode != "RGBA" else "RGBA")
+    except Exception as exc:
+        log(f"Watermark application failed: {exc}", prefix="⚠️", task_id=task_id)
+        return image
+
+
+def _save_output_image(image: Any, output_path: Path, task_id: str = "") -> None:
+    final_image = _apply_output_watermark(image, task_id=task_id)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    final_image.save(output_path)
+
+
 SERVER_BASE = ENV_VARS.get("SERVER_URL", "http://127.0.0.1:5001").rstrip("/")
 JOIN_TOKEN = ENV_VARS.get("JOIN_TOKEN", "").strip()
 ROLE = "creator" if ENV_VARS.get("CREATOR_MODE", "false").lower() in {"1", "true", "yes"} else "worker"
@@ -294,6 +447,13 @@ FAST_PREVIEW = (
     os.environ.get("HAI_FAST_PREVIEW", ENV_VARS.get("HAI_FAST_PREVIEW", "")).lower()
     in {"1", "true", "yes"}
 )
+WATERMARK_ENABLED = _env_flag("HAVNAI_WATERMARK_ENABLED", True)
+WATERMARK_TEXT = _env_str("HAVNAI_WATERMARK_TEXT", "HAVNAI")
+WATERMARK_PATH = _env_str("HAVNAI_WATERMARK_PATH", "")
+WATERMARK_OPACITY = max(0.05, min(1.0, _env_float("HAVNAI_WATERMARK_OPACITY", 0.82)))
+WATERMARK_MARGIN_PCT = max(0.01, min(0.12, _env_float("HAVNAI_WATERMARK_MARGIN_PCT", 0.03)))
+WATERMARK_MAX_WIDTH_PCT = max(0.08, min(0.4, _env_float("HAVNAI_WATERMARK_MAX_WIDTH_PCT", 0.2)))
+WATERMARK_MIN_WIDTH = max(48, _env_int("HAVNAI_WATERMARK_MIN_WIDTH", 96))
 LTX2_MODEL_ID = os.environ.get("LTX2_MODEL_ID") or ENV_VARS.get("LTX2_MODEL_ID") or "maxin-cn/Latte-1"
 LTX2_MODEL_PATH = os.environ.get("LTX2_MODEL_PATH") or ENV_VARS.get("LTX2_MODEL_PATH", "")
 ANIMATEDIFF_ADAPTER_ID = (
@@ -318,6 +478,9 @@ INSTANTID_CONTROLNET_REPO = (
     or ENV_VARS.get("HAVNAI_INSTANTID_CONTROLNET_REPO")
     or "InstantX/InstantID"
 )
+_WATERMARK_IMAGE_CACHE: Any = None
+_WATERMARK_IMAGE_CACHE_KEY: Optional[str] = None
+_WATERMARK_IMAGE_LOCK = threading.Lock()
 ENABLE_XFORMERS = _env_flag("HAI_ENABLE_XFORMERS", False)
 FACE_SWAP_USE_XFORMERS = _env_flag("HAVNAI_FACE_SWAP_USE_XFORMERS", True)
 FACE_SWAP_PROFILE = (
@@ -1714,7 +1877,7 @@ def _run_faceswap_task(
             raise RuntimeError(str(last_exc) if last_exc else "face swap produced no image")
 
         output_path = OUTPUTS_DIR / f"{task_id}.png"
-        composed.save(output_path)
+        _save_output_image(composed, output_path, task_id=task_id)
         with output_path.open("rb") as fh:
             image_b64 = base64.b64encode(fh.read()).decode("utf-8")
     except Exception as exc:
@@ -2461,7 +2624,7 @@ def run_image_generation(
                 generation_ms = int((time.time() - gen_t0) * 1000)
                 log(f"Generated in {generation_ms}ms", prefix="✅")
                 img = result.images[0]
-                img.save(output_path)
+                _save_output_image(img, output_path, task_id=task_id)
                 with output_path.open("rb") as fh:
                     image_b64 = base64.b64encode(fh.read()).decode("utf-8")
             finally:
@@ -2480,7 +2643,7 @@ def run_image_generation(
             else:
                 arr = None
             img = Image.fromarray(arr) if arr is not None else Image.new("RGB", (w, h), color=(40, 60, 80))
-            img.save(output_path)
+            _save_output_image(img, output_path, task_id=task_id)
             with output_path.open("rb") as fh:
                 image_b64 = base64.b64encode(fh.read()).decode("utf-8")
         else:

@@ -37,6 +37,7 @@ import blockchain
 import analytics
 import validators
 import workflows
+import gallery
 
 try:
     from eth_account import Account  # type: ignore
@@ -535,6 +536,11 @@ def _inject_module_dependencies() -> None:
     workflows.log_event = log_event  # type: ignore[attr-defined]
     workflows.WALLET_REGEX = WALLET_REGEX  # type: ignore[attr-defined]
 
+    # Gallery module
+    gallery.get_db = get_db  # type: ignore[attr-defined]
+    gallery.log_event = log_event  # type: ignore[attr-defined]
+    gallery.WALLET_REGEX = WALLET_REGEX  # type: ignore[attr-defined]
+
 
 # ---------------------------------------------------------------------------
 # Utility helpers
@@ -748,6 +754,7 @@ _inject_module_dependencies()
 blockchain.init_blockchain_tables(get_db())
 validators.init_validator_tables(get_db())
 workflows.init_workflow_tables(get_db())
+gallery.init_gallery_tables(get_db())
 
 # Optional: clear database and in-memory state on startup for a fresh dashboard
 if RESET_ON_STARTUP:
@@ -4098,6 +4105,175 @@ def api_marketplace_browse() -> Any:
         limit=limit, offset=offset,
     )
     return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
+# Gallery — image/video marketplace
+# ---------------------------------------------------------------------------
+
+
+@app.route("/gallery/browse", methods=["GET"])
+def api_gallery_browse() -> Any:
+    """Browse gallery listings."""
+    search = request.args.get("search", "").strip() or None
+    category = request.args.get("category", "").strip() or None
+    asset_type = request.args.get("asset_type", "").strip() or None
+    sort = request.args.get("sort", "newest").strip()
+    limit = _clamp(_coerce_int(request.args.get("limit"), 24), 1, 200)
+    offset = max(0, _coerce_int(request.args.get("offset"), 0))
+    result = gallery.browse_gallery(
+        search=search, category=category, asset_type=asset_type,
+        sort=sort, limit=limit, offset=offset,
+    )
+    return jsonify(result)
+
+
+@app.route("/gallery/listings", methods=["POST"])
+def api_gallery_create_listing() -> Any:
+    """Create a gallery listing from a completed job."""
+    if not rate_limit(f"gallery-list:{request.remote_addr}", limit=30):
+        return jsonify({"error": "rate limit"}), 429
+    data = request.get_json() or {}
+    wallet = str(data.get("wallet", "")).strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    job_id = str(data.get("job_id", "")).strip()
+    if not job_id:
+        return jsonify({"error": "missing job_id"}), 400
+
+    # Verify the job belongs to this wallet and is completed
+    conn = get_db()
+    job_row = conn.execute(
+        "SELECT wallet, status, model, data, task_type FROM jobs WHERE id = ?", (job_id,)
+    ).fetchone()
+    if not job_row:
+        return jsonify({"error": "job_not_found"}), 404
+    if job_row["wallet"] != wallet:
+        return jsonify({"error": "not_your_job"}), 403
+    if job_row["status"] not in ("completed", "success"):
+        return jsonify({"error": "job_not_completed"}), 400
+
+    title = str(data.get("title", "")).strip() or f"Generation #{job_id[:8]}"
+    description = str(data.get("description", "")).strip()
+    price = data.get("price_credits")
+    try:
+        price_credits = float(price)
+        if price_credits <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid price_credits — must be > 0"}), 400
+
+    category = str(data.get("category", "")).strip()
+    task_type = str(job_row["task_type"] or "").upper()
+    asset_type = "video" if "VIDEO" in task_type else "image"
+    model = job_row["model"] or ""
+
+    prompt = ""
+    try:
+        job_data = json.loads(job_row["data"]) if job_row["data"] else {}
+        prompt = str(job_data.get("prompt", ""))
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    result = gallery.create_listing(
+        job_id=job_id,
+        seller_wallet=wallet,
+        title=title,
+        price_credits=price_credits,
+        description=description,
+        category=category,
+        asset_type=asset_type,
+        model=model,
+        prompt=prompt,
+    )
+    return jsonify(result), 201
+
+
+@app.route("/gallery/listings/<int:listing_id>", methods=["GET"])
+def api_gallery_listing_detail(listing_id: int) -> Any:
+    """Get listing details."""
+    listing = gallery.get_listing(listing_id)
+    if not listing:
+        return jsonify({"error": "listing_not_found"}), 404
+    return jsonify(listing)
+
+
+@app.route("/gallery/listings/<int:listing_id>/purchase", methods=["POST"])
+def api_gallery_purchase(listing_id: int) -> Any:
+    """Purchase a gallery listing using credits."""
+    data = request.get_json() or {}
+    buyer_wallet = str(data.get("wallet", "")).strip()
+    if not buyer_wallet or not WALLET_REGEX.match(buyer_wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+
+    listing = gallery.get_listing(listing_id)
+    if not listing or not listing.get("listed") or listing.get("sold"):
+        return jsonify({"error": "listing_not_available"}), 404
+
+    price = listing["price_credits"]
+
+    # Deduct credits from buyer
+    ok, remaining = credits.deduct_credits(buyer_wallet, price, job_id=f"gallery-{listing_id}")
+    if not ok:
+        return jsonify({
+            "error": "insufficient_credits",
+            "balance": remaining,
+            "cost": price,
+            "message": f"This item costs {price} credits but you only have {remaining}.",
+        }), 402
+
+    # Complete the purchase
+    result = gallery.purchase_listing(listing_id, buyer_wallet)
+    if not result.get("ok"):
+        # Refund buyer if purchase failed after deduction
+        credits.deposit_credits(buyer_wallet, price, reason=f"gallery-refund-{listing_id}")
+        return jsonify({"error": result.get("error", "purchase_failed")}), 400
+
+    # Credit the seller
+    credits.deposit_credits(
+        listing["seller_wallet"], price,
+        reason=f"gallery-sale-{listing_id}",
+    )
+
+    return jsonify({
+        "ok": True,
+        "sale": result["sale"],
+        "remaining_credits": remaining,
+    })
+
+
+@app.route("/gallery/listings/<int:listing_id>", methods=["DELETE"])
+def api_gallery_delist(listing_id: int) -> Any:
+    """Remove a listing (seller only)."""
+    data = request.get_json() or {}
+    wallet = str(data.get("wallet", "")).strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    ok = gallery.delist(listing_id, wallet)
+    if not ok:
+        return jsonify({"error": "listing_not_found_or_unauthorized"}), 404
+    return jsonify({"ok": True})
+
+
+@app.route("/gallery/my-listings", methods=["GET"])
+def api_gallery_my_listings() -> Any:
+    """Get listings for the current wallet."""
+    wallet = request.args.get("wallet", "").strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    include_sold = request.args.get("include_sold", "").lower() in ("true", "1", "yes")
+    listings = gallery.seller_listings(wallet, include_sold=include_sold)
+    return jsonify({"listings": listings})
+
+
+@app.route("/gallery/purchases", methods=["GET"])
+def api_gallery_purchases() -> Any:
+    """Get purchase history for a wallet."""
+    wallet = request.args.get("wallet", "").strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    purchases = gallery.buyer_purchases(wallet)
+    return jsonify({"purchases": purchases})
 
 
 # ---------------------------------------------------------------------------

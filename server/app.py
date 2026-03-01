@@ -104,6 +104,13 @@ INVITE_CONFIG_PATH = Path(
 INVITE_GATING = os.getenv("HAVNAI_INVITE_GATING", "").strip().lower() in {"1", "true", "yes"}
 CREDITS_ENABLED = os.getenv("HAVNAI_CREDITS_ENABLED", "").strip().lower() in {"1", "true", "yes"}
 WALLET_NONCE_PURPOSE_CONVERT = "convert_credits_to_hai"
+WALLET_NONCE_PURPOSE_GALLERY_PURCHASE = "gallery_purchase"
+WALLET_NONCE_PURPOSE_GALLERY_LIST = "gallery_list"
+WALLET_NONCE_ALLOWED_PURPOSES = {
+    WALLET_NONCE_PURPOSE_CONVERT,
+    WALLET_NONCE_PURPOSE_GALLERY_PURCHASE,
+    WALLET_NONCE_PURPOSE_GALLERY_LIST,
+}
 WALLET_NONCE_TTL_SECONDS = max(60, int(os.getenv("HAVNAI_WALLET_NONCE_TTL_SECONDS", "300")))
 
 # Startup warnings for missing configuration
@@ -3107,6 +3114,123 @@ def _build_convert_nonce_message(
     )
 
 
+def _build_gallery_nonce_message(
+    purpose: str,
+    wallet: str,
+    amount: float,
+    nonce: str,
+    issued_at_iso: str,
+    expires_at_iso: str,
+    origin: str,
+    domain: str,
+    *,
+    listing_id: Optional[int] = None,
+    job_id: Optional[str] = None,
+) -> str:
+    """Build a signed message for gallery operations (purchase or list)."""
+    lines = [
+        "HavnAI Wallet Signature",
+        f"action: {purpose}",
+        f"wallet: {wallet}",
+    ]
+    if listing_id is not None:
+        lines.append(f"listing_id: {listing_id}")
+    if job_id is not None:
+        lines.append(f"job_id: {job_id}")
+    lines += [
+        f"amount: {amount:.8f}",
+        f"nonce: {nonce}",
+        f"issued_at: {issued_at_iso}",
+        f"expires_at: {expires_at_iso}",
+        f"origin: {origin}",
+        f"domain: {domain}",
+    ]
+    return "\n".join(lines)
+
+
+def _verify_wallet_signature(
+    wallet: str,
+    nonce_str: str,
+    signature: str,
+    allowed_purposes: set,
+    expected_amount: Optional[float] = None,
+    log_label: str = "Signature verification",
+) -> Tuple[bool, Optional[Any]]:
+    """Verify a wallet signature against a stored nonce.
+
+    Returns (True, None) on success.
+    Returns (False, flask_response_tuple) on failure.
+    """
+    if Account is None or encode_defunct is None:
+        return False, (jsonify({
+            "error": "signature_verification_unavailable",
+            "message": "eth-account is required for wallet signature verification",
+        }), 500)
+
+    conn = get_db()
+    row = conn.execute(
+        "SELECT wallet, nonce, purpose, amount, message, issued_at, expires_at, used_at "
+        "FROM wallet_nonces WHERE wallet=? AND nonce=?",
+        (wallet, nonce_str),
+    ).fetchone()
+    if not row:
+        log_event(f"{log_label} rejected", level="warning", wallet=wallet, reason="nonce_not_found")
+        return False, (jsonify({"error": "invalid_nonce", "message": "nonce not found"}), 400)
+
+    nonce_purpose = str(row["purpose"] or "").strip()
+    if nonce_purpose not in allowed_purposes:
+        log_event(f"{log_label} rejected", level="warning", wallet=wallet, reason="nonce_purpose_mismatch")
+        return False, (jsonify({"error": "invalid_nonce", "message": "nonce purpose mismatch"}), 400)
+
+    if expected_amount is not None:
+        try:
+            nonce_amount = float(row["amount"])
+        except (TypeError, ValueError):
+            log_event(f"{log_label} rejected", level="warning", wallet=wallet, reason="nonce_amount_invalid")
+            return False, (jsonify({"error": "invalid_nonce", "message": "nonce amount invalid"}), 400)
+        if abs(nonce_amount - expected_amount) > 1e-9:
+            log_event(f"{log_label} rejected", level="warning", wallet=wallet, reason="nonce_amount_mismatch")
+            return False, (jsonify({"error": "invalid_nonce", "message": "nonce amount mismatch"}), 400)
+
+    now_ts = unix_now()
+    expires_at = float(row["expires_at"] or 0.0)
+    if row["used_at"] is not None:
+        log_event(f"{log_label} rejected", level="warning", wallet=wallet, reason="nonce_used")
+        return False, (jsonify({"error": "nonce_used", "message": "nonce already used"}), 409)
+    if now_ts > expires_at:
+        log_event(f"{log_label} rejected", level="warning", wallet=wallet, reason="nonce_expired")
+        return False, (jsonify({"error": "nonce_expired", "message": "nonce expired"}), 400)
+
+    message = str(row["message"] or "")
+    try:
+        recovered = Account.recover_message(encode_defunct(text=message), signature=signature)
+    except Exception as exc:
+        log_event(f"{log_label} rejected", level="warning", wallet=wallet, reason="signature_parse_failed", error=str(exc))
+        return False, (jsonify({"error": "invalid_signature", "message": "signature verification failed"}), 400)
+
+    if recovered.lower() != wallet.lower():
+        log_event(f"{log_label} rejected", level="warning", wallet=wallet, reason="signature_wallet_mismatch", recovered=recovered)
+        return False, (jsonify({"error": "invalid_signature", "message": "signature wallet mismatch"}), 400)
+
+    # Atomically mark nonce as used
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            "UPDATE wallet_nonces SET used_at=? WHERE wallet=? AND nonce=? AND used_at IS NULL",
+            (now_ts, wallet, nonce_str),
+        )
+        if cur.rowcount != 1:
+            conn.rollback()
+            log_event(f"{log_label} rejected", level="warning", wallet=wallet, reason="nonce_replay")
+            return False, (jsonify({"error": "nonce_used", "message": "nonce already used"}), 409)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    return True, None
+
+
 def _parse_positive_amount(raw_amount: Any) -> Tuple[Optional[float], Optional[Any]]:
     try:
         amount = float(raw_amount)
@@ -3199,11 +3323,11 @@ def wallet_nonce() -> Any:
         return jsonify({"error": "rate limit", "detail": "per-wallet limit exceeded"}), 429
 
     purpose = str(data.get("purpose") or WALLET_NONCE_PURPOSE_CONVERT).strip()
-    if purpose != WALLET_NONCE_PURPOSE_CONVERT:
+    if purpose not in WALLET_NONCE_ALLOWED_PURPOSES:
         return jsonify(
             {
                 "error": "unsupported_purpose",
-                "message": f"purpose must be '{WALLET_NONCE_PURPOSE_CONVERT}'",
+                "message": f"purpose must be one of: {', '.join(sorted(WALLET_NONCE_ALLOWED_PURPOSES))}",
             }
         ), 400
 
@@ -3212,13 +3336,35 @@ def wallet_nonce() -> Any:
         return amount_error
     assert amount is not None
 
+    # Optional context fields for gallery purposes
+    listing_id = None
+    job_id_ctx = None
+    if purpose == WALLET_NONCE_PURPOSE_GALLERY_PURCHASE:
+        try:
+            listing_id = int(data.get("listing_id", 0))
+        except (TypeError, ValueError):
+            listing_id = None
+        if not listing_id:
+            return jsonify({"error": "missing listing_id", "message": "listing_id required for gallery_purchase"}), 400
+    elif purpose == WALLET_NONCE_PURPOSE_GALLERY_LIST:
+        job_id_ctx = str(data.get("job_id", "")).strip() or None
+        if not job_id_ctx:
+            return jsonify({"error": "missing job_id", "message": "job_id required for gallery_list"}), 400
+
     now_ts = unix_now()
     issued_at_iso = datetime.fromtimestamp(now_ts, timezone.utc).isoformat().replace("+00:00", "Z")
     expires_ts = now_ts + float(WALLET_NONCE_TTL_SECONDS)
     expires_at_iso = datetime.fromtimestamp(expires_ts, timezone.utc).isoformat().replace("+00:00", "Z")
     nonce = secrets.token_hex(16)
     origin, domain = _request_origin_and_domain()
-    message = _build_convert_nonce_message(wallet, amount, nonce, issued_at_iso, expires_at_iso, origin, domain)
+
+    if purpose == WALLET_NONCE_PURPOSE_CONVERT:
+        message = _build_convert_nonce_message(wallet, amount, nonce, issued_at_iso, expires_at_iso, origin, domain)
+    else:
+        message = _build_gallery_nonce_message(
+            purpose, wallet, amount, nonce, issued_at_iso, expires_at_iso, origin, domain,
+            listing_id=listing_id, job_id=job_id_ctx,
+        )
 
     conn = get_db()
     conn.execute(
@@ -4146,7 +4292,7 @@ def api_gallery_browse() -> Any:
 
 @app.route("/gallery/listings", methods=["POST"])
 def api_gallery_create_listing() -> Any:
-    """Create a gallery listing from a completed job."""
+    """Create a gallery listing from a completed job (requires wallet signature)."""
     if not rate_limit(f"gallery-list:{request.remote_addr}", limit=30):
         return jsonify({"error": "rate limit"}), 429
     data = request.get_json() or {}
@@ -4156,6 +4302,29 @@ def api_gallery_create_listing() -> Any:
     job_id = str(data.get("job_id", "")).strip()
     if not job_id:
         return jsonify({"error": "missing job_id"}), 400
+
+    # Verify wallet ownership via signature
+    nonce_str = str(data.get("nonce", "")).strip()
+    signature = str(data.get("signature", "")).strip()
+    if not nonce_str or not signature:
+        return jsonify({"error": "signature_required", "message": "nonce and signature are required"}), 400
+
+    price = data.get("price_credits")
+    try:
+        price_credits = float(price)
+        if price_credits <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid price_credits — must be > 0"}), 400
+
+    sig_ok, sig_err = _verify_wallet_signature(
+        wallet, nonce_str, signature,
+        allowed_purposes={WALLET_NONCE_PURPOSE_GALLERY_LIST},
+        expected_amount=price_credits,
+        log_label="Gallery listing",
+    )
+    if not sig_ok:
+        return sig_err
 
     # Verify the job belongs to this wallet and is completed
     conn = get_db()
@@ -4171,13 +4340,6 @@ def api_gallery_create_listing() -> Any:
 
     title = str(data.get("title", "")).strip()[:200] or f"Generation #{job_id[:8]}"
     description = str(data.get("description", "")).strip()[:2000]
-    price = data.get("price_credits")
-    try:
-        price_credits = float(price)
-        if price_credits <= 0:
-            raise ValueError
-    except (TypeError, ValueError):
-        return jsonify({"error": "invalid price_credits — must be > 0"}), 400
 
     category = str(data.get("category", "")).strip()
     task_type = str(job_row["task_type"] or "").upper()
@@ -4216,7 +4378,7 @@ def api_gallery_listing_detail(listing_id: int) -> Any:
 
 @app.route("/gallery/listings/<int:listing_id>/purchase", methods=["POST"])
 def api_gallery_purchase(listing_id: int) -> Any:
-    """Purchase a gallery listing using credits."""
+    """Purchase a gallery listing using credits (requires wallet signature)."""
     if not rate_limit(f"gallery-purchase:{request.remote_addr}", limit=10):
         return jsonify({"error": "rate limit"}), 429
     data = request.get_json() or {}
@@ -4224,11 +4386,26 @@ def api_gallery_purchase(listing_id: int) -> Any:
     if not buyer_wallet or not WALLET_REGEX.match(buyer_wallet):
         return jsonify({"error": "invalid wallet"}), 400
 
+    # Verify wallet ownership via signature
+    nonce_str = str(data.get("nonce", "")).strip()
+    signature = str(data.get("signature", "")).strip()
+    if not nonce_str or not signature:
+        return jsonify({"error": "signature_required", "message": "nonce and signature are required"}), 400
+
     listing = gallery.get_listing(listing_id)
     if not listing or not listing.get("listed") or listing.get("sold"):
         return jsonify({"error": "listing_not_available"}), 404
 
     price = listing["price_credits"]
+
+    sig_ok, sig_err = _verify_wallet_signature(
+        buyer_wallet, nonce_str, signature,
+        allowed_purposes={WALLET_NONCE_PURPOSE_GALLERY_PURCHASE},
+        expected_amount=price,
+        log_label="Gallery purchase",
+    )
+    if not sig_ok:
+        return sig_err
 
     # Deduct credits from buyer
     ok, remaining = credits.deduct_credits(buyer_wallet, price, job_id=f"gallery-{listing_id}")

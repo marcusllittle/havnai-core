@@ -30,6 +30,7 @@ import job_helpers
 
 VALID_WALLET = "0x1111111111111111111111111111111111111111"
 SDXL_MODEL = "epicrealismxl_vxviicrystalclear"
+SD15_MODEL = "realisticvision_v60"
 LTX2_MODEL = "ltx2"
 
 
@@ -90,6 +91,73 @@ class JobHelperSupportMappingTests(unittest.TestCase):
 
         job = job_helpers.fetch_next_job_for_node("node-a")
         self.assertIsNone(job)
+
+    def test_reference_face_image_not_assignable_without_face_swap_support(self) -> None:
+        now = time.time()
+        self.conn.execute(
+            """
+            INSERT INTO jobs (id, wallet, model, data, task_type, weight, status, node_id, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, 'queued', NULL, ?)
+            """,
+            (
+                "job-reference-face",
+                VALID_WALLET,
+                SDXL_MODEL,
+                json.dumps({"prompt": "portrait", "reference_face_url": "https://example.com/face.png"}),
+                "IMAGE_GEN",
+                10.0,
+                now,
+            ),
+        )
+        self.conn.commit()
+
+        job_helpers.get_db = lambda: self.conn
+        job_helpers.get_model_config = lambda model_name: {"pipeline": "sdxl"} if model_name == SDXL_MODEL else None
+        job_helpers.NODES = {
+            "node-a": {
+                "role": "creator",
+                "supports": ["image"],
+                "models": [SDXL_MODEL],
+                "pipelines": ["sdxl"],
+            }
+        }
+
+        job = job_helpers.fetch_next_job_for_node("node-a")
+        self.assertIsNone(job)
+
+    def test_reference_face_image_assignable_with_face_swap_support(self) -> None:
+        now = time.time()
+        self.conn.execute(
+            """
+            INSERT INTO jobs (id, wallet, model, data, task_type, weight, status, node_id, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, 'queued', NULL, ?)
+            """,
+            (
+                "job-reference-face",
+                VALID_WALLET,
+                SDXL_MODEL,
+                json.dumps({"prompt": "portrait", "reference_face_url": "https://example.com/face.png"}),
+                "IMAGE_GEN",
+                10.0,
+                now,
+            ),
+        )
+        self.conn.commit()
+
+        job_helpers.get_db = lambda: self.conn
+        job_helpers.get_model_config = lambda model_name: {"pipeline": "sdxl"} if model_name == SDXL_MODEL else None
+        job_helpers.NODES = {
+            "node-a": {
+                "role": "creator",
+                "supports": ["image", "face_swap"],
+                "models": [SDXL_MODEL],
+                "pipelines": ["sdxl"],
+            }
+        }
+
+        job = job_helpers.fetch_next_job_for_node("node-a")
+        self.assertIsNotNone(job)
+        self.assertEqual(job["id"], "job-reference-face")
 
 
 class CoordinatorCapacityEndpointTests(unittest.TestCase):
@@ -187,6 +255,116 @@ class CoordinatorCapacityEndpointTests(unittest.TestCase):
         self.assertEqual(body.get("error"), "no_capacity")
         self.assertEqual(body.get("task_type"), "FACE_SWAP")
         self.assertEqual(body.get("model"), SDXL_MODEL)
+
+    def test_submit_job_reference_face_returns_specific_no_capacity(self) -> None:
+        app_module.MANIFEST_MODELS[SDXL_MODEL] = {
+            "name": SDXL_MODEL,
+            "pipeline": "sdxl",
+            "task_type": "IMAGE_GEN",
+            "reward_weight": 10.0,
+            "tags": [],
+        }
+        with self._common_submission_patches():
+            resp = self.client.post(
+                "/submit-job",
+                json={
+                    "wallet": VALID_WALLET,
+                    "model": SDXL_MODEL,
+                    "prompt": "portrait photo",
+                    "reference_face_url": "https://example.com/face.png",
+                },
+            )
+        self.assertEqual(resp.status_code, 503)
+        body = resp.get_json()
+        self.assertEqual(body.get("error"), "no_capacity")
+        self.assertEqual(body.get("task_type"), "IMAGE_GEN")
+        self.assertEqual(body.get("model"), SDXL_MODEL)
+        self.assertIn("reference-face", str(body.get("message")))
+
+    def test_submit_job_reference_face_rejects_non_sdxl_model(self) -> None:
+        app_module.MANIFEST_MODELS[SD15_MODEL] = {
+            "name": SD15_MODEL,
+            "pipeline": "sd15",
+            "task_type": "IMAGE_GEN",
+            "reward_weight": 8.0,
+            "tags": [],
+        }
+        with self._common_submission_patches():
+            resp = self.client.post(
+                "/submit-job",
+                json={
+                    "wallet": VALID_WALLET,
+                    "model": SD15_MODEL,
+                    "prompt": "portrait photo",
+                    "reference_face_url": "https://example.com/face.png",
+                },
+            )
+        self.assertEqual(resp.status_code, 400)
+        body = resp.get_json()
+        self.assertEqual(body.get("error"), "reference_face_requires_sdxl")
+        self.assertIn("SDXL", str(body.get("message")))
+
+    def test_submit_job_reference_face_auto_only_considers_face_swap_capacity(self) -> None:
+        app_module.MANIFEST_MODELS[SDXL_MODEL] = {
+            "name": SDXL_MODEL,
+            "pipeline": "sdxl",
+            "task_type": "IMAGE_GEN",
+            "reward_weight": 10.0,
+            "tags": [],
+        }
+        app_module.MANIFEST_MODELS[SD15_MODEL] = {
+            "name": SD15_MODEL,
+            "pipeline": "sd15",
+            "task_type": "IMAGE_GEN",
+            "reward_weight": 9.0,
+            "tags": [],
+        }
+        now = app_module.unix_now()
+        app_module.NODES["node-face"] = {
+            "role": "creator",
+            "last_seen_unix": now,
+            "supports": ["image", "face_swap"],
+            "models": [SDXL_MODEL],
+            "pipelines": ["sdxl"],
+        }
+        app_module.NODES["node-image"] = {
+            "role": "creator",
+            "last_seen_unix": now,
+            "supports": ["image"],
+            "models": [SD15_MODEL],
+            "pipelines": ["sd15"],
+        }
+        captured: dict = {}
+
+        def _capture_enqueue(wallet, model, task_type, data, weight, invite_code=None):
+            captured["model"] = model
+            captured["task_type"] = task_type
+            captured["data"] = data
+            return "job-reference-auto"
+
+        def _pick_single(options, weights=None, k=1):
+            self.assertEqual(options, [SDXL_MODEL])
+            return [SDXL_MODEL]
+
+        with self._common_submission_patches(), patch.object(
+            app_module.job_helpers, "enqueue_job", side_effect=_capture_enqueue
+        ), patch.object(
+            app_module.random, "choices", side_effect=_pick_single
+        ):
+            resp = self.client.post(
+                "/submit-job",
+                json={
+                    "wallet": VALID_WALLET,
+                    "model": "auto",
+                    "prompt": "portrait photo",
+                    "reference_face_url": "https://example.com/face.png",
+                },
+            )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(captured["model"], SDXL_MODEL)
+        self.assertEqual(captured["task_type"], "IMAGE_GEN")
+        payload = json.loads(captured["data"])
+        self.assertEqual(payload["reference_face_url"], "https://example.com/face.png")
 
 
 class ExplicitLoraPolicyTests(unittest.TestCase):

@@ -1137,7 +1137,7 @@ def _eligible_online_node_count(model_name: str, task_type: str) -> int:
     return len(_eligible_online_node_ids(model_name, task_type))
 
 
-def _no_capacity_response(model_name: str, task_type: str) -> Any:
+def _no_capacity_response(model_name: str, task_type: str, message: Optional[str] = None) -> Any:
     normalized_task_type = _normalize_task_type(task_type)
     normalized_model = str(model_name or "").strip().lower()
     support_token = TASK_SUPPORT_MAP.get(normalized_task_type, "image")
@@ -1147,7 +1147,7 @@ def _no_capacity_response(model_name: str, task_type: str) -> Any:
                 "error": "no_capacity",
                 "task_type": normalized_task_type,
                 "model": normalized_model,
-                "message": (
+                "message": message or (
                     f"No online creator nodes currently support {normalized_task_type} "
                     f"for model '{normalized_model}' ({support_token})."
                 ),
@@ -1804,6 +1804,30 @@ def resolve_faceswap_defaults(
     return resolved, sources
 
 
+def _extract_reference_face_url(payload: Dict[str, Any]) -> str:
+    for key in (
+        "reference_face_url",
+        "identity_anchor_url",
+        "reference_face",
+        "reference_face_b64",
+        "identity_anchor",
+        "identity_anchor_b64",
+    ):
+        raw = payload.get(key)
+        if raw is None:
+            continue
+        value = str(raw).strip()
+        if value:
+            return value
+    return ""
+
+
+def _image_job_requires_reference_face(payload_or_settings: Any) -> bool:
+    if not isinstance(payload_or_settings, dict):
+        return False
+    return bool(_extract_reference_face_url(payload_or_settings))
+
+
 def _resolve_confidence(default_sources: Dict[str, str]) -> str:
     unique_sources = {str(value) for value in default_sources.values() if value}
     if not unique_sources:
@@ -1891,6 +1915,7 @@ def submit_job() -> Any:
     model_name = model_name_raw.lower()
     weight = payload.get("weight")
     raw_prompt = str(payload.get("prompt") or payload.get("data") or "")
+    reference_face_url = _extract_reference_face_url(payload)
     auto_model_request = not model_name or model_name in {"auto", "auto_image", "auto-image"}
     explicit_hardcore_mode = _is_truthy(payload.get("hardcore_mode"))
     sfw_mode = _is_truthy(payload.get("sfw_mode"))
@@ -1934,7 +1959,7 @@ def submit_job() -> Any:
             for key, meta in MANIFEST_MODELS.items()
             if (meta.get("task_type") or CREATOR_TASK_TYPE).upper() == CREATOR_TASK_TYPE
         ]
-        if not candidates:
+        if not candidates and not reference_face_url:
             return jsonify({"error": "no_creator_models"}), 400
 
         eligible: List[Dict[str, Any]] = []
@@ -1942,10 +1967,22 @@ def submit_job() -> Any:
             candidate_name = str(meta.get("name") or "").strip().lower()
             if not candidate_name:
                 continue
-            if _eligible_online_node_count(candidate_name, CREATOR_TASK_TYPE) > 0:
+            pipeline = str(meta.get("pipeline") or "").lower()
+            if reference_face_url and "sdxl" not in pipeline:
+                continue
+            required_task_type = "FACE_SWAP" if reference_face_url else CREATOR_TASK_TYPE
+            if _eligible_online_node_count(candidate_name, required_task_type) > 0:
                 eligible.append(meta)
         if not eligible:
-            return _no_capacity_response("auto", CREATOR_TASK_TYPE)
+            return _no_capacity_response(
+                "auto",
+                CREATOR_TASK_TYPE,
+                message=(
+                    "No compatible reference-face node capacity is available right now."
+                    if reference_face_url
+                    else None
+                ),
+            )
 
         names = [meta["name"] for meta in eligible]
         weights = [rewards.resolve_weight(meta["name"].lower(), meta.get("reward_weight", 10.0)) for meta in eligible]
@@ -1965,6 +2002,13 @@ def submit_job() -> Any:
 
     # Special-case LTX2 video jobs with structured payload
     pipeline_name = str(cfg.get("pipeline", "")).lower()
+    if reference_face_url and "sdxl" not in pipeline_name:
+        return jsonify(
+            {
+                "error": "reference_face_requires_sdxl",
+                "message": "Reference face requires an SDXL image model.",
+            }
+        ), 400
     is_ltx2 = model_name == "ltx2" or pipeline_name == "ltx2"
 
     # Special-case AnimateDiff video jobs with rich structured payload
@@ -2180,6 +2224,8 @@ def submit_job() -> Any:
             payload,
             RUNTIME_PROFILE,
         )
+        if reference_face_url:
+            job_settings["reference_face_url"] = reference_face_url
         job_settings.update(resolved_image_defaults)
         job_settings["defaults_source"] = {"image": image_default_sources}
         job_settings["defaults_confidence"] = {"image": _resolve_confidence(image_default_sources)}
@@ -2235,8 +2281,17 @@ def submit_job() -> Any:
 
     selected_model_name = str(cfg.get("name") or model_name).strip()
     selected_model_key = selected_model_name.lower()
-    if _eligible_online_node_count(selected_model_key, task_type) <= 0:
-        return _no_capacity_response(selected_model_key, task_type)
+    capacity_task_type = "FACE_SWAP" if task_type == CREATOR_TASK_TYPE and reference_face_url else task_type
+    if _eligible_online_node_count(selected_model_key, capacity_task_type) <= 0:
+        return _no_capacity_response(
+            selected_model_key,
+            task_type,
+            message=(
+                "No compatible reference-face node capacity is available right now."
+                if task_type == CREATOR_TASK_TYPE and reference_face_url
+                else None
+            ),
+        )
 
     # Credit gate — only active when HAVNAI_CREDITS_ENABLED=true
     credit_err = credits.check_and_deduct_credits(wallet, selected_model_name, task_type)
@@ -2600,7 +2655,7 @@ def get_creator_tasks() -> Any:
                         if isinstance(parsed_loras, list):
                             loras = [item for item in parsed_loras if item]
                         # Forward per-image overrides stored in job settings.
-                        for key in ("steps", "guidance", "width", "height", "sampler", "seed"):
+                        for key in ("steps", "guidance", "width", "height", "sampler", "seed", "reference_face_url"):
                             if key not in parsed:
                                 continue
                             value = parsed.get(key)
@@ -2617,6 +2672,10 @@ def get_creator_tasks() -> Any:
                                 except (TypeError, ValueError):
                                     continue
                             elif key == "sampler":
+                                value_str = str(value).strip()
+                                if value_str:
+                                    image_overrides[key] = value_str
+                            elif key == "reference_face_url":
                                 value_str = str(value).strip()
                                 if value_str:
                                     image_overrides[key] = value_str
@@ -2686,7 +2745,7 @@ def get_creator_tasks() -> Any:
             }
             if task_payload["type"].upper() == CREATOR_TASK_TYPE:
                 # Forward generation overrides for image tasks only.
-                for key in ("steps", "guidance", "width", "height", "sampler", "seed"):
+                for key in ("steps", "guidance", "width", "height", "sampler", "seed", "reference_face_url"):
                     if key in task and task[key] is not None:
                         task_payload[key] = task[key]
             # If this is a WAN I2V video job, attempt to expose structured settings to the node

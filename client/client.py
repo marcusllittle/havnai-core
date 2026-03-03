@@ -92,6 +92,8 @@ except Exception:  # pragma: no cover
 _FACE_ANALYSIS = None
 _FACE_SWAP_PIPE = None
 _FACE_SWAP_PIPE_MODEL = ""
+_REFERENCE_FACE_PIPE = None
+_REFERENCE_FACE_PIPE_MODEL = ""
 _IMAGE_PIPELINE_CACHE: "OrderedDict[str, Any]" = OrderedDict()
 _IMAGE_PIPELINE_CACHE_LOCK = threading.Lock()
 
@@ -1994,7 +1996,7 @@ def execute_task(task: Dict[str, Any]) -> None:
                 log(f"Failed to parse job settings: {exc}", prefix="⚠️", task_id=task_id)
             # Merge coordinator-sent overrides even when prompt is plain text.
             if isinstance(task, dict):
-                for key in ("steps", "guidance", "width", "height", "sampler", "seed"):
+                for key in ("steps", "guidance", "width", "height", "sampler", "seed", "reference_face_url"):
                     value = task.get(key)
                     if value is None or value == "":
                         continue
@@ -2378,6 +2380,123 @@ def _acquire_base_image_pipeline(
     return pipe, False, load_ms
 
 
+def _truncate_image_prompts(pipe: Any, pos_text: str, neg_text: str) -> Tuple[str, str]:
+    if not hasattr(pipe, "tokenizer") or not hasattr(pipe.tokenizer, "model_max_length"):
+        return pos_text, neg_text
+    try:
+        encoded = pipe.tokenizer(
+            pos_text,
+            max_length=pipe.tokenizer.model_max_length,
+            truncation=True,
+            return_tensors="pt",
+        )
+        pos_text = pipe.tokenizer.batch_decode(encoded.input_ids, skip_special_tokens=True)[0]
+        if neg_text:
+            encoded_neg = pipe.tokenizer(
+                neg_text,
+                max_length=pipe.tokenizer.model_max_length,
+                truncation=True,
+                return_tensors="pt",
+            )
+            neg_text = pipe.tokenizer.batch_decode(encoded_neg.input_ids, skip_special_tokens=True)[0]
+    except Exception as exc:
+        log(f"Prompt truncation failed: {exc}", prefix="⚠️")
+    return pos_text, neg_text
+
+
+def _apply_image_sampler(pipe: Any, sampler: Optional[str]) -> None:
+    if not sampler or not hasattr(pipe, "scheduler") or _DPMSolver is None:
+        return
+    sampler_norm = sampler.replace("+", "p")
+    if "dpmpp" not in sampler_norm:
+        return
+    try:
+        pipe.scheduler = _DPMSolver.from_config(pipe.scheduler.config)
+    except Exception as exc:
+        log(f"Sampler switch failed: {exc}", prefix="⚠️", sampler=sampler)
+
+
+def _reference_face_pipeline_cache_key(
+    model_path: Path,
+    controlnet_ref: str,
+    adapter_path: Path,
+    device: str,
+    dtype: Any,
+) -> str:
+    try:
+        model_ref = str(model_path.resolve())
+    except Exception:
+        model_ref = str(model_path)
+    dtype_ref = str(dtype)
+    return f"{model_ref}|{controlnet_ref}|{adapter_path}|{device}|{dtype_ref}"
+
+
+def _construct_reference_face_pipeline(
+    entry: ModelEntry,
+    model_path: Path,
+    dtype: Any,
+    device: str,
+    adapter_path: Path,
+) -> Tuple[Any, int]:
+    from pipeline_stable_diffusion_xl_instantid import StableDiffusionXLInstantIDPipeline  # type: ignore
+
+    load_t0 = time.time()
+    controlnet = _load_instantid_controlnet(dtype)
+    pipe = StableDiffusionXLInstantIDPipeline.from_single_file(
+        str(model_path),
+        controlnet=controlnet,
+        torch_dtype=dtype,
+        safety_checker=None,
+    )
+    pipe.load_ip_adapter_instantid(str(adapter_path))
+    pipe = _configure_image_pipeline(pipe, entry, True, device)
+    pipe.set_ip_adapter_scale(0.8)
+    if hasattr(pipe, "image_proj_model") and pipe.image_proj_model is not None:
+        pipe.image_proj_model.to(device=device, dtype=dtype)
+    load_ms = int((time.time() - load_t0) * 1000)
+    return pipe, load_ms
+
+
+def _acquire_reference_face_pipeline(
+    entry: ModelEntry,
+    model_path: Path,
+    dtype: Any,
+    device: str,
+) -> Tuple[Any, bool, int]:
+    global _REFERENCE_FACE_PIPE, _REFERENCE_FACE_PIPE_MODEL
+
+    adapter_path = _resolve_instantid_adapter_path()
+    controlnet_ref = _resolve_instantid_controlnet_ref()
+    cache_key = _reference_face_pipeline_cache_key(
+        model_path,
+        controlnet_ref,
+        adapter_path,
+        device,
+        dtype,
+    )
+    if _REFERENCE_FACE_PIPE is not None and _REFERENCE_FACE_PIPE_MODEL == cache_key:
+        pipe = _REFERENCE_FACE_PIPE
+        pipe.set_ip_adapter_scale(0.8)
+        pipe.to(device)
+        if hasattr(pipe, "image_proj_model") and pipe.image_proj_model is not None:
+            pipe.image_proj_model.to(device=device, dtype=dtype)
+        return pipe, True, 0
+
+    old_pipe = _REFERENCE_FACE_PIPE
+    pipe, load_ms = _construct_reference_face_pipeline(
+        entry,
+        model_path,
+        dtype,
+        device,
+        adapter_path,
+    )
+    _REFERENCE_FACE_PIPE = pipe
+    _REFERENCE_FACE_PIPE_MODEL = cache_key
+    if old_pipe is not None and old_pipe is not pipe:
+        _release_image_pipeline(old_pipe)
+    return pipe, False, load_ms
+
+
 def _collect_explicit_loras(requested_raw: Any, entry: ModelEntry, pipeline_name: str) -> List[Tuple[Path, float, str]]:
     requested = requested_raw
     if isinstance(requested, str):
@@ -2483,6 +2602,9 @@ def run_image_generation(
     use_img2img = False
     init_image_raw: Optional[str] = None
     img2img_strength = 0.75
+    reference_face_url = ""
+    reference_face_used = False
+    reference_face_pipeline: Optional[str] = None
     if job_settings and isinstance(job_settings, dict):
         try:
             width = int(job_settings.get("width", width) or width)
@@ -2490,6 +2612,7 @@ def run_image_generation(
         except (TypeError, ValueError):
             pass
         init_image_raw = job_settings.get("init_image") or job_settings.get("init_image_url")
+        reference_face_url = str(job_settings.get("reference_face_url") or "").strip()
         use_img2img = bool(init_image_raw)
         try:
             img2img_strength = float(job_settings.get("img2img_strength", 0.75) or 0.75)
@@ -2497,6 +2620,10 @@ def run_image_generation(
             img2img_strength = 0.75
 
     try:
+        if reference_face_url and (FAST_PREVIEW or torch is None or diffusers is None):
+            raise RuntimeError("Reference face requires the full diffusers runtime and cannot run in fast preview mode")
+        if reference_face_url and (Image is None or np is None or cv2 is None or FaceAnalysis is None):
+            raise RuntimeError("Reference face requires pillow + numpy + opencv + insightface")
         if not FAST_PREVIEW and torch is not None and diffusers is not None:
             device, dtype, is_xl, pipeline_name = _resolve_image_runtime(entry)
             requested_loras = job_settings.get("loras") if isinstance(job_settings, dict) else []
@@ -2508,128 +2635,181 @@ def run_image_generation(
             else:
                 lora_summary = "none"
             log(f"Loading LoRAs: {lora_summary}", prefix="🎛️")
-
-            init_pil = None
-            if use_img2img and init_image_raw:
-                try:
-                    from PIL import Image as _PILImage
-                    if init_image_raw.startswith("data:"):
-                        b64_part = init_image_raw.split(",", 1)[-1]
-                        img_bytes = base64.b64decode(b64_part)
-                        init_pil = _PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
-                    elif init_image_raw.startswith(("http://", "https://", "/")):
-                        img_resp = requests.get(init_image_raw, timeout=30)
-                        img_resp.raise_for_status()
-                        init_pil = _PILImage.open(io.BytesIO(img_resp.content)).convert("RGB")
-                    elif os.path.isfile(init_image_raw):
-                        init_pil = _PILImage.open(init_image_raw).convert("RGB")
-                    else:
-                        img_bytes = base64.b64decode(init_image_raw)
-                        init_pil = _PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
-                    if init_pil:
-                        init_pil = init_pil.resize((width, height))
-                        log(f"Init image loaded for img2img (strength={img2img_strength})", prefix="🖼️")
-                except Exception as exc:
-                    log(f"Failed to load init image, falling back to txt2img: {exc}", prefix="⚠️")
-                    init_pil = None
-
-            pipe_mode = "img2img" if init_pil is not None else "txt2img"
-            log(f"Preparing {pipe_mode} pipeline…", prefix="ℹ️", device=device)
-            transient_pipeline = bool(lora_entries) or IMAGE_PIPELINE_CACHE_SIZE <= 0
-            pipe: Optional[Any] = None
+            seed = job_settings.get("seed") if isinstance(job_settings, dict) else None
             try:
-                if transient_pipeline:
-                    pipe, pipeline_load_ms = _construct_base_image_pipeline(
-                        entry, model_path, pipeline_name, dtype, is_xl, device
-                    )
-                else:
-                    pipe, pipeline_cache_hit, pipeline_load_ms = _acquire_base_image_pipeline(
-                        entry, model_path, pipeline_name, dtype, is_xl, device
-                    )
-                if not pipeline_cache_hit:
-                    log(f"Pipeline ready in {pipeline_load_ms}ms", prefix="✅")
-                if lora_entries and pipe is not None:
-                    loaded_loras, lora_load_ms = _apply_explicit_loras(pipe, entry, lora_entries)
-                if pipe is None:
-                    raise RuntimeError("Image pipeline is unavailable")
+                seed = int(seed) if seed is not None else None
+            except (TypeError, ValueError):
+                seed = None
+            if seed is None:
+                seed = int(time.time()) & 0x7FFFFFFF
+            generator = torch.Generator(device=device).manual_seed(seed)
+            pos_text = prompt or "a high quality photo of a golden retriever on a beach at sunset"
+            neg_text = negative_prompt or ""
+            steps = IMAGE_STEPS
+            guidance = IMAGE_GUIDANCE
+            img_h = IMAGE_HEIGHT
+            img_w = IMAGE_WIDTH
+            sampler = None
+            if job_settings and isinstance(job_settings, dict):
+                steps = int(job_settings.get("steps", steps) or steps)
+                guidance = float(job_settings.get("guidance", guidance) or guidance)
+                img_h = int(job_settings.get("height", img_h) or img_h)
+                img_w = int(job_settings.get("width", img_w) or img_w)
+                sampler = str(job_settings.get("sampler") or "").strip().lower() or None
+                if job_settings.get("negative_prompt"):
+                    neg_text = str(job_settings.get("negative_prompt") or "")
+            steps = max(5, min(50, steps))
+            guidance = max(1.0, min(15.0, guidance))
+            img_h = max(256, min(1536, img_h))
+            img_w = max(256, min(1536, img_w))
 
-                seed = job_settings.get("seed") if isinstance(job_settings, dict) else None
+            if reference_face_url:
+                if not is_xl or "sdxl" not in pipeline_name:
+                    raise RuntimeError("Reference face requires an SDXL image model on the node")
+                if use_img2img:
+                    raise RuntimeError("Reference face cannot be combined with init_image")
+
+                from pipeline_stable_diffusion_xl_instantid import draw_kps  # type: ignore
+
+                reference_face_used = True
+                reference_face_pipeline = "instantid"
+                log("Preparing reference-face pipeline…", prefix="ℹ️", device=device)
+                transient_pipeline = bool(lora_entries)
+                pipe: Optional[Any] = None
                 try:
-                    seed = int(seed) if seed is not None else None
-                except (TypeError, ValueError):
-                    seed = None
-                if seed is None:
-                    seed = int(time.time()) & 0x7FFFFFFF
-                generator = torch.Generator(device=device).manual_seed(seed)
-                pos_text = prompt or "a high quality photo of a golden retriever on a beach at sunset"
-                neg_text = negative_prompt or ""
-                steps = IMAGE_STEPS
-                guidance = IMAGE_GUIDANCE
-                img_h = IMAGE_HEIGHT
-                img_w = IMAGE_WIDTH
-                sampler = None
-                if job_settings and isinstance(job_settings, dict):
-                    steps = int(job_settings.get("steps", steps) or steps)
-                    guidance = float(job_settings.get("guidance", guidance) or guidance)
-                    img_h = int(job_settings.get("height", img_h) or img_h)
-                    img_w = int(job_settings.get("width", img_w) or img_w)
-                    sampler = str(job_settings.get("sampler") or "").strip().lower() or None
-                    if job_settings.get("negative_prompt"):
-                        neg_text = str(job_settings.get("negative_prompt") or "")
-                steps = max(5, min(50, steps))
-                guidance = max(1.0, min(15.0, guidance))
-                img_h = max(256, min(1536, img_h))
-                img_w = max(256, min(1536, img_w))
-                if hasattr(pipe, "tokenizer") and hasattr(pipe.tokenizer, "model_max_length"):
-                    try:
-                        encoded = pipe.tokenizer(
-                            pos_text,
-                            max_length=pipe.tokenizer.model_max_length,
-                            truncation=True,
-                            return_tensors="pt",
+                    if transient_pipeline:
+                        adapter_path = _resolve_instantid_adapter_path()
+                        pipe, pipeline_load_ms = _construct_reference_face_pipeline(
+                            entry,
+                            model_path,
+                            dtype,
+                            device,
+                            adapter_path,
                         )
-                        pos_text = pipe.tokenizer.batch_decode(
-                            encoded.input_ids, skip_special_tokens=True
-                        )[0]
-                        if neg_text:
-                            encoded_neg = pipe.tokenizer(
-                                neg_text,
-                                max_length=pipe.tokenizer.model_max_length,
-                                truncation=True,
-                                return_tensors="pt",
-                            )
-                            neg_text = pipe.tokenizer.batch_decode(
-                                encoded_neg.input_ids, skip_special_tokens=True
-                            )[0]
+                    else:
+                        pipe, pipeline_cache_hit, pipeline_load_ms = _acquire_reference_face_pipeline(
+                            entry,
+                            model_path,
+                            dtype,
+                            device,
+                        )
+                    if not pipeline_cache_hit:
+                        log(f"Pipeline ready in {pipeline_load_ms}ms", prefix="✅")
+                    if lora_entries and pipe is not None:
+                        loaded_loras, lora_load_ms = _apply_explicit_loras(pipe, entry, lora_entries)
+                    if pipe is None:
+                        raise RuntimeError("Reference face pipeline is unavailable")
+
+                    pos_text, neg_text = _truncate_image_prompts(pipe, pos_text, neg_text)
+                    _apply_image_sampler(pipe, sampler)
+
+                    reference_image, reference_error = load_image_source_with_error(reference_face_url)
+                    if reference_image is None:
+                        raise RuntimeError(
+                            f"Failed to load reference face image: {reference_error or 'unknown error'}"
+                        )
+                    face_app = get_face_analysis()
+                    face_infos = face_app.get(cv2.cvtColor(np.array(reference_image), cv2.COLOR_RGB2BGR))
+                    reference_face = pick_primary_face(face_infos)
+                    if reference_face is None:
+                        raise RuntimeError("No face detected in reference face image")
+                    face_embedding = reference_face.get("embedding")
+                    if face_embedding is None:
+                        raise RuntimeError("Reference face embedding is unavailable")
+                    control_image = draw_kps(reference_image, reference_face["kps"])
+
+                    gen_t0 = time.time()
+                    with torch.inference_mode():
+                        result = pipe(
+                            pos_text,
+                            negative_prompt=neg_text or None,
+                            num_inference_steps=steps,
+                            guidance_scale=guidance,
+                            generator=generator,
+                            height=img_h,
+                            width=img_w,
+                            image=control_image,
+                            image_embeds=face_embedding,
+                            controlnet_conditioning_scale=0.8,
+                            ip_adapter_scale=0.8,
+                        )
+                    generation_ms = int((time.time() - gen_t0) * 1000)
+                    log(f"Generated in {generation_ms}ms", prefix="✅")
+                    img = result.images[0]
+                    _save_output_image(img, output_path, task_id=task_id)
+                    with output_path.open("rb") as fh:
+                        image_b64 = base64.b64encode(fh.read()).decode("utf-8")
+                finally:
+                    if transient_pipeline and pipe is not None:
+                        _release_image_pipeline(pipe)
+            else:
+                init_pil = None
+                if use_img2img and init_image_raw:
+                    try:
+                        from PIL import Image as _PILImage
+                        if init_image_raw.startswith("data:"):
+                            b64_part = init_image_raw.split(",", 1)[-1]
+                            img_bytes = base64.b64decode(b64_part)
+                            init_pil = _PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
+                        elif init_image_raw.startswith(("http://", "https://", "/")):
+                            img_resp = requests.get(init_image_raw, timeout=30)
+                            img_resp.raise_for_status()
+                            init_pil = _PILImage.open(io.BytesIO(img_resp.content)).convert("RGB")
+                        elif os.path.isfile(init_image_raw):
+                            init_pil = _PILImage.open(init_image_raw).convert("RGB")
+                        else:
+                            img_bytes = base64.b64decode(init_image_raw)
+                            init_pil = _PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
+                        if init_pil:
+                            init_pil = init_pil.resize((width, height))
+                            log(f"Init image loaded for img2img (strength={img2img_strength})", prefix="🖼️")
                     except Exception as exc:
-                        log(f"Prompt truncation failed: {exc}", prefix="⚠️")
-                gen_t0 = time.time()
-                if sampler and hasattr(pipe, "scheduler") and _DPMSolver is not None:
-                    sampler_norm = sampler.replace("+", "p")
-                    if "dpmpp" in sampler_norm:
-                        try:
-                            pipe.scheduler = _DPMSolver.from_config(pipe.scheduler.config)
-                        except Exception as exc:
-                            log(f"Sampler switch failed: {exc}", prefix="⚠️", sampler=sampler)
-                with torch.inference_mode():
-                    result = pipe(
-                        pos_text,
-                        negative_prompt=neg_text or None,
-                        num_inference_steps=steps,
-                        guidance_scale=guidance,
-                        generator=generator,
-                        height=img_h,
-                        width=img_w,
-                    )
-                generation_ms = int((time.time() - gen_t0) * 1000)
-                log(f"Generated in {generation_ms}ms", prefix="✅")
-                img = result.images[0]
-                _save_output_image(img, output_path, task_id=task_id)
-                with output_path.open("rb") as fh:
-                    image_b64 = base64.b64encode(fh.read()).decode("utf-8")
-            finally:
-                if transient_pipeline and pipe is not None:
-                    _release_image_pipeline(pipe)
+                        log(f"Failed to load init image, falling back to txt2img: {exc}", prefix="⚠️")
+                        init_pil = None
+
+                pipe_mode = "img2img" if init_pil is not None else "txt2img"
+                log(f"Preparing {pipe_mode} pipeline…", prefix="ℹ️", device=device)
+                transient_pipeline = bool(lora_entries) or IMAGE_PIPELINE_CACHE_SIZE <= 0
+                pipe: Optional[Any] = None
+                try:
+                    if transient_pipeline:
+                        pipe, pipeline_load_ms = _construct_base_image_pipeline(
+                            entry, model_path, pipeline_name, dtype, is_xl, device
+                        )
+                    else:
+                        pipe, pipeline_cache_hit, pipeline_load_ms = _acquire_base_image_pipeline(
+                            entry, model_path, pipeline_name, dtype, is_xl, device
+                        )
+                    if not pipeline_cache_hit:
+                        log(f"Pipeline ready in {pipeline_load_ms}ms", prefix="✅")
+                    if lora_entries and pipe is not None:
+                        loaded_loras, lora_load_ms = _apply_explicit_loras(pipe, entry, lora_entries)
+                    if pipe is None:
+                        raise RuntimeError("Image pipeline is unavailable")
+
+                    pos_text, neg_text = _truncate_image_prompts(pipe, pos_text, neg_text)
+                    _apply_image_sampler(pipe, sampler)
+
+                    gen_t0 = time.time()
+                    with torch.inference_mode():
+                        result = pipe(
+                            pos_text,
+                            negative_prompt=neg_text or None,
+                            num_inference_steps=steps,
+                            guidance_scale=guidance,
+                            generator=generator,
+                            height=img_h,
+                            width=img_w,
+                        )
+                    generation_ms = int((time.time() - gen_t0) * 1000)
+                    log(f"Generated in {generation_ms}ms", prefix="✅")
+                    img = result.images[0]
+                    _save_output_image(img, output_path, task_id=task_id)
+                    with output_path.open("rb") as fh:
+                        image_b64 = base64.b64encode(fh.read()).decode("utf-8")
+                finally:
+                    if transient_pipeline and pipe is not None:
+                        _release_image_pipeline(pipe)
         elif Image is not None:
             log("Using fast preview placeholder (no SD detected or FAST_PREVIEW enabled)", prefix="ℹ️")
             w = h = 512
@@ -2670,7 +2850,10 @@ def run_image_generation(
         "pipeline_load_ms": int(pipeline_load_ms),
         "lora_load_ms": int(lora_load_ms),
         "generation_ms": int(generation_ms),
+        "reference_face_used": bool(reference_face_used),
     }
+    if reference_face_pipeline:
+        metrics["reference_face_pipeline"] = reference_face_pipeline
     if loaded_loras:
         metrics["loras"] = loaded_loras
     if status == "failed":

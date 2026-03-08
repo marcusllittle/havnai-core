@@ -34,6 +34,7 @@ import job_helpers
 import stripe_payments
 import sse as sse_module
 import blockchain
+import hai_funding
 import analytics
 import validators
 import workflows
@@ -456,6 +457,11 @@ def _inject_module_dependencies() -> None:
     blockchain.log_event = log_event  # type: ignore[attr-defined]
     blockchain.WALLET_REGEX = WALLET_REGEX  # type: ignore[attr-defined]
 
+    # HAI funding module
+    hai_funding.get_db = get_db  # type: ignore[attr-defined]
+    hai_funding.log_event = log_event  # type: ignore[attr-defined]
+    hai_funding.deposit_credits = credits.deposit_credits  # type: ignore[attr-defined]
+
     # Analytics module
     analytics.get_db = get_db  # type: ignore[attr-defined]
     analytics.log_event = log_event  # type: ignore[attr-defined]
@@ -733,6 +739,7 @@ _inject_module_dependencies()
 
 # Initialize tables for new modules (must come after dependency injection)
 blockchain.init_blockchain_tables(get_db())
+hai_funding.init_hai_funding_tables(get_db())
 validators.init_validator_tables(get_db())
 workflows.init_workflow_tables(get_db())
 
@@ -3471,6 +3478,72 @@ def rewards_claim_history() -> Any:
         return jsonify({"error": "invalid wallet"}), 400
     history = blockchain.get_claim_history(wallet)
     return jsonify({"wallet": wallet, "claims": history})
+
+
+# ---------------------------------------------------------------------------
+# HAI Token Funding endpoints
+# ---------------------------------------------------------------------------
+
+@app.route("/credits/fund-hai", methods=["POST"])
+def credits_fund_hai() -> Any:
+    """Fund internal credits by transferring HAI tokens to the treasury.
+
+    Accepts a tx_hash from a direct ERC-20 transfer() already confirmed on Sepolia.
+    Verifies the transaction on-chain, then deposits credits.
+    Idempotent: duplicate tx_hash returns 'already_processed'.
+    """
+    if not hai_funding.HAI_FUNDING_ENABLED:
+        return jsonify({"error": "HAI funding is not enabled."}), 403
+
+    if not rate_limit(f"fund-hai:{request.remote_addr}", limit=20):
+        return jsonify({"error": "rate_limit", "message": "Too many requests."}), 429
+
+    data = request.get_json(silent=True) or {}
+    wallet = (data.get("wallet") or "").strip()
+    tx_hash = (data.get("tx_hash") or "").strip()
+    amount = data.get("amount")
+
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid_wallet", "message": "Invalid wallet address."}), 400
+
+    if not tx_hash or not re.match(r"^0x[a-fA-F0-9]{64}$", tx_hash):
+        return jsonify({"error": "invalid_tx_hash", "message": "Invalid transaction hash."}), 400
+
+    try:
+        amount = float(amount)
+        if amount <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid_amount", "message": "Amount must be a positive number."}), 400
+
+    if not rate_limit(f"fund-hai:wallet:{wallet}", limit=10):
+        return jsonify({"error": "rate_limit", "message": "Too many funding requests for this wallet."}), 429
+
+    try:
+        result = hai_funding.fund_credits_with_hai(wallet, amount, tx_hash)
+    except Exception as exc:
+        log_event("HAI funding error", wallet=wallet, tx_hash=tx_hash, error=str(exc))
+        return jsonify({"error": "internal", "message": "Failed to process HAI funding."}), 500
+
+    if result.get("status") == "failed":
+        return jsonify(result), 400
+
+    return jsonify(result)
+
+
+@app.route("/credits/hai-fundings", methods=["GET"])
+def credits_hai_fundings() -> Any:
+    """Return HAI funding history for a wallet."""
+    wallet = request.args.get("wallet", "").strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+
+    history = hai_funding.get_funding_history(wallet)
+    return jsonify({
+        "wallet": wallet,
+        "fundings": history,
+        "hai_funding_enabled": hai_funding.HAI_FUNDING_ENABLED,
+    })
 
 
 # ---------------------------------------------------------------------------

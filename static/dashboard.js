@@ -51,6 +51,22 @@ function buildEndpointUrl(base, endpoint) {
   return `${base}${safeEndpoint}`;
 }
 
+function resolveAssetUrl(path) {
+  if (!path) return "";
+  if (/^https?:\/\//i.test(path)) {
+    return path;
+  }
+  const normalized = path.startsWith("/") ? path : `/${path}`;
+  const base = preferredApiBase;
+  if (!base) {
+    return normalized;
+  }
+  if (normalized.startsWith(`${base}/`)) {
+    return normalized;
+  }
+  return `${base}${normalized}`;
+}
+
 function resolveApiBases() {
   const bases = [];
   if (preferredApiBase !== null) {
@@ -192,8 +208,9 @@ function renderJobFeed(feed) {
     };
     const statusClass = status.toLowerCase();
     const statusLabel = statusMap[status] || status;
-    const preview = item.image_url
-      ? `<div class="job-card"><img src="${item.image_url}" alt="${item.job_id} preview" width="96" height="96" loading="lazy" /></div>`
+    const previewUrl = resolveAssetUrl(item.image_url);
+    const preview = previewUrl
+      ? `<div class="job-card"><img src="${previewUrl}" alt="${item.job_id} preview" width="96" height="96" loading="lazy" /></div>`
       : "—";
     const rowClass = "job-type-creator";
     return `

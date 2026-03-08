@@ -35,6 +35,7 @@ import stripe_payments
 import sse as sse_module
 import blockchain
 import hai_funding
+import settlement
 import analytics
 import validators
 import workflows
@@ -457,6 +458,10 @@ def _inject_module_dependencies() -> None:
     blockchain.log_event = log_event  # type: ignore[attr-defined]
     blockchain.WALLET_REGEX = WALLET_REGEX  # type: ignore[attr-defined]
 
+    # Settlement module
+    settlement.get_db = get_db  # type: ignore[attr-defined]
+    settlement.log_event = log_event  # type: ignore[attr-defined]
+
     # HAI funding module
     hai_funding.get_db = get_db  # type: ignore[attr-defined]
     hai_funding.log_event = log_event  # type: ignore[attr-defined]
@@ -739,6 +744,7 @@ _inject_module_dependencies()
 
 # Initialize tables for new modules (must come after dependency injection)
 blockchain.init_blockchain_tables(get_db())
+settlement.init_settlement_tables(get_db())
 hai_funding.init_hai_funding_tables(get_db())
 validators.init_validator_tables(get_db())
 workflows.init_workflow_tables(get_db())
@@ -1891,8 +1897,8 @@ def submit_job() -> Any:
     if _eligible_online_node_count(selected_model_key, task_type) <= 0:
         return _no_capacity_response(selected_model_key, task_type)
 
-    # Credit gate — only active when HAVNAI_CREDITS_ENABLED=true
-    credit_err = credits.check_and_deduct_credits(wallet, selected_model_name, task_type)
+    # Credit gate — reserve credits (not immediately spent)
+    credit_err, credit_cost = credits.check_and_reserve_credits(wallet, selected_model_name, task_type)
     if credit_err:
         return credit_err
 
@@ -1905,6 +1911,32 @@ def submit_job() -> Any:
             float(weight),
             invite_code,
         )
+
+    # Create durable job ticket with settlement tracking
+    try:
+        prompt_for_ticket = ""
+        try:
+            parsed = json.loads(job_data) if isinstance(job_data, str) else {}
+            prompt_for_ticket = parsed.get("prompt", "")
+        except Exception:
+            pass
+        settlement.create_job_ticket(
+            job_id=job_id,
+            wallet=wallet,
+            job_type=task_type,
+            model=selected_model_name,
+            estimated_cost=credit_cost,
+            prompt=prompt_for_ticket,
+        )
+        if credit_cost > 0:
+            settlement.reserve_credits(
+                job_id, wallet, credit_cost,
+                reserve_fn=lambda w, a, j: (True, credits.get_credit_balance(w)),
+            )
+        settlement.mark_queued(job_id)
+    except Exception as exc:
+        log_event("Settlement ticket creation failed (non-fatal)", job_id=job_id, error=str(exc))
+
     log_event("Public job queued", wallet=wallet, model=model_name, job_id=job_id)
     _emit_job_event("job_queued", job_id, wallet, model=model_name, task_type=task_type)
     return jsonify({"status": "queued", "job_id": job_id}), 200
@@ -1993,8 +2025,8 @@ def generate_video_job() -> Any:
     if _eligible_online_node_count(selected_model_key, "VIDEO_GEN") <= 0:
         return _no_capacity_response(selected_model_key, "VIDEO_GEN")
 
-    # Credit gate — only active when HAVNAI_CREDITS_ENABLED=true
-    credit_err = credits.check_and_deduct_credits(wallet, selected_model_name, "VIDEO_GEN")
+    # Credit gate — reserve credits
+    credit_err, credit_cost = credits.check_and_reserve_credits(wallet, selected_model_name, "VIDEO_GEN")
     if credit_err:
         return credit_err
 
@@ -2007,6 +2039,23 @@ def generate_video_job() -> Any:
             float(weight),
             invite_code,
         )
+
+    # Create durable job ticket
+    try:
+        settlement.create_job_ticket(
+            job_id=job_id, wallet=wallet, job_type="VIDEO_GEN",
+            model=selected_model_name, estimated_cost=credit_cost,
+            prompt=str(payload.get("prompt", "")),
+        )
+        if credit_cost > 0:
+            settlement.reserve_credits(
+                job_id, wallet, credit_cost,
+                reserve_fn=lambda w, a, j: (True, credits.get_credit_balance(w)),
+            )
+        settlement.mark_queued(job_id)
+    except Exception as exc:
+        log_event("Settlement ticket creation failed (non-fatal)", job_id=job_id, error=str(exc))
+
     log_event("Video job queued", wallet=wallet, model=model_name, job_id=job_id)
     _emit_job_event("job_queued", job_id, wallet, model=model_name, task_type="VIDEO_GEN")
     return jsonify({"status": "queued", "job_id": job_id}), 200
@@ -2055,8 +2104,8 @@ def submit_faceswap_job_endpoint() -> Any:
     if _eligible_online_node_count(selected_model_key, "FACE_SWAP") <= 0:
         return _no_capacity_response(selected_model_key, "FACE_SWAP")
 
-    # Credit gate — only active when HAVNAI_CREDITS_ENABLED=true
-    credit_err = credits.check_and_deduct_credits(wallet, selected_model_name, "FACE_SWAP")
+    # Credit gate — reserve credits
+    credit_err, credit_cost = credits.check_and_reserve_credits(wallet, selected_model_name, "FACE_SWAP")
     if credit_err:
         return credit_err
 
@@ -2069,6 +2118,26 @@ def submit_faceswap_job_endpoint() -> Any:
             float(weight),
             invite_code,
         )
+
+    # Create durable job ticket (face swap = not marketplace eligible)
+    try:
+        settlement.create_job_ticket(
+            job_id=job_id,
+            wallet=wallet,
+            job_type="FACE_SWAP",
+            model=selected_model_name,
+            estimated_cost=credit_cost,
+            prompt=prompt_text,
+        )
+        if credit_cost > 0:
+            settlement.reserve_credits(
+                job_id, wallet, credit_cost,
+                reserve_fn=lambda w, a, j: (True, credits.get_credit_balance(w)),
+            )
+        settlement.mark_queued(job_id)
+    except Exception as exc:
+        log_event("Settlement ticket creation failed (non-fatal)", job_id=job_id, error=str(exc))
+
     log_event("Face-swap job queued", wallet=wallet, model=model_name, job_id=job_id)
     _emit_job_event("job_queued", job_id, wallet, model=model_name, task_type="FACE_SWAP")
     return jsonify({"status": "queued", "job_id": job_id}), 200
@@ -2262,6 +2331,11 @@ def get_creator_tasks() -> Any:
 
                     # Assign under global lock to avoid multiple nodes claiming the same job
                     job_helpers.assign_job_to_node(job["id"], node_id)
+                    # Record durable claim attempt
+                    try:
+                        settlement.record_claim(job["id"], node_id)
+                    except Exception:
+                        pass  # non-fatal — settlement is additive
                     log_event("Job claimed by node", job_id=job["id"], node_id=node_id)
                     _emit_job_event("job_running", job["id"], job.get("wallet", ""), node_id=node_id, model=job["model"])
                     reward_weight = float(job["weight"] or cfg.get("reward_weight", rewards.resolve_weight(job["model"], 10.0)))
@@ -2646,6 +2720,49 @@ def submit_results() -> Any:
                         )
 
         rewards.record_reward(wallet, task_id, reward)
+
+        # --- Settlement: validate, settle, payout ---
+        try:
+            # Complete the attempt record
+            settlement.complete_attempt(
+                task_id, node_id, status,
+                error_message=str(metrics.get("error", "")) if status != "success" else None,
+                execution_metadata=metrics if metrics else None,
+            )
+
+            # Determine execution and quality status
+            if status == "success":
+                exec_status = settlement.STATUS_COMPLETED
+                # Run minimum output validation for image/face_swap jobs
+                task_type_upper = str(task_type).upper()
+                if task_type_upper in ("IMAGE_GEN", "FACE_SWAP"):
+                    output_path = OUTPUTS_DIR / f"{task_id}.png"
+                    quality = settlement.validate_output(
+                        task_id, task_type_upper, output_path=output_path,
+                    )
+                else:
+                    quality = settlement.QUALITY_UNCHECKED
+            else:
+                exec_status = settlement.STATUS_TECHNICAL_FAILED
+                quality = settlement.QUALITY_UNCHECKED
+
+            # Settle the job (spend/release credits, create payout)
+            settlement.settle_job(
+                job_id=task_id,
+                node_id=node_id,
+                execution_status=exec_status,
+                quality_status=quality,
+                reward_amount=reward,
+                deposit_fn=credits.deposit_credits,
+            )
+
+            # Link output asset for marketplace eligibility
+            if status == "success" and quality == settlement.QUALITY_VALID:
+                output_asset_id = f"{task_id}.png"
+                if (OUTPUTS_DIR / output_asset_id).exists():
+                    settlement.set_output_asset(task_id, output_asset_id)
+        except Exception as exc:
+            log_event("Settlement processing failed (non-fatal)", job_id=task_id, error=str(exc))
 
         # Emit SSE events for job completion and reward
         _emit_job_event(
@@ -3158,6 +3275,24 @@ def job_detail(job_id: str) -> Any:
         payload = {}
     reward_factors = payload.get("reward_factors") if isinstance(payload, dict) else None
 
+    # Include settlement info if available
+    settle_info = None
+    try:
+        settle_row = settlement.get_job_settlement(job_id)
+        if settle_row:
+            settle_info = {
+                "execution_status": settle_row.get("execution_status"),
+                "quality_status": settle_row.get("quality_status"),
+                "settlement_outcome": settle_row.get("settlement_outcome"),
+                "estimated_cost": settle_row.get("estimated_cost"),
+                "reserved_amount": settle_row.get("reserved_amount"),
+                "spent_amount": settle_row.get("spent_amount"),
+                "marketplace_eligible": bool(settle_row.get("marketplace_eligible")),
+                "attempt_count": settle_row.get("attempt_count"),
+            }
+    except Exception:
+        pass
+
     return jsonify(
         {
             "id": job.get("id"),
@@ -3173,6 +3308,7 @@ def job_detail(job_id: str) -> Any:
             "reward_timestamp": reward_ts,
             "reward_factors": reward_factors,
             "data": payload,
+            "settlement": settle_info,
         }
     )
 
@@ -3544,6 +3680,48 @@ def credits_hai_fundings() -> Any:
         "fundings": history,
         "hai_funding_enabled": hai_funding.HAI_FUNDING_ENABLED,
     })
+
+
+# ---------------------------------------------------------------------------
+# Settlement query endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.route("/settlement/<job_id>", methods=["GET"])
+def settlement_detail(job_id: str) -> Any:
+    """Return full settlement record for a job."""
+    record = settlement.get_job_settlement(job_id)
+    if not record:
+        return jsonify({"error": "not_found", "job_id": job_id}), 404
+    attempts = settlement.get_job_attempts(job_id)
+    record["attempts"] = attempts
+    return jsonify(record)
+
+
+@app.route("/settlement/<job_id>/attempts", methods=["GET"])
+def settlement_attempts(job_id: str) -> Any:
+    """Return all attempt records for a job."""
+    attempts = settlement.get_job_attempts(job_id)
+    return jsonify({"job_id": job_id, "attempts": attempts})
+
+
+@app.route("/payouts/node/<node_id>", methods=["GET"])
+def node_payouts(node_id: str) -> Any:
+    """Return payout history for a node."""
+    limit = _clamp(_coerce_int(request.args.get("limit"), 50), 1, 200)
+    payouts = settlement.get_node_payouts(node_id, limit=limit)
+    return jsonify({"node_id": node_id, "payouts": payouts})
+
+
+@app.route("/credits/ledger", methods=["GET"])
+def credit_ledger() -> Any:
+    """Return credit ledger entries for a wallet."""
+    wallet = request.args.get("wallet", "").strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    limit = _clamp(_coerce_int(request.args.get("limit"), 50), 1, 200)
+    entries = settlement.get_credit_ledger(wallet, limit=limit)
+    return jsonify({"wallet": wallet, "entries": entries})
 
 
 # ---------------------------------------------------------------------------

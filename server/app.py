@@ -48,6 +48,13 @@ except Exception:  # pragma: no cover
     encode_defunct = None  # type: ignore[assignment]
 
 # ---------------------------------------------------------------------------
+# HAI Funding (Sepolia):
+# Set these in your backend node's environment:
+#   HAVNAI_HAI_FUNDING_ENABLED=1
+#   HAVNAI_SEPOLIA_RPC_URL=<your Sepolia RPC URL from Alchemy/Infura>
+#   HAVNAI_HAI_TOKEN_ADDRESS=0x8aaa7f1075de91b2103542379BFD3B889c89105f
+#   HAVNAI_HAI_TREASURY_WALLET=0x7110347e2bcd02F5F3485Dc6bEc5e0b5f9Eb9262
+# ---------------------------------------------------------------------------
 # Paths & constants
 # ---------------------------------------------------------------------------
 

@@ -514,6 +514,15 @@ BACKOFF_BASE = 5
 MAX_BACKOFF = 60
 START_TIME = time.time()
 
+# Network timeouts/retries are env-tunable because coordinator latency can
+# spike during model/result processing.
+HTTP_TIMEOUT_REGISTER = max(5.0, _env_float("HAI_HTTP_TIMEOUT_REGISTER", 12.0))
+HTTP_TIMEOUT_TASK_POLL = max(10.0, _env_float("HAI_HTTP_TIMEOUT_TASK_POLL", 30.0))
+HTTP_TIMEOUT_RESULTS = max(15.0, _env_float("HAI_HTTP_TIMEOUT_RESULTS", 60.0))
+HTTP_TIMEOUT_WALLET_LINK = max(10.0, _env_float("HAI_HTTP_TIMEOUT_WALLET_LINK", 20.0))
+HTTP_TIMEOUT_DISCONNECT = max(5.0, _env_float("HAI_HTTP_TIMEOUT_DISCONNECT", 10.0))
+RESULT_SUBMIT_RETRIES = max(1, _env_int("HAI_RESULT_SUBMIT_RETRIES", 4))
+
 IMAGE_STEPS = int(os.environ.get("HAI_STEPS", "20"))
 IMAGE_GUIDANCE = float(os.environ.get("HAI_GUIDANCE", "7.0"))
 IMAGE_WIDTH = int(os.environ.get("HAI_WIDTH", "512"))
@@ -768,7 +777,7 @@ WALLET = ensure_wallet()
 def link_wallet(wallet: str) -> None:
     payload = {"node_id": NODE_NAME, "wallet": wallet, "node_name": NODE_NAME}
     try:
-        resp = SESSION.post(endpoint("/link-wallet"), data=json.dumps(payload), timeout=10)
+        resp = SESSION.post(endpoint("/link-wallet"), data=json.dumps(payload), timeout=HTTP_TIMEOUT_WALLET_LINK)
         resp.raise_for_status()
         log("Wallet linked with coordinator.", prefix="✅", wallet=wallet)
     except Exception as exc:
@@ -818,7 +827,7 @@ def run_command(cmd: List[str]) -> Optional[str]:
 
 def disconnect() -> None:
     try:
-        resp = SESSION.post(endpoint("/disconnect"), data=json.dumps({"node_id": NODE_NAME}), timeout=5)
+        resp = SESSION.post(endpoint("/disconnect"), data=json.dumps({"node_id": NODE_NAME}), timeout=HTTP_TIMEOUT_DISCONNECT)
         if resp.status_code == 200:
             log("Disconnected from coordinator.", prefix="�o.")
     except Exception as exc:
@@ -2046,9 +2055,9 @@ def execute_task(task: Dict[str, Any]) -> None:
 
     submit_error: Optional[Exception] = None
     reward: Any = None
-    for attempt in range(2):
+    for attempt in range(RESULT_SUBMIT_RETRIES):
         try:
-            resp = SESSION.post(endpoint("/results"), data=json.dumps(payload), timeout=15)
+            resp = SESSION.post(endpoint("/results"), data=json.dumps(payload), timeout=HTTP_TIMEOUT_RESULTS)
             resp.raise_for_status()
             reward = resp.json().get("reward")
             submit_error = None
@@ -2056,12 +2065,27 @@ def execute_task(task: Dict[str, Any]) -> None:
         except Exception as exc:
             submit_error = exc
             status_code = getattr(getattr(exc, "response", None), "status_code", None)
-            if status_code == 404 and attempt == 0:
+            # Non-fatal: coordinator already moved state past this task.
+            if status_code == 409:
+                submit_error = None
+                reward = reward if reward is not None else 0.0
                 log(
-                    f"Result submit returned 404 for {task_id[:8]}; retrying once",
+                    f"Result submit returned 409 for {task_id[:8]}; treating as already settled",
+                    prefix="ℹ️",
+                )
+                break
+
+            transient = (
+                isinstance(exc, (requests.Timeout, requests.ConnectionError))
+                or status_code in {404, 408, 429, 500, 502, 503, 504}
+            )
+            if transient and attempt < (RESULT_SUBMIT_RETRIES - 1):
+                wait_s = min(8.0, float(2 ** attempt))
+                log(
+                    f"Result submit retry {attempt + 1}/{RESULT_SUBMIT_RETRIES - 1} for {task_id[:8]} in {wait_s:.1f}s",
                     prefix="⚠️",
                 )
-                time.sleep(1.0)
+                time.sleep(wait_s)
                 continue
             break
 
@@ -2949,7 +2973,7 @@ def heartbeat_loop() -> None:
             "supports": supports,
         }
         try:
-            resp = SESSION.post(endpoint("/register"), data=json.dumps(payload), timeout=5)
+            resp = SESSION.post(endpoint("/register"), data=json.dumps(payload), timeout=HTTP_TIMEOUT_REGISTER)
             resp.raise_for_status()
             backoff = BACKOFF_BASE
             log(f"Heartbeat OK ({ROLE})", prefix="✅")
@@ -2969,7 +2993,11 @@ def poll_tasks_loop() -> None:
     backoff = BACKOFF_BASE
     while True:
         try:
-            resp = SESSION.get(endpoint("/tasks/creator"), params={"node_id": NODE_NAME}, timeout=15)
+            resp = SESSION.get(
+                endpoint("/tasks/creator"),
+                params={"node_id": NODE_NAME},
+                timeout=HTTP_TIMEOUT_TASK_POLL,
+            )
             resp.raise_for_status()
             payload = resp.json()
             tasks = payload.get("tasks", [])
@@ -2992,6 +3020,14 @@ def poll_tasks_loop() -> None:
 
 if __name__ == "__main__":
     log(f"Node ID: {NODE_NAME} · Role: {ROLE.upper()} · Version: {CLIENT_VERSION}")
+    log(
+        (
+            f"Coordinator: {SERVER_BASE} "
+            f"(timeouts r={HTTP_TIMEOUT_REGISTER:.0f}s t={HTTP_TIMEOUT_TASK_POLL:.0f}s "
+            f"res={HTTP_TIMEOUT_RESULTS:.0f}s)"
+        ),
+        prefix="ℹ️",
+    )
     manifest_ready = refresh_manifest_with_backoff("startup", max_attempts=5)
     if not manifest_ready:
         log("Proceeding with degraded manifest state; heartbeat loop will keep retrying.", prefix="⚠️")

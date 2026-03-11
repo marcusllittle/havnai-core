@@ -193,10 +193,10 @@ _RUNTIME_DEFAULT_PROFILES: Dict[str, Dict[str, Dict[str, Any]]] = {
         "face_swap": {"num_steps": 24, "guidance": 6.0, "strength": 0.85},
     },
 }
-RUNTIME_PROFILE_NAME = os.getenv("HAVNAI_RUNTIME_PROFILE", "balanced").strip().lower()
+RUNTIME_PROFILE_NAME = os.getenv("HAVNAI_RUNTIME_PROFILE", "quality").strip().lower()
 RUNTIME_PROFILE = _RUNTIME_DEFAULT_PROFILES.get(
     RUNTIME_PROFILE_NAME,
-    _RUNTIME_DEFAULT_PROFILES["aggressive"],
+    _RUNTIME_DEFAULT_PROFILES["quality"],
 )
 ENABLE_LEGACY_AUTO_HARDCORE = os.getenv("HAVNAI_ENABLE_LEGACY_AUTO_HARDCORE", "").strip().lower() in {
     "1",

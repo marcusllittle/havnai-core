@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 import uuid
@@ -15,6 +16,19 @@ get_db: Callable[[], sqlite3.Connection]
 get_model_config: Callable[[str], Optional[Dict[str, Any]]]
 NODES: Dict[str, Dict[str, Any]]
 CREATOR_TASK_TYPE: str = "IMAGE_GEN"
+
+
+def _image_job_requires_reference_face(raw_data: Any) -> bool:
+    if not isinstance(raw_data, str) or not raw_data.strip():
+        return False
+    try:
+        parsed = json.loads(raw_data)
+    except Exception:
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    value = parsed.get("reference_face_url")
+    return isinstance(value, str) and bool(value.strip())
 
 
 def enqueue_job(
@@ -62,6 +76,8 @@ def fetch_next_job_for_node(node_id: str) -> Optional[Dict[str, Any]]:
         if role != "creator":
             continue
         required_support = support_map.get(task_type, "image")
+        if task_type == CREATOR_TASK_TYPE and _image_job_requires_reference_face(row["data"]):
+            required_support = "face_swap"
         if node_supports and required_support not in node_supports:
             continue
         model_name = row["model"].lower()

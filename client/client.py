@@ -75,9 +75,11 @@ except ImportError:  # pragma: no cover
     _DPMSolver = None  # type: ignore
     _AutoencoderKL = None  # type: ignore
 try:
-    from PIL import Image  # type: ignore
+    from PIL import Image, ImageDraw, ImageFont  # type: ignore
 except Exception:  # pragma: no cover
     Image = None  # type: ignore
+    ImageDraw = None  # type: ignore
+    ImageFont = None  # type: ignore
 try:
     import cv2  # type: ignore
 except Exception:  # pragma: no cover
@@ -90,6 +92,8 @@ except Exception:  # pragma: no cover
 _FACE_ANALYSIS = None
 _FACE_SWAP_PIPE = None
 _FACE_SWAP_PIPE_MODEL = ""
+_REFERENCE_FACE_PIPE = None
+_REFERENCE_FACE_PIPE_MODEL = ""
 _IMAGE_PIPELINE_CACHE: "OrderedDict[str, Any]" = OrderedDict()
 _IMAGE_PIPELINE_CACHE_LOCK = threading.Lock()
 
@@ -273,6 +277,170 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        raw = ENV_VARS.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_str(name: str, default: str = "") -> str:
+    raw = os.environ.get(name)
+    if raw is None:
+        raw = ENV_VARS.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip()
+
+
+def _env_csv(name: str) -> List[str]:
+    raw = os.environ.get(name)
+    if raw is None:
+        raw = ENV_VARS.get(name)
+    if raw is None:
+        return []
+    return [part.strip() for part in str(raw).split(",") if part and part.strip()]
+
+
+def _normalize_model_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _watermark_asset_candidates() -> List[Path]:
+    candidates: List[Path] = []
+    if WATERMARK_PATH:
+        candidates.append(Path(WATERMARK_PATH).expanduser())
+    candidates.append(REPO_ROOT / "static" / "HavnAI-logo.png")
+    candidates.append(REPO_ROOT.parent / "havnai-web" / "HavnAI-logo.png")
+    return candidates
+
+
+def _resolve_watermark_asset_path() -> Optional[Path]:
+    for candidate in _watermark_asset_candidates():
+        try:
+            if candidate.exists() and candidate.is_file():
+                return candidate
+        except Exception:
+            continue
+    return None
+
+
+def _load_watermark_image() -> Any:
+    if Image is None or not WATERMARK_ENABLED:
+        return None
+
+    asset_path = _resolve_watermark_asset_path()
+    if asset_path is None:
+        return None
+
+    cache_key = str(asset_path.resolve())
+    with _WATERMARK_IMAGE_LOCK:
+        if _WATERMARK_IMAGE_CACHE_KEY == cache_key and _WATERMARK_IMAGE_CACHE is not None:
+            return _WATERMARK_IMAGE_CACHE.copy()
+
+        try:
+            watermark = Image.open(asset_path).convert("RGBA")
+            pixels = watermark.load()
+            for y in range(watermark.height):
+                for x in range(watermark.width):
+                    r, g, b, a = pixels[x, y]
+                    if a <= 0:
+                        continue
+                    if r <= 20 and g <= 20 and b <= 20:
+                        pixels[x, y] = (r, g, b, 0)
+            if WATERMARK_OPACITY < 1.0:
+                alpha = watermark.getchannel("A").point(lambda value: int(value * WATERMARK_OPACITY))
+                watermark.putalpha(alpha)
+            globals()["_WATERMARK_IMAGE_CACHE"] = watermark
+            globals()["_WATERMARK_IMAGE_CACHE_KEY"] = cache_key
+            return watermark.copy()
+        except Exception as exc:
+            log(f"Failed to load watermark asset {asset_path}: {exc}", prefix="⚠️")
+            globals()["_WATERMARK_IMAGE_CACHE"] = None
+            globals()["_WATERMARK_IMAGE_CACHE_KEY"] = cache_key
+            return None
+
+
+def _load_watermark_font(size: int) -> Any:
+    if ImageFont is None:
+        return None
+    try:
+        return ImageFont.truetype("DejaVuSans-Bold.ttf", size)
+    except Exception:
+        try:
+            return ImageFont.load_default()
+        except Exception:
+            return None
+
+
+def _apply_text_watermark(image: Any) -> Any:
+    if Image is None or ImageDraw is None:
+        return image
+
+    text = (WATERMARK_TEXT or "HAVNAI").strip()
+    if not text:
+        return image
+
+    base = image.convert("RGBA")
+    overlay = Image.new("RGBA", base.size, (255, 255, 255, 0))
+    draw = ImageDraw.Draw(overlay)
+    font = _load_watermark_font(max(18, int(min(base.size) * 0.06)))
+    if font is None:
+        return image
+
+    try:
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_width = max(1, bbox[2] - bbox[0])
+        text_height = max(1, bbox[3] - bbox[1])
+    except Exception:
+        text_width = max(1, len(text) * 10)
+        text_height = max(1, int(min(base.size) * 0.06))
+
+    margin = max(12, int(min(base.size) * WATERMARK_MARGIN_PCT))
+    x = max(margin, base.width - text_width - margin)
+    y = max(margin, base.height - text_height - margin)
+    draw.text((x + 2, y + 2), text, font=font, fill=(0, 0, 0, 120))
+    draw.text((x, y), text, font=font, fill=(255, 255, 255, int(255 * 0.75)))
+    return Image.alpha_composite(base, overlay).convert(image.mode if image.mode != "RGBA" else "RGBA")
+
+
+def _apply_output_watermark(image: Any, task_id: str = "") -> Any:
+    if Image is None or not WATERMARK_ENABLED:
+        return image
+    try:
+        base = image.convert("RGBA")
+        watermark = _load_watermark_image()
+        if watermark is None:
+            return _apply_text_watermark(image)
+
+        max_width = max(WATERMARK_MIN_WIDTH, int(base.width * WATERMARK_MAX_WIDTH_PCT))
+        scale = max_width / max(1, watermark.width)
+        target_height = max(1, int(watermark.height * scale))
+        watermark = watermark.resize((max_width, target_height), Image.LANCZOS)
+
+        margin = max(12, int(min(base.size) * WATERMARK_MARGIN_PCT))
+        x = max(margin, base.width - watermark.width - margin)
+        y = max(margin, base.height - watermark.height - margin)
+
+        overlay = Image.new("RGBA", base.size, (255, 255, 255, 0))
+        overlay.alpha_composite(watermark, (x, y))
+        return Image.alpha_composite(base, overlay).convert(image.mode if image.mode != "RGBA" else "RGBA")
+    except Exception as exc:
+        log(f"Watermark application failed: {exc}", prefix="⚠️", task_id=task_id)
+        return image
+
+
+def _save_output_image(image: Any, output_path: Path, task_id: str = "") -> None:
+    final_image = _apply_output_watermark(image, task_id=task_id)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    final_image.save(output_path)
+
+
 SERVER_BASE = ENV_VARS.get("SERVER_URL", "http://127.0.0.1:5001").rstrip("/")
 JOIN_TOKEN = ENV_VARS.get("JOIN_TOKEN", "").strip()
 ROLE = "creator" if ENV_VARS.get("CREATOR_MODE", "false").lower() in {"1", "true", "yes"} else "worker"
@@ -281,6 +449,13 @@ FAST_PREVIEW = (
     os.environ.get("HAI_FAST_PREVIEW", ENV_VARS.get("HAI_FAST_PREVIEW", "")).lower()
     in {"1", "true", "yes"}
 )
+WATERMARK_ENABLED = _env_flag("HAVNAI_WATERMARK_ENABLED", True)
+WATERMARK_TEXT = _env_str("HAVNAI_WATERMARK_TEXT", "HAVNAI")
+WATERMARK_PATH = _env_str("HAVNAI_WATERMARK_PATH", "")
+WATERMARK_OPACITY = max(0.05, min(1.0, _env_float("HAVNAI_WATERMARK_OPACITY", 0.82)))
+WATERMARK_MARGIN_PCT = max(0.01, min(0.12, _env_float("HAVNAI_WATERMARK_MARGIN_PCT", 0.03)))
+WATERMARK_MAX_WIDTH_PCT = max(0.08, min(0.4, _env_float("HAVNAI_WATERMARK_MAX_WIDTH_PCT", 0.2)))
+WATERMARK_MIN_WIDTH = max(48, _env_int("HAVNAI_WATERMARK_MIN_WIDTH", 96))
 LTX2_MODEL_ID = os.environ.get("LTX2_MODEL_ID") or ENV_VARS.get("LTX2_MODEL_ID") or "maxin-cn/Latte-1"
 LTX2_MODEL_PATH = os.environ.get("LTX2_MODEL_PATH") or ENV_VARS.get("LTX2_MODEL_PATH", "")
 ANIMATEDIFF_ADAPTER_ID = (
@@ -305,8 +480,18 @@ INSTANTID_CONTROLNET_REPO = (
     or ENV_VARS.get("HAVNAI_INSTANTID_CONTROLNET_REPO")
     or "InstantX/InstantID"
 )
+_WATERMARK_IMAGE_CACHE: Any = None
+_WATERMARK_IMAGE_CACHE_KEY: Optional[str] = None
+_WATERMARK_IMAGE_LOCK = threading.Lock()
 ENABLE_XFORMERS = _env_flag("HAI_ENABLE_XFORMERS", False)
+FACE_SWAP_USE_XFORMERS = _env_flag("HAVNAI_FACE_SWAP_USE_XFORMERS", True)
+FACE_SWAP_PROFILE = (
+    os.environ.get("HAVNAI_FACE_SWAP_PROFILE")
+    or ENV_VARS.get("HAVNAI_FACE_SWAP_PROFILE")
+    or "auto"
+).strip().lower()
 SAFE_CUDA_KERNELS = _env_flag("HAI_SAFE_CUDA_KERNELS", True)
+LTX2_LOW_VRAM_CAPS = _env_flag("HAVNAI_LTX2_LOW_VRAM_CAPS", True)
 IMAGE_PIPELINE_CACHE_SIZE = max(0, _env_int("HAI_IMAGE_PIPELINE_CACHE_SIZE", 1))
 PRELOAD_IMAGE_ON_STARTUP = _env_flag("HAI_PRELOAD_IMAGE_ON_STARTUP", True)
 PRELOAD_IMAGE_MODEL = str(
@@ -315,6 +500,11 @@ PRELOAD_IMAGE_MODEL = str(
     or ""
 ).strip()
 ALLOW_REMOTE_LORA_DOWNLOAD = _env_flag("HAI_ALLOW_REMOTE_LORA_DOWNLOAD", False)
+_allowed_models_from_env = (
+    _env_csv("HAI_ALLOWED_MODELS")
+    or _env_csv("HAVNAI_ALLOWED_MODELS")
+)
+ALLOWED_MODEL_KEYS = {_normalize_model_key(name) for name in _allowed_models_from_env if _normalize_model_key(name)}
 
 REGISTRY.base_url = SERVER_BASE
 
@@ -323,6 +513,15 @@ TASK_POLL_INTERVAL = 15
 BACKOFF_BASE = 5
 MAX_BACKOFF = 60
 START_TIME = time.time()
+
+# Network timeouts/retries are env-tunable because coordinator latency can
+# spike during model/result processing.
+HTTP_TIMEOUT_REGISTER = max(5.0, _env_float("HAI_HTTP_TIMEOUT_REGISTER", 12.0))
+HTTP_TIMEOUT_TASK_POLL = max(10.0, _env_float("HAI_HTTP_TIMEOUT_TASK_POLL", 30.0))
+HTTP_TIMEOUT_RESULTS = max(15.0, _env_float("HAI_HTTP_TIMEOUT_RESULTS", 60.0))
+HTTP_TIMEOUT_WALLET_LINK = max(10.0, _env_float("HAI_HTTP_TIMEOUT_WALLET_LINK", 20.0))
+HTTP_TIMEOUT_DISCONNECT = max(5.0, _env_float("HAI_HTTP_TIMEOUT_DISCONNECT", 10.0))
+RESULT_SUBMIT_RETRIES = max(1, _env_int("HAI_RESULT_SUBMIT_RETRIES", 4))
 
 IMAGE_STEPS = int(os.environ.get("HAI_STEPS", "20"))
 IMAGE_GUIDANCE = float(os.environ.get("HAI_GUIDANCE", "7.0"))
@@ -360,7 +559,15 @@ def endpoint(path: str) -> str:
     return f"{SERVER_BASE}{path}"
 
 
+def _is_model_allowed(model_name: str) -> bool:
+    if not ALLOWED_MODEL_KEYS:
+        return True
+    return _normalize_model_key(model_name) in ALLOWED_MODEL_KEYS
+
+
 def ensure_model_entry(model_name: str) -> ModelEntry:
+    if not _is_model_allowed(model_name):
+        raise RuntimeError(f"Model '{model_name}' is not allowed on this node")
     try:
         return REGISTRY.get(model_name)
     except (KeyError, ManifestError) as exc:
@@ -429,6 +636,8 @@ def discover_capabilities() -> Dict[str, List[str]]:
         name = str(getattr(entry, "name", "") or "").strip()
         if not name:
             continue
+        if not _is_model_allowed(name):
+            continue
         # LTX2 can be loaded from HF repo id; local path is optional.
         if pipeline == "ltx2":
             pipelines.add(pipeline)
@@ -455,6 +664,9 @@ def _has_sdxl_base_model() -> bool:
     for entry in REGISTRY.list_entries():
         pipeline = str(getattr(entry, "pipeline", "") or "").lower()
         task_type = str(getattr(entry, "task_type", "IMAGE_GEN") or "IMAGE_GEN").upper()
+        name = str(getattr(entry, "name", "") or "").strip()
+        if not name or not _is_model_allowed(name):
+            continue
         if task_type != "IMAGE_GEN":
             continue
         if "sdxl" not in pipeline:
@@ -470,6 +682,9 @@ def _has_sdxl_base_model() -> bool:
 def _has_image_generation_model() -> bool:
     for entry in REGISTRY.list_entries():
         task_type = str(getattr(entry, "task_type", "IMAGE_GEN") or "IMAGE_GEN").upper()
+        name = str(getattr(entry, "name", "") or "").strip()
+        if not name or not _is_model_allowed(name):
+            continue
         if task_type != "IMAGE_GEN":
             continue
         try:
@@ -562,7 +777,7 @@ WALLET = ensure_wallet()
 def link_wallet(wallet: str) -> None:
     payload = {"node_id": NODE_NAME, "wallet": wallet, "node_name": NODE_NAME}
     try:
-        resp = SESSION.post(endpoint("/link-wallet"), data=json.dumps(payload), timeout=10)
+        resp = SESSION.post(endpoint("/link-wallet"), data=json.dumps(payload), timeout=HTTP_TIMEOUT_WALLET_LINK)
         resp.raise_for_status()
         log("Wallet linked with coordinator.", prefix="✅", wallet=wallet)
     except Exception as exc:
@@ -612,7 +827,7 @@ def run_command(cmd: List[str]) -> Optional[str]:
 
 def disconnect() -> None:
     try:
-        resp = SESSION.post(endpoint("/disconnect"), data=json.dumps({"node_id": NODE_NAME}), timeout=5)
+        resp = SESSION.post(endpoint("/disconnect"), data=json.dumps({"node_id": NODE_NAME}), timeout=HTTP_TIMEOUT_DISCONNECT)
         if resp.status_code == 200:
             log("Disconnected from coordinator.", prefix="�o.")
     except Exception as exc:
@@ -1164,6 +1379,8 @@ def prepare_mask_and_pose_control(
     padding: int = 60,
     mask_grow: int = 40,
     resize: bool = True,
+    resize_max_side: int = 1280,
+    resize_min_side: int = 1024,
 ) -> Tuple[Tuple["Image.Image", "Image.Image", "Image.Image"], Tuple[int, int, int, int]]:
     if np is None or cv2 is None:
         raise RuntimeError("opencv + numpy required for face swap preprocessing")
@@ -1203,13 +1420,63 @@ def prepare_mask_and_pose_control(
     original_width, original_height = image.size
     kps -= [p_x1, p_y1]
     if resize:
-        mask = resize_img(mask)
-        image = resize_img(image)
+        mask = resize_img(mask, max_side=resize_max_side, min_side=resize_min_side)
+        image = resize_img(image, max_side=resize_max_side, min_side=resize_min_side)
         new_width, new_height = image.size
         kps *= [new_width / original_width, new_height / original_height]
     control_image = draw_kps(image, kps)
 
     return (mask, image, control_image), (p_x1, p_y1, original_width, original_height)
+
+
+def _is_cuda_oom_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (
+        "out of memory" in text
+        or "cudaerrormemoryallocation" in text
+        or "cublas_status_alloc_failed" in text
+    )
+
+
+def _cuda_total_vram_gb() -> float:
+    if torch is None or not torch.cuda.is_available():
+        return 0.0
+    try:
+        props = torch.cuda.get_device_properties(0)
+        return float(props.total_memory) / float(1024**3)
+    except Exception:
+        return 0.0
+
+
+def _faceswap_attempt_profiles(requested_steps: int, requested_guidance: float) -> List[Dict[str, Any]]:
+    # Auto profile favors responsiveness on 12 GB cards (e.g. RTX 3060).
+    profile = FACE_SWAP_PROFILE
+    if profile in {"", "auto"}:
+        vram_gb = _cuda_total_vram_gb()
+        profile = "balanced_3060" if 0 < vram_gb <= 12.5 else "quality"
+
+    base_guidance = max(0.0, min(12.0, float(requested_guidance)))
+
+    if profile in {"quality", "high"}:
+        return [
+            {"max_side": 1280, "min_side": 1024, "steps": requested_steps, "guidance": base_guidance},
+            {"max_side": 1024, "min_side": 832, "steps": min(requested_steps, 24), "guidance": max(0.0, base_guidance - 0.2)},
+            {"max_side": 896, "min_side": 704, "steps": min(requested_steps, 20), "guidance": max(0.0, base_guidance - 0.4)},
+        ]
+
+    if profile in {"fast", "fast_3060"}:
+        return [
+            {"max_side": 768, "min_side": 576, "steps": min(requested_steps, 10), "guidance": max(0.0, base_guidance - 0.2)},
+            {"max_side": 704, "min_side": 512, "steps": min(requested_steps, 8), "guidance": max(0.0, base_guidance - 0.4)},
+            {"max_side": 640, "min_side": 512, "steps": min(requested_steps, 6), "guidance": max(0.0, base_guidance - 0.6)},
+        ]
+
+    # Default balanced_3060 profile.
+    return [
+        {"max_side": 960, "min_side": 768, "steps": min(requested_steps, 18), "guidance": base_guidance},
+        {"max_side": 896, "min_side": 704, "steps": min(requested_steps, 16), "guidance": max(0.0, base_guidance - 0.2)},
+        {"max_side": 832, "min_side": 640, "steps": min(requested_steps, 14), "guidance": max(0.0, base_guidance - 0.4)},
+    ]
 
 
 def _candidate_instantid_adapter_paths() -> List[Path]:
@@ -1313,6 +1580,35 @@ def _run_ltx2_task(
     task_payload["model_name"] = entry.name
     task_payload["reward_weight"] = reward_weight
     task_payload.setdefault("seed", random.randint(0, 2**31 - 1))
+
+    vram_gb = _cuda_total_vram_gb()
+    if LTX2_LOW_VRAM_CAPS and 0 < vram_gb <= 12.5:
+        original_steps = coerce_int(task_payload.get("steps"), 20)
+        original_guidance = coerce_float(task_payload.get("guidance"), 7.0)
+        original_width = coerce_int(task_payload.get("width"), 512)
+        original_height = coerce_int(task_payload.get("height"), 512)
+        original_frames = coerce_int(task_payload.get("frames"), 16)
+        original_timeout = coerce_int(task_payload.get("timeout"), 300)
+
+        task_payload["steps"] = max(4, min(original_steps, 8))
+        task_payload["guidance"] = max(0.0, min(original_guidance, 5.5))
+        task_payload["width"] = max(256, min(original_width, 384))
+        task_payload["height"] = max(256, min(original_height, 384))
+        # Latte-1 commonly expects 16-frame blocks; forcing 16 avoids extra retry overhead.
+        task_payload["frames"] = 16
+        task_payload["timeout"] = max(original_timeout, 900)
+
+        log(
+            "LTX2 low-VRAM caps applied "
+            f"(VRAM={vram_gb:.1f}GB): "
+            f"steps {original_steps}->{task_payload['steps']}, "
+            f"guidance {original_guidance:.2f}->{task_payload['guidance']:.2f}, "
+            f"size {original_width}x{original_height}->{task_payload['width']}x{task_payload['height']}, "
+            f"frames {original_frames}->{task_payload['frames']}, "
+            f"timeout {original_timeout}s->{task_payload['timeout']}s",
+            prefix="⚠️",
+            task_id=task_id,
+        )
 
     try:
         metrics, util, video_path = run_ltx2(
@@ -1448,6 +1744,8 @@ def _run_faceswap_task(
         strength = max(0.0, min(1.0, strength))
         num_steps = coerce_int(task.get("num_steps"), 20)
         num_steps = max(5, min(60, num_steps))
+        guidance = coerce_float(task.get("guidance"), 4.8)
+        guidance = max(0.0, min(12.0, guidance))
         seed = task.get("seed")
         try:
             seed = int(seed) if seed is not None else random.randint(0, 2**31 - 1)
@@ -1471,10 +1769,6 @@ def _run_faceswap_task(
         if source_face is None:
             raise RuntimeError("No face detected in face source image")
 
-        crop_inputs, crop_region = prepare_mask_and_pose_control(base_image, base_face, padding=70, mask_grow=48)
-        mask_image, cropped_image, control_image = crop_inputs
-        crop_x, crop_y, crop_w, crop_h = crop_region
-
         adapter_path = _resolve_instantid_adapter_path()
         controlnet_ref = _resolve_instantid_controlnet_ref()
         dtype = torch.float16 if torch.cuda.is_available() else torch.float32
@@ -1495,8 +1789,18 @@ def _run_faceswap_task(
             # generic pipeline .to(...), so force placement to avoid cpu/cuda mismatch.
             if hasattr(pipe, "image_proj_model") and pipe.image_proj_model is not None:
                 pipe.image_proj_model.to(device=device, dtype=dtype)
-            if hasattr(pipe, "enable_attention_slicing"):
+            xformers_enabled = False
+            if FACE_SWAP_USE_XFORMERS and hasattr(pipe, "enable_xformers_memory_efficient_attention"):
+                try:
+                    pipe.enable_xformers_memory_efficient_attention()
+                    xformers_enabled = True
+                    log("Face swap xformers attention enabled", prefix="✅", task_id=task_id)
+                except Exception as exc:
+                    log(f"Face swap xformers unavailable: {exc}", prefix="ℹ️", task_id=task_id)
+            if hasattr(pipe, "enable_attention_slicing") and not xformers_enabled:
                 pipe.enable_attention_slicing("max")
+            if hasattr(pipe, "set_progress_bar_config"):
+                pipe.set_progress_bar_config(disable=True)
             _FACE_SWAP_PIPE = pipe
             _FACE_SWAP_PIPE_MODEL = pipeline_cache_key
 
@@ -1508,28 +1812,83 @@ def _run_faceswap_task(
             image_embeds = torch.from_numpy(image_embeds)
         if isinstance(image_embeds, torch.Tensor):
             image_embeds = image_embeds.to(device=device, dtype=dtype)
+        attempt_profiles = _faceswap_attempt_profiles(num_steps, guidance)
+        composed: Optional["Image.Image"] = None
+        last_exc: Optional[Exception] = None
 
-        generator = torch.Generator(device=device).manual_seed(seed)
-        result = _FACE_SWAP_PIPE(
-            prompt=prompt,
-            negative_prompt=negative_prompt or None,
-            image=cropped_image,
-            mask_image=mask_image,
-            control_image=control_image,
-            image_embeds=image_embeds,
-            num_inference_steps=num_steps,
-            guidance_scale=5.0,
-            strength=strength,
-            controlnet_conditioning_scale=0.8,
-            generator=generator,
-        )
-        swapped_crop = result.images[0]
-        swapped_crop = swapped_crop.resize((crop_w, crop_h), resample=Image.LANCZOS)
-        composed = base_image.copy()
-        composed.paste(swapped_crop, (crop_x, crop_y))
+        for idx, profile in enumerate(attempt_profiles, start=1):
+            crop_inputs, crop_region = prepare_mask_and_pose_control(
+                base_image,
+                base_face,
+                padding=70,
+                mask_grow=48,
+                resize_max_side=int(profile["max_side"]),
+                resize_min_side=int(profile["min_side"]),
+            )
+            mask_image, cropped_image, control_image = crop_inputs
+            crop_x, crop_y, crop_w, crop_h = crop_region
+            guidance_scale = float(profile["guidance"])
+            attempt_steps = int(profile["steps"])
+            generator = torch.Generator(device=device).manual_seed(seed)
+            log(
+                "Face swap attempt "
+                f"{idx}/{len(attempt_profiles)} "
+                f"@ {cropped_image.size[0]}x{cropped_image.size[1]} "
+                f"steps={attempt_steps} guidance={guidance_scale:.2f}",
+                prefix="🎭",
+                task_id=task_id,
+            )
+
+            try:
+                result = _FACE_SWAP_PIPE(
+                    prompt=prompt,
+                    negative_prompt=negative_prompt or None,
+                    image=cropped_image,
+                    mask_image=mask_image,
+                    control_image=control_image,
+                    image_embeds=image_embeds,
+                    num_inference_steps=attempt_steps,
+                    guidance_scale=guidance_scale,
+                    strength=strength,
+                    controlnet_conditioning_scale=0.8,
+                    generator=generator,
+                )
+                swapped_crop = result.images[0]
+                swapped_crop = swapped_crop.resize((crop_w, crop_h), resample=Image.LANCZOS)
+                composed = base_image.copy()
+                composed.paste(swapped_crop, (crop_x, crop_y))
+                log(
+                    f"Face swap attempt {idx} finished successfully",
+                    prefix="✅",
+                    task_id=task_id,
+                )
+                break
+            except Exception as exc:
+                last_exc = exc
+                if (
+                    idx < len(attempt_profiles)
+                    and torch.cuda.is_available()
+                    and _is_cuda_oom_error(exc)
+                ):
+                    log(
+                        "Face swap hit CUDA OOM "
+                        f"(attempt {idx}/{len(attempt_profiles)} @ {attempt_steps} steps). "
+                        "Retrying with lower VRAM settings.",
+                        prefix="⚠️",
+                        task_id=task_id,
+                    )
+                    try:
+                        torch.cuda.empty_cache()
+                    except Exception:
+                        pass
+                    continue
+                raise
+
+        if composed is None:
+            raise RuntimeError(str(last_exc) if last_exc else "face swap produced no image")
 
         output_path = OUTPUTS_DIR / f"{task_id}.png"
-        composed.save(output_path)
+        _save_output_image(composed, output_path, task_id=task_id)
         with output_path.open("rb") as fh:
             image_b64 = base64.b64encode(fh.read()).decode("utf-8")
     except Exception as exc:
@@ -1574,6 +1933,31 @@ def execute_task(task: Dict[str, Any]) -> None:
         return
 
     log(f"Executing {task_type.lower()} task {task_id[:8]} · {model_name}", prefix="🚀")
+
+    if not _is_model_allowed(model_name):
+        log(
+            f"Rejecting task for disallowed model '{model_name}'",
+            prefix="⚠️",
+            task_id=task_id,
+        )
+        payload = {
+            "node_id": NODE_NAME,
+            "task_id": task_id,
+            "status": "failed",
+            "metrics": {
+                "task_type": task_type.lower(),
+                "model_name": model_name,
+                "reward_weight": reward_weight,
+                "error": f"Model '{model_name}' is not allowed on this node",
+            },
+            "utilization": utilization_hint,
+            "submitted_at": time.time(),
+        }
+        try:
+            SESSION.post(endpoint("/results"), data=json.dumps(payload), timeout=15).raise_for_status()
+        except Exception as exc:
+            log(f"Failed to submit disallowed-model result: {exc}", prefix="🚫", task_id=task_id)
+        return
 
     image_b64: Optional[str] = None
     video_b64: Optional[str] = None
@@ -1621,7 +2005,7 @@ def execute_task(task: Dict[str, Any]) -> None:
                 log(f"Failed to parse job settings: {exc}", prefix="⚠️", task_id=task_id)
             # Merge coordinator-sent overrides even when prompt is plain text.
             if isinstance(task, dict):
-                for key in ("steps", "guidance", "width", "height", "sampler", "seed"):
+                for key in ("steps", "guidance", "width", "height", "sampler", "seed", "reference_face_url"):
                     value = task.get(key)
                     if value is None or value == "":
                         continue
@@ -1671,9 +2055,9 @@ def execute_task(task: Dict[str, Any]) -> None:
 
     submit_error: Optional[Exception] = None
     reward: Any = None
-    for attempt in range(2):
+    for attempt in range(RESULT_SUBMIT_RETRIES):
         try:
-            resp = SESSION.post(endpoint("/results"), data=json.dumps(payload), timeout=15)
+            resp = SESSION.post(endpoint("/results"), data=json.dumps(payload), timeout=HTTP_TIMEOUT_RESULTS)
             resp.raise_for_status()
             reward = resp.json().get("reward")
             submit_error = None
@@ -1681,12 +2065,27 @@ def execute_task(task: Dict[str, Any]) -> None:
         except Exception as exc:
             submit_error = exc
             status_code = getattr(getattr(exc, "response", None), "status_code", None)
-            if status_code == 404 and attempt == 0:
+            # Non-fatal: coordinator already moved state past this task.
+            if status_code == 409:
+                submit_error = None
+                reward = reward if reward is not None else 0.0
                 log(
-                    f"Result submit returned 404 for {task_id[:8]}; retrying once",
+                    f"Result submit returned 409 for {task_id[:8]}; treating as already settled",
+                    prefix="ℹ️",
+                )
+                break
+
+            transient = (
+                isinstance(exc, (requests.Timeout, requests.ConnectionError))
+                or status_code in {404, 408, 429, 500, 502, 503, 504}
+            )
+            if transient and attempt < (RESULT_SUBMIT_RETRIES - 1):
+                wait_s = min(8.0, float(2 ** attempt))
+                log(
+                    f"Result submit retry {attempt + 1}/{RESULT_SUBMIT_RETRIES - 1} for {task_id[:8]} in {wait_s:.1f}s",
                     prefix="⚠️",
                 )
-                time.sleep(1.0)
+                time.sleep(wait_s)
                 continue
             break
 
@@ -2005,6 +2404,123 @@ def _acquire_base_image_pipeline(
     return pipe, False, load_ms
 
 
+def _truncate_image_prompts(pipe: Any, pos_text: str, neg_text: str) -> Tuple[str, str]:
+    if not hasattr(pipe, "tokenizer") or not hasattr(pipe.tokenizer, "model_max_length"):
+        return pos_text, neg_text
+    try:
+        encoded = pipe.tokenizer(
+            pos_text,
+            max_length=pipe.tokenizer.model_max_length,
+            truncation=True,
+            return_tensors="pt",
+        )
+        pos_text = pipe.tokenizer.batch_decode(encoded.input_ids, skip_special_tokens=True)[0]
+        if neg_text:
+            encoded_neg = pipe.tokenizer(
+                neg_text,
+                max_length=pipe.tokenizer.model_max_length,
+                truncation=True,
+                return_tensors="pt",
+            )
+            neg_text = pipe.tokenizer.batch_decode(encoded_neg.input_ids, skip_special_tokens=True)[0]
+    except Exception as exc:
+        log(f"Prompt truncation failed: {exc}", prefix="⚠️")
+    return pos_text, neg_text
+
+
+def _apply_image_sampler(pipe: Any, sampler: Optional[str]) -> None:
+    if not sampler or not hasattr(pipe, "scheduler") or _DPMSolver is None:
+        return
+    sampler_norm = sampler.replace("+", "p")
+    if "dpmpp" not in sampler_norm:
+        return
+    try:
+        pipe.scheduler = _DPMSolver.from_config(pipe.scheduler.config)
+    except Exception as exc:
+        log(f"Sampler switch failed: {exc}", prefix="⚠️", sampler=sampler)
+
+
+def _reference_face_pipeline_cache_key(
+    model_path: Path,
+    controlnet_ref: str,
+    adapter_path: Path,
+    device: str,
+    dtype: Any,
+) -> str:
+    try:
+        model_ref = str(model_path.resolve())
+    except Exception:
+        model_ref = str(model_path)
+    dtype_ref = str(dtype)
+    return f"{model_ref}|{controlnet_ref}|{adapter_path}|{device}|{dtype_ref}"
+
+
+def _construct_reference_face_pipeline(
+    entry: ModelEntry,
+    model_path: Path,
+    dtype: Any,
+    device: str,
+    adapter_path: Path,
+) -> Tuple[Any, int]:
+    from pipeline_stable_diffusion_xl_instantid import StableDiffusionXLInstantIDPipeline  # type: ignore
+
+    load_t0 = time.time()
+    controlnet = _load_instantid_controlnet(dtype)
+    pipe = StableDiffusionXLInstantIDPipeline.from_single_file(
+        str(model_path),
+        controlnet=controlnet,
+        torch_dtype=dtype,
+        safety_checker=None,
+    )
+    pipe.load_ip_adapter_instantid(str(adapter_path))
+    pipe = _configure_image_pipeline(pipe, entry, True, device)
+    pipe.set_ip_adapter_scale(0.8)
+    if hasattr(pipe, "image_proj_model") and pipe.image_proj_model is not None:
+        pipe.image_proj_model.to(device=device, dtype=dtype)
+    load_ms = int((time.time() - load_t0) * 1000)
+    return pipe, load_ms
+
+
+def _acquire_reference_face_pipeline(
+    entry: ModelEntry,
+    model_path: Path,
+    dtype: Any,
+    device: str,
+) -> Tuple[Any, bool, int]:
+    global _REFERENCE_FACE_PIPE, _REFERENCE_FACE_PIPE_MODEL
+
+    adapter_path = _resolve_instantid_adapter_path()
+    controlnet_ref = _resolve_instantid_controlnet_ref()
+    cache_key = _reference_face_pipeline_cache_key(
+        model_path,
+        controlnet_ref,
+        adapter_path,
+        device,
+        dtype,
+    )
+    if _REFERENCE_FACE_PIPE is not None and _REFERENCE_FACE_PIPE_MODEL == cache_key:
+        pipe = _REFERENCE_FACE_PIPE
+        pipe.set_ip_adapter_scale(0.8)
+        pipe.to(device)
+        if hasattr(pipe, "image_proj_model") and pipe.image_proj_model is not None:
+            pipe.image_proj_model.to(device=device, dtype=dtype)
+        return pipe, True, 0
+
+    old_pipe = _REFERENCE_FACE_PIPE
+    pipe, load_ms = _construct_reference_face_pipeline(
+        entry,
+        model_path,
+        dtype,
+        device,
+        adapter_path,
+    )
+    _REFERENCE_FACE_PIPE = pipe
+    _REFERENCE_FACE_PIPE_MODEL = cache_key
+    if old_pipe is not None and old_pipe is not pipe:
+        _release_image_pipeline(old_pipe)
+    return pipe, False, load_ms
+
+
 def _collect_explicit_loras(requested_raw: Any, entry: ModelEntry, pipeline_name: str) -> List[Tuple[Path, float, str]]:
     requested = requested_raw
     if isinstance(requested, str):
@@ -2110,6 +2626,9 @@ def run_image_generation(
     use_img2img = False
     init_image_raw: Optional[str] = None
     img2img_strength = 0.75
+    reference_face_url = ""
+    reference_face_used = False
+    reference_face_pipeline: Optional[str] = None
     if job_settings and isinstance(job_settings, dict):
         try:
             width = int(job_settings.get("width", width) or width)
@@ -2117,6 +2636,7 @@ def run_image_generation(
         except (TypeError, ValueError):
             pass
         init_image_raw = job_settings.get("init_image") or job_settings.get("init_image_url")
+        reference_face_url = str(job_settings.get("reference_face_url") or "").strip()
         use_img2img = bool(init_image_raw)
         try:
             img2img_strength = float(job_settings.get("img2img_strength", 0.75) or 0.75)
@@ -2124,6 +2644,10 @@ def run_image_generation(
             img2img_strength = 0.75
 
     try:
+        if reference_face_url and (FAST_PREVIEW or torch is None or diffusers is None):
+            raise RuntimeError("Reference face requires the full diffusers runtime and cannot run in fast preview mode")
+        if reference_face_url and (Image is None or np is None or cv2 is None or FaceAnalysis is None):
+            raise RuntimeError("Reference face requires pillow + numpy + opencv + insightface")
         if not FAST_PREVIEW and torch is not None and diffusers is not None:
             device, dtype, is_xl, pipeline_name = _resolve_image_runtime(entry)
             requested_loras = job_settings.get("loras") if isinstance(job_settings, dict) else []
@@ -2135,128 +2659,181 @@ def run_image_generation(
             else:
                 lora_summary = "none"
             log(f"Loading LoRAs: {lora_summary}", prefix="🎛️")
-
-            init_pil = None
-            if use_img2img and init_image_raw:
-                try:
-                    from PIL import Image as _PILImage
-                    if init_image_raw.startswith("data:"):
-                        b64_part = init_image_raw.split(",", 1)[-1]
-                        img_bytes = base64.b64decode(b64_part)
-                        init_pil = _PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
-                    elif init_image_raw.startswith(("http://", "https://", "/")):
-                        img_resp = requests.get(init_image_raw, timeout=30)
-                        img_resp.raise_for_status()
-                        init_pil = _PILImage.open(io.BytesIO(img_resp.content)).convert("RGB")
-                    elif os.path.isfile(init_image_raw):
-                        init_pil = _PILImage.open(init_image_raw).convert("RGB")
-                    else:
-                        img_bytes = base64.b64decode(init_image_raw)
-                        init_pil = _PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
-                    if init_pil:
-                        init_pil = init_pil.resize((width, height))
-                        log(f"Init image loaded for img2img (strength={img2img_strength})", prefix="🖼️")
-                except Exception as exc:
-                    log(f"Failed to load init image, falling back to txt2img: {exc}", prefix="⚠️")
-                    init_pil = None
-
-            pipe_mode = "img2img" if init_pil is not None else "txt2img"
-            log(f"Preparing {pipe_mode} pipeline…", prefix="ℹ️", device=device)
-            transient_pipeline = bool(lora_entries) or IMAGE_PIPELINE_CACHE_SIZE <= 0
-            pipe: Optional[Any] = None
+            seed = job_settings.get("seed") if isinstance(job_settings, dict) else None
             try:
-                if transient_pipeline:
-                    pipe, pipeline_load_ms = _construct_base_image_pipeline(
-                        entry, model_path, pipeline_name, dtype, is_xl, device
-                    )
-                else:
-                    pipe, pipeline_cache_hit, pipeline_load_ms = _acquire_base_image_pipeline(
-                        entry, model_path, pipeline_name, dtype, is_xl, device
-                    )
-                if not pipeline_cache_hit:
-                    log(f"Pipeline ready in {pipeline_load_ms}ms", prefix="✅")
-                if lora_entries and pipe is not None:
-                    loaded_loras, lora_load_ms = _apply_explicit_loras(pipe, entry, lora_entries)
-                if pipe is None:
-                    raise RuntimeError("Image pipeline is unavailable")
+                seed = int(seed) if seed is not None else None
+            except (TypeError, ValueError):
+                seed = None
+            if seed is None:
+                seed = int(time.time()) & 0x7FFFFFFF
+            generator = torch.Generator(device=device).manual_seed(seed)
+            pos_text = prompt or "a high quality photo of a golden retriever on a beach at sunset"
+            neg_text = negative_prompt or ""
+            steps = IMAGE_STEPS
+            guidance = IMAGE_GUIDANCE
+            img_h = IMAGE_HEIGHT
+            img_w = IMAGE_WIDTH
+            sampler = None
+            if job_settings and isinstance(job_settings, dict):
+                steps = int(job_settings.get("steps", steps) or steps)
+                guidance = float(job_settings.get("guidance", guidance) or guidance)
+                img_h = int(job_settings.get("height", img_h) or img_h)
+                img_w = int(job_settings.get("width", img_w) or img_w)
+                sampler = str(job_settings.get("sampler") or "").strip().lower() or None
+                if job_settings.get("negative_prompt"):
+                    neg_text = str(job_settings.get("negative_prompt") or "")
+            steps = max(5, min(50, steps))
+            guidance = max(1.0, min(15.0, guidance))
+            img_h = max(256, min(1536, img_h))
+            img_w = max(256, min(1536, img_w))
 
-                seed = job_settings.get("seed") if isinstance(job_settings, dict) else None
+            if reference_face_url:
+                if not is_xl or "sdxl" not in pipeline_name:
+                    raise RuntimeError("Reference face requires an SDXL image model on the node")
+                if use_img2img:
+                    raise RuntimeError("Reference face cannot be combined with init_image")
+
+                from pipeline_stable_diffusion_xl_instantid import draw_kps  # type: ignore
+
+                reference_face_used = True
+                reference_face_pipeline = "instantid"
+                log("Preparing reference-face pipeline…", prefix="ℹ️", device=device)
+                transient_pipeline = bool(lora_entries)
+                pipe: Optional[Any] = None
                 try:
-                    seed = int(seed) if seed is not None else None
-                except (TypeError, ValueError):
-                    seed = None
-                if seed is None:
-                    seed = int(time.time()) & 0x7FFFFFFF
-                generator = torch.Generator(device=device).manual_seed(seed)
-                pos_text = prompt or "a high quality photo of a golden retriever on a beach at sunset"
-                neg_text = negative_prompt or ""
-                steps = IMAGE_STEPS
-                guidance = IMAGE_GUIDANCE
-                img_h = IMAGE_HEIGHT
-                img_w = IMAGE_WIDTH
-                sampler = None
-                if job_settings and isinstance(job_settings, dict):
-                    steps = int(job_settings.get("steps", steps) or steps)
-                    guidance = float(job_settings.get("guidance", guidance) or guidance)
-                    img_h = int(job_settings.get("height", img_h) or img_h)
-                    img_w = int(job_settings.get("width", img_w) or img_w)
-                    sampler = str(job_settings.get("sampler") or "").strip().lower() or None
-                    if job_settings.get("negative_prompt"):
-                        neg_text = str(job_settings.get("negative_prompt") or "")
-                steps = max(5, min(50, steps))
-                guidance = max(1.0, min(15.0, guidance))
-                img_h = max(256, min(1536, img_h))
-                img_w = max(256, min(1536, img_w))
-                if hasattr(pipe, "tokenizer") and hasattr(pipe.tokenizer, "model_max_length"):
-                    try:
-                        encoded = pipe.tokenizer(
-                            pos_text,
-                            max_length=pipe.tokenizer.model_max_length,
-                            truncation=True,
-                            return_tensors="pt",
+                    if transient_pipeline:
+                        adapter_path = _resolve_instantid_adapter_path()
+                        pipe, pipeline_load_ms = _construct_reference_face_pipeline(
+                            entry,
+                            model_path,
+                            dtype,
+                            device,
+                            adapter_path,
                         )
-                        pos_text = pipe.tokenizer.batch_decode(
-                            encoded.input_ids, skip_special_tokens=True
-                        )[0]
-                        if neg_text:
-                            encoded_neg = pipe.tokenizer(
-                                neg_text,
-                                max_length=pipe.tokenizer.model_max_length,
-                                truncation=True,
-                                return_tensors="pt",
-                            )
-                            neg_text = pipe.tokenizer.batch_decode(
-                                encoded_neg.input_ids, skip_special_tokens=True
-                            )[0]
+                    else:
+                        pipe, pipeline_cache_hit, pipeline_load_ms = _acquire_reference_face_pipeline(
+                            entry,
+                            model_path,
+                            dtype,
+                            device,
+                        )
+                    if not pipeline_cache_hit:
+                        log(f"Pipeline ready in {pipeline_load_ms}ms", prefix="✅")
+                    if lora_entries and pipe is not None:
+                        loaded_loras, lora_load_ms = _apply_explicit_loras(pipe, entry, lora_entries)
+                    if pipe is None:
+                        raise RuntimeError("Reference face pipeline is unavailable")
+
+                    pos_text, neg_text = _truncate_image_prompts(pipe, pos_text, neg_text)
+                    _apply_image_sampler(pipe, sampler)
+
+                    reference_image, reference_error = load_image_source_with_error(reference_face_url)
+                    if reference_image is None:
+                        raise RuntimeError(
+                            f"Failed to load reference face image: {reference_error or 'unknown error'}"
+                        )
+                    face_app = get_face_analysis()
+                    face_infos = face_app.get(cv2.cvtColor(np.array(reference_image), cv2.COLOR_RGB2BGR))
+                    reference_face = pick_primary_face(face_infos)
+                    if reference_face is None:
+                        raise RuntimeError("No face detected in reference face image")
+                    face_embedding = reference_face.get("embedding")
+                    if face_embedding is None:
+                        raise RuntimeError("Reference face embedding is unavailable")
+                    control_image = draw_kps(reference_image, reference_face["kps"])
+
+                    gen_t0 = time.time()
+                    with torch.inference_mode():
+                        result = pipe(
+                            pos_text,
+                            negative_prompt=neg_text or None,
+                            num_inference_steps=steps,
+                            guidance_scale=guidance,
+                            generator=generator,
+                            height=img_h,
+                            width=img_w,
+                            image=control_image,
+                            image_embeds=face_embedding,
+                            controlnet_conditioning_scale=0.8,
+                            ip_adapter_scale=0.8,
+                        )
+                    generation_ms = int((time.time() - gen_t0) * 1000)
+                    log(f"Generated in {generation_ms}ms", prefix="✅")
+                    img = result.images[0]
+                    _save_output_image(img, output_path, task_id=task_id)
+                    with output_path.open("rb") as fh:
+                        image_b64 = base64.b64encode(fh.read()).decode("utf-8")
+                finally:
+                    if transient_pipeline and pipe is not None:
+                        _release_image_pipeline(pipe)
+            else:
+                init_pil = None
+                if use_img2img and init_image_raw:
+                    try:
+                        from PIL import Image as _PILImage
+                        if init_image_raw.startswith("data:"):
+                            b64_part = init_image_raw.split(",", 1)[-1]
+                            img_bytes = base64.b64decode(b64_part)
+                            init_pil = _PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
+                        elif init_image_raw.startswith(("http://", "https://", "/")):
+                            img_resp = requests.get(init_image_raw, timeout=30)
+                            img_resp.raise_for_status()
+                            init_pil = _PILImage.open(io.BytesIO(img_resp.content)).convert("RGB")
+                        elif os.path.isfile(init_image_raw):
+                            init_pil = _PILImage.open(init_image_raw).convert("RGB")
+                        else:
+                            img_bytes = base64.b64decode(init_image_raw)
+                            init_pil = _PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
+                        if init_pil:
+                            init_pil = init_pil.resize((width, height))
+                            log(f"Init image loaded for img2img (strength={img2img_strength})", prefix="🖼️")
                     except Exception as exc:
-                        log(f"Prompt truncation failed: {exc}", prefix="⚠️")
-                gen_t0 = time.time()
-                if sampler and hasattr(pipe, "scheduler") and _DPMSolver is not None:
-                    sampler_norm = sampler.replace("+", "p")
-                    if "dpmpp" in sampler_norm:
-                        try:
-                            pipe.scheduler = _DPMSolver.from_config(pipe.scheduler.config)
-                        except Exception as exc:
-                            log(f"Sampler switch failed: {exc}", prefix="⚠️", sampler=sampler)
-                with torch.inference_mode():
-                    result = pipe(
-                        pos_text,
-                        negative_prompt=neg_text or None,
-                        num_inference_steps=steps,
-                        guidance_scale=guidance,
-                        generator=generator,
-                        height=img_h,
-                        width=img_w,
-                    )
-                generation_ms = int((time.time() - gen_t0) * 1000)
-                log(f"Generated in {generation_ms}ms", prefix="✅")
-                img = result.images[0]
-                img.save(output_path)
-                with output_path.open("rb") as fh:
-                    image_b64 = base64.b64encode(fh.read()).decode("utf-8")
-            finally:
-                if transient_pipeline and pipe is not None:
-                    _release_image_pipeline(pipe)
+                        log(f"Failed to load init image, falling back to txt2img: {exc}", prefix="⚠️")
+                        init_pil = None
+
+                pipe_mode = "img2img" if init_pil is not None else "txt2img"
+                log(f"Preparing {pipe_mode} pipeline…", prefix="ℹ️", device=device)
+                transient_pipeline = bool(lora_entries) or IMAGE_PIPELINE_CACHE_SIZE <= 0
+                pipe: Optional[Any] = None
+                try:
+                    if transient_pipeline:
+                        pipe, pipeline_load_ms = _construct_base_image_pipeline(
+                            entry, model_path, pipeline_name, dtype, is_xl, device
+                        )
+                    else:
+                        pipe, pipeline_cache_hit, pipeline_load_ms = _acquire_base_image_pipeline(
+                            entry, model_path, pipeline_name, dtype, is_xl, device
+                        )
+                    if not pipeline_cache_hit:
+                        log(f"Pipeline ready in {pipeline_load_ms}ms", prefix="✅")
+                    if lora_entries and pipe is not None:
+                        loaded_loras, lora_load_ms = _apply_explicit_loras(pipe, entry, lora_entries)
+                    if pipe is None:
+                        raise RuntimeError("Image pipeline is unavailable")
+
+                    pos_text, neg_text = _truncate_image_prompts(pipe, pos_text, neg_text)
+                    _apply_image_sampler(pipe, sampler)
+
+                    gen_t0 = time.time()
+                    with torch.inference_mode():
+                        result = pipe(
+                            pos_text,
+                            negative_prompt=neg_text or None,
+                            num_inference_steps=steps,
+                            guidance_scale=guidance,
+                            generator=generator,
+                            height=img_h,
+                            width=img_w,
+                        )
+                    generation_ms = int((time.time() - gen_t0) * 1000)
+                    log(f"Generated in {generation_ms}ms", prefix="✅")
+                    img = result.images[0]
+                    _save_output_image(img, output_path, task_id=task_id)
+                    with output_path.open("rb") as fh:
+                        image_b64 = base64.b64encode(fh.read()).decode("utf-8")
+                finally:
+                    if transient_pipeline and pipe is not None:
+                        _release_image_pipeline(pipe)
         elif Image is not None:
             log("Using fast preview placeholder (no SD detected or FAST_PREVIEW enabled)", prefix="ℹ️")
             w = h = 512
@@ -2270,7 +2847,7 @@ def run_image_generation(
             else:
                 arr = None
             img = Image.fromarray(arr) if arr is not None else Image.new("RGB", (w, h), color=(40, 60, 80))
-            img.save(output_path)
+            _save_output_image(img, output_path, task_id=task_id)
             with output_path.open("rb") as fh:
                 image_b64 = base64.b64encode(fh.read()).decode("utf-8")
         else:
@@ -2297,7 +2874,10 @@ def run_image_generation(
         "pipeline_load_ms": int(pipeline_load_ms),
         "lora_load_ms": int(lora_load_ms),
         "generation_ms": int(generation_ms),
+        "reference_face_used": bool(reference_face_used),
     }
+    if reference_face_pipeline:
+        metrics["reference_face_pipeline"] = reference_face_pipeline
     if loaded_loras:
         metrics["loras"] = loaded_loras
     if status == "failed":
@@ -2309,6 +2889,9 @@ def _iter_image_entries() -> List[ModelEntry]:
     entries: List[ModelEntry] = []
     for entry in REGISTRY.list_entries():
         task_type = str(getattr(entry, "task_type", "IMAGE_GEN") or "IMAGE_GEN").upper()
+        name = str(getattr(entry, "name", "") or "").strip()
+        if not name or not _is_model_allowed(name):
+            continue
         if task_type == "IMAGE_GEN":
             entries.append(entry)
     return entries
@@ -2390,7 +2973,7 @@ def heartbeat_loop() -> None:
             "supports": supports,
         }
         try:
-            resp = SESSION.post(endpoint("/register"), data=json.dumps(payload), timeout=5)
+            resp = SESSION.post(endpoint("/register"), data=json.dumps(payload), timeout=HTTP_TIMEOUT_REGISTER)
             resp.raise_for_status()
             backoff = BACKOFF_BASE
             log(f"Heartbeat OK ({ROLE})", prefix="✅")
@@ -2410,7 +2993,11 @@ def poll_tasks_loop() -> None:
     backoff = BACKOFF_BASE
     while True:
         try:
-            resp = SESSION.get(endpoint("/tasks/creator"), params={"node_id": NODE_NAME}, timeout=15)
+            resp = SESSION.get(
+                endpoint("/tasks/creator"),
+                params={"node_id": NODE_NAME},
+                timeout=HTTP_TIMEOUT_TASK_POLL,
+            )
             resp.raise_for_status()
             payload = resp.json()
             tasks = payload.get("tasks", [])
@@ -2433,6 +3020,14 @@ def poll_tasks_loop() -> None:
 
 if __name__ == "__main__":
     log(f"Node ID: {NODE_NAME} · Role: {ROLE.upper()} · Version: {CLIENT_VERSION}")
+    log(
+        (
+            f"Coordinator: {SERVER_BASE} "
+            f"(timeouts r={HTTP_TIMEOUT_REGISTER:.0f}s t={HTTP_TIMEOUT_TASK_POLL:.0f}s "
+            f"res={HTTP_TIMEOUT_RESULTS:.0f}s)"
+        ),
+        prefix="ℹ️",
+    )
     manifest_ready = refresh_manifest_with_backoff("startup", max_attempts=5)
     if not manifest_ready:
         log("Proceeding with degraded manifest state; heartbeat loop will keep retrying.", prefix="⚠️")

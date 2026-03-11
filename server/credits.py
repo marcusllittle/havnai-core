@@ -119,17 +119,43 @@ def deduct_credits(wallet: str, amount: float, job_id: str = "") -> Tuple[bool, 
     return True, remaining
 
 
-def check_and_deduct_credits(
-    wallet: str, model_name: str, task_type: str = "", jsonify_func: Optional[Callable] = None
-) -> Optional[Any]:
-    """If credits are enabled, check balance and deduct.
+def release_credits(wallet: str, amount: float, reason: str = "") -> float:
+    """Return reserved credits to a wallet (refund/release).  Returns new balance.
 
-    Returns a Flask error response if insufficient, or None if OK / credits disabled.
+    This is the inverse of ``deduct_credits`` — it adds credits back and
+    adjusts total_spent downward (clamped to 0).
+    """
+    if amount <= 0:
+        return get_credit_balance(wallet)
+    conn = get_db()
+    conn.execute(
+        """
+        UPDATE credits
+        SET balance = balance + ?,
+            total_spent = MAX(0.0, total_spent - ?),
+            updated_at = ?
+        WHERE wallet = ?
+        """,
+        (amount, amount, time.time(), wallet),
+    )
+    conn.commit()
+    new_balance = get_credit_balance(wallet)
+    log_event("Credits released", wallet=wallet, amount=amount, new_balance=new_balance, reason=reason)
+    return new_balance
+
+
+def check_and_reserve_credits(
+    wallet: str, model_name: str, task_type: str = "", jsonify_func: Optional[Callable] = None
+) -> Tuple[Optional[Any], float]:
+    """Check balance and reserve (deduct) credits for a job.
+
+    Returns a tuple of (error_response_or_None, credit_cost).
+    When credits are disabled, returns (None, 0.0).
+    When successful, returns (None, cost) — credits have been reserved.
     """
     if not CREDITS_ENABLED:
-        return None
+        return None, 0.0
     if jsonify_func is None:
-        # Import here to avoid circular dependency
         from flask import jsonify as jsonify_func  # type: ignore[assignment]
     cost = resolve_credit_cost(model_name, task_type)
     balance = get_credit_balance(wallet)
@@ -139,16 +165,28 @@ def check_and_deduct_credits(
             "balance": balance,
             "cost": cost,
             "message": f"This job costs {cost} credits but you only have {balance}.",
-        }), 402
-    # Deduction happens at enqueue time (not completion) so the slot is reserved.
+        }), cost
     ok, remaining = deduct_credits(wallet, cost)
     if not ok:
         return jsonify_func({
             "error": "insufficient_credits",
             "balance": remaining,
             "cost": cost,
-        }), 402
-    return None
+        }), cost
+    return None, cost
+
+
+def check_and_deduct_credits(
+    wallet: str, model_name: str, task_type: str = "", jsonify_func: Optional[Callable] = None
+) -> Optional[Any]:
+    """If credits are enabled, check balance and deduct.
+
+    Returns a Flask error response if insufficient, or None if OK / credits disabled.
+
+    .. deprecated:: Use ``check_and_reserve_credits`` for new code.
+    """
+    err, _cost = check_and_reserve_credits(wallet, model_name, task_type, jsonify_func)
+    return err
 
 
 

@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -2383,6 +2389,32 @@ def submit_job() -> Any:
             float(weight),
             invite_code,
         )
+    # Create durable job ticket with settlement tracking
+    try:
+        prompt_for_ticket = ""
+        try:
+            parsed = json.loads(job_data) if isinstance(job_data, str) else {}
+            prompt_for_ticket = parsed.get("prompt", "")
+        except Exception:
+            pass
+        credit_cost = credits.resolve_credit_cost(selected_model_name, task_type)
+        settlement.create_job_ticket(
+            job_id=job_id,
+            wallet=wallet,
+            job_type=task_type,
+            model=selected_model_name,
+            estimated_cost=credit_cost,
+            prompt=prompt_for_ticket,
+        )
+        if credit_cost > 0:
+            settlement.reserve_credits(
+                job_id, wallet, credit_cost,
+                reserve_fn=lambda w, a, j: (True, credits.get_credit_balance(w)),
+            )
+        settlement.mark_queued(job_id)
+    except Exception as exc:
+        log_event("Settlement ticket creation failed (non-fatal)", job_id=job_id, error=str(exc))
+
     log_event("Public job queued", wallet=wallet, model=model_name, job_id=job_id)
     if hardcore_lora_step_cap_applied:
         log_event(
@@ -2761,6 +2793,10 @@ def get_creator_tasks() -> Any:
 
                     # Assign under global lock to avoid multiple nodes claiming the same job
                     job_helpers.assign_job_to_node(job["id"], node_id)
+                    try:
+                        settlement.record_claim(job["id"], node_id)
+                    except Exception:
+                        pass  # non-fatal — settlement is additive
                     log_event("Job claimed by node", job_id=job["id"], node_id=node_id)
                     _emit_job_event("job_running", job["id"], job.get("wallet", ""), node_id=node_id, model=job["model"])
                     reward_weight = float(job["weight"] or cfg.get("reward_weight", rewards.resolve_weight(job["model"], 10.0)))
@@ -3145,6 +3181,43 @@ def submit_results() -> Any:
                         )
 
         rewards.record_reward(wallet, task_id, reward)
+
+        # --- Settlement: validate, settle, payout ---
+        try:
+            settlement.complete_attempt(
+                task_id, node_id, status,
+                error_message=str(metrics.get("error", "")) if status != "success" else None,
+                execution_metadata=metrics if metrics else None,
+            )
+            if status == "success":
+                exec_status = settlement.STATUS_COMPLETED
+                task_type_upper = str(task.get("task_type", CREATOR_TASK_TYPE)).upper()
+                if task_type_upper in ("IMAGE_GEN", "FACE_SWAP"):
+                    output_path = OUTPUTS_DIR / f"{task_id}.png"
+                    quality = settlement.validate_output(
+                        task_id, task_type_upper, output_path=output_path,
+                    )
+                else:
+                    quality = settlement.QUALITY_UNCHECKED
+            else:
+                exec_status = settlement.STATUS_TECHNICAL_FAILED
+                quality = settlement.QUALITY_UNCHECKED
+
+            settlement.settle_job(
+                job_id=task_id,
+                node_id=node_id,
+                execution_status=exec_status,
+                quality_status=quality,
+                reward_amount=reward,
+                deposit_fn=credits.deposit_credits,
+            )
+
+            if status == "success" and quality == settlement.QUALITY_VALID:
+                output_asset_id = f"{task_id}.png"
+                if (OUTPUTS_DIR / output_asset_id).exists():
+                    settlement.set_output_asset(task_id, output_asset_id)
+        except Exception as exc:
+            log_event("Settlement processing failed (non-fatal)", job_id=task_id, error=str(exc))
 
         # Emit SSE events for job completion and reward
         _emit_job_event(
@@ -4329,6 +4402,115 @@ def rewards_claim_history() -> Any:
         return jsonify({"error": "invalid wallet"}), 400
     history = blockchain.get_claim_history(wallet)
     return jsonify({"wallet": wallet, "claims": history})
+
+
+# ---------------------------------------------------------------------------
+# HAI Token Funding endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.route("/credits/fund-hai", methods=["POST"])
+def credits_fund_hai() -> Any:
+    """Fund internal credits by transferring HAI tokens to the treasury.
+
+    Accepts a tx_hash from a direct ERC-20 transfer() already confirmed on Sepolia.
+    Verifies the transaction on-chain, then deposits credits.
+    Idempotent: duplicate tx_hash returns 'already_processed'.
+    """
+    if not hai_funding.HAI_FUNDING_ENABLED:
+        return jsonify({"error": "HAI funding is not enabled."}), 403
+
+    if not rate_limit(f"fund-hai:{request.remote_addr}", limit=20):
+        return jsonify({"error": "rate_limit", "message": "Too many requests."}), 429
+
+    data = request.get_json(silent=True) or {}
+    wallet = (data.get("wallet") or "").strip()
+    tx_hash = (data.get("tx_hash") or "").strip()
+    amount = data.get("amount")
+
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid_wallet", "message": "Invalid wallet address."}), 400
+
+    if not tx_hash or not re.match(r"^0x[a-fA-F0-9]{64}$", tx_hash):
+        return jsonify({"error": "invalid_tx_hash", "message": "Invalid transaction hash."}), 400
+
+    try:
+        amount = float(amount)
+        if amount <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid_amount", "message": "Amount must be a positive number."}), 400
+
+    if not rate_limit(f"fund-hai:wallet:{wallet}", limit=10):
+        return jsonify({"error": "rate_limit", "message": "Too many funding requests for this wallet."}), 429
+
+    try:
+        result = hai_funding.fund_credits_with_hai(wallet, amount, tx_hash)
+    except Exception as exc:
+        log_event("HAI funding error", wallet=wallet, tx_hash=tx_hash, error=str(exc))
+        return jsonify({"error": "internal", "message": "Failed to process HAI funding."}), 500
+
+    if result.get("status") == "failed":
+        return jsonify(result), 400
+
+    return jsonify(result)
+
+
+@app.route("/credits/hai-fundings", methods=["GET"])
+def credits_hai_fundings() -> Any:
+    """Return HAI funding history for a wallet."""
+    wallet = request.args.get("wallet", "").strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+
+    history = hai_funding.get_funding_history(wallet)
+    return jsonify({
+        "wallet": wallet,
+        "fundings": history,
+        "hai_funding_enabled": hai_funding.HAI_FUNDING_ENABLED,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Settlement query endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.route("/settlement/<job_id>", methods=["GET"])
+def settlement_detail(job_id: str) -> Any:
+    """Return full settlement record for a job."""
+    record = settlement.get_job_settlement(job_id)
+    if not record:
+        return jsonify({"error": "not_found", "job_id": job_id}), 404
+    attempts = settlement.get_job_attempts(job_id)
+    record["attempts"] = attempts
+    return jsonify(record)
+
+
+@app.route("/settlement/<job_id>/attempts", methods=["GET"])
+def settlement_attempts(job_id: str) -> Any:
+    """Return all attempt records for a job."""
+    attempts = settlement.get_job_attempts(job_id)
+    return jsonify({"job_id": job_id, "attempts": attempts})
+
+
+@app.route("/payouts/node/<node_id>", methods=["GET"])
+def node_payouts(node_id: str) -> Any:
+    """Return payout history for a node."""
+    limit = _clamp(_coerce_int(request.args.get("limit"), 50), 1, 200)
+    payouts = settlement.get_node_payouts(node_id, limit=limit)
+    return jsonify({"node_id": node_id, "payouts": payouts})
+
+
+@app.route("/credits/ledger", methods=["GET"])
+def credit_ledger() -> Any:
+    """Return credit ledger entries for a wallet."""
+    wallet = request.args.get("wallet", "").strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    limit = _clamp(_coerce_int(request.args.get("limit"), 50), 1, 200)
+    entries = settlement.get_credit_ledger(wallet, limit=limit)
+    return jsonify({"wallet": wallet, "entries": entries})
 
 
 # ---------------------------------------------------------------------------

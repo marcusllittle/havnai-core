@@ -1486,12 +1486,6 @@ def favicon() -> Any:
 # /models/list is defined below (models_list) with full tier/pipeline metadata
 
 
-@app.route("/loras/list")
-def list_loras() -> Any:
-    """LoRA support has been removed in the MVP. Returns empty list."""
-    return jsonify({"loras": [], "nodes": [], "source": "none"})
-
-
 @app.route("/installers/<path:filename>")
 def installer_assets(filename: str) -> Any:
     safe_path = (LEGACY_STATIC_DIR / filename).resolve()

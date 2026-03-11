@@ -861,13 +861,6 @@ def init_db() -> None:
 
 init_db()
 stripe_payments.init_stripe_tables(get_db())
-if hasattr(stripe_payments, "init_subscription_tables"):
-    stripe_payments.init_subscription_tables(get_db())
-else:
-    log_event(
-        "Stripe subscription table init skipped (init_subscription_tables missing)",
-        level="warning",
-    )
 settlement.init_settlement_tables(get_db())
 hai_funding.init_hai_funding_tables(get_db())
 

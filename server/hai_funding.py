@@ -128,10 +128,18 @@ def verify_hai_transfer(
     try:
         receipt = _rpc_call("eth_getTransactionReceipt", [tx_hash])
     except Exception as exc:
-        return {"verified": False, "error": f"Failed to fetch tx receipt: {exc}"}
+        return {
+            "verified": False,
+            "pending": True,
+            "error": f"Failed to fetch tx receipt: {exc}",
+        }
 
     if receipt is None:
-        return {"verified": False, "error": "Transaction not found. It may still be pending."}
+        return {
+            "verified": False,
+            "pending": True,
+            "error": "Transaction not found. It may still be pending.",
+        }
 
     # Check tx succeeded
     tx_status = receipt.get("status", "0x0")
@@ -143,14 +151,21 @@ def verify_hai_transfer(
         tx_block = int(receipt["blockNumber"], 16)
         current_block_hex = _rpc_call("eth_blockNumber", [])
         current_block = int(current_block_hex, 16)
-        confirmations = current_block - tx_block
+        # Include the tx block itself as the first confirmation.
+        confirmations = max(0, current_block - tx_block + 1)
         if confirmations < MIN_CONFIRMATIONS:
             return {
                 "verified": False,
+                "pending": True,
+                "confirmations": confirmations,
                 "error": f"Insufficient confirmations ({confirmations}/{MIN_CONFIRMATIONS}). Try again shortly.",
             }
     except Exception as exc:
-        return {"verified": False, "error": f"Failed to check confirmations: {exc}"}
+        return {
+            "verified": False,
+            "pending": True,
+            "error": f"Failed to check confirmations: {exc}",
+        }
 
     # Find the Transfer event from the HAI token contract
     logs = receipt.get("logs", [])
@@ -239,13 +254,25 @@ def fund_credits_with_hai(
             (tx_hash,),
         ).fetchone()
         if existing:
+            existing_status = str(existing["status"] or "").lower()
+            if existing_status == "completed":
+                return {
+                    "status": "already_processed",
+                    "tx_hash": tx_hash,
+                    "credits_granted": float(existing["credits_granted"]),
+                    "message": "This transaction has already been processed.",
+                }
+            # Non-completed records are retryable; reopen the tx for verification.
+            conn.execute(
+                "UPDATE hai_fundings SET status = 'pending', error = NULL WHERE tx_hash = ? AND status != 'completed'",
+                (tx_hash,),
+            )
+            conn.commit()
+        else:
             return {
-                "status": "already_processed",
-                "tx_hash": tx_hash,
-                "credits_granted": float(existing["credits_granted"]),
-                "message": "This transaction has already been processed.",
+                "status": "error",
+                "error": "Duplicate transaction hash.",
             }
-        return {"status": "error", "error": "Duplicate transaction hash."}
 
     log_event("HAI funding initiated", wallet=wallet, amount=amount, tx_hash=tx_hash)
 
@@ -254,21 +281,37 @@ def fund_credits_with_hai(
 
     if not verification.get("verified"):
         error_msg = verification.get("error", "Verification failed.")
+        is_pending = bool(verification.get("pending"))
+        next_status = "pending" if is_pending else "failed"
         conn.execute(
-            "UPDATE hai_fundings SET status = 'failed', error = ? WHERE tx_hash = ?",
-            (error_msg, tx_hash),
+            "UPDATE hai_fundings SET status = ?, error = ? WHERE tx_hash = ?",
+            (next_status, error_msg, tx_hash),
         )
         conn.commit()
-        log_event("HAI funding verification failed", wallet=wallet, tx_hash=tx_hash, error=error_msg)
-        return {"status": "failed", "tx_hash": tx_hash, "error": error_msg}
+        if is_pending:
+            log_event(
+                "HAI funding pending verification",
+                wallet=wallet,
+                tx_hash=tx_hash,
+                error=error_msg,
+                confirmations=verification.get("confirmations"),
+            )
+        else:
+            log_event("HAI funding verification failed", wallet=wallet, tx_hash=tx_hash, error=error_msg)
+        return {
+            "status": next_status,
+            "tx_hash": tx_hash,
+            "error": error_msg,
+            "confirmations": verification.get("confirmations"),
+        }
 
     # Verification passed — deposit credits
-    # Use atomic UPDATE WHERE status='pending' to prevent race conditions
+    # Use atomic UPDATE to prevent double-crediting the same tx hash.
     cur = conn.execute(
         """
         UPDATE hai_fundings
-        SET status = 'completed', credits_granted = ?, verified_at = ?
-        WHERE tx_hash = ? AND status = 'pending'
+        SET status = 'completed', credits_granted = ?, verified_at = ?, error = NULL
+        WHERE tx_hash = ? AND status != 'completed'
         """,
         (credits_amount, time.time(), tx_hash),
     )

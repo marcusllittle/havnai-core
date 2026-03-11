@@ -4466,6 +4466,8 @@ def credits_fund_hai() -> Any:
 
     if result.get("status") == "failed":
         return jsonify(result), 400
+    if result.get("status") == "pending":
+        return jsonify(result), 202
 
     return jsonify(result)
 

@@ -861,7 +861,13 @@ def init_db() -> None:
 
 init_db()
 stripe_payments.init_stripe_tables(get_db())
-stripe_payments.init_subscription_tables(get_db())
+if hasattr(stripe_payments, "init_subscription_tables"):
+    stripe_payments.init_subscription_tables(get_db())
+else:
+    log_event(
+        "Stripe subscription table init skipped (init_subscription_tables missing)",
+        level="warning",
+    )
 settlement.init_settlement_tables(get_db())
 hai_funding.init_hai_funding_tables(get_db())
 
@@ -3879,6 +3885,14 @@ def stripe_create_subscription() -> Any:
     """Create a Stripe subscription for monthly credits + $HAI rewards."""
     if not stripe_payments.STRIPE_ENABLED:
         return jsonify({"error": "payments_disabled", "message": "Stripe payments are not enabled."}), 503
+    create_subscription = getattr(stripe_payments, "create_subscription", None)
+    if create_subscription is None:
+        return jsonify(
+            {
+                "error": "subscriptions_unavailable",
+                "message": "Stripe subscriptions are not enabled on this deployment.",
+            }
+        ), 503
     data = request.get_json() or {}
     wallet = str(data.get("wallet", "")).strip()
     if not wallet or not WALLET_REGEX.match(wallet):
@@ -3891,7 +3905,7 @@ def stripe_create_subscription() -> Any:
     if not success_url or not cancel_url:
         return jsonify({"error": "missing success_url or cancel_url"}), 400
     try:
-        result = stripe_payments.create_subscription(wallet, tier_id, success_url, cancel_url)
+        result = create_subscription(wallet, tier_id, success_url, cancel_url)
         return jsonify(result)
     except ValueError as exc:
         return jsonify({"error": "invalid_tier", "message": str(exc)}), 400
@@ -3903,9 +3917,12 @@ def stripe_create_subscription() -> Any:
 @app.route("/stripe/subscription-tiers", methods=["GET"])
 def stripe_subscription_tiers() -> Any:
     """Return available subscription tiers."""
+    tiers = getattr(stripe_payments, "SUBSCRIPTION_TIERS", [])
+    subscriptions_enabled = hasattr(stripe_payments, "create_subscription")
     return jsonify({
-        "tiers": stripe_payments.SUBSCRIPTION_TIERS,
+        "tiers": tiers,
         "stripe_enabled": stripe_payments.STRIPE_ENABLED,
+        "subscriptions_enabled": subscriptions_enabled,
     })
 
 
@@ -3915,8 +3932,11 @@ def stripe_subscription_status() -> Any:
     wallet = request.args.get("wallet", "").strip()
     if not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid wallet"}), 400
-    status = stripe_payments.get_subscription_status(wallet)
-    return jsonify({"wallet": wallet, "subscription": status})
+    get_status = getattr(stripe_payments, "get_subscription_status", None)
+    if get_status is None:
+        return jsonify({"wallet": wallet, "subscription": None, "subscriptions_enabled": False})
+    status = get_status(wallet)
+    return jsonify({"wallet": wallet, "subscription": status, "subscriptions_enabled": True})
 
 
 @app.route("/jobs/recent", methods=["GET"])

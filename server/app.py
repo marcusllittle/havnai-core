@@ -39,6 +39,7 @@ import settlement
 import analytics
 import validators
 import workflows
+import gallery
 
 try:
     from eth_account import Account  # type: ignore
@@ -117,6 +118,13 @@ INVITE_CONFIG_PATH = Path(
 INVITE_GATING = os.getenv("HAVNAI_INVITE_GATING", "").strip().lower() in {"1", "true", "yes"}
 CREDITS_ENABLED = os.getenv("HAVNAI_CREDITS_ENABLED", "").strip().lower() in {"1", "true", "yes"}
 WALLET_NONCE_PURPOSE_CONVERT = "convert_credits_to_hai"
+WALLET_NONCE_PURPOSE_GALLERY_PURCHASE = "gallery_purchase"
+WALLET_NONCE_PURPOSE_GALLERY_LIST = "gallery_list"
+WALLET_NONCE_ALLOWED_PURPOSES = {
+    WALLET_NONCE_PURPOSE_CONVERT,
+    WALLET_NONCE_PURPOSE_GALLERY_PURCHASE,
+    WALLET_NONCE_PURPOSE_GALLERY_LIST,
+}
 WALLET_NONCE_TTL_SECONDS = max(60, int(os.getenv("HAVNAI_WALLET_NONCE_TTL_SECONDS", "300")))
 
 SUPPORTED_TASK_TYPES = {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP"}
@@ -150,6 +158,42 @@ LTX2_DEFAULT_GUIDANCE = float(os.getenv("HAVNAI_LTX2_GUIDANCE", str(GPU_PROFILE[
 
 # Hard timeout (seconds) for a single video generation job.  0 = no limit.
 LTX2_JOB_TIMEOUT = int(os.getenv("HAVNAI_LTX2_JOB_TIMEOUT", "300"))
+
+# Runtime defaults profile used when payload and model defaults do not provide values.
+_RUNTIME_DEFAULT_PROFILES: Dict[str, Dict[str, Dict[str, Any]]] = {
+    "aggressive": {
+        "image_sdxl": {"steps": 24, "guidance": 5.8, "width": 768, "height": 1152},
+        "image_sd15": {"steps": 24, "guidance": 6.2, "width": 576, "height": 768},
+        "video_ltx2": {"steps": 16, "guidance": 5.0, "frames": 12, "fps": 8, "width": 512, "height": 512},
+        "video_animatediff": {"steps": 18, "guidance": 5.5, "frames": 16, "fps": 8, "width": 512, "height": 512},
+        "face_swap": {"num_steps": 14, "guidance": 4.5, "strength": 0.75},
+    },
+    "balanced": {
+        "image_sdxl": {"steps": 28, "guidance": 6.0, "width": 768, "height": 1152},
+        "image_sd15": {"steps": 28, "guidance": 6.5, "width": 576, "height": 768},
+        "video_ltx2": {"steps": 25, "guidance": 7.0, "frames": 16, "fps": 8, "width": 512, "height": 512},
+        "video_animatediff": {"steps": 25, "guidance": 7.5, "frames": 16, "fps": 8, "width": 512, "height": 512},
+        "face_swap": {"num_steps": 18, "guidance": 5.0, "strength": 0.8},
+    },
+    "quality": {
+        "image_sdxl": {"steps": 32, "guidance": 6.5, "width": 832, "height": 1216},
+        "image_sd15": {"steps": 36, "guidance": 7.0, "width": 640, "height": 896},
+        "video_ltx2": {"steps": 28, "guidance": 7.0, "frames": 16, "fps": 8, "width": 512, "height": 512},
+        "video_animatediff": {"steps": 28, "guidance": 7.0, "frames": 16, "fps": 8, "width": 512, "height": 512},
+        "face_swap": {"num_steps": 24, "guidance": 6.0, "strength": 0.85},
+    },
+}
+RUNTIME_PROFILE_NAME = os.getenv("HAVNAI_RUNTIME_PROFILE", "balanced").strip().lower()
+RUNTIME_PROFILE = _RUNTIME_DEFAULT_PROFILES.get(
+    RUNTIME_PROFILE_NAME,
+    _RUNTIME_DEFAULT_PROFILES["aggressive"],
+)
+ENABLE_LEGACY_AUTO_HARDCORE = os.getenv("HAVNAI_ENABLE_LEGACY_AUTO_HARDCORE", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 # Reward configuration (can be overridden via environment variables)
 REWARD_CONFIG: Dict[str, float] = {
@@ -254,6 +298,16 @@ _NEGATIVE_STYLE_REALISM = (
     "digital art, anime, fake, 3d modeling, drawing, sketch"
 )
 
+NO_WATERMARK_NEGATIVE = (
+    "watermark, signature, text, logo, username, artist name, artist signature, "
+    "copyright, qr code, url, website, subtitle, caption, timestamp"
+)
+
+SFW_NEGATIVE_PROMPT = (
+    "nsfw, nude, nudity, naked, explicit, explicit content, porn, erotic, sexual, "
+    "nipples, areola, exposed breasts, bare breasts, vagina, penis, genital, uncensored"
+)
+
 GLOBAL_NEGATIVE_SD15 = ", ".join([
     "FastNegativeV2",
     _NEGATIVE_HAND_SD15,
@@ -343,6 +397,27 @@ def get_video_positive_suffix(model_name: str) -> str:
         return POSITIVE_VIDEO_ANIMATEDIFF
     return POSITIVE_VIDEO_LTXL
 
+
+def _merge_negative_prompts(*prompts: Any) -> str:
+    merged: List[str] = []
+    seen: set[str] = set()
+    for prompt in prompts:
+        if prompt is None:
+            continue
+        text = str(prompt).strip()
+        if not text:
+            continue
+        for token in text.split(","):
+            cleaned = token.strip()
+            if not cleaned:
+                continue
+            key = cleaned.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(cleaned)
+    return ", ".join(merged)
+
 # ---------------------------------------------------------------------------
 # Version helpers
 # ---------------------------------------------------------------------------
@@ -372,7 +447,13 @@ if CORS_ORIGINS and CORS_ORIGINS != "*":
     origins = [origin.strip() for origin in CORS_ORIGINS.split(",") if origin.strip()]
     CORS(app, resources={r"/*": {"origins": origins}})
 else:
-    CORS(app)
+    # Default to the production domain when no explicit origins are set.
+    # In local dev, set CORS_ORIGINS="*" if you need wide-open access.
+    CORS(app, resources={r"/*": {"origins": [
+        "https://joinhavn.io",
+        "https://www.joinhavn.io",
+        "http://localhost:3000",
+    ]}})
 
 app.config["APP_VERSION"] = APP_VERSION
 
@@ -417,10 +498,33 @@ def setup_logging() -> logging.Logger:
 
 LOGGER = setup_logging()
 
+# Startup warnings for missing configuration
+if not SERVER_JOIN_TOKEN:
+    LOGGER.warning("SERVER_JOIN_TOKEN is not set — admin endpoints are unprotected!")
+if not CORS_ORIGINS:
+    LOGGER.warning("CORS_ORIGINS is not set — using default allowlist (joinhavn.io + localhost)")
+
 
 def log_event(message: str, level: str = "info", **extra: Any) -> None:
     LOGGER.log(getattr(logging, level.upper(), logging.INFO), message, extra=extra if extra else None)
     EVENT_LOGS.append({"timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "level": level, "message": message})
+
+
+def _build_result_payload(job_id: str) -> Optional[Dict[str, Any]]:
+    """Resolve output URLs for a completed job if artifacts exist."""
+    if not job_id:
+        return None
+
+    image_path = OUTPUTS_DIR / f"{job_id}.png"
+    video_path = OUTPUTS_DIR / "videos" / f"{job_id}.mp4"
+    payload: Dict[str, Any] = {"job_id": job_id}
+    if image_path.exists():
+        payload["image_url"] = f"/static/outputs/{job_id}.png"
+    if video_path.exists():
+        payload["video_url"] = f"/static/outputs/videos/{job_id}.mp4"
+    if "image_url" not in payload and "video_url" not in payload:
+        return None
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -465,15 +569,6 @@ def _inject_module_dependencies() -> None:
     blockchain.log_event = log_event  # type: ignore[attr-defined]
     blockchain.WALLET_REGEX = WALLET_REGEX  # type: ignore[attr-defined]
 
-    # Settlement module
-    settlement.get_db = get_db  # type: ignore[attr-defined]
-    settlement.log_event = log_event  # type: ignore[attr-defined]
-
-    # HAI funding module
-    hai_funding.get_db = get_db  # type: ignore[attr-defined]
-    hai_funding.log_event = log_event  # type: ignore[attr-defined]
-    hai_funding.deposit_credits = credits.deposit_credits  # type: ignore[attr-defined]
-
     # Analytics module
     analytics.get_db = get_db  # type: ignore[attr-defined]
     analytics.log_event = log_event  # type: ignore[attr-defined]
@@ -490,6 +585,21 @@ def _inject_module_dependencies() -> None:
     workflows.get_db = get_db  # type: ignore[attr-defined]
     workflows.log_event = log_event  # type: ignore[attr-defined]
     workflows.WALLET_REGEX = WALLET_REGEX  # type: ignore[attr-defined]
+
+    # Gallery module
+    gallery.get_db = get_db  # type: ignore[attr-defined]
+    gallery.log_event = log_event  # type: ignore[attr-defined]
+    gallery.WALLET_REGEX = WALLET_REGEX  # type: ignore[attr-defined]
+    gallery.build_result_payload = _build_result_payload  # type: ignore[attr-defined]
+
+    # Settlement module
+    settlement.get_db = get_db  # type: ignore[attr-defined]
+    settlement.log_event = log_event  # type: ignore[attr-defined]
+
+    # HAI funding module
+    hai_funding.get_db = get_db  # type: ignore[attr-defined]
+    hai_funding.log_event = log_event  # type: ignore[attr-defined]
+    hai_funding.deposit_credits = credits.deposit_credits  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
@@ -745,16 +855,18 @@ def init_db() -> None:
 
 init_db()
 stripe_payments.init_stripe_tables(get_db())
+stripe_payments.init_subscription_tables(get_db())
+settlement.init_settlement_tables(get_db())
+hai_funding.init_hai_funding_tables(get_db())
 
 # Inject dependencies into extracted modules (initial injection)
 _inject_module_dependencies()
 
 # Initialize tables for new modules (must come after dependency injection)
 blockchain.init_blockchain_tables(get_db())
-settlement.init_settlement_tables(get_db())
-hai_funding.init_hai_funding_tables(get_db())
 validators.init_validator_tables(get_db())
 workflows.init_workflow_tables(get_db())
+gallery.init_gallery_tables(get_db())
 
 # Optional: clear database and in-memory state on startup for a fresh dashboard
 if RESET_ON_STARTUP:
@@ -895,7 +1007,6 @@ def load_node_wallets() -> None:
             "start_time": unix_now(),
             "role": "worker",
             "last_seen": iso_now(),
-            "loras": [],
         })
         node["wallet"] = row["wallet"]
         if row["node_name"]:
@@ -1102,7 +1213,7 @@ def _eligible_online_node_count(model_name: str, task_type: str) -> int:
     return len(_eligible_online_node_ids(model_name, task_type))
 
 
-def _no_capacity_response(model_name: str, task_type: str) -> Any:
+def _no_capacity_response(model_name: str, task_type: str, message: Optional[str] = None) -> Any:
     normalized_task_type = _normalize_task_type(task_type)
     normalized_model = str(model_name or "").strip().lower()
     support_token = TASK_SUPPORT_MAP.get(normalized_task_type, "image")
@@ -1112,7 +1223,7 @@ def _no_capacity_response(model_name: str, task_type: str) -> Any:
                 "error": "no_capacity",
                 "task_type": normalized_task_type,
                 "model": normalized_model,
-                "message": (
+                "message": message or (
                     f"No online creator nodes currently support {normalized_task_type} "
                     f"for model '{normalized_model}' ({support_token})."
                 ),
@@ -1363,90 +1474,10 @@ def favicon() -> Any:
 # /models/list is defined below (models_list) with full tier/pipeline metadata
 
 
-def _normalize_lora_catalog(raw_loras: Any) -> List[Dict[str, Any]]:
-    if not raw_loras or not isinstance(raw_loras, list):
-        return []
-    normalized: List[Dict[str, Any]] = []
-    for entry in raw_loras:
-        if isinstance(entry, dict):
-            name = str(entry.get("name") or "").strip()
-            filename = str(entry.get("filename") or "").strip()
-            label = str(entry.get("label") or "").strip()
-            if not name and filename:
-                name = Path(filename).stem or filename
-            if not name:
-                continue
-            item: Dict[str, Any] = {"name": name}
-            if filename:
-                item["filename"] = filename
-            if label:
-                item["label"] = label
-            # Preserve pipeline compatibility field (sd15 / sdxl)
-            pipeline = str(entry.get("pipeline") or "").strip().lower()
-            if pipeline:
-                item["pipeline"] = pipeline
-            normalized.append(item)
-            continue
-        if isinstance(entry, str):
-            name = entry.strip()
-            if name:
-                normalized.append({"name": name})
-    return normalized
-
-
 @app.route("/loras/list")
 def list_loras() -> Any:
-    # Optional pipeline filter: /loras/list?pipeline=sdxl or ?pipeline=sd15
-    pipeline_filter = request.args.get("pipeline", "").strip().lower()
-    loras: List[Dict[str, Any]] = []
-    nodes_with_loras: List[str] = []
-    with LOCK:
-        for node_id, node in NODES.items():
-            node_loras = _normalize_lora_catalog(node.get("loras"))
-            if node_loras:
-                nodes_with_loras.append(node_id)
-                loras.extend(node_loras)
-    if loras:
-        seen = set()
-        deduped: List[Dict[str, Any]] = []
-        for entry in loras:
-            key = str(entry.get("filename") or entry.get("name") or "").strip().lower()
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            deduped.append(entry)
-        deduped.sort(key=lambda item: str(item.get("label") or item.get("name") or "").lower())
-        if pipeline_filter:
-            deduped = [e for e in deduped if _lora_matches_pipeline(e, pipeline_filter)]
-        return jsonify({"loras": deduped, "nodes": nodes_with_loras, "source": "nodes"})
-    path = LORA_STORAGE_DIR
-    if path.exists():
-        for entry in sorted(path.iterdir()):
-            if not entry.is_file():
-                continue
-            if entry.suffix.lower() not in SUPPORTED_LORA_EXTS:
-                continue
-            loras.append({"name": entry.stem, "filename": entry.name})
-    loras.sort(key=lambda item: str(item.get("name") or "").lower())
-    if pipeline_filter:
-        loras = [e for e in loras if _lora_matches_pipeline(e, pipeline_filter)]
-    return jsonify({"loras": loras, "path": str(path), "source": "local"})
-
-
-def _lora_matches_pipeline(lora: Dict[str, Any], target_pipeline: str) -> bool:
-    """Check if a LoRA is compatible with the target pipeline.
-
-    Returns True if the LoRA has no pipeline metadata (unknown = show it)
-    or if the pipeline matches.
-    """
-    lora_pipeline = str(lora.get("pipeline") or "").lower()
-    if not lora_pipeline:
-        return True  # No metadata — show in all pipelines
-    if target_pipeline == "sdxl":
-        return "sdxl" in lora_pipeline or "xl" in lora_pipeline
-    if target_pipeline == "sd15":
-        return lora_pipeline == "sd15" or lora_pipeline == "sd1.5"
-    return True
+    """LoRA support has been removed in the MVP. Returns empty list."""
+    return jsonify({"loras": [], "nodes": [], "source": "none"})
 
 
 @app.route("/installers/<path:filename>")
@@ -1481,6 +1512,16 @@ def _coerce_float(value: Any, default: float) -> float:
         return default
 
 
+def _is_truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
 def _clamp(value: int, min_val: int, max_val: int) -> int:
     return max(min_val, min(max_val, value))
 
@@ -1497,36 +1538,389 @@ def _clamp_float(value: Any, default: float, min_val: float, max_val: float) -> 
     return max(min_val, min(max_val, v))
 
 
-def _normalize_loras(raw_loras: Any) -> List[Dict[str, Any]]:
-    if not raw_loras or not isinstance(raw_loras, list):
-        return []
-    normalized: List[Dict[str, Any]] = []
-    for entry in raw_loras:
-        if isinstance(entry, dict):
-            name = str(entry.get("name") or "").strip()
-            if not name:
-                continue
-            item: Dict[str, Any] = {"name": name}
-            weight = entry.get("weight")
-            if weight is not None:
-                try:
-                    item["weight"] = float(weight)
-                except (TypeError, ValueError):
-                    pass
-            # Preserve pipeline compatibility field for validation
-            pipeline = str(entry.get("pipeline") or "").strip().lower()
-            if pipeline:
-                item["pipeline"] = pipeline
-            normalized.append(item)
+def _try_parse_int(value: Any) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _try_parse_float(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_default_value(
+    *,
+    payload: Dict[str, Any],
+    payload_keys: Tuple[str, ...],
+    model_defaults: Dict[str, Any],
+    model_keys: Tuple[str, ...],
+    profile_defaults: Dict[str, Any],
+    profile_key: str,
+    env_candidates: Tuple[str, ...],
+    parse_value: Any,
+) -> Tuple[Any, str]:
+    for key in payload_keys:
+        parsed = parse_value(payload.get(key))
+        if parsed is not None:
+            return parsed, "user"
+
+    for key in model_keys:
+        parsed = parse_value(model_defaults.get(key))
+        if parsed is not None:
+            return parsed, "model"
+
+    parsed_profile = parse_value(profile_defaults.get(profile_key))
+    if parsed_profile is not None:
+        return parsed_profile, "profile"
+
+    for env_key in env_candidates:
+        parsed = parse_value(os.getenv(env_key))
+        if parsed is not None:
+            return parsed, "env"
+
+    return parse_value(0), "profile"
+
+
+def _resolve_str_default(
+    *,
+    payload: Dict[str, Any],
+    payload_keys: Tuple[str, ...],
+    model_defaults: Dict[str, Any],
+    model_keys: Tuple[str, ...],
+    profile_defaults: Dict[str, Any],
+    profile_key: str,
+    env_candidates: Tuple[str, ...],
+) -> Tuple[str, str]:
+    for key in payload_keys:
+        raw = payload.get(key)
+        if raw is None:
             continue
-        if isinstance(entry, str):
-            name = entry.strip()
-            if name:
-                normalized.append({"name": name})
-    return normalized
+        value = str(raw).strip()
+        if value:
+            return value, "user"
+
+    for key in model_keys:
+        raw = model_defaults.get(key)
+        if raw is None:
+            continue
+        value = str(raw).strip()
+        if value:
+            return value, "model"
+
+    profile_raw = profile_defaults.get(profile_key)
+    if profile_raw is not None:
+        value = str(profile_raw).strip()
+        if value:
+            return value, "profile"
+
+    for env_key in env_candidates:
+        env_raw = os.getenv(env_key)
+        if env_raw:
+            value = str(env_raw).strip()
+            if value:
+                return value, "env"
+
+    return "", "profile"
 
 
-def build_faceswap_settings(payload: Dict[str, Any], prompt_text: str) -> Dict[str, Any]:
+def resolve_image_defaults(
+    model_cfg: Dict[str, Any],
+    payload: Dict[str, Any],
+    profile: Dict[str, Dict[str, Any]],
+) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    pipeline = str(model_cfg.get("pipeline") or "sd15").lower()
+    profile_key = "image_sdxl" if "sdxl" in pipeline or "xl" in pipeline else "image_sd15"
+    profile_defaults = dict(profile.get(profile_key) or {})
+    model_defaults = dict(model_cfg or {})
+
+    steps, steps_source = _resolve_default_value(
+        payload=payload,
+        payload_keys=("steps",),
+        model_defaults=model_defaults,
+        model_keys=("steps",),
+        profile_defaults=profile_defaults,
+        profile_key="steps",
+        env_candidates=("HAVNAI_IMAGE_STEPS", "HAI_STEPS"),
+        parse_value=_try_parse_int,
+    )
+    guidance, guidance_source = _resolve_default_value(
+        payload=payload,
+        payload_keys=("guidance",),
+        model_defaults=model_defaults,
+        model_keys=("guidance",),
+        profile_defaults=profile_defaults,
+        profile_key="guidance",
+        env_candidates=("HAVNAI_IMAGE_GUIDANCE", "HAI_GUIDANCE"),
+        parse_value=_try_parse_float,
+    )
+    width, width_source = _resolve_default_value(
+        payload=payload,
+        payload_keys=("width",),
+        model_defaults=model_defaults,
+        model_keys=("width",),
+        profile_defaults=profile_defaults,
+        profile_key="width",
+        env_candidates=("HAVNAI_IMAGE_WIDTH", "HAI_WIDTH"),
+        parse_value=_try_parse_int,
+    )
+    height, height_source = _resolve_default_value(
+        payload=payload,
+        payload_keys=("height",),
+        model_defaults=model_defaults,
+        model_keys=("height",),
+        profile_defaults=profile_defaults,
+        profile_key="height",
+        env_candidates=("HAVNAI_IMAGE_HEIGHT", "HAI_HEIGHT"),
+        parse_value=_try_parse_int,
+    )
+    sampler, sampler_source = _resolve_str_default(
+        payload=payload,
+        payload_keys=("sampler",),
+        model_defaults=model_defaults,
+        model_keys=("sampler",),
+        profile_defaults=profile_defaults,
+        profile_key="sampler",
+        env_candidates=("HAVNAI_IMAGE_SAMPLER",),
+    )
+
+    resolved = {
+        "steps": _clamp(int(steps), 5, 50),
+        "guidance": max(1.0, min(15.0, float(guidance))),
+        "width": _clamp(int(width), 256, 1536),
+        "height": _clamp(int(height), 256, 1536),
+    }
+    sources = {
+        "steps": steps_source,
+        "guidance": guidance_source,
+        "width": width_source,
+        "height": height_source,
+    }
+    if sampler:
+        resolved["sampler"] = sampler
+        sources["sampler"] = sampler_source
+    return resolved, sources
+
+
+def resolve_video_defaults(
+    model_cfg: Dict[str, Any],
+    payload: Dict[str, Any],
+    profile: Dict[str, Dict[str, Any]],
+    task_type: str,
+) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    normalized_task = _normalize_task_type(task_type)
+    is_animatediff = normalized_task == "ANIMATEDIFF"
+    profile_key = "video_animatediff" if is_animatediff else "video_ltx2"
+    profile_defaults = dict(profile.get(profile_key) or {})
+    model_defaults = dict((model_cfg or {}).get("video_defaults") or {})
+
+    if is_animatediff:
+        env_steps = ("HAVNAI_ANIMATEDIFF_STEPS", "HAVNAI_VIDEO_STEPS")
+        env_guidance = ("HAVNAI_ANIMATEDIFF_GUIDANCE", "HAVNAI_VIDEO_GUIDANCE")
+        env_frames = ("HAVNAI_ANIMATEDIFF_FRAMES", "HAVNAI_VIDEO_FRAMES")
+        env_fps = ("HAVNAI_ANIMATEDIFF_FPS", "HAVNAI_VIDEO_FPS")
+        env_width = ("HAVNAI_ANIMATEDIFF_WIDTH", "HAVNAI_VIDEO_WIDTH")
+        env_height = ("HAVNAI_ANIMATEDIFF_HEIGHT", "HAVNAI_VIDEO_HEIGHT")
+    else:
+        env_steps = ("HAVNAI_LTX2_STEPS", "HAVNAI_VIDEO_STEPS")
+        env_guidance = ("HAVNAI_LTX2_GUIDANCE", "HAVNAI_VIDEO_GUIDANCE")
+        env_frames = ("HAVNAI_LTX2_FRAMES", "HAVNAI_VIDEO_FRAMES")
+        env_fps = ("HAVNAI_LTX2_FPS", "HAVNAI_VIDEO_FPS")
+        env_width = ("HAVNAI_LTX2_WIDTH", "HAVNAI_VIDEO_WIDTH")
+        env_height = ("HAVNAI_LTX2_HEIGHT", "HAVNAI_VIDEO_HEIGHT")
+
+    steps, steps_source = _resolve_default_value(
+        payload=payload,
+        payload_keys=("steps",),
+        model_defaults=model_defaults,
+        model_keys=("steps",),
+        profile_defaults=profile_defaults,
+        profile_key="steps",
+        env_candidates=env_steps,
+        parse_value=_try_parse_int,
+    )
+    guidance, guidance_source = _resolve_default_value(
+        payload=payload,
+        payload_keys=("guidance",),
+        model_defaults=model_defaults,
+        model_keys=("guidance",),
+        profile_defaults=profile_defaults,
+        profile_key="guidance",
+        env_candidates=env_guidance,
+        parse_value=_try_parse_float,
+    )
+    width, width_source = _resolve_default_value(
+        payload=payload,
+        payload_keys=("width",),
+        model_defaults=model_defaults,
+        model_keys=("width",),
+        profile_defaults=profile_defaults,
+        profile_key="width",
+        env_candidates=env_width,
+        parse_value=_try_parse_int,
+    )
+    height, height_source = _resolve_default_value(
+        payload=payload,
+        payload_keys=("height",),
+        model_defaults=model_defaults,
+        model_keys=("height",),
+        profile_defaults=profile_defaults,
+        profile_key="height",
+        env_candidates=env_height,
+        parse_value=_try_parse_int,
+    )
+    frames, frames_source = _resolve_default_value(
+        payload=payload,
+        payload_keys=("frames",),
+        model_defaults=model_defaults,
+        model_keys=("frames",),
+        profile_defaults=profile_defaults,
+        profile_key="frames",
+        env_candidates=env_frames,
+        parse_value=_try_parse_int,
+    )
+    fps, fps_source = _resolve_default_value(
+        payload=payload,
+        payload_keys=("fps",),
+        model_defaults=model_defaults,
+        model_keys=("fps",),
+        profile_defaults=profile_defaults,
+        profile_key="fps",
+        env_candidates=env_fps,
+        parse_value=_try_parse_int,
+    )
+
+    if is_animatediff:
+        width_val = int(width)
+        height_val = int(height)
+        if width_val not in {512, 768}:
+            width_val = 512
+        if height_val not in {512, 768}:
+            height_val = 512
+        resolved = {
+            "steps": _clamp(int(steps), 1, 50),
+            "guidance": max(0.0, min(12.0, float(guidance))),
+            "width": width_val,
+            "height": height_val,
+            "frames": _clamp(int(frames), 1, 64),
+            "fps": _clamp(int(fps), 1, 24),
+        }
+    else:
+        resolved = {
+            "steps": _clamp(int(steps), 1, 50),
+            "guidance": max(0.0, min(12.0, float(guidance))),
+            "width": _clamp(int(width), 256, 768),
+            "height": _clamp(int(height), 256, 768),
+            "frames": _clamp(int(frames), 1, 16),
+            "fps": _clamp(int(fps), 1, 12),
+        }
+    sources = {
+        "steps": steps_source,
+        "guidance": guidance_source,
+        "width": width_source,
+        "height": height_source,
+        "frames": frames_source,
+        "fps": fps_source,
+    }
+    return resolved, sources
+
+
+def resolve_faceswap_defaults(
+    model_cfg: Dict[str, Any],
+    payload: Dict[str, Any],
+    profile: Dict[str, Dict[str, Any]],
+) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    profile_defaults = dict(profile.get("face_swap") or {})
+    model_defaults = dict((model_cfg or {}).get("face_swap_defaults") or {})
+
+    num_steps, num_steps_source = _resolve_default_value(
+        payload=payload,
+        payload_keys=("num_steps", "steps"),
+        model_defaults=model_defaults,
+        model_keys=("num_steps", "steps"),
+        profile_defaults=profile_defaults,
+        profile_key="num_steps",
+        env_candidates=("HAVNAI_FACE_SWAP_STEPS",),
+        parse_value=_try_parse_int,
+    )
+    guidance, guidance_source = _resolve_default_value(
+        payload=payload,
+        payload_keys=("guidance",),
+        model_defaults=model_defaults,
+        model_keys=("guidance",),
+        profile_defaults=profile_defaults,
+        profile_key="guidance",
+        env_candidates=("HAVNAI_FACE_SWAP_GUIDANCE",),
+        parse_value=_try_parse_float,
+    )
+    strength, strength_source = _resolve_default_value(
+        payload=payload,
+        payload_keys=("strength",),
+        model_defaults=model_defaults,
+        model_keys=("strength",),
+        profile_defaults=profile_defaults,
+        profile_key="strength",
+        env_candidates=("HAVNAI_FACE_SWAP_STRENGTH",),
+        parse_value=_try_parse_float,
+    )
+
+    resolved = {
+        "num_steps": _clamp(int(num_steps), 5, 60),
+        "guidance": max(0.0, min(12.0, float(guidance))),
+        "strength": max(0.0, min(1.0, float(strength))),
+    }
+    sources = {
+        "num_steps": num_steps_source,
+        "guidance": guidance_source,
+        "strength": strength_source,
+    }
+    return resolved, sources
+
+
+def _extract_reference_face_url(payload: Dict[str, Any]) -> str:
+    for key in (
+        "reference_face_url",
+        "identity_anchor_url",
+        "reference_face",
+        "reference_face_b64",
+        "identity_anchor",
+        "identity_anchor_b64",
+    ):
+        raw = payload.get(key)
+        if raw is None:
+            continue
+        value = str(raw).strip()
+        if value:
+            return value
+    return ""
+
+
+def _image_job_requires_reference_face(payload_or_settings: Any) -> bool:
+    if not isinstance(payload_or_settings, dict):
+        return False
+    return bool(_extract_reference_face_url(payload_or_settings))
+
+
+def _resolve_confidence(default_sources: Dict[str, str]) -> str:
+    unique_sources = {str(value) for value in default_sources.values() if value}
+    if not unique_sources:
+        return "fallback"
+    if unique_sources == {"model"}:
+        return "high"
+    if unique_sources <= {"model", "profile"}:
+        return "medium"
+    return "fallback"
+
+
+def build_faceswap_settings(
+    payload: Dict[str, Any],
+    prompt_text: str,
+    model_cfg: Dict[str, Any],
+    sfw_mode: bool = False,
+) -> Dict[str, Any]:
     base_image_url = str(
         payload.get("base_image_url")
         or payload.get("base_image_b64")
@@ -1545,17 +1939,30 @@ def build_faceswap_settings(payload: Dict[str, Any], prompt_text: str) -> Dict[s
         or payload.get("face_source_path")
         or ""
     ).strip()
-    strength = _coerce_float(payload.get("strength", 0.8), 0.8)
-    num_steps = _coerce_int(payload.get("num_steps", payload.get("steps", 20)), 20)
-    strength = max(0.0, min(1.0, strength))
-    num_steps = _clamp(num_steps, 5, 60)
+    resolved_defaults, default_sources = resolve_faceswap_defaults(model_cfg, payload, RUNTIME_PROFILE)
+    user_negative = str(payload.get("negative_prompt") or "").strip()
+    base_negative = str(model_cfg.get("negative_prompt_default") or "").strip()
+    pipeline_negative = get_pipeline_negative(str(model_cfg.get("pipeline") or "sdxl"))
+    sfw_negative = SFW_NEGATIVE_PROMPT if sfw_mode else ""
+    combined_negative = _merge_negative_prompts(
+        user_negative,
+        base_negative,
+        pipeline_negative,
+        NO_WATERMARK_NEGATIVE,
+        sfw_negative,
+    )
     settings: Dict[str, Any] = {
         "prompt": prompt_text,
         "base_image_url": base_image_url,
         "face_source_url": face_source_url,
-        "strength": strength,
-        "num_steps": num_steps,
+        "strength": resolved_defaults["strength"],
+        "num_steps": resolved_defaults["num_steps"],
+        "guidance": resolved_defaults["guidance"],
+        "defaults_source": {"face_swap": default_sources},
+        "defaults_confidence": {"face_swap": _resolve_confidence(default_sources)},
     }
+    if combined_negative:
+        settings["negative_prompt"] = combined_negative
     seed = payload.get("seed")
     try:
         seed = int(seed) if seed is not None else None
@@ -1574,8 +1981,8 @@ def submit_job() -> Any:
     invite_code, invite_error = invite.enforce_invite_limits(payload)
     if invite_error:
         return invite_error
-    prompt_raw = str(payload.get("prompt") or payload.get("data") or "")
-    negative_raw = str(payload.get("negative_prompt") or "")
+    prompt_raw = str(payload.get("prompt") or payload.get("data") or "")[:4000]
+    negative_raw = str(payload.get("negative_prompt") or "")[:2000]
     block_reason = safety.check_safety(prompt_raw, negative_raw)
     if block_reason:
         return jsonify({"error": "prompt_blocked", "reason": block_reason}), 400
@@ -1584,9 +1991,24 @@ def submit_job() -> Any:
     model_name = model_name_raw.lower()
     weight = payload.get("weight")
     raw_prompt = str(payload.get("prompt") or payload.get("data") or "")
+    reference_face_url = _extract_reference_face_url(payload)
     auto_model_request = not model_name or model_name in {"auto", "auto_image", "auto-image"}
-    hardcore_prompt = has_hardcore_keywords(raw_prompt)
-    enhanced_prompt, model_override, position_lora, position_negative = enhance_prompt_for_positions(raw_prompt)
+    explicit_hardcore_mode = _is_truthy(payload.get("hardcore_mode"))
+    sfw_mode = _is_truthy(payload.get("sfw_mode"))
+    legacy_auto_hardcore = ENABLE_LEGACY_AUTO_HARDCORE and has_hardcore_keywords(raw_prompt)
+    hardcore_prompt = explicit_hardcore_mode or legacy_auto_hardcore
+    enhanced_prompt = raw_prompt
+    model_override: Optional[str] = None
+    position_negative: Optional[str] = None
+    if hardcore_prompt:
+        (
+            enhanced_prompt,
+            auto_model_override,
+            _position_lora,
+            position_negative,
+        ) = enhance_prompt_for_positions(raw_prompt)
+        if legacy_auto_hardcore and not explicit_hardcore_mode:
+            model_override = auto_model_override
 
     if model_override:
         # Drop overrides that are no longer available in the manifest.
@@ -1613,7 +2035,7 @@ def submit_job() -> Any:
             for key, meta in MANIFEST_MODELS.items()
             if (meta.get("task_type") or CREATOR_TASK_TYPE).upper() == CREATOR_TASK_TYPE
         ]
-        if not candidates:
+        if not candidates and not reference_face_url:
             return jsonify({"error": "no_creator_models"}), 400
 
         eligible: List[Dict[str, Any]] = []
@@ -1621,10 +2043,22 @@ def submit_job() -> Any:
             candidate_name = str(meta.get("name") or "").strip().lower()
             if not candidate_name:
                 continue
-            if _eligible_online_node_count(candidate_name, CREATOR_TASK_TYPE) > 0:
+            pipeline = str(meta.get("pipeline") or "").lower()
+            if reference_face_url and "sdxl" not in pipeline:
+                continue
+            required_task_type = "FACE_SWAP" if reference_face_url else CREATOR_TASK_TYPE
+            if _eligible_online_node_count(candidate_name, required_task_type) > 0:
                 eligible.append(meta)
         if not eligible:
-            return _no_capacity_response("auto", CREATOR_TASK_TYPE)
+            return _no_capacity_response(
+                "auto",
+                CREATOR_TASK_TYPE,
+                message=(
+                    "No compatible reference-face node capacity is available right now."
+                    if reference_face_url
+                    else None
+                ),
+            )
 
         names = [meta["name"] for meta in eligible]
         weights = [rewards.resolve_weight(meta["name"].lower(), meta.get("reward_weight", 10.0)) for meta in eligible]
@@ -1644,10 +2078,18 @@ def submit_job() -> Any:
 
     # Special-case LTX2 video jobs with structured payload
     pipeline_name = str(cfg.get("pipeline", "")).lower()
+    if reference_face_url and "sdxl" not in pipeline_name:
+        return jsonify(
+            {
+                "error": "reference_face_requires_sdxl",
+                "message": "Reference face requires an SDXL image model.",
+            }
+        ), 400
     is_ltx2 = model_name == "ltx2" or pipeline_name == "ltx2"
 
     # Special-case AnimateDiff video jobs with rich structured payload
     is_animatediff = model_name == "animatediff" or pipeline_name == "animatediff"
+    hardcore_lora_step_cap_applied = False
 
     # Backward-compatible alias for legacy WAN i2v routing that now maps to VIDEO_GEN behavior.
     is_wan_i2v = (
@@ -1659,7 +2101,16 @@ def submit_job() -> Any:
     if is_wan_i2v:
         # Persist VIDEO_GEN controls inside the job data blob as JSON.
         prompt_text = enhanced_prompt
-        negative_prompt = str(payload.get("negative_prompt") or "").strip()
+        # Append positive quality suffix if prompt doesn't have quality tokens
+        prompt_lower = prompt_text.lower()
+        if prompt_text and "best quality" not in prompt_lower and "masterpiece" not in prompt_lower:
+            prompt_text = f"{prompt_text}, {get_video_positive_suffix(model_name)}"
+        negative_prompt = _merge_negative_prompts(
+            str(payload.get("negative_prompt") or "").strip(),
+            get_video_negative(model_name),
+            NO_WATERMARK_NEGATIVE,
+            SFW_NEGATIVE_PROMPT if sfw_mode else "",
+        )
         seed = payload.get("seed")
         try:
             seed = int(seed) if seed is not None else None
@@ -1673,17 +2124,25 @@ def submit_job() -> Any:
             or payload.get("init_image_b64")
             or None
         )
+        resolved_video_defaults, video_default_sources = resolve_video_defaults(
+            cfg,
+            payload,
+            RUNTIME_PROFILE,
+            "VIDEO_GEN",
+        )
         settings: Dict[str, Any] = {
             "prompt": prompt_text,
             "negative_prompt": negative_prompt,
             "seed": seed,
-            "steps": _clamp_int(payload.get("steps", LTX2_DEFAULT_STEPS), LTX2_DEFAULT_STEPS, 1, 50),
-            "guidance": _clamp_float(payload.get("guidance", LTX2_DEFAULT_GUIDANCE), LTX2_DEFAULT_GUIDANCE, 0.0, 12.0),
-            "width": _clamp_int(payload.get("width", LTX2_DEFAULT_WIDTH), LTX2_DEFAULT_WIDTH, 256, 768),
-            "height": _clamp_int(payload.get("height", LTX2_DEFAULT_HEIGHT), LTX2_DEFAULT_HEIGHT, 256, 768),
-            "frames": _clamp_int(payload.get("frames", LTX2_DEFAULT_FRAMES), LTX2_DEFAULT_FRAMES, 1, 16),
-            "fps": _clamp_int(payload.get("fps", LTX2_DEFAULT_FPS), LTX2_DEFAULT_FPS, 1, 12),
+            "steps": resolved_video_defaults["steps"],
+            "guidance": resolved_video_defaults["guidance"],
+            "width": resolved_video_defaults["width"],
+            "height": resolved_video_defaults["height"],
+            "frames": resolved_video_defaults["frames"],
+            "fps": resolved_video_defaults["fps"],
             "timeout": LTX2_JOB_TIMEOUT,
+            "defaults_source": {"video": video_default_sources},
+            "defaults_confidence": {"video": _resolve_confidence(video_default_sources)},
         }
         if init_image:
             settings["init_image"] = init_image
@@ -1691,11 +2150,15 @@ def submit_job() -> Any:
         task_type = "VIDEO_GEN"
     elif is_animatediff:
         prompt_text = enhanced_prompt
-        negative_prompt = str(payload.get("negative_prompt") or "")
+        negative_prompt = str(payload.get("negative_prompt") or "").strip()
         raw_prompt = str(payload.get("raw_prompt", "")).lower() in ("1", "true", "yes")
-        # Apply default video negative prompt if not provided
-        if not negative_prompt and not raw_prompt:
-            negative_prompt = get_video_negative(model_name)
+        default_video_negative = "" if raw_prompt else get_video_negative(model_name)
+        negative_prompt = _merge_negative_prompts(
+            negative_prompt,
+            default_video_negative,
+            NO_WATERMARK_NEGATIVE,
+            SFW_NEGATIVE_PROMPT if sfw_mode else "",
+        )
 
         # Append positive quality suffix if prompt doesn't have quality tokens
         if not raw_prompt:
@@ -1703,27 +2166,19 @@ def submit_job() -> Any:
             if prompt_text and "best quality" not in prompt_lower and "masterpiece" not in prompt_lower:
                 prompt_text = f"{prompt_text}, {get_video_positive_suffix(model_name)}"
 
-        # Core AnimateDiff controls – validated/coerced into safe ranges
-        try:
-            frames = int(payload.get("frames", 16))
-        except (TypeError, ValueError):
-            frames = 16
-        try:
-            fps = int(payload.get("fps", 8))
-        except (TypeError, ValueError):
-            fps = 8
-        frames = max(1, min(frames, 64))
-        fps = max(1, min(fps, 24))  # Increased max fps from 60 to 24 for realistic smooth video
+        resolved_video_defaults, video_default_sources = resolve_video_defaults(
+            cfg,
+            payload,
+            RUNTIME_PROFILE,
+            "ANIMATEDIFF",
+        )
+        frames = int(resolved_video_defaults["frames"])
+        fps = int(resolved_video_defaults["fps"])
 
         motion = str(payload.get("motion") or "").strip().lower() or "zoom-in"
         base_model = str(payload.get("base_model") or "realisticVision")
-        width = int(payload.get("width", 512) or 512)
-        height = int(payload.get("height", 512) or 512)
-        # Clamp to supported grid
-        if width not in {512, 768}:
-            width = 512
-        if height not in {512, 768}:
-            height = 512
+        width = int(resolved_video_defaults["width"])
+        height = int(resolved_video_defaults["height"])
 
         seed = payload.get("seed")
         try:
@@ -1774,16 +2229,13 @@ def submit_job() -> Any:
             "strength": strength,
             "extend_remaining": extend_chunks,
             "extend_total": extend_chunks,
+            "defaults_source": {"video": video_default_sources},
+            "defaults_confidence": {"video": _resolve_confidence(video_default_sources)},
         }
         job_data = json.dumps(settings)
         task_type = "ANIMATEDIFF"
     else:
         prompt_text = enhanced_prompt
-        if position_lora:
-            lora_weight = resolve_position_lora_weight(position_lora)
-            lora_tag = f"<lora:{position_lora}:{lora_weight:.2f}>"
-            if lora_tag not in prompt_text:
-                prompt_text = f"{prompt_text}, {lora_tag}" if prompt_text else lora_tag
         if hardcore_prompt and HARDCORE_POSITIVE_SUFFIX.lower() not in prompt_text.lower():
             prompt_text = f"{prompt_text}, {HARDCORE_POSITIVE_SUFFIX}" if prompt_text else HARDCORE_POSITIVE_SUFFIX
         if prompt_text:
@@ -1814,31 +2266,26 @@ def submit_job() -> Any:
                     name = str(item).strip()
                     if name:
                         loras_list.append({"name": name})
-        if position_lora:
-            def normalize_lora_ref(name: str) -> str:
-                base = Path(name).name
-                if base.lower().endswith(".safetensors"):
-                    base = base[:-len(".safetensors")]
-                return base.strip().lower()
-
-            position_norm = normalize_lora_ref(position_lora)
-            if not any(normalize_lora_ref(str(entry.get("name") or "")) == position_norm for entry in loras_list):
-                loras_list.append({"name": position_lora, "weight": resolve_position_lora_weight(position_lora)})
         if loras_list:
             job_settings["loras"] = loras_list
+            job_settings["requested_loras"] = loras_list
         if seed is not None:
             job_settings["seed"] = seed
         base_negative = str(cfg.get("negative_prompt_default") or "").strip() if cfg else ""
-        combined_negative = ", ".join(
-            filter(None, [negative_prompt, base_negative, GLOBAL_NEGATIVE_PROMPT])
+        combined_negative = _merge_negative_prompts(
+            negative_prompt,
+            base_negative,
+            get_pipeline_negative(pipeline_name),
+            NO_WATERMARK_NEGATIVE,
+            SFW_NEGATIVE_PROMPT if sfw_mode else "",
         )
         if position_negative:
-            combined_negative = f"{combined_negative}, {position_negative}" if combined_negative else position_negative
+            combined_negative = _merge_negative_prompts(combined_negative, position_negative)
         if hardcore_prompt:
             for extra_negative in (ANTI_OVERLAY_NEGATIVE, SHARPNESS_NEGATIVE):
                 if not extra_negative:
                     continue
-                combined_negative = f"{combined_negative}, {extra_negative}" if combined_negative else extra_negative
+                combined_negative = _merge_negative_prompts(combined_negative, extra_negative)
         if combined_negative:
             job_settings["negative_prompt"] = combined_negative
         pose_image = payload.get("pose_image") or payload.get("pose_image_b64") or ""
@@ -1848,27 +2295,34 @@ def submit_job() -> Any:
         if pose_image_path:
             job_settings["pose_image_path"] = str(pose_image_path)
 
-        # Per-model defaults from manifest (steps/guidance/size/sampler/negative)
-        if cfg:
-            if cfg.get("steps") is not None:
-                job_settings["steps"] = cfg["steps"]
-            if cfg.get("guidance") is not None:
-                job_settings["guidance"] = cfg["guidance"]
-            if cfg.get("width") is not None:
-                job_settings["width"] = cfg["width"]
-            if cfg.get("height") is not None:
-                job_settings["height"] = cfg["height"]
-            if cfg.get("sampler"):
-                job_settings["sampler"] = cfg["sampler"]
-        if hardcore_prompt:
+        resolved_image_defaults, image_default_sources = resolve_image_defaults(
+            cfg,
+            payload,
+            RUNTIME_PROFILE,
+        )
+        if reference_face_url:
+            job_settings["reference_face_url"] = reference_face_url
+        job_settings.update(resolved_image_defaults)
+        job_settings["defaults_source"] = {"image": image_default_sources}
+        job_settings["defaults_confidence"] = {"image": _resolve_confidence(image_default_sources)}
+        if legacy_auto_hardcore and not explicit_hardcore_mode:
             job_settings["steps"] = 40
             job_settings["guidance"] = 7.5
+        if (
+            legacy_auto_hardcore
+            and not explicit_hardcore_mode
+            and loras_list
+            and payload.get("steps") is None
+            and int(job_settings.get("steps", 20) or 20) == 40
+        ):
+            job_settings["steps"] = 30
+            hardcore_lora_step_cap_applied = True
 
-        injected_loras = job_settings.get("loras") or []
+        requested_loras = job_settings.get("loras") or []
         log_event(
             "Enhanced prompt: "
             f"{prompt_text} | Selected model: {model_name_raw or model_name} | "
-            f"Injected LoRAs: {injected_loras} | Extra negatives: {position_negative or ''}"
+            f"Requested LoRAs: {requested_loras} | Extra negatives: {position_negative or ''}"
         )
 
         overrides: Dict[str, Any] = {}
@@ -1895,17 +2349,28 @@ def submit_job() -> Any:
             overrides["seed"] = seed
         if overrides:
             job_settings["overrides"] = overrides
+            for key, value in overrides.items():
+                job_settings[key] = value
 
         job_data = json.dumps(job_settings)
         task_type = CREATOR_TASK_TYPE
 
     selected_model_name = str(cfg.get("name") or model_name).strip()
     selected_model_key = selected_model_name.lower()
-    if _eligible_online_node_count(selected_model_key, task_type) <= 0:
-        return _no_capacity_response(selected_model_key, task_type)
+    capacity_task_type = "FACE_SWAP" if task_type == CREATOR_TASK_TYPE and reference_face_url else task_type
+    if _eligible_online_node_count(selected_model_key, capacity_task_type) <= 0:
+        return _no_capacity_response(
+            selected_model_key,
+            task_type,
+            message=(
+                "No compatible reference-face node capacity is available right now."
+                if task_type == CREATOR_TASK_TYPE and reference_face_url
+                else None
+            ),
+        )
 
-    # Credit gate — reserve credits (not immediately spent)
-    credit_err, credit_cost = credits.check_and_reserve_credits(wallet, selected_model_name, task_type)
+    # Credit gate — only active when HAVNAI_CREDITS_ENABLED=true
+    credit_err = credits.check_and_deduct_credits(wallet, selected_model_name, task_type)
     if credit_err:
         return credit_err
 
@@ -1918,33 +2383,15 @@ def submit_job() -> Any:
             float(weight),
             invite_code,
         )
-
-    # Create durable job ticket with settlement tracking
-    try:
-        prompt_for_ticket = ""
-        try:
-            parsed = json.loads(job_data) if isinstance(job_data, str) else {}
-            prompt_for_ticket = parsed.get("prompt", "")
-        except Exception:
-            pass
-        settlement.create_job_ticket(
-            job_id=job_id,
-            wallet=wallet,
-            job_type=task_type,
-            model=selected_model_name,
-            estimated_cost=credit_cost,
-            prompt=prompt_for_ticket,
-        )
-        if credit_cost > 0:
-            settlement.reserve_credits(
-                job_id, wallet, credit_cost,
-                reserve_fn=lambda w, a, j: (True, credits.get_credit_balance(w)),
-            )
-        settlement.mark_queued(job_id)
-    except Exception as exc:
-        log_event("Settlement ticket creation failed (non-fatal)", job_id=job_id, error=str(exc))
-
     log_event("Public job queued", wallet=wallet, model=model_name, job_id=job_id)
+    if hardcore_lora_step_cap_applied:
+        log_event(
+            "hardcore_lora_step_cap_applied",
+            model=selected_model_name,
+            job_id=job_id,
+            steps_from=40,
+            steps_to=30,
+        )
     _emit_job_event("job_queued", job_id, wallet, model=model_name, task_type=task_type)
     return jsonify({"status": "queued", "job_id": job_id}), 200
 
@@ -1976,6 +2423,13 @@ def generate_video_job() -> Any:
     if not cfg:
         return jsonify({"error": "unknown model"}), 400
 
+    # Append positive quality suffix if prompt doesn't have quality tokens
+    raw_prompt_flag = str(payload.get("raw_prompt", "")).lower() in ("1", "true", "yes")
+    if not raw_prompt_flag:
+        prompt_lower = prompt_text.lower()
+        if "best quality" not in prompt_lower and "masterpiece" not in prompt_lower:
+            prompt_text = f"{prompt_text}, {get_video_positive_suffix(model_name)}"
+
     weight = payload.get("weight")
     if weight is None:
         weight = cfg.get("reward_weight", rewards.resolve_weight(model_name, 10.0))
@@ -1988,32 +2442,38 @@ def generate_video_job() -> Any:
     if seed is None:
         seed = random.randint(0, 2**31 - 1)
 
-    fps = _clamp(_coerce_int(payload.get("fps", 8), 8), 1, 8)
+    resolved_video_defaults, video_default_sources = resolve_video_defaults(
+        cfg,
+        payload,
+        RUNTIME_PROFILE,
+        "VIDEO_GEN",
+    )
+    fps = int(resolved_video_defaults["fps"])
+    frames = int(resolved_video_defaults["frames"])
     duration = payload.get("duration")
-    frames = payload.get("frames")
-    if frames is None and duration is not None:
+    if payload.get("frames") is None and duration is not None:
         try:
-            frames = int(float(duration) * fps)
+            frames = _clamp(int(float(duration) * fps), 1, 16)
         except (TypeError, ValueError):
-            frames = None
-    frames = _clamp(_coerce_int(frames or 16, 16), 1, 16)
-
-    steps = _clamp(_coerce_int(payload.get("steps", 25), 25), 1, 50)
-    guidance = _coerce_float(payload.get("guidance", 6.0), 6.0)
-    guidance = max(0.0, min(guidance, 12.0))
-    width = _clamp(_coerce_int(payload.get("width", 512), 512), 256, 512)
-    height = _clamp(_coerce_int(payload.get("height", 512), 512), 256, 512)
+            pass
 
     settings: Dict[str, Any] = {
         "prompt": prompt_text,
-        "negative_prompt": str(payload.get("negative_prompt") or "").strip(),
+        "negative_prompt": _merge_negative_prompts(
+            str(payload.get("negative_prompt") or "").strip(),
+            get_video_negative(model_name),
+            NO_WATERMARK_NEGATIVE,
+            SFW_NEGATIVE_PROMPT if _is_truthy(payload.get("sfw_mode")) else "",
+        ),
         "seed": seed,
-        "steps": steps,
-        "guidance": guidance,
-        "width": width,
-        "height": height,
+        "steps": int(resolved_video_defaults["steps"]),
+        "guidance": float(resolved_video_defaults["guidance"]),
+        "width": int(resolved_video_defaults["width"]),
+        "height": int(resolved_video_defaults["height"]),
         "frames": frames,
         "fps": fps,
+        "defaults_source": {"video": video_default_sources},
+        "defaults_confidence": {"video": _resolve_confidence(video_default_sources)},
     }
     motion_type = payload.get("motion_type")
     if motion_type:
@@ -2032,8 +2492,8 @@ def generate_video_job() -> Any:
     if _eligible_online_node_count(selected_model_key, "VIDEO_GEN") <= 0:
         return _no_capacity_response(selected_model_key, "VIDEO_GEN")
 
-    # Credit gate — reserve credits
-    credit_err, credit_cost = credits.check_and_reserve_credits(wallet, selected_model_name, "VIDEO_GEN")
+    # Credit gate — only active when HAVNAI_CREDITS_ENABLED=true
+    credit_err = credits.check_and_deduct_credits(wallet, selected_model_name, "VIDEO_GEN")
     if credit_err:
         return credit_err
 
@@ -2046,23 +2506,6 @@ def generate_video_job() -> Any:
             float(weight),
             invite_code,
         )
-
-    # Create durable job ticket
-    try:
-        settlement.create_job_ticket(
-            job_id=job_id, wallet=wallet, job_type="VIDEO_GEN",
-            model=selected_model_name, estimated_cost=credit_cost,
-            prompt=str(payload.get("prompt", "")),
-        )
-        if credit_cost > 0:
-            settlement.reserve_credits(
-                job_id, wallet, credit_cost,
-                reserve_fn=lambda w, a, j: (True, credits.get_credit_balance(w)),
-            )
-        settlement.mark_queued(job_id)
-    except Exception as exc:
-        log_event("Settlement ticket creation failed (non-fatal)", job_id=job_id, error=str(exc))
-
     log_event("Video job queued", wallet=wallet, model=model_name, job_id=job_id)
     _emit_job_event("job_queued", job_id, wallet, model=model_name, task_type="VIDEO_GEN")
     return jsonify({"status": "queued", "job_id": job_id}), 200
@@ -2088,10 +2531,6 @@ def submit_faceswap_job_endpoint() -> Any:
     if not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid wallet"}), 400
 
-    settings = build_faceswap_settings(payload, prompt_text)
-    if not settings.get("base_image_url") or not settings.get("face_source_url"):
-        return jsonify({"error": "base_image and face_source are required"}), 400
-
     refresh_manifest()
     cfg = get_model_config(model_name)
     if not cfg:
@@ -2099,6 +2538,10 @@ def submit_faceswap_job_endpoint() -> Any:
     pipeline_norm = str(cfg.get("pipeline", "")).lower()
     if "sdxl" not in pipeline_norm:
         return jsonify({"error": "faceswap requires an SDXL base model"}), 400
+
+    settings = build_faceswap_settings(payload, prompt_text, cfg, sfw_mode=_is_truthy(payload.get("sfw_mode")))
+    if not settings.get("base_image_url") or not settings.get("face_source_url"):
+        return jsonify({"error": "base_image and face_source are required"}), 400
 
     weight = payload.get("weight")
     if weight is None:
@@ -2111,8 +2554,8 @@ def submit_faceswap_job_endpoint() -> Any:
     if _eligible_online_node_count(selected_model_key, "FACE_SWAP") <= 0:
         return _no_capacity_response(selected_model_key, "FACE_SWAP")
 
-    # Credit gate — reserve credits
-    credit_err, credit_cost = credits.check_and_reserve_credits(wallet, selected_model_name, "FACE_SWAP")
+    # Credit gate — only active when HAVNAI_CREDITS_ENABLED=true
+    credit_err = credits.check_and_deduct_credits(wallet, selected_model_name, "FACE_SWAP")
     if credit_err:
         return credit_err
 
@@ -2125,26 +2568,6 @@ def submit_faceswap_job_endpoint() -> Any:
             float(weight),
             invite_code,
         )
-
-    # Create durable job ticket (face swap = not marketplace eligible)
-    try:
-        settlement.create_job_ticket(
-            job_id=job_id,
-            wallet=wallet,
-            job_type="FACE_SWAP",
-            model=selected_model_name,
-            estimated_cost=credit_cost,
-            prompt=prompt_text,
-        )
-        if credit_cost > 0:
-            settlement.reserve_credits(
-                job_id, wallet, credit_cost,
-                reserve_fn=lambda w, a, j: (True, credits.get_credit_balance(w)),
-            )
-        settlement.mark_queued(job_id)
-    except Exception as exc:
-        log_event("Settlement ticket creation failed (non-fatal)", job_id=job_id, error=str(exc))
-
     log_event("Face-swap job queued", wallet=wallet, model=model_name, job_id=job_id)
     _emit_job_event("job_queued", job_id, wallet, model=model_name, task_type="FACE_SWAP")
     return jsonify({"status": "queued", "job_id": job_id}), 200
@@ -2202,8 +2625,6 @@ def register() -> Any:
             )
         else:
             node["supports"] = node.get("supports", [])
-        if "loras" in data:
-            node["loras"] = _normalize_lora_catalog(data.get("loras"))
         util = data.get("gpu", {}).get("utilization") if isinstance(data.get("gpu"), dict) else data.get("utilization")
         util = float(util or node.get("utilization", 0.0))
         node["utilization"] = util
@@ -2294,9 +2715,7 @@ def get_creator_tasks() -> Any:
                     model_spec: Optional[Dict[str, Any]] = None
                     if isinstance(cfg, dict):
                         model_spec = {"name": job["model"], "pipeline": cfg.get("pipeline")}
-                        if cfg.get("lora") is not None:
-                            model_spec["lora"] = cfg.get("lora")
-                    # Decode prompt/negative_prompt for standard IMAGE_GEN jobs stored as JSON
+                        # Decode prompt/negative_prompt for standard IMAGE_GEN jobs stored as JSON
                     raw_data = job.get("data")
                     prompt_text = raw_data or ""
                     negative_prompt = ""
@@ -2313,7 +2732,7 @@ def get_creator_tasks() -> Any:
                         if isinstance(parsed_loras, list):
                             loras = [item for item in parsed_loras if item]
                         # Forward per-image overrides stored in job settings.
-                        for key in ("steps", "guidance", "width", "height", "sampler", "seed"):
+                        for key in ("steps", "guidance", "width", "height", "sampler", "seed", "reference_face_url"):
                             if key not in parsed:
                                 continue
                             value = parsed.get(key)
@@ -2333,16 +2752,15 @@ def get_creator_tasks() -> Any:
                                 value_str = str(value).strip()
                                 if value_str:
                                     image_overrides[key] = value_str
+                            elif key == "reference_face_url":
+                                value_str = str(value).strip()
+                                if value_str:
+                                    image_overrides[key] = value_str
                     # Always send plain prompt text to the node (avoid passing raw JSON)
                     prompt_for_node = prompt_text
 
                     # Assign under global lock to avoid multiple nodes claiming the same job
                     job_helpers.assign_job_to_node(job["id"], node_id)
-                    # Record durable claim attempt
-                    try:
-                        settlement.record_claim(job["id"], node_id)
-                    except Exception:
-                        pass  # non-fatal — settlement is additive
                     log_event("Job claimed by node", job_id=job["id"], node_id=node_id)
                     _emit_job_event("job_running", job["id"], job.get("wallet", ""), node_id=node_id, model=job["model"])
                     reward_weight = float(job["weight"] or cfg.get("reward_weight", rewards.resolve_weight(job["model"], 10.0)))
@@ -2404,7 +2822,7 @@ def get_creator_tasks() -> Any:
             }
             if task_payload["type"].upper() == CREATOR_TASK_TYPE:
                 # Forward generation overrides for image tasks only.
-                for key in ("steps", "guidance", "width", "height", "sampler", "seed"):
+                for key in ("steps", "guidance", "width", "height", "sampler", "seed", "reference_face_url"):
                     if key in task and task[key] is not None:
                         task_payload[key] = task[key]
             # If this is a WAN I2V video job, attempt to expose structured settings to the node
@@ -2436,7 +2854,6 @@ def get_creator_tasks() -> Any:
                         "width",
                         "height",
                         "seed",
-                        "lora_strength",
                         "init_image",
                         "strength",
                         "scheduler",
@@ -2457,6 +2874,7 @@ def get_creator_tasks() -> Any:
                         "face_source_url",
                         "strength",
                         "num_steps",
+                        "guidance",
                         "seed",
                     ):
                         if key in fs_settings and fs_settings[key] is not None:
@@ -2728,49 +3146,6 @@ def submit_results() -> Any:
 
         rewards.record_reward(wallet, task_id, reward)
 
-        # --- Settlement: validate, settle, payout ---
-        try:
-            # Complete the attempt record
-            settlement.complete_attempt(
-                task_id, node_id, status,
-                error_message=str(metrics.get("error", "")) if status != "success" else None,
-                execution_metadata=metrics if metrics else None,
-            )
-
-            # Determine execution and quality status
-            if status == "success":
-                exec_status = settlement.STATUS_COMPLETED
-                # Run minimum output validation for image/face_swap jobs
-                task_type_upper = str(task_type).upper()
-                if task_type_upper in ("IMAGE_GEN", "FACE_SWAP"):
-                    output_path = OUTPUTS_DIR / f"{task_id}.png"
-                    quality = settlement.validate_output(
-                        task_id, task_type_upper, output_path=output_path,
-                    )
-                else:
-                    quality = settlement.QUALITY_UNCHECKED
-            else:
-                exec_status = settlement.STATUS_TECHNICAL_FAILED
-                quality = settlement.QUALITY_UNCHECKED
-
-            # Settle the job (spend/release credits, create payout)
-            settlement.settle_job(
-                job_id=task_id,
-                node_id=node_id,
-                execution_status=exec_status,
-                quality_status=quality,
-                reward_amount=reward,
-                deposit_fn=credits.deposit_credits,
-            )
-
-            # Link output asset for marketplace eligibility
-            if status == "success" and quality == settlement.QUALITY_VALID:
-                output_asset_id = f"{task_id}.png"
-                if (OUTPUTS_DIR / output_asset_id).exists():
-                    settlement.set_output_asset(task_id, output_asset_id)
-        except Exception as exc:
-            log_event("Settlement processing failed (non-fatal)", job_id=task_id, error=str(exc))
-
         # Emit SSE events for job completion and reward
         _emit_job_event(
             "job_success" if status == "success" else "job_failed",
@@ -2893,6 +3268,123 @@ def _build_convert_nonce_message(
     )
 
 
+def _build_gallery_nonce_message(
+    purpose: str,
+    wallet: str,
+    amount: float,
+    nonce: str,
+    issued_at_iso: str,
+    expires_at_iso: str,
+    origin: str,
+    domain: str,
+    *,
+    listing_id: Optional[int] = None,
+    job_id: Optional[str] = None,
+) -> str:
+    """Build a signed message for gallery operations (purchase or list)."""
+    lines = [
+        "HavnAI Wallet Signature",
+        f"action: {purpose}",
+        f"wallet: {wallet}",
+    ]
+    if listing_id is not None:
+        lines.append(f"listing_id: {listing_id}")
+    if job_id is not None:
+        lines.append(f"job_id: {job_id}")
+    lines += [
+        f"amount: {amount:.8f}",
+        f"nonce: {nonce}",
+        f"issued_at: {issued_at_iso}",
+        f"expires_at: {expires_at_iso}",
+        f"origin: {origin}",
+        f"domain: {domain}",
+    ]
+    return "\n".join(lines)
+
+
+def _verify_wallet_signature(
+    wallet: str,
+    nonce_str: str,
+    signature: str,
+    allowed_purposes: set,
+    expected_amount: Optional[float] = None,
+    log_label: str = "Signature verification",
+) -> Tuple[bool, Optional[Any]]:
+    """Verify a wallet signature against a stored nonce.
+
+    Returns (True, None) on success.
+    Returns (False, flask_response_tuple) on failure.
+    """
+    if Account is None or encode_defunct is None:
+        return False, (jsonify({
+            "error": "signature_verification_unavailable",
+            "message": "eth-account is required for wallet signature verification",
+        }), 500)
+
+    conn = get_db()
+    row = conn.execute(
+        "SELECT wallet, nonce, purpose, amount, message, issued_at, expires_at, used_at "
+        "FROM wallet_nonces WHERE wallet=? AND nonce=?",
+        (wallet, nonce_str),
+    ).fetchone()
+    if not row:
+        log_event(f"{log_label} rejected", level="warning", wallet=wallet, reason="nonce_not_found")
+        return False, (jsonify({"error": "invalid_nonce", "message": "nonce not found"}), 400)
+
+    nonce_purpose = str(row["purpose"] or "").strip()
+    if nonce_purpose not in allowed_purposes:
+        log_event(f"{log_label} rejected", level="warning", wallet=wallet, reason="nonce_purpose_mismatch")
+        return False, (jsonify({"error": "invalid_nonce", "message": "nonce purpose mismatch"}), 400)
+
+    if expected_amount is not None:
+        try:
+            nonce_amount = float(row["amount"])
+        except (TypeError, ValueError):
+            log_event(f"{log_label} rejected", level="warning", wallet=wallet, reason="nonce_amount_invalid")
+            return False, (jsonify({"error": "invalid_nonce", "message": "nonce amount invalid"}), 400)
+        if abs(nonce_amount - expected_amount) > 1e-9:
+            log_event(f"{log_label} rejected", level="warning", wallet=wallet, reason="nonce_amount_mismatch")
+            return False, (jsonify({"error": "invalid_nonce", "message": "nonce amount mismatch"}), 400)
+
+    now_ts = unix_now()
+    expires_at = float(row["expires_at"] or 0.0)
+    if row["used_at"] is not None:
+        log_event(f"{log_label} rejected", level="warning", wallet=wallet, reason="nonce_used")
+        return False, (jsonify({"error": "nonce_used", "message": "nonce already used"}), 409)
+    if now_ts > expires_at:
+        log_event(f"{log_label} rejected", level="warning", wallet=wallet, reason="nonce_expired")
+        return False, (jsonify({"error": "nonce_expired", "message": "nonce expired"}), 400)
+
+    message = str(row["message"] or "")
+    try:
+        recovered = Account.recover_message(encode_defunct(text=message), signature=signature)
+    except Exception as exc:
+        log_event(f"{log_label} rejected", level="warning", wallet=wallet, reason="signature_parse_failed", error=str(exc))
+        return False, (jsonify({"error": "invalid_signature", "message": "signature verification failed"}), 400)
+
+    if recovered.lower() != wallet.lower():
+        log_event(f"{log_label} rejected", level="warning", wallet=wallet, reason="signature_wallet_mismatch", recovered=recovered)
+        return False, (jsonify({"error": "invalid_signature", "message": "signature wallet mismatch"}), 400)
+
+    # Atomically mark nonce as used
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            "UPDATE wallet_nonces SET used_at=? WHERE wallet=? AND nonce=? AND used_at IS NULL",
+            (now_ts, wallet, nonce_str),
+        )
+        if cur.rowcount != 1:
+            conn.rollback()
+            log_event(f"{log_label} rejected", level="warning", wallet=wallet, reason="nonce_replay")
+            return False, (jsonify({"error": "nonce_used", "message": "nonce already used"}), 409)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    return True, None
+
+
 def _parse_positive_amount(raw_amount: Any) -> Tuple[Optional[float], Optional[Any]]:
     try:
         amount = float(raw_amount)
@@ -2985,11 +3477,11 @@ def wallet_nonce() -> Any:
         return jsonify({"error": "rate limit", "detail": "per-wallet limit exceeded"}), 429
 
     purpose = str(data.get("purpose") or WALLET_NONCE_PURPOSE_CONVERT).strip()
-    if purpose != WALLET_NONCE_PURPOSE_CONVERT:
+    if purpose not in WALLET_NONCE_ALLOWED_PURPOSES:
         return jsonify(
             {
                 "error": "unsupported_purpose",
-                "message": f"purpose must be '{WALLET_NONCE_PURPOSE_CONVERT}'",
+                "message": f"purpose must be one of: {', '.join(sorted(WALLET_NONCE_ALLOWED_PURPOSES))}",
             }
         ), 400
 
@@ -2998,13 +3490,35 @@ def wallet_nonce() -> Any:
         return amount_error
     assert amount is not None
 
+    # Optional context fields for gallery purposes
+    listing_id = None
+    job_id_ctx = None
+    if purpose == WALLET_NONCE_PURPOSE_GALLERY_PURCHASE:
+        try:
+            listing_id = int(data.get("listing_id", 0))
+        except (TypeError, ValueError):
+            listing_id = None
+        if not listing_id:
+            return jsonify({"error": "missing listing_id", "message": "listing_id required for gallery_purchase"}), 400
+    elif purpose == WALLET_NONCE_PURPOSE_GALLERY_LIST:
+        job_id_ctx = str(data.get("job_id", "")).strip() or None
+        if not job_id_ctx:
+            return jsonify({"error": "missing job_id", "message": "job_id required for gallery_list"}), 400
+
     now_ts = unix_now()
     issued_at_iso = datetime.fromtimestamp(now_ts, timezone.utc).isoformat().replace("+00:00", "Z")
     expires_ts = now_ts + float(WALLET_NONCE_TTL_SECONDS)
     expires_at_iso = datetime.fromtimestamp(expires_ts, timezone.utc).isoformat().replace("+00:00", "Z")
     nonce = secrets.token_hex(16)
     origin, domain = _request_origin_and_domain()
-    message = _build_convert_nonce_message(wallet, amount, nonce, issued_at_iso, expires_at_iso, origin, domain)
+
+    if purpose == WALLET_NONCE_PURPOSE_CONVERT:
+        message = _build_convert_nonce_message(wallet, amount, nonce, issued_at_iso, expires_at_iso, origin, domain)
+    else:
+        message = _build_gallery_nonce_message(
+            purpose, wallet, amount, nonce, issued_at_iso, expires_at_iso, origin, domain,
+            listing_id=listing_id, job_id=job_id_ctx,
+        )
 
     conn = get_db()
     conn.execute(
@@ -3183,6 +3697,41 @@ def credits_cost() -> Any:
     })
 
 
+@app.route("/credits/reference", methods=["GET"])
+def credits_reference() -> Any:
+    """Return the current default pricing reference used for common job types."""
+    return jsonify({
+        "credits_enabled": CREDITS_ENABLED,
+        "reference": [
+            {
+                "id": "sdxl_image",
+                "label": "SDXL Image",
+                "credits_per_job": float(credits.DEFAULT_CREDIT_COSTS.get("sdxl", 1.0)),
+            },
+            {
+                "id": "sd15_image",
+                "label": "SD1.5 Image",
+                "credits_per_job": float(credits.DEFAULT_CREDIT_COSTS.get("sd15", 0.5)),
+            },
+            {
+                "id": "face_swap",
+                "label": "Face Swap",
+                "credits_per_job": float(credits.DEFAULT_CREDIT_COSTS.get("face_swap", 1.5)),
+            },
+            {
+                "id": "animatediff_video",
+                "label": "AnimateDiff Video",
+                "credits_per_job": float(credits.DEFAULT_CREDIT_COSTS.get("animatediff", 2.0)),
+            },
+            {
+                "id": "ltx2_video",
+                "label": "LTX2 Video",
+                "credits_per_job": float(credits.DEFAULT_CREDIT_COSTS.get("ltx2", 3.0)),
+            },
+        ],
+    })
+
+
 # ---------------------------------------------------------------------------
 # Stripe payment endpoints
 # ---------------------------------------------------------------------------
@@ -3231,11 +3780,15 @@ def payments_webhook() -> Any:
     payload = request.get_data()
     sig_header = request.headers.get("Stripe-Signature", "")
     try:
+        import stripe as _stripe_mod
         result = stripe_payments.handle_webhook_event(payload, sig_header)
         return jsonify(result)
+    except _stripe_mod.error.SignatureVerificationError:
+        log_event("Stripe webhook: invalid signature", level="warning")
+        return jsonify({"error": "invalid_signature"}), 401
     except Exception as exc:
         log_event("Stripe webhook error", level="error", error=str(exc))
-        return jsonify({"error": "webhook_failed", "message": str(exc)}), 400
+        return jsonify({"error": "webhook_failed"}), 400
 
 
 @app.route("/payments/history", methods=["GET"])
@@ -3246,6 +3799,51 @@ def payments_history() -> Any:
         return jsonify({"error": "invalid wallet"}), 400
     history = stripe_payments.get_payment_history(wallet)
     return jsonify({"wallet": wallet, "payments": history})
+
+
+@app.route("/stripe/create-subscription", methods=["POST"])
+def stripe_create_subscription() -> Any:
+    """Create a Stripe subscription for monthly credits + $HAI rewards."""
+    if not stripe_payments.STRIPE_ENABLED:
+        return jsonify({"error": "payments_disabled", "message": "Stripe payments are not enabled."}), 503
+    data = request.get_json() or {}
+    wallet = str(data.get("wallet", "")).strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    tier_id = str(data.get("tier_id", "")).strip()
+    if not tier_id:
+        return jsonify({"error": "missing tier_id"}), 400
+    success_url = str(data.get("success_url", "")).strip()
+    cancel_url = str(data.get("cancel_url", "")).strip()
+    if not success_url or not cancel_url:
+        return jsonify({"error": "missing success_url or cancel_url"}), 400
+    try:
+        result = stripe_payments.create_subscription(wallet, tier_id, success_url, cancel_url)
+        return jsonify(result)
+    except ValueError as exc:
+        return jsonify({"error": "invalid_tier", "message": str(exc)}), 400
+    except Exception as exc:
+        log_event("Stripe subscription error", level="error", error=str(exc))
+        return jsonify({"error": "subscription_failed", "message": "Could not create subscription."}), 500
+
+
+@app.route("/stripe/subscription-tiers", methods=["GET"])
+def stripe_subscription_tiers() -> Any:
+    """Return available subscription tiers."""
+    return jsonify({
+        "tiers": stripe_payments.SUBSCRIPTION_TIERS,
+        "stripe_enabled": stripe_payments.STRIPE_ENABLED,
+    })
+
+
+@app.route("/stripe/subscription-status", methods=["GET"])
+def stripe_subscription_status() -> Any:
+    """Return the active subscription for a wallet."""
+    wallet = request.args.get("wallet", "").strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    status = stripe_payments.get_subscription_status(wallet)
+    return jsonify({"wallet": wallet, "subscription": status})
 
 
 @app.route("/jobs/recent", methods=["GET"])
@@ -3282,24 +3880,6 @@ def job_detail(job_id: str) -> Any:
         payload = {}
     reward_factors = payload.get("reward_factors") if isinstance(payload, dict) else None
 
-    # Include settlement info if available
-    settle_info = None
-    try:
-        settle_row = settlement.get_job_settlement(job_id)
-        if settle_row:
-            settle_info = {
-                "execution_status": settle_row.get("execution_status"),
-                "quality_status": settle_row.get("quality_status"),
-                "settlement_outcome": settle_row.get("settlement_outcome"),
-                "estimated_cost": settle_row.get("estimated_cost"),
-                "reserved_amount": settle_row.get("reserved_amount"),
-                "spent_amount": settle_row.get("spent_amount"),
-                "marketplace_eligible": bool(settle_row.get("marketplace_eligible")),
-                "attempt_count": settle_row.get("attempt_count"),
-            }
-    except Exception:
-        pass
-
     return jsonify(
         {
             "id": job.get("id"),
@@ -3315,7 +3895,6 @@ def job_detail(job_id: str) -> Any:
             "reward_timestamp": reward_ts,
             "reward_factors": reward_factors,
             "data": payload,
-            "settlement": settle_info,
         }
     )
 
@@ -3429,6 +4008,88 @@ def models_stats() -> Any:
     )
 
 
+def _normalize_lora_catalog(raw_loras: Any) -> List[Dict[str, Any]]:
+    if not raw_loras or not isinstance(raw_loras, list):
+        return []
+    normalized: List[Dict[str, Any]] = []
+    for entry in raw_loras:
+        if isinstance(entry, dict):
+            name = str(entry.get("name") or "").strip()
+            filename = str(entry.get("filename") or "").strip()
+            label = str(entry.get("label") or "").strip()
+            if not name and filename:
+                name = Path(filename).stem or filename
+            if not name:
+                continue
+            item: Dict[str, Any] = {"name": name}
+            if filename:
+                item["filename"] = filename
+            if label:
+                item["label"] = label
+            # Preserve pipeline compatibility field (sd15 / sdxl)
+            pipeline = str(entry.get("pipeline") or "").strip().lower()
+            if pipeline:
+                item["pipeline"] = pipeline
+            normalized.append(item)
+            continue
+        if isinstance(entry, str):
+            name = entry.strip()
+            if name:
+                normalized.append({"name": name})
+    return normalized
+
+
+@app.route("/loras/list")
+def list_loras() -> Any:
+    # Optional pipeline filter: /loras/list?pipeline=sdxl or ?pipeline=sd15
+    pipeline_filter = request.args.get("pipeline", "").strip().lower()
+    loras: List[Dict[str, Any]] = []
+    nodes_with_loras: List[str] = []
+    with LOCK:
+        for node_id, node in NODES.items():
+            node_loras = _normalize_lora_catalog(node.get("loras"))
+            if node_loras:
+                nodes_with_loras.append(node_id)
+                loras.extend(node_loras)
+    if loras:
+        seen = set()
+        deduped: List[Dict[str, Any]] = []
+        for entry in loras:
+            key = str(entry.get("filename") or entry.get("name") or "").strip().lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(entry)
+        deduped.sort(key=lambda item: str(item.get("label") or item.get("name") or "").lower())
+        if pipeline_filter:
+            deduped = [e for e in deduped if _lora_matches_pipeline(e, pipeline_filter)]
+        return jsonify({"loras": deduped, "nodes": nodes_with_loras, "source": "nodes"})
+    path = LORA_STORAGE_DIR
+    if path.exists():
+        for entry in sorted(path.iterdir()):
+            if not entry.is_file():
+                continue
+            if entry.suffix.lower() not in SUPPORTED_LORA_EXTS:
+                continue
+            loras.append({"name": entry.stem, "filename": entry.name})
+    loras.sort(key=lambda item: str(item.get("name") or "").lower())
+    if pipeline_filter:
+        loras = [e for e in loras if _lora_matches_pipeline(e, pipeline_filter)]
+    return jsonify({"loras": loras, "path": str(path), "source": "local"})
+
+
+def _lora_matches_pipeline(lora: Dict[str, Any], target_pipeline: str) -> bool:
+    """Check if a LoRA is compatible with the target pipeline."""
+    lora_pipeline = str(lora.get("pipeline") or "").lower()
+    if not lora_pipeline:
+        return True  # No metadata — show in all pipelines
+    if target_pipeline == "sdxl":
+        return "sdxl" in lora_pipeline or "xl" in lora_pipeline
+    if target_pipeline == "sd15":
+        return lora_pipeline == "sd15" or lora_pipeline == "sd1.5"
+    return True
+
+
 @app.route("/models/list", methods=["GET"])
 def models_list() -> Any:
     """
@@ -3448,6 +4109,11 @@ def models_list() -> Any:
               "online_nodes": int,
               "face_swap_available": bool,
               "face_swap_online_nodes": int,
+              "image_defaults": dict | null,
+              "video_defaults": dict | null,
+              "face_swap_defaults": dict | null,
+              "defaults_source": dict | null,
+              "defaults_confidence": dict | null,
               "tags": list[str],
               "strengths": str | null,
               "weaknesses": str | null
@@ -3481,6 +4147,43 @@ def models_list() -> Any:
         pipeline = str(model_data.get("pipeline", "sd15")).lower()
         weight = float(model_data.get("reward_weight", 10.0))
 
+        image_defaults: Optional[Dict[str, Any]] = None
+        video_defaults: Optional[Dict[str, Any]] = None
+        face_swap_defaults: Optional[Dict[str, Any]] = None
+        defaults_source: Dict[str, Dict[str, str]] = {}
+        defaults_confidence: Dict[str, str] = {}
+
+        if native_task_type == CREATOR_TASK_TYPE:
+            image_defaults, image_sources = resolve_image_defaults(model_data, {}, RUNTIME_PROFILE)
+            image_defaults = {
+                "steps": image_defaults.get("steps"),
+                "guidance": image_defaults.get("guidance"),
+                "width": image_defaults.get("width"),
+                "height": image_defaults.get("height"),
+                "sampler": image_defaults.get("sampler"),
+            }
+            defaults_source["image"] = image_sources
+            defaults_confidence["image"] = _resolve_confidence(image_sources)
+
+        if native_task_type in {"VIDEO_GEN", "ANIMATEDIFF"}:
+            video_defaults, video_sources = resolve_video_defaults(
+                model_data,
+                {},
+                RUNTIME_PROFILE,
+                native_task_type,
+            )
+            defaults_source["video"] = video_sources
+            defaults_confidence["video"] = _resolve_confidence(video_sources)
+
+        if "sdxl" in pipeline:
+            face_swap_defaults, face_swap_sources = resolve_faceswap_defaults(
+                model_data,
+                {},
+                RUNTIME_PROFILE,
+            )
+            defaults_source["face_swap"] = face_swap_sources
+            defaults_confidence["face_swap"] = _resolve_confidence(face_swap_sources)
+
         online_nodes = _eligible_online_node_count(model_key_norm, native_task_type)
         face_swap_online_nodes = (
             _eligible_online_node_count(model_key_norm, "FACE_SWAP")
@@ -3503,6 +4206,11 @@ def models_list() -> Any:
                 "tags": model_data.get("tags", []),
                 "strengths": model_data.get("strengths"),
                 "weaknesses": model_data.get("weaknesses"),
+                "image_defaults": image_defaults,
+                "video_defaults": video_defaults,
+                "face_swap_defaults": face_swap_defaults,
+                "defaults_source": defaults_source or None,
+                "defaults_confidence": defaults_confidence or None,
             }
         )
 
@@ -3621,114 +4329,6 @@ def rewards_claim_history() -> Any:
         return jsonify({"error": "invalid wallet"}), 400
     history = blockchain.get_claim_history(wallet)
     return jsonify({"wallet": wallet, "claims": history})
-
-
-# ---------------------------------------------------------------------------
-# HAI Token Funding endpoints
-# ---------------------------------------------------------------------------
-
-@app.route("/credits/fund-hai", methods=["POST"])
-def credits_fund_hai() -> Any:
-    """Fund internal credits by transferring HAI tokens to the treasury.
-
-    Accepts a tx_hash from a direct ERC-20 transfer() already confirmed on Sepolia.
-    Verifies the transaction on-chain, then deposits credits.
-    Idempotent: duplicate tx_hash returns 'already_processed'.
-    """
-    if not hai_funding.HAI_FUNDING_ENABLED:
-        return jsonify({"error": "HAI funding is not enabled."}), 403
-
-    if not rate_limit(f"fund-hai:{request.remote_addr}", limit=20):
-        return jsonify({"error": "rate_limit", "message": "Too many requests."}), 429
-
-    data = request.get_json(silent=True) or {}
-    wallet = (data.get("wallet") or "").strip()
-    tx_hash = (data.get("tx_hash") or "").strip()
-    amount = data.get("amount")
-
-    if not wallet or not WALLET_REGEX.match(wallet):
-        return jsonify({"error": "invalid_wallet", "message": "Invalid wallet address."}), 400
-
-    if not tx_hash or not re.match(r"^0x[a-fA-F0-9]{64}$", tx_hash):
-        return jsonify({"error": "invalid_tx_hash", "message": "Invalid transaction hash."}), 400
-
-    try:
-        amount = float(amount)
-        if amount <= 0:
-            raise ValueError
-    except (TypeError, ValueError):
-        return jsonify({"error": "invalid_amount", "message": "Amount must be a positive number."}), 400
-
-    if not rate_limit(f"fund-hai:wallet:{wallet}", limit=10):
-        return jsonify({"error": "rate_limit", "message": "Too many funding requests for this wallet."}), 429
-
-    try:
-        result = hai_funding.fund_credits_with_hai(wallet, amount, tx_hash)
-    except Exception as exc:
-        log_event("HAI funding error", wallet=wallet, tx_hash=tx_hash, error=str(exc))
-        return jsonify({"error": "internal", "message": "Failed to process HAI funding."}), 500
-
-    if result.get("status") == "failed":
-        return jsonify(result), 400
-
-    return jsonify(result)
-
-
-@app.route("/credits/hai-fundings", methods=["GET"])
-def credits_hai_fundings() -> Any:
-    """Return HAI funding history for a wallet."""
-    wallet = request.args.get("wallet", "").strip()
-    if not wallet or not WALLET_REGEX.match(wallet):
-        return jsonify({"error": "invalid wallet"}), 400
-
-    history = hai_funding.get_funding_history(wallet)
-    return jsonify({
-        "wallet": wallet,
-        "fundings": history,
-        "hai_funding_enabled": hai_funding.HAI_FUNDING_ENABLED,
-    })
-
-
-# ---------------------------------------------------------------------------
-# Settlement query endpoints
-# ---------------------------------------------------------------------------
-
-
-@app.route("/settlement/<job_id>", methods=["GET"])
-def settlement_detail(job_id: str) -> Any:
-    """Return full settlement record for a job."""
-    record = settlement.get_job_settlement(job_id)
-    if not record:
-        return jsonify({"error": "not_found", "job_id": job_id}), 404
-    attempts = settlement.get_job_attempts(job_id)
-    record["attempts"] = attempts
-    return jsonify(record)
-
-
-@app.route("/settlement/<job_id>/attempts", methods=["GET"])
-def settlement_attempts(job_id: str) -> Any:
-    """Return all attempt records for a job."""
-    attempts = settlement.get_job_attempts(job_id)
-    return jsonify({"job_id": job_id, "attempts": attempts})
-
-
-@app.route("/payouts/node/<node_id>", methods=["GET"])
-def node_payouts(node_id: str) -> Any:
-    """Return payout history for a node."""
-    limit = _clamp(_coerce_int(request.args.get("limit"), 50), 1, 200)
-    payouts = settlement.get_node_payouts(node_id, limit=limit)
-    return jsonify({"node_id": node_id, "payouts": payouts})
-
-
-@app.route("/credits/ledger", methods=["GET"])
-def credit_ledger() -> Any:
-    """Return credit ledger entries for a wallet."""
-    wallet = request.args.get("wallet", "").strip()
-    if not wallet or not WALLET_REGEX.match(wallet):
-        return jsonify({"error": "invalid wallet"}), 400
-    limit = _clamp(_coerce_int(request.args.get("limit"), 50), 1, 200)
-    entries = settlement.get_credit_ledger(wallet, limit=limit)
-    return jsonify({"wallet": wallet, "entries": entries})
 
 
 # ---------------------------------------------------------------------------
@@ -3941,6 +4541,208 @@ def api_marketplace_browse() -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Gallery — image/video marketplace
+# ---------------------------------------------------------------------------
+
+
+@app.route("/gallery/browse", methods=["GET"])
+def api_gallery_browse() -> Any:
+    """Browse gallery listings."""
+    search = request.args.get("search", "").strip() or None
+    category = request.args.get("category", "").strip() or None
+    asset_type = request.args.get("asset_type", "").strip() or None
+    sort = request.args.get("sort", "newest").strip()
+    limit = _clamp(_coerce_int(request.args.get("limit"), 24), 1, 200)
+    offset = max(0, _coerce_int(request.args.get("offset"), 0))
+    result = gallery.browse_gallery(
+        search=search, category=category, asset_type=asset_type,
+        sort=sort, limit=limit, offset=offset,
+    )
+    return jsonify(result)
+
+
+@app.route("/gallery/listings", methods=["POST"])
+def api_gallery_create_listing() -> Any:
+    """Create a gallery listing from a completed job (requires wallet signature)."""
+    if not rate_limit(f"gallery-list:{request.remote_addr}", limit=30):
+        return jsonify({"error": "rate limit"}), 429
+    data = request.get_json() or {}
+    wallet = str(data.get("wallet", "")).strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    job_id = str(data.get("job_id", "")).strip()
+    if not job_id:
+        return jsonify({"error": "missing job_id"}), 400
+
+    # Verify wallet ownership via signature
+    nonce_str = str(data.get("nonce", "")).strip()
+    signature = str(data.get("signature", "")).strip()
+    if not nonce_str or not signature:
+        return jsonify({"error": "signature_required", "message": "nonce and signature are required"}), 400
+
+    price = data.get("price_credits")
+    try:
+        price_credits = float(price)
+        if price_credits <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid price_credits — must be > 0"}), 400
+
+    sig_ok, sig_err = _verify_wallet_signature(
+        wallet, nonce_str, signature,
+        allowed_purposes={WALLET_NONCE_PURPOSE_GALLERY_LIST},
+        expected_amount=price_credits,
+        log_label="Gallery listing",
+    )
+    if not sig_ok:
+        return sig_err
+
+    # Verify the job belongs to this wallet and is completed
+    conn = get_db()
+    job_row = conn.execute(
+        "SELECT wallet, status, model, data, task_type FROM jobs WHERE id = ?", (job_id,)
+    ).fetchone()
+    if not job_row:
+        return jsonify({"error": "job_not_found"}), 404
+    if job_row["wallet"] != wallet:
+        return jsonify({"error": "not_your_job"}), 403
+    if job_row["status"] not in ("completed", "success"):
+        return jsonify({"error": "job_not_completed"}), 400
+
+    title = str(data.get("title", "")).strip()[:200] or f"Generation #{job_id[:8]}"
+    description = str(data.get("description", "")).strip()[:2000]
+
+    category = str(data.get("category", "")).strip()
+    task_type = str(job_row["task_type"] or "").upper()
+    asset_type = "video" if "VIDEO" in task_type else "image"
+    model = job_row["model"] or ""
+
+    prompt = ""
+    try:
+        job_data = json.loads(job_row["data"]) if job_row["data"] else {}
+        prompt = str(job_data.get("prompt", ""))
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    result = gallery.create_listing(
+        job_id=job_id,
+        seller_wallet=wallet,
+        title=title,
+        price_credits=price_credits,
+        description=description,
+        category=category,
+        asset_type=asset_type,
+        model=model,
+        prompt=prompt,
+    )
+    return jsonify(result), 201
+
+
+@app.route("/gallery/listings/<int:listing_id>", methods=["GET"])
+def api_gallery_listing_detail(listing_id: int) -> Any:
+    """Get listing details."""
+    listing = gallery.get_listing(listing_id)
+    if not listing:
+        return jsonify({"error": "listing_not_found"}), 404
+    return jsonify(listing)
+
+
+@app.route("/gallery/listings/<int:listing_id>/purchase", methods=["POST"])
+def api_gallery_purchase(listing_id: int) -> Any:
+    """Purchase a gallery listing using credits (requires wallet signature)."""
+    if not rate_limit(f"gallery-purchase:{request.remote_addr}", limit=10):
+        return jsonify({"error": "rate limit"}), 429
+    data = request.get_json() or {}
+    buyer_wallet = str(data.get("wallet", "")).strip()
+    if not buyer_wallet or not WALLET_REGEX.match(buyer_wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+
+    # Verify wallet ownership via signature
+    nonce_str = str(data.get("nonce", "")).strip()
+    signature = str(data.get("signature", "")).strip()
+    if not nonce_str or not signature:
+        return jsonify({"error": "signature_required", "message": "nonce and signature are required"}), 400
+
+    listing = gallery.get_listing(listing_id)
+    if not listing or not listing.get("listed") or listing.get("sold"):
+        return jsonify({"error": "listing_not_available"}), 404
+
+    price = listing["price_credits"]
+
+    sig_ok, sig_err = _verify_wallet_signature(
+        buyer_wallet, nonce_str, signature,
+        allowed_purposes={WALLET_NONCE_PURPOSE_GALLERY_PURCHASE},
+        expected_amount=price,
+        log_label="Gallery purchase",
+    )
+    if not sig_ok:
+        return sig_err
+
+    # Deduct credits from buyer
+    ok, remaining = credits.deduct_credits(buyer_wallet, price, job_id=f"gallery-{listing_id}")
+    if not ok:
+        return jsonify({
+            "error": "insufficient_credits",
+            "balance": remaining,
+            "cost": price,
+            "message": f"This item costs {price} credits but you only have {remaining}.",
+        }), 402
+
+    # Complete the purchase
+    result = gallery.purchase_listing(listing_id, buyer_wallet)
+    if not result.get("ok"):
+        # Refund buyer if purchase failed after deduction
+        credits.deposit_credits(buyer_wallet, price, reason=f"gallery-refund-{listing_id}")
+        return jsonify({"error": result.get("error", "purchase_failed")}), 400
+
+    # Credit the seller
+    credits.deposit_credits(
+        listing["seller_wallet"], price,
+        reason=f"gallery-sale-{listing_id}",
+    )
+
+    return jsonify({
+        "ok": True,
+        "sale": result["sale"],
+        "remaining_credits": remaining,
+    })
+
+
+@app.route("/gallery/listings/<int:listing_id>", methods=["DELETE"])
+def api_gallery_delist(listing_id: int) -> Any:
+    """Remove a listing (seller only)."""
+    data = request.get_json() or {}
+    wallet = str(data.get("wallet", "")).strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    ok = gallery.delist(listing_id, wallet)
+    if not ok:
+        return jsonify({"error": "listing_not_found_or_unauthorized"}), 404
+    return jsonify({"ok": True})
+
+
+@app.route("/gallery/my-listings", methods=["GET"])
+def api_gallery_my_listings() -> Any:
+    """Get listings for the current wallet."""
+    wallet = request.args.get("wallet", "").strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    include_sold = request.args.get("include_sold", "").lower() in ("true", "1", "yes")
+    listings = gallery.seller_listings(wallet, include_sold=include_sold)
+    return jsonify({"listings": listings})
+
+
+@app.route("/gallery/purchases", methods=["GET"])
+def api_gallery_purchases() -> Any:
+    """Get purchase history for a wallet."""
+    wallet = request.args.get("wallet", "").strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    purchases = gallery.buyer_purchases(wallet)
+    return jsonify({"purchases": purchases})
+
+
+# ---------------------------------------------------------------------------
 # Health and admin utilities
 # ---------------------------------------------------------------------------
 
@@ -4028,6 +4830,8 @@ if RESET_ON_STARTUP:
 
 @app.route("/logs", methods=["GET"])
 def logs_endpoint() -> Any:
+    if not check_join_token():
+        abort(403)
     with LOCK:
         entries = list(EVENT_LOGS)[-50:]
     return jsonify({"logs": entries})
@@ -4049,17 +4853,8 @@ def get_result(job_id: str) -> Any:
     if not job_id:
         return jsonify({"error": "missing job_id"}), 400
 
-    image_path = OUTPUTS_DIR / f"{job_id}.png"
-    videos_dir = OUTPUTS_DIR / "videos"
-    video_path = videos_dir / f"{job_id}.mp4"
-
-    payload: Dict[str, Any] = {"job_id": job_id}
-    if image_path.exists():
-        payload["image_url"] = f"/static/outputs/{job_id}.png"
-    if video_path.exists():
-        payload["video_url"] = f"/static/outputs/videos/{job_id}.mp4"
-
-    if "image_url" not in payload and "video_url" not in payload:
+    payload = _build_result_payload(job_id)
+    if payload is None:
         return jsonify({"error": "result_not_found", "job_id": job_id}), 404
     return jsonify(payload), 200
 

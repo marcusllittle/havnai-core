@@ -20,6 +20,7 @@ get_db: Callable[[], sqlite3.Connection]
 log_event: Callable[..., None]
 WALLET_REGEX: Any  # re.Pattern
 build_result_payload: Callable[[str], Optional[Dict[str, Any]]]
+resolve_job_metadata: Callable[[str], Optional[Dict[str, Any]]]
 
 
 def init_gallery_tables(conn: sqlite3.Connection) -> None:
@@ -287,6 +288,26 @@ def _attach_result_urls(record: Dict[str, Any]) -> Dict[str, Any]:
     job_id = str(record.get("job_id") or "").strip()
     if not job_id:
         return record
+
+    metadata_resolver = globals().get("resolve_job_metadata")
+    if callable(metadata_resolver):
+        try:
+            metadata = metadata_resolver(job_id)  # type: ignore[misc]
+        except Exception:
+            metadata = None
+        if isinstance(metadata, dict):
+            canonical_model = str(metadata.get("model_name") or "").strip()
+            canonical_prompt = str(metadata.get("prompt") or "").strip()
+            if canonical_model:
+                record["model"] = canonical_model
+                record["model_key"] = metadata.get("model_key")
+                record["model_tier"] = metadata.get("tier")
+                record["model_reward_weight"] = metadata.get("reward_weight")
+                record["model_credit_cost"] = metadata.get("credit_cost")
+                record["model_pipeline"] = metadata.get("pipeline")
+                record["model_task_type"] = metadata.get("task_type")
+            if canonical_prompt:
+                record["prompt"] = canonical_prompt
 
     resolver = globals().get("build_result_payload")
     if not callable(resolver):

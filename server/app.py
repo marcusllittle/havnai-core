@@ -913,15 +913,22 @@ def load_manifest() -> None:
         pipeline = str(entry.get("pipeline", "")).strip().lower()
         path_str = str(entry.get("path", "")).strip()
         artifact_type = str(entry.get("type", "")).strip() or "checkpoint"
-        weight = float(entry.get("weight", MODEL_WEIGHTS.get(key, 10.0)))
-        MODEL_WEIGHTS[key] = weight
+        # Canonical reward weight precedence:
+        #   1) reward_weight (explicit economics signal)
+        #   2) weight (legacy/shared field)
+        #   3) runtime fallback
+        reward_weight_raw = entry.get("reward_weight", entry.get("weight", MODEL_WEIGHTS.get(key, 10.0)))
+        reward_weight = float(reward_weight_raw)
+        legacy_weight = float(entry.get("weight", reward_weight))
+        MODEL_WEIGHTS[key] = reward_weight
         entry_data = {
             "name": name,
             "pipeline": pipeline or "sd15",
             "path": path_str,
             "type": artifact_type,
             "tags": entry.get("tags", []),
-            "reward_weight": weight,
+            "weight": legacy_weight,
+            "reward_weight": reward_weight,
             "task_type": entry.get("task_type", CREATOR_TASK_TYPE),
             "strengths": entry.get("strengths"),
             "weaknesses": entry.get("weaknesses"),
@@ -1148,9 +1155,100 @@ def get_model_config(model_name: str) -> Optional[Dict[str, Any]]:
     return dict(entry)
 
 
+def _weight_to_tier(weight: float) -> str:
+    """Map reward weight to canonical tier label."""
+    if weight >= 20:
+        return "S"
+    if weight >= 10:
+        return "A"
+    if weight >= 8:
+        return "B"
+    if weight >= 5:
+        return "C"
+    return "D"
+
+
+def _safe_parse_json_dict(raw: Any) -> Dict[str, Any]:
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            return {}
+    return {}
+
+
+def _build_canonical_model_metadata(
+    model_name: str,
+    job_type: str,
+    *,
+    fallback_prompt: str = "",
+) -> Dict[str, Any]:
+    """Build canonical model/economy metadata for a job."""
+    cfg = get_model_config(model_name) or {}
+    canonical_model_name = str(cfg.get("name") or model_name or "").strip()
+    canonical_model_key = canonical_model_name.lower()
+    reward_weight = float(cfg.get("reward_weight", rewards.resolve_weight(canonical_model_key, 10.0)))
+    pipeline = str(cfg.get("pipeline") or "").strip().lower()
+    normalized_job_type = _normalize_task_type(str(job_type or cfg.get("task_type") or CREATOR_TASK_TYPE))
+    prompt = str(fallback_prompt or "").strip()
+    return {
+        "model_key": canonical_model_key,
+        "model_name": canonical_model_name,
+        "pipeline": pipeline,
+        "task_type": normalized_job_type,
+        "reward_weight": reward_weight,
+        "tier": _weight_to_tier(reward_weight),
+        "credit_cost": float(credits.resolve_credit_cost(canonical_model_name, normalized_job_type)),
+        "prompt": prompt,
+        "source": "manifest",
+    }
+
+
+def _canonical_metadata_for_job(job_id: str) -> Optional[Dict[str, Any]]:
+    """Resolve canonical model metadata for an existing job via settlement truth."""
+    record = settlement.get_job_settlement(job_id)
+    if not record:
+        return None
+
+    metadata = _safe_parse_json_dict(record.get("input_metadata"))
+    model_name = str(
+        metadata.get("model_name")
+        or metadata.get("model_key")
+        or record.get("model")
+        or ""
+    ).strip()
+    if not model_name:
+        return None
+
+    metadata_from_truth = _build_canonical_model_metadata(
+        model_name=model_name,
+        job_type=str(record.get("job_type") or CREATOR_TASK_TYPE),
+        fallback_prompt=str(record.get("prompt") or ""),
+    )
+    for key, value in metadata.items():
+        metadata_from_truth[key] = value
+    metadata_from_truth["model_name"] = str(
+        metadata_from_truth.get("model_name")
+        or metadata_from_truth.get("model_key")
+        or model_name
+    ).strip()
+    metadata_from_truth["model_key"] = metadata_from_truth["model_name"].lower()
+    metadata_from_truth["prompt"] = str(
+        metadata_from_truth.get("prompt")
+        or record.get("prompt")
+        or ""
+    )
+    return metadata_from_truth
+
+
 # Inject get_model_config into modules that need it
 credits.get_model_config = get_model_config  # type: ignore[attr-defined]
 job_helpers.get_model_config = get_model_config  # type: ignore[attr-defined]
+gallery.resolve_job_metadata = _canonical_metadata_for_job  # type: ignore[attr-defined]
 
 
 def _normalize_task_type(task_type: Optional[str]) -> str:
@@ -1976,6 +2074,83 @@ def build_faceswap_settings(
     return settings
 
 
+def _create_settlement_ticket_for_submission(
+    *,
+    job_id: str,
+    wallet: str,
+    job_type: str,
+    model: str,
+    job_data: str,
+) -> None:
+    """Create and advance the settlement ticket for a newly queued job."""
+    prompt_for_ticket = ""
+    try:
+        parsed = json.loads(job_data) if isinstance(job_data, str) else {}
+        if isinstance(parsed, dict):
+            prompt_for_ticket = str(parsed.get("prompt", "") or "")
+    except Exception:
+        pass
+
+    canonical_metadata = _build_canonical_model_metadata(
+        model_name=model,
+        job_type=job_type,
+        fallback_prompt=prompt_for_ticket,
+    )
+    prompt_for_ticket = str(canonical_metadata.get("prompt") or prompt_for_ticket)
+
+    credit_cost = credits.resolve_credit_cost(model, job_type)
+    settlement.create_job_ticket(
+        job_id=job_id,
+        wallet=wallet,
+        job_type=job_type,
+        model=model,
+        estimated_cost=credit_cost,
+        prompt=prompt_for_ticket,
+        input_metadata=canonical_metadata,
+    )
+    if credit_cost > 0:
+        # Credits are already deducted by check_and_deduct_credits.
+        settlement.reserve_credits(
+            job_id,
+            wallet,
+            credit_cost,
+            reserve_fn=lambda w, a, j: (True, credits.get_credit_balance(w)),
+        )
+    settlement.mark_queued(job_id)
+
+
+def _emit_job_lifecycle(
+    *,
+    job_id: str,
+    wallet: str,
+    job_type: str,
+    lifecycle_status: str,
+    settlement_status: Optional[str] = None,
+    quality_status: Optional[str] = None,
+    message: Optional[str] = None,
+    reason: Optional[str] = None,
+    **extra: Any,
+) -> None:
+    """Emit canonical lifecycle events across all job types."""
+    payload: Dict[str, Any] = {
+        "event_type": "job_lifecycle",
+        "job_type": (job_type or CREATOR_TASK_TYPE).upper(),
+        "lifecycle_status": str(lifecycle_status or "").upper(),
+        # Backward-compatible alias used by some older clients.
+        "status": str(lifecycle_status or "").upper(),
+    }
+    if settlement_status:
+        payload["settlement_status"] = str(settlement_status)
+    if quality_status:
+        payload["quality_status"] = str(quality_status)
+    if message:
+        payload["message"] = str(message)
+    if reason:
+        payload["reason"] = str(reason)
+    payload.update(extra)
+    _emit_job_event("job_lifecycle", job_id, wallet, **payload)
+
+
 @app.route("/submit-job", methods=["POST"])
 def submit_job() -> Any:
     if not rate_limit(f"submit-job:{request.remote_addr}", limit=30):
@@ -2388,27 +2563,13 @@ def submit_job() -> Any:
         )
     # Create durable job ticket with settlement tracking
     try:
-        prompt_for_ticket = ""
-        try:
-            parsed = json.loads(job_data) if isinstance(job_data, str) else {}
-            prompt_for_ticket = parsed.get("prompt", "")
-        except Exception:
-            pass
-        credit_cost = credits.resolve_credit_cost(selected_model_name, task_type)
-        settlement.create_job_ticket(
+        _create_settlement_ticket_for_submission(
             job_id=job_id,
             wallet=wallet,
             job_type=task_type,
             model=selected_model_name,
-            estimated_cost=credit_cost,
-            prompt=prompt_for_ticket,
+            job_data=job_data,
         )
-        if credit_cost > 0:
-            settlement.reserve_credits(
-                job_id, wallet, credit_cost,
-                reserve_fn=lambda w, a, j: (True, credits.get_credit_balance(w)),
-            )
-        settlement.mark_queued(job_id)
     except Exception as exc:
         log_event("Settlement ticket creation failed (non-fatal)", job_id=job_id, error=str(exc))
 
@@ -2422,6 +2583,15 @@ def submit_job() -> Any:
             steps_to=30,
         )
     _emit_job_event("job_queued", job_id, wallet, model=model_name, task_type=task_type)
+    _emit_job_lifecycle(
+        job_id=job_id,
+        wallet=wallet,
+        job_type=task_type,
+        lifecycle_status="QUEUED",
+        settlement_status="queued",
+        model=model_name,
+        message="Job queued",
+    )
     return jsonify({"status": "queued", "job_id": job_id}), 200
 
 
@@ -2535,8 +2705,27 @@ def generate_video_job() -> Any:
             float(weight),
             invite_code,
         )
+    try:
+        _create_settlement_ticket_for_submission(
+            job_id=job_id,
+            wallet=wallet,
+            job_type="VIDEO_GEN",
+            model=selected_model_name,
+            job_data=job_data,
+        )
+    except Exception as exc:
+        log_event("Settlement ticket creation failed (non-fatal)", job_id=job_id, error=str(exc))
     log_event("Video job queued", wallet=wallet, model=model_name, job_id=job_id)
     _emit_job_event("job_queued", job_id, wallet, model=model_name, task_type="VIDEO_GEN")
+    _emit_job_lifecycle(
+        job_id=job_id,
+        wallet=wallet,
+        job_type="VIDEO_GEN",
+        lifecycle_status="QUEUED",
+        settlement_status="queued",
+        model=model_name,
+        message="Job queued",
+    )
     return jsonify({"status": "queued", "job_id": job_id}), 200
 
 
@@ -2597,8 +2786,27 @@ def submit_faceswap_job_endpoint() -> Any:
             float(weight),
             invite_code,
         )
+    try:
+        _create_settlement_ticket_for_submission(
+            job_id=job_id,
+            wallet=wallet,
+            job_type="FACE_SWAP",
+            model=selected_model_name,
+            job_data=job_data,
+        )
+    except Exception as exc:
+        log_event("Settlement ticket creation failed (non-fatal)", job_id=job_id, error=str(exc))
     log_event("Face-swap job queued", wallet=wallet, model=model_name, job_id=job_id)
     _emit_job_event("job_queued", job_id, wallet, model=model_name, task_type="FACE_SWAP")
+    _emit_job_lifecycle(
+        job_id=job_id,
+        wallet=wallet,
+        job_type="FACE_SWAP",
+        lifecycle_status="QUEUED",
+        settlement_status="queued",
+        model=model_name,
+        message="Job queued",
+    )
     return jsonify({"status": "queued", "job_id": job_id}), 200
 
 
@@ -2795,9 +3003,19 @@ def get_creator_tasks() -> Any:
                     except Exception:
                         pass  # non-fatal — settlement is additive
                     log_event("Job claimed by node", job_id=job["id"], node_id=node_id)
-                    _emit_job_event("job_running", job["id"], job.get("wallet", ""), node_id=node_id, model=job["model"])
-                    reward_weight = float(job["weight"] or cfg.get("reward_weight", rewards.resolve_weight(job["model"], 10.0)))
                     job_task_type = (job.get("task_type") or CREATOR_TASK_TYPE).upper()
+                    _emit_job_event("job_running", job["id"], job.get("wallet", ""), node_id=node_id, model=job["model"])
+                    _emit_job_lifecycle(
+                        job_id=job["id"],
+                        wallet=job.get("wallet", ""),
+                        job_type=job_task_type,
+                        lifecycle_status="RUNNING",
+                        settlement_status="claimed",
+                        node_id=node_id,
+                        model=job["model"],
+                        message="Job running on node",
+                    )
+                    reward_weight = float(job["weight"] or cfg.get("reward_weight", rewards.resolve_weight(job["model"], 10.0)))
                     pending_entry = {
                             "task_id": job["id"],
                             "task_type": job_task_type,
@@ -3180,6 +3398,8 @@ def submit_results() -> Any:
         rewards.record_reward(wallet, task_id, reward)
 
         # --- Settlement: validate, settle, payout ---
+        settlement_result: Dict[str, Any] = {}
+        quality = settlement.QUALITY_UNCHECKED
         try:
             settlement.complete_attempt(
                 task_id, node_id, status,
@@ -3200,7 +3420,7 @@ def submit_results() -> Any:
                 exec_status = settlement.STATUS_TECHNICAL_FAILED
                 quality = settlement.QUALITY_UNCHECKED
 
-            settlement.settle_job(
+            settlement_result = settlement.settle_job(
                 job_id=task_id,
                 node_id=node_id,
                 execution_status=exec_status,
@@ -3221,6 +3441,26 @@ def submit_results() -> Any:
             "job_success" if status == "success" else "job_failed",
             task_id, wallet or "",
             node_id=node_id, model=model_name, status=status,
+        )
+        task_type_upper = str(task.get("task_type", CREATOR_TASK_TYPE)).upper()
+        status_upper = str(status or "").upper()
+        if status_upper == "SUCCESS":
+            lifecycle_status = "SUCCEEDED"
+        elif status_upper in {"CANCELLED", "CANCELED"}:
+            lifecycle_status = "CANCELLED"
+        else:
+            lifecycle_status = "FAILED"
+        _emit_job_lifecycle(
+            job_id=task_id,
+            wallet=wallet or "",
+            job_type=task_type_upper,
+            lifecycle_status=lifecycle_status,
+            settlement_status=str(settlement_result.get("settlement_outcome") or ""),
+            quality_status=quality,
+            reason=str(metrics.get("error", "")) if status != "success" else "",
+            node_id=node_id,
+            model=model_name,
+            message="Job completed" if status == "success" else "Job failed",
         )
         if reward > 0:
             _emit_job_event("reward_computed", task_id, wallet or "", reward=reward, node_id=node_id)
@@ -3963,6 +4203,7 @@ def job_detail(job_id: str) -> Any:
     except Exception:
         payload = {}
     reward_factors = payload.get("reward_factors") if isinstance(payload, dict) else None
+    model_metadata = _canonical_metadata_for_job(job_id)
 
     return jsonify(
         {
@@ -3978,7 +4219,159 @@ def job_detail(job_id: str) -> Any:
             "reward": reward_value,
             "reward_timestamp": reward_ts,
             "reward_factors": reward_factors,
+            "model_metadata": model_metadata,
             "data": payload,
+        }
+    )
+
+
+@app.route("/jobs/<job_id>/cancel", methods=["POST"])
+def job_cancel(job_id: str) -> Any:
+    """Cancel a queued/running job and release reserved credits when applicable."""
+    if not rate_limit(f"jobs-cancel:{request.remote_addr}", limit=60):
+        return jsonify({"error": "rate limit"}), 429
+
+    data = request.get_json(silent=True) or {}
+    wallet = str(data.get("wallet", "")).strip()
+
+    conn = get_db()
+    row = conn.execute(
+        "SELECT id, wallet, model, task_type, status, node_id FROM jobs WHERE id=?",
+        (job_id,),
+    ).fetchone()
+    if not row:
+        return jsonify({"error": "job_not_found", "job_id": job_id}), 404
+
+    owner_wallet = str(row["wallet"] or "")
+    if wallet and owner_wallet.lower() != wallet.lower():
+        return jsonify({"error": "not_your_job"}), 403
+
+    current_status = str(row["status"] or "").lower()
+    job_type = str(row["task_type"] or CREATOR_TASK_TYPE).upper()
+    node_id = str(row["node_id"] or "")
+
+    if current_status in {"cancelled", "canceled"}:
+        record = settlement.get_job_settlement(job_id)
+        return jsonify(
+            {
+                "status": "cancelled",
+                "job_id": job_id,
+                "already_cancelled": True,
+                "job_type": job_type,
+                "settlement_status": (record or {}).get("settlement_outcome"),
+                "quality_status": (record or {}).get("quality_status"),
+            }
+        )
+
+    if current_status in {"success", "completed", "failed"}:
+        return jsonify(
+            {
+                "error": "job_finalized",
+                "message": f"Job is already finalized with status '{current_status}'.",
+                "job_id": job_id,
+                "status": current_status,
+            }
+        ), 409
+
+    if current_status not in {"queued", "running"}:
+        return jsonify(
+            {
+                "error": "invalid_job_state",
+                "message": f"Cannot cancel job in state '{current_status}'.",
+                "job_id": job_id,
+                "status": current_status,
+            }
+        ), 409
+
+    now_ts = unix_now()
+    cur = conn.execute(
+        "UPDATE jobs SET status='cancelled', completed_at=? WHERE id=? AND status IN ('queued', 'running')",
+        (now_ts, job_id),
+    )
+    conn.commit()
+    if cur.rowcount != 1:
+        latest = conn.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+        latest_status = str(latest["status"] or "") if latest else "unknown"
+        return jsonify(
+            {
+                "error": "cancel_conflict",
+                "message": "Job state changed before cancellation could be applied.",
+                "job_id": job_id,
+                "status": latest_status,
+            }
+        ), 409
+
+    with LOCK:
+        TASKS.pop(job_id, None)
+        if node_id and node_id in NODES:
+            current_task = NODES[node_id].get("current_task") or {}
+            if str(current_task.get("task_id") or "") == job_id:
+                NODES[node_id]["current_task"] = None
+            save_nodes()
+
+    settlement_result: Dict[str, Any] = {}
+    settlement_record = settlement.get_job_settlement(job_id)
+    if settlement_record and settlement_record.get("settlement_outcome") == settlement.OUTCOME_PENDING:
+        settlement_node = node_id or str(settlement_record.get("assigned_node_id") or "cancelled")
+        if node_id:
+            try:
+                settlement.complete_attempt(
+                    job_id,
+                    node_id,
+                    "cancelled",
+                    error_message="cancelled_by_user",
+                    execution_metadata={"cancelled": True},
+                )
+            except Exception:
+                pass
+        try:
+            settlement_result = settlement.settle_job(
+                job_id=job_id,
+                node_id=settlement_node,
+                execution_status=settlement.STATUS_TECHNICAL_FAILED,
+                quality_status=settlement.QUALITY_UNCHECKED,
+                reward_amount=0.0,
+                deposit_fn=credits.deposit_credits,
+            )
+        except Exception as exc:
+            log_event("Job cancel settlement failed (non-fatal)", job_id=job_id, error=str(exc))
+
+    updated_record = settlement.get_job_settlement(job_id)
+    settlement_status = str(
+        settlement_result.get("settlement_outcome")
+        or (updated_record or {}).get("settlement_outcome")
+        or ""
+    )
+    quality_status = str((updated_record or {}).get("quality_status") or "")
+
+    _emit_job_event(
+        "job_failed",
+        job_id,
+        owner_wallet,
+        node_id=node_id or None,
+        model=row["model"],
+        status="cancelled",
+        reason="cancelled_by_user",
+    )
+    _emit_job_lifecycle(
+        job_id=job_id,
+        wallet=owner_wallet,
+        job_type=job_type,
+        lifecycle_status="CANCELLED",
+        settlement_status=settlement_status,
+        quality_status=quality_status,
+        reason="cancelled_by_user",
+        message="Job cancelled by user",
+        node_id=node_id or None,
+        model=row["model"],
+    )
+    return jsonify(
+        {
+            "status": "cancelled",
+            "job_id": job_id,
+            "job_type": job_type,
+            "settlement_status": settlement_status or None,
+            "quality_status": quality_status or None,
         }
     )
 
@@ -4183,10 +4576,12 @@ def models_list() -> Any:
         {
           "models": [
             {
+              "model_key": str,
               "name": str,
               "tier": str,           # S, A, B, C, D
               "weight": float,
               "reward_weight": float,
+              "credit_cost": float,
               "task_type": str,      # IMAGE_GEN, VIDEO_GEN, ANIMATEDIFF
               "pipeline": str,       # sdxl, sd15, ltx2, animatediff
               "available": bool,
@@ -4207,19 +4602,6 @@ def models_list() -> Any:
         }
     """
 
-    def weight_to_tier(weight: float) -> str:
-        """Map weight to tier label (S/A/B/C/D)."""
-        if weight >= 20:
-            return "S"
-        elif weight >= 10:
-            return "A"
-        elif weight >= 8:
-            return "B"
-        elif weight >= 5:
-            return "C"
-        else:
-            return "D"
-
     refresh_manifest()
     models = []
     with LOCK:
@@ -4230,6 +4612,7 @@ def models_list() -> Any:
         native_task_type = _normalize_task_type(str(model_data.get("task_type", CREATOR_TASK_TYPE)))
         pipeline = str(model_data.get("pipeline", "sd15")).lower()
         weight = float(model_data.get("reward_weight", 10.0))
+        credit_cost = float(credits.resolve_credit_cost(model_name, native_task_type))
 
         image_defaults: Optional[Dict[str, Any]] = None
         video_defaults: Optional[Dict[str, Any]] = None
@@ -4277,10 +4660,12 @@ def models_list() -> Any:
 
         models.append(
             {
+                "model_key": model_key_norm,
                 "name": model_name,
-                "tier": weight_to_tier(weight),
+                "tier": _weight_to_tier(weight),
                 "weight": weight,
                 "reward_weight": weight,
+                "credit_cost": credit_cost,
                 "task_type": native_task_type,
                 "pipeline": pipeline,
                 "available": online_nodes > 0,
@@ -4496,6 +4881,7 @@ def settlement_detail(job_id: str) -> Any:
     if not record:
         return jsonify({"error": "not_found", "job_id": job_id}), 404
     attempts = settlement.get_job_attempts(job_id)
+    record["canonical_model_metadata"] = _canonical_metadata_for_job(job_id)
     record["attempts"] = attempts
     return jsonify(record)
 
@@ -4803,6 +5189,16 @@ def api_gallery_create_listing() -> Any:
         return jsonify({"error": "not_your_job"}), 403
     if job_row["status"] not in ("completed", "success"):
         return jsonify({"error": "job_not_completed"}), 400
+    if not settlement.is_marketplace_eligible(job_id):
+        return jsonify(
+            {
+                "error": "marketplace_ineligible",
+                "message": (
+                    "This output is not eligible for marketplace listing under current "
+                    "settlement policy."
+                ),
+            }
+        ), 400
 
     title = str(data.get("title", "")).strip()[:200] or f"Generation #{job_id[:8]}"
     description = str(data.get("description", "")).strip()[:2000]
@@ -4810,14 +5206,15 @@ def api_gallery_create_listing() -> Any:
     category = str(data.get("category", "")).strip()
     task_type = str(job_row["task_type"] or "").upper()
     asset_type = "video" if "VIDEO" in task_type else "image"
-    model = job_row["model"] or ""
-
-    prompt = ""
-    try:
-        job_data = json.loads(job_row["data"]) if job_row["data"] else {}
-        prompt = str(job_data.get("prompt", ""))
-    except (json.JSONDecodeError, TypeError):
-        pass
+    canonical_metadata = _canonical_metadata_for_job(job_id) or {}
+    model = str(canonical_metadata.get("model_name") or job_row["model"] or "")
+    prompt = str(canonical_metadata.get("prompt") or "")
+    if not prompt:
+        try:
+            job_data = json.loads(job_row["data"]) if job_row["data"] else {}
+            prompt = str(job_data.get("prompt", ""))
+        except (json.JSONDecodeError, TypeError):
+            pass
 
     result = gallery.create_listing(
         job_id=job_id,
@@ -4830,6 +5227,13 @@ def api_gallery_create_listing() -> Any:
         model=model,
         prompt=prompt,
     )
+    if canonical_metadata:
+        result["model_key"] = canonical_metadata.get("model_key")
+        result["model_tier"] = canonical_metadata.get("tier")
+        result["model_reward_weight"] = canonical_metadata.get("reward_weight")
+        result["model_credit_cost"] = canonical_metadata.get("credit_cost")
+        result["model_pipeline"] = canonical_metadata.get("pipeline")
+        result["model_task_type"] = canonical_metadata.get("task_type")
     return jsonify(result), 201
 
 

@@ -614,6 +614,126 @@ def get_node_payouts(node_id: str, limit: int = 50) -> List[Dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def get_node_attempts(node_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+    """Fetch recent execution attempts for a node, including settlement quality."""
+    conn = get_db()
+    limit = max(1, min(int(limit), 500))
+    rows = conn.execute(
+        """
+        SELECT a.id, a.job_id, a.node_id, a.attempt_number, a.claim_time, a.finish_time,
+               a.status, a.error_message, a.execution_metadata, a.created_at, a.updated_at,
+               s.job_type, s.model, s.quality_status, s.settlement_outcome
+        FROM job_attempts a
+        LEFT JOIN job_settlement s ON s.job_id = a.job_id
+        WHERE a.node_id = ?
+        ORDER BY COALESCE(a.finish_time, a.claim_time) DESC
+        LIMIT ?
+        """,
+        (node_id, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_node_performance(node_id: str, window_days: int = 30) -> Dict[str, Any]:
+    """Aggregate attempt quality + payout totals for an operator-facing worker view."""
+    conn = get_db()
+    days = max(1, min(int(window_days), 365))
+    cutoff = time.time() - (days * 86400)
+
+    attempts_row = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS total_attempts,
+            SUM(CASE WHEN LOWER(COALESCE(a.status, '')) IN ('success', 'completed') THEN 1 ELSE 0 END) AS completed_attempts,
+            SUM(
+                CASE
+                    WHEN a.finish_time IS NOT NULL
+                     AND LOWER(COALESCE(a.status, '')) NOT IN ('success', 'completed')
+                    THEN 1 ELSE 0
+                END
+            ) AS failed_attempts,
+            SUM(
+                CASE
+                    WHEN LOWER(COALESCE(a.status, '')) IN ('success', 'completed')
+                     AND LOWER(COALESCE(s.quality_status, '')) = 'malformed'
+                    THEN 1 ELSE 0
+                END
+            ) AS malformed_attempts,
+            MAX(COALESCE(a.finish_time, a.claim_time)) AS recent_attempt_at
+        FROM job_attempts a
+        LEFT JOIN job_settlement s ON s.job_id = a.job_id
+        WHERE a.node_id = ?
+        """,
+        (node_id,),
+    ).fetchone()
+
+    payouts_row = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS payout_count,
+            COALESCE(SUM(reward_amount), 0.0) AS payout_total,
+            SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) AS payout_window_count,
+            COALESCE(SUM(CASE WHEN created_at >= ? THEN reward_amount ELSE 0.0 END), 0.0) AS payout_window_total,
+            MAX(created_at) AS last_payout_at
+        FROM node_payouts
+        WHERE node_id = ? AND status = 'completed'
+        """,
+        (cutoff, cutoff, node_id),
+    ).fetchone()
+
+    total_attempts = int((attempts_row["total_attempts"] or 0) if attempts_row else 0)
+    completed_attempts = int((attempts_row["completed_attempts"] or 0) if attempts_row else 0)
+    failed_attempts = int((attempts_row["failed_attempts"] or 0) if attempts_row else 0)
+    malformed_attempts = int((attempts_row["malformed_attempts"] or 0) if attempts_row else 0)
+    finished_attempts = completed_attempts + failed_attempts
+
+    success_rate = (completed_attempts / finished_attempts) if finished_attempts > 0 else 0.0
+    malformed_rate = (malformed_attempts / completed_attempts) if completed_attempts > 0 else 0.0
+
+    if finished_attempts <= 0:
+        trust_score = None
+    else:
+        trust_score = max(0.0, min(100.0, (success_rate * 100.0) - (malformed_rate * 30.0)))
+
+    if finished_attempts < 5:
+        trust_level = "new"
+    elif trust_score is not None and trust_score >= 90 and malformed_rate <= 0.05:
+        trust_level = "trusted"
+    elif trust_score is not None and trust_score >= 70:
+        trust_level = "monitoring"
+    else:
+        trust_level = "at_risk"
+
+    payout_total = float((payouts_row["payout_total"] or 0.0) if payouts_row else 0.0)
+    payout_count = int((payouts_row["payout_count"] or 0) if payouts_row else 0)
+    payout_window_total = float((payouts_row["payout_window_total"] or 0.0) if payouts_row else 0.0)
+    payout_window_count = int((payouts_row["payout_window_count"] or 0) if payouts_row else 0)
+    last_payout_at = float(payouts_row["last_payout_at"]) if payouts_row and payouts_row["last_payout_at"] else None
+    recent_attempt_at = (
+        float(attempts_row["recent_attempt_at"]) if attempts_row and attempts_row["recent_attempt_at"] else None
+    )
+
+    return {
+        "attempts_total": total_attempts,
+        "completed_attempts": completed_attempts,
+        "failed_attempts": failed_attempts,
+        "finished_attempts": finished_attempts,
+        "malformed_attempts": malformed_attempts,
+        "success_rate": round(success_rate, 4),
+        "malformed_rate": round(malformed_rate, 4),
+        "trust_score": round(trust_score, 2) if trust_score is not None else None,
+        "trust_level": trust_level,
+        "sample_size": finished_attempts,
+        "recent_attempt_at": recent_attempt_at,
+        "payout_total": round(payout_total, 6),
+        "payout_count": payout_count,
+        "payout_window_days": days,
+        "payout_window_total": round(payout_window_total, 6),
+        "payout_window_count": payout_window_count,
+        "last_payout_at": last_payout_at,
+    }
+
+
 def get_credit_ledger(wallet: str, limit: int = 50) -> List[Dict[str, Any]]:
     """Fetch credit ledger entries for a wallet."""
     conn = get_db()

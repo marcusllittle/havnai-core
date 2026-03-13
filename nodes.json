@@ -1,0 +1,22 @@
+{
+  "node-face": {
+    "role": "creator",
+    "supports": [
+      "image",
+      "face_swap"
+    ],
+    "models": [
+      "epicrealismxl_vxviicrystalclear"
+    ],
+    "pipelines": [
+      "sdxl"
+    ],
+    "current_task": {
+      "task_id": "job-anchor-task",
+      "model_name": "epicrealismxl_vxviicrystalclear",
+      "status": "pending",
+      "task_type": "IMAGE_GEN",
+      "weight": 10.0
+    }
+  }
+}

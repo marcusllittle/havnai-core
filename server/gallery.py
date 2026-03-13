@@ -19,6 +19,8 @@ if TYPE_CHECKING:
 get_db: Callable[[], sqlite3.Connection]
 log_event: Callable[..., None]
 WALLET_REGEX: Any  # re.Pattern
+build_result_payload: Callable[[str], Optional[Dict[str, Any]]]
+resolve_job_metadata: Callable[[str], Optional[Dict[str, Any]]]
 
 
 def init_gallery_tables(conn: sqlite3.Connection) -> None:
@@ -266,7 +268,11 @@ def buyer_purchases(wallet: str) -> List[Dict[str, Any]]:
         """,
         (wallet,),
     ).fetchall()
-    return [dict(row) for row in rows]
+    purchases: List[Dict[str, Any]] = []
+    for row in rows:
+        purchase = dict(row)
+        purchases.append(_attach_result_urls(purchase))
+    return purchases
 
 
 def _listing_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
@@ -274,4 +280,53 @@ def _listing_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
     d = dict(row)
     d["listed"] = bool(d.get("listed", 0))
     d["sold"] = bool(d.get("sold", 0))
-    return d
+    return _attach_result_urls(d)
+
+
+def _attach_result_urls(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Attach image/video/preview URLs using the job's output artifacts when available."""
+    job_id = str(record.get("job_id") or "").strip()
+    if not job_id:
+        return record
+
+    metadata_resolver = globals().get("resolve_job_metadata")
+    if callable(metadata_resolver):
+        try:
+            metadata = metadata_resolver(job_id)  # type: ignore[misc]
+        except Exception:
+            metadata = None
+        if isinstance(metadata, dict):
+            canonical_model = str(metadata.get("model_name") or "").strip()
+            canonical_prompt = str(metadata.get("prompt") or "").strip()
+            if canonical_model:
+                record["model"] = canonical_model
+                record["model_key"] = metadata.get("model_key")
+                record["model_tier"] = metadata.get("tier")
+                record["model_reward_weight"] = metadata.get("reward_weight")
+                record["model_credit_cost"] = metadata.get("credit_cost")
+                record["model_pipeline"] = metadata.get("pipeline")
+                record["model_task_type"] = metadata.get("task_type")
+            if canonical_prompt:
+                record["prompt"] = canonical_prompt
+
+    resolver = globals().get("build_result_payload")
+    if not callable(resolver):
+        return record
+
+    try:
+        payload = resolver(job_id)  # type: ignore[misc]
+    except Exception:
+        return record
+
+    if not payload:
+        return record
+
+    image_url = payload.get("image_url")
+    video_url = payload.get("video_url")
+    if image_url:
+        record["image_url"] = image_url
+    if video_url:
+        record["video_url"] = video_url
+    if image_url or video_url:
+        record["preview_url"] = video_url or image_url
+    return record

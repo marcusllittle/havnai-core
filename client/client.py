@@ -488,7 +488,7 @@ FACE_SWAP_USE_XFORMERS = _env_flag("HAVNAI_FACE_SWAP_USE_XFORMERS", True)
 FACE_SWAP_PROFILE = (
     os.environ.get("HAVNAI_FACE_SWAP_PROFILE")
     or ENV_VARS.get("HAVNAI_FACE_SWAP_PROFILE")
-    or "auto"
+    or "quality"
 ).strip().lower()
 SAFE_CUDA_KERNELS = _env_flag("HAI_SAFE_CUDA_KERNELS", True)
 LTX2_LOW_VRAM_CAPS = _env_flag("HAVNAI_LTX2_LOW_VRAM_CAPS", True)
@@ -523,8 +523,8 @@ HTTP_TIMEOUT_WALLET_LINK = max(10.0, _env_float("HAI_HTTP_TIMEOUT_WALLET_LINK", 
 HTTP_TIMEOUT_DISCONNECT = max(5.0, _env_float("HAI_HTTP_TIMEOUT_DISCONNECT", 10.0))
 RESULT_SUBMIT_RETRIES = max(1, _env_int("HAI_RESULT_SUBMIT_RETRIES", 4))
 
-IMAGE_STEPS = int(os.environ.get("HAI_STEPS", "20"))
-IMAGE_GUIDANCE = float(os.environ.get("HAI_GUIDANCE", "7.0"))
+IMAGE_STEPS = int(os.environ.get("HAI_STEPS", "32"))
+IMAGE_GUIDANCE = float(os.environ.get("HAI_GUIDANCE", "6.5"))
 IMAGE_WIDTH = int(os.environ.get("HAI_WIDTH", "512"))
 IMAGE_HEIGHT = int(os.environ.get("HAI_HEIGHT", "512"))
 

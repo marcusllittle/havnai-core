@@ -144,6 +144,12 @@ TASK_SUPPORT_MAP = {
     "ANIMATEDIFF": "animatediff",
     "FACE_SWAP": "face_swap",
 }
+SUPPORT_TO_JOB_TYPE_MAP = {
+    "image": CREATOR_TASK_TYPE,
+    "video": "VIDEO_GEN",
+    "animatediff": "ANIMATEDIFF",
+    "face_swap": "FACE_SWAP",
+}
 
 # ---------------------------------------------------------------------------
 # GPU profile presets – select via HAVNAI_GPU_PROFILE env var.
@@ -193,10 +199,10 @@ _RUNTIME_DEFAULT_PROFILES: Dict[str, Dict[str, Dict[str, Any]]] = {
         "face_swap": {"num_steps": 24, "guidance": 6.0, "strength": 0.85},
     },
 }
-RUNTIME_PROFILE_NAME = os.getenv("HAVNAI_RUNTIME_PROFILE", "balanced").strip().lower()
+RUNTIME_PROFILE_NAME = os.getenv("HAVNAI_RUNTIME_PROFILE", "quality").strip().lower()
 RUNTIME_PROFILE = _RUNTIME_DEFAULT_PROFILES.get(
     RUNTIME_PROFILE_NAME,
-    _RUNTIME_DEFAULT_PROFILES["aggressive"],
+    _RUNTIME_DEFAULT_PROFILES["quality"],
 )
 ENABLE_LEGACY_AUTO_HARDCORE = os.getenv("HAVNAI_ENABLE_LEGACY_AUTO_HARDCORE", "").strip().lower() in {
     "1",
@@ -828,6 +834,32 @@ def init_db() -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS node_operator_registry (
+            node_id TEXT PRIMARY KEY,
+            operator_wallet TEXT,
+            operator_display_name TEXT,
+            node_name TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'worker',
+            supports TEXT,
+            supported_job_types TEXT,
+            supported_models TEXT,
+            supported_pipelines TEXT,
+            capability_metadata TEXT,
+            heartbeat_status TEXT NOT NULL DEFAULT 'offline',
+            first_seen REAL NOT NULL,
+            last_heartbeat REAL NOT NULL,
+            updated_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_node_operator_registry_wallet ON node_operator_registry (operator_wallet)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_node_operator_registry_last_heartbeat ON node_operator_registry (last_heartbeat DESC)"
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS credits (
             wallet TEXT PRIMARY KEY,
             balance REAL NOT NULL DEFAULT 0.0 CHECK (balance >= 0),
@@ -913,15 +945,22 @@ def load_manifest() -> None:
         pipeline = str(entry.get("pipeline", "")).strip().lower()
         path_str = str(entry.get("path", "")).strip()
         artifact_type = str(entry.get("type", "")).strip() or "checkpoint"
-        weight = float(entry.get("weight", MODEL_WEIGHTS.get(key, 10.0)))
-        MODEL_WEIGHTS[key] = weight
+        # Canonical reward weight precedence:
+        #   1) reward_weight (explicit economics signal)
+        #   2) weight (legacy/shared field)
+        #   3) runtime fallback
+        reward_weight_raw = entry.get("reward_weight", entry.get("weight", MODEL_WEIGHTS.get(key, 10.0)))
+        reward_weight = float(reward_weight_raw)
+        legacy_weight = float(entry.get("weight", reward_weight))
+        MODEL_WEIGHTS[key] = reward_weight
         entry_data = {
             "name": name,
             "pipeline": pipeline or "sd15",
             "path": path_str,
             "type": artifact_type,
             "tags": entry.get("tags", []),
-            "reward_weight": weight,
+            "weight": legacy_weight,
+            "reward_weight": reward_weight,
             "task_type": entry.get("task_type", CREATOR_TASK_TYPE),
             "strengths": entry.get("strengths"),
             "weaknesses": entry.get("weaknesses"),
@@ -1022,7 +1061,371 @@ def load_node_wallets() -> None:
             node["node_name"] = row["node_name"]
 
 
+def _normalize_string_list(values: Any, *, lower: bool = False) -> List[str]:
+    if not isinstance(values, list):
+        return []
+    normalized: List[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        candidate = text.lower() if lower else text
+        marker = candidate.lower()
+        if marker in seen:
+            continue
+        seen.add(marker)
+        normalized.append(candidate)
+    return normalized
+
+
+def _normalize_supports(values: Any) -> List[str]:
+    supports = _normalize_string_list(values, lower=True)
+    return [item for item in supports if item in SUPPORT_TO_JOB_TYPE_MAP]
+
+
+def _supports_to_job_types(supports: List[str]) -> List[str]:
+    mapped = [SUPPORT_TO_JOB_TYPE_MAP[item] for item in supports if item in SUPPORT_TO_JOB_TYPE_MAP]
+    return _normalize_string_list(mapped, lower=False)
+
+
+def _extract_gpu_payload(
+    raw_gpu: Any,
+    raw_gpu_stats: Any = None,
+) -> Dict[str, Any]:
+    if isinstance(raw_gpu_stats, dict):
+        payload = dict(raw_gpu_stats)
+    elif isinstance(raw_gpu, dict):
+        payload = dict(raw_gpu)
+    elif isinstance(raw_gpu, str):
+        payload = {"gpu_name": raw_gpu}
+    else:
+        payload = {}
+    if "gpu_name" not in payload and isinstance(raw_gpu, str) and raw_gpu.strip():
+        payload["gpu_name"] = raw_gpu.strip()
+    return payload
+
+
+def _decode_json_list(raw: Any) -> List[str]:
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return _normalize_string_list(raw, lower=False)
+    try:
+        parsed = json.loads(str(raw))
+    except Exception:
+        return []
+    return _normalize_string_list(parsed, lower=False) if isinstance(parsed, list) else []
+
+
+def _decode_json_dict(raw: Any) -> Dict[str, Any]:
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return dict(raw)
+    try:
+        parsed = json.loads(str(raw))
+    except Exception:
+        return {}
+    return dict(parsed) if isinstance(parsed, dict) else {}
+
+
+def _upsert_node_operator_registry(
+    node_id: str,
+    node: Dict[str, Any],
+    *,
+    heartbeat_status: Optional[str] = None,
+) -> None:
+    conn = get_db()
+    now = unix_now()
+
+    supports = _normalize_supports(node.get("supports", []))
+    models = _normalize_string_list(node.get("models", []), lower=False)
+    pipelines = _normalize_string_list(node.get("pipelines", []), lower=True)
+    supported_job_types = _supports_to_job_types(supports)
+    wallet = str(node.get("wallet") or "").strip()
+    node_name = str(node.get("node_name") or node_id).strip() or node_id
+    operator_display_name = str(node.get("operator_display_name") or node_name).strip() or node_name
+    role = str(node.get("role") or "worker").strip() or "worker"
+    last_heartbeat = parse_timestamp(node.get("last_seen_unix") or node.get("last_seen") or now)
+
+    capability_metadata = {
+        "os": node.get("os", "unknown"),
+        "gpu": node.get("gpu") if isinstance(node.get("gpu"), dict) else {},
+        "version": node.get("version", "unknown"),
+        "avg_utilization": float(node.get("avg_utilization", node.get("utilization", 0.0)) or 0.0),
+    }
+    status_value = str(
+        heartbeat_status
+        or ("online" if (now - last_heartbeat) <= ONLINE_THRESHOLD else "offline")
+    )
+
+    conn.execute(
+        """
+        INSERT INTO node_operator_registry (
+            node_id,
+            operator_wallet,
+            operator_display_name,
+            node_name,
+            role,
+            supports,
+            supported_job_types,
+            supported_models,
+            supported_pipelines,
+            capability_metadata,
+            heartbeat_status,
+            first_seen,
+            last_heartbeat,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(node_id) DO UPDATE SET
+            operator_wallet = CASE
+                WHEN excluded.operator_wallet IS NOT NULL AND excluded.operator_wallet != ''
+                THEN excluded.operator_wallet
+                ELSE node_operator_registry.operator_wallet
+            END,
+            operator_display_name = CASE
+                WHEN excluded.operator_display_name IS NOT NULL AND excluded.operator_display_name != ''
+                THEN excluded.operator_display_name
+                ELSE node_operator_registry.operator_display_name
+            END,
+            node_name = excluded.node_name,
+            role = excluded.role,
+            supports = excluded.supports,
+            supported_job_types = excluded.supported_job_types,
+            supported_models = excluded.supported_models,
+            supported_pipelines = excluded.supported_pipelines,
+            capability_metadata = excluded.capability_metadata,
+            heartbeat_status = excluded.heartbeat_status,
+            last_heartbeat = excluded.last_heartbeat,
+            updated_at = excluded.updated_at
+        """,
+        (
+            node_id,
+            wallet,
+            operator_display_name,
+            node_name,
+            role,
+            json.dumps(supports),
+            json.dumps(supported_job_types),
+            json.dumps(models),
+            json.dumps(pipelines),
+            json.dumps(capability_metadata),
+            status_value,
+            now,
+            last_heartbeat,
+            now,
+        ),
+    )
+    conn.commit()
+
+
+def _mark_node_operator_status(node_id: str, status: str) -> None:
+    conn = get_db()
+    conn.execute(
+        """
+        UPDATE node_operator_registry
+        SET heartbeat_status = ?, updated_at = ?
+        WHERE node_id = ?
+        """,
+        (status, unix_now(), node_id),
+    )
+    conn.commit()
+
+
+def _fetch_node_operator_registry_rows(limit: int = 500) -> Dict[str, Dict[str, Any]]:
+    conn = get_db()
+    rows = conn.execute(
+        """
+        SELECT * FROM node_operator_registry
+        ORDER BY last_heartbeat DESC
+        LIMIT ?
+        """,
+        (max(1, min(int(limit), 2000)),),
+    ).fetchall()
+    return {str(row["node_id"]): dict(row) for row in rows}
+
+
+def _fetch_node_operator_registry_row(node_id: str) -> Optional[Dict[str, Any]]:
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM node_operator_registry WHERE node_id = ?",
+        (node_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _worker_snapshot(
+    node_id: str,
+    *,
+    node_info: Optional[Dict[str, Any]] = None,
+    registry_row: Optional[Dict[str, Any]] = None,
+    include_history: bool = False,
+    attempts_limit: int = 20,
+    payouts_limit: int = 20,
+) -> Dict[str, Any]:
+    now = unix_now()
+    node = dict(node_info or {})
+    registry = registry_row or _fetch_node_operator_registry_row(node_id) or {}
+    capability_meta = _decode_json_dict(registry.get("capability_metadata"))
+
+    supports = _normalize_supports(node.get("supports", []))
+    if not supports:
+        supports = _normalize_supports(_decode_json_list(registry.get("supports")))
+    supported_job_types = _supports_to_job_types(supports)
+    if not supported_job_types:
+        supported_job_types = _normalize_string_list(
+            _decode_json_list(registry.get("supported_job_types")),
+            lower=False,
+        )
+
+    models = _normalize_string_list(node.get("models", []), lower=False)
+    if not models:
+        models = _normalize_string_list(_decode_json_list(registry.get("supported_models")), lower=False)
+    pipelines = _normalize_string_list(node.get("pipelines", []), lower=True)
+    if not pipelines:
+        pipelines = _normalize_string_list(_decode_json_list(registry.get("supported_pipelines")), lower=True)
+
+    node_name = (
+        str(node.get("node_name") or registry.get("node_name") or node_id).strip()
+        or node_id
+    )
+    role = str(node.get("role") or registry.get("role") or "worker").strip() or "worker"
+    wallet = str(node.get("wallet") or registry.get("operator_wallet") or "").strip() or None
+    operator_display_name = (
+        str(node.get("operator_display_name") or registry.get("operator_display_name") or node_name).strip()
+        or node_name
+    )
+
+    gpu_payload = _extract_gpu_payload(node.get("gpu"), capability_meta.get("gpu"))
+    avg_utilization = float(node.get("avg_utilization", node.get("utilization", capability_meta.get("avg_utilization", 0.0))) or 0.0)
+    current_task = node.get("current_task") or {}
+    last_result = node.get("last_result") or {}
+    model_name = (last_result.get("model_name") or current_task.get("model_name"))
+    inference_time = last_result.get("metrics", {}).get("inference_time_ms")
+    task_type = (last_result.get("task_type") or current_task.get("task_type") or CREATOR_TASK_TYPE)
+    weight = (
+        last_result.get("metrics", {}).get("reward_weight")
+        or current_task.get("weight")
+        or MODEL_WEIGHTS.get((model_name or "triomerge_v10").lower(), 10.0)
+    )
+    try:
+        model_weight = float(weight)
+    except (TypeError, ValueError):
+        model_weight = rewards.resolve_weight(model_name or "triomerge_v10", 10.0)
+
+    last_seen_unix = parse_timestamp(
+        node.get("last_seen_unix")
+        or node.get("last_seen")
+        or registry.get("last_heartbeat")
+        or now
+    )
+    online = (now - last_seen_unix) <= ONLINE_THRESHOLD
+    status = "online" if online else "offline"
+    if registry.get("heartbeat_status") == "disconnected":
+        status = "disconnected"
+        online = False
+
+    start_time = parse_timestamp(node.get("start_time") or registry.get("first_seen") or now)
+    uptime_seconds = max(0, int(now - start_time))
+
+    performance = settlement.get_node_performance(node_id, window_days=30)
+    recent_activity_at = max(
+        [
+            float(value)
+            for value in [
+                performance.get("recent_attempt_at"),
+                performance.get("last_payout_at"),
+                last_seen_unix,
+            ]
+            if value is not None
+        ],
+        default=last_seen_unix,
+    )
+    trust = {
+        "score": performance.get("trust_score"),
+        "level": performance.get("trust_level"),
+        "sample_size": performance.get("sample_size"),
+    }
+
+    payload: Dict[str, Any] = {
+        "node_id": node_id,
+        "node_name": node_name,
+        "role": role,
+        "wallet": wallet,
+        "operator": {
+            "wallet": wallet,
+            "display_name": operator_display_name,
+            "identity": wallet or node_id,
+        },
+        "os": node.get("os") or capability_meta.get("os") or "unknown",
+        "gpu": gpu_payload,
+        "supports": supports,
+        "supported_job_types": supported_job_types,
+        "models": models,
+        "pipelines": pipelines,
+        "task_type": task_type,
+        "model_name": model_name,
+        "model_weight": model_weight,
+        "inference_time_ms": inference_time,
+        "gpu_utilization": float(node.get("utilization", gpu_payload.get("utilization", 0.0)) or 0.0),
+        "utilization": float(node.get("utilization", gpu_payload.get("utilization", 0.0)) or 0.0),
+        "avg_utilization": avg_utilization,
+        "rewards": float(node.get("rewards", 0.0) or 0.0),
+        "last_reward": float(node.get("last_reward", 0.0) or 0.0),
+        "tasks_completed": int(node.get("tasks_completed", 0) or 0),
+        "last_seen": node.get("last_seen") or datetime.fromtimestamp(last_seen_unix, timezone.utc).isoformat().replace("+00:00", "Z"),
+        "last_seen_unix": last_seen_unix,
+        "uptime_human": format_duration(uptime_seconds),
+        "status": status,
+        "online": online,
+        "heartbeat": {
+            "status": status,
+            "last_heartbeat": last_seen_unix,
+            "online": online,
+        },
+        "performance": {
+            "attempts_total": performance.get("attempts_total", 0),
+            "completed_attempts": performance.get("completed_attempts", 0),
+            "failed_attempts": performance.get("failed_attempts", 0),
+            "malformed_attempts": performance.get("malformed_attempts", 0),
+            "success_rate": performance.get("success_rate", 0.0),
+            "malformed_rate": performance.get("malformed_rate", 0.0),
+            "recent_attempt_at": performance.get("recent_attempt_at"),
+        },
+        "payouts": {
+            "total": performance.get("payout_total", 0.0),
+            "count": performance.get("payout_count", 0),
+            "window_days": performance.get("payout_window_days", 30),
+            "window_total": performance.get("payout_window_total", 0.0),
+            "window_count": performance.get("payout_window_count", 0),
+            "last_payout_at": performance.get("last_payout_at"),
+        },
+        "trust": trust,
+        "recent_activity_at": recent_activity_at,
+        "last_result": last_result,
+    }
+
+    if include_history:
+        payload["recent_attempts"] = settlement.get_node_attempts(
+            node_id,
+            limit=max(1, min(int(attempts_limit), 200)),
+        )
+        payload["recent_payouts"] = settlement.get_node_payouts(
+            node_id,
+            limit=max(1, min(int(payouts_limit), 200)),
+        )
+    return payload
+
+
 load_node_wallets()
+with LOCK:
+    for _node_id, _node_info in NODES.items():
+        try:
+            _upsert_node_operator_registry(_node_id, _node_info)
+        except Exception:
+            continue
 log_event(f"Telemetry online with {len(NODES)} cached node(s).", version=APP_VERSION)
 
 # ---------------------------------------------------------------------------
@@ -1148,9 +1551,100 @@ def get_model_config(model_name: str) -> Optional[Dict[str, Any]]:
     return dict(entry)
 
 
+def _weight_to_tier(weight: float) -> str:
+    """Map reward weight to canonical tier label."""
+    if weight >= 20:
+        return "S"
+    if weight >= 10:
+        return "A"
+    if weight >= 8:
+        return "B"
+    if weight >= 5:
+        return "C"
+    return "D"
+
+
+def _safe_parse_json_dict(raw: Any) -> Dict[str, Any]:
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            return {}
+    return {}
+
+
+def _build_canonical_model_metadata(
+    model_name: str,
+    job_type: str,
+    *,
+    fallback_prompt: str = "",
+) -> Dict[str, Any]:
+    """Build canonical model/economy metadata for a job."""
+    cfg = get_model_config(model_name) or {}
+    canonical_model_name = str(cfg.get("name") or model_name or "").strip()
+    canonical_model_key = canonical_model_name.lower()
+    reward_weight = float(cfg.get("reward_weight", rewards.resolve_weight(canonical_model_key, 10.0)))
+    pipeline = str(cfg.get("pipeline") or "").strip().lower()
+    normalized_job_type = _normalize_task_type(str(job_type or cfg.get("task_type") or CREATOR_TASK_TYPE))
+    prompt = str(fallback_prompt or "").strip()
+    return {
+        "model_key": canonical_model_key,
+        "model_name": canonical_model_name,
+        "pipeline": pipeline,
+        "task_type": normalized_job_type,
+        "reward_weight": reward_weight,
+        "tier": _weight_to_tier(reward_weight),
+        "credit_cost": float(credits.resolve_credit_cost(canonical_model_name, normalized_job_type)),
+        "prompt": prompt,
+        "source": "manifest",
+    }
+
+
+def _canonical_metadata_for_job(job_id: str) -> Optional[Dict[str, Any]]:
+    """Resolve canonical model metadata for an existing job via settlement truth."""
+    record = settlement.get_job_settlement(job_id)
+    if not record:
+        return None
+
+    metadata = _safe_parse_json_dict(record.get("input_metadata"))
+    model_name = str(
+        metadata.get("model_name")
+        or metadata.get("model_key")
+        or record.get("model")
+        or ""
+    ).strip()
+    if not model_name:
+        return None
+
+    metadata_from_truth = _build_canonical_model_metadata(
+        model_name=model_name,
+        job_type=str(record.get("job_type") or CREATOR_TASK_TYPE),
+        fallback_prompt=str(record.get("prompt") or ""),
+    )
+    for key, value in metadata.items():
+        metadata_from_truth[key] = value
+    metadata_from_truth["model_name"] = str(
+        metadata_from_truth.get("model_name")
+        or metadata_from_truth.get("model_key")
+        or model_name
+    ).strip()
+    metadata_from_truth["model_key"] = metadata_from_truth["model_name"].lower()
+    metadata_from_truth["prompt"] = str(
+        metadata_from_truth.get("prompt")
+        or record.get("prompt")
+        or ""
+    )
+    return metadata_from_truth
+
+
 # Inject get_model_config into modules that need it
 credits.get_model_config = get_model_config  # type: ignore[attr-defined]
 job_helpers.get_model_config = get_model_config  # type: ignore[attr-defined]
+gallery.resolve_job_metadata = _canonical_metadata_for_job  # type: ignore[attr-defined]
 
 
 def _normalize_task_type(task_type: Optional[str]) -> str:
@@ -1976,6 +2470,83 @@ def build_faceswap_settings(
     return settings
 
 
+def _create_settlement_ticket_for_submission(
+    *,
+    job_id: str,
+    wallet: str,
+    job_type: str,
+    model: str,
+    job_data: str,
+) -> None:
+    """Create and advance the settlement ticket for a newly queued job."""
+    prompt_for_ticket = ""
+    try:
+        parsed = json.loads(job_data) if isinstance(job_data, str) else {}
+        if isinstance(parsed, dict):
+            prompt_for_ticket = str(parsed.get("prompt", "") or "")
+    except Exception:
+        pass
+
+    canonical_metadata = _build_canonical_model_metadata(
+        model_name=model,
+        job_type=job_type,
+        fallback_prompt=prompt_for_ticket,
+    )
+    prompt_for_ticket = str(canonical_metadata.get("prompt") or prompt_for_ticket)
+
+    credit_cost = credits.resolve_credit_cost(model, job_type)
+    settlement.create_job_ticket(
+        job_id=job_id,
+        wallet=wallet,
+        job_type=job_type,
+        model=model,
+        estimated_cost=credit_cost,
+        prompt=prompt_for_ticket,
+        input_metadata=canonical_metadata,
+    )
+    if credit_cost > 0:
+        # Credits are already deducted by check_and_deduct_credits.
+        settlement.reserve_credits(
+            job_id,
+            wallet,
+            credit_cost,
+            reserve_fn=lambda w, a, j: (True, credits.get_credit_balance(w)),
+        )
+    settlement.mark_queued(job_id)
+
+
+def _emit_job_lifecycle(
+    *,
+    job_id: str,
+    wallet: str,
+    job_type: str,
+    lifecycle_status: str,
+    settlement_status: Optional[str] = None,
+    quality_status: Optional[str] = None,
+    message: Optional[str] = None,
+    reason: Optional[str] = None,
+    **extra: Any,
+) -> None:
+    """Emit canonical lifecycle events across all job types."""
+    payload: Dict[str, Any] = {
+        "event_type": "job_lifecycle",
+        "job_type": (job_type or CREATOR_TASK_TYPE).upper(),
+        "lifecycle_status": str(lifecycle_status or "").upper(),
+        # Backward-compatible alias used by some older clients.
+        "status": str(lifecycle_status or "").upper(),
+    }
+    if settlement_status:
+        payload["settlement_status"] = str(settlement_status)
+    if quality_status:
+        payload["quality_status"] = str(quality_status)
+    if message:
+        payload["message"] = str(message)
+    if reason:
+        payload["reason"] = str(reason)
+    payload.update(extra)
+    _emit_job_event("job_lifecycle", job_id, wallet, **payload)
+
+
 @app.route("/submit-job", methods=["POST"])
 def submit_job() -> Any:
     if not rate_limit(f"submit-job:{request.remote_addr}", limit=30):
@@ -2388,27 +2959,13 @@ def submit_job() -> Any:
         )
     # Create durable job ticket with settlement tracking
     try:
-        prompt_for_ticket = ""
-        try:
-            parsed = json.loads(job_data) if isinstance(job_data, str) else {}
-            prompt_for_ticket = parsed.get("prompt", "")
-        except Exception:
-            pass
-        credit_cost = credits.resolve_credit_cost(selected_model_name, task_type)
-        settlement.create_job_ticket(
+        _create_settlement_ticket_for_submission(
             job_id=job_id,
             wallet=wallet,
             job_type=task_type,
             model=selected_model_name,
-            estimated_cost=credit_cost,
-            prompt=prompt_for_ticket,
+            job_data=job_data,
         )
-        if credit_cost > 0:
-            settlement.reserve_credits(
-                job_id, wallet, credit_cost,
-                reserve_fn=lambda w, a, j: (True, credits.get_credit_balance(w)),
-            )
-        settlement.mark_queued(job_id)
     except Exception as exc:
         log_event("Settlement ticket creation failed (non-fatal)", job_id=job_id, error=str(exc))
 
@@ -2422,6 +2979,15 @@ def submit_job() -> Any:
             steps_to=30,
         )
     _emit_job_event("job_queued", job_id, wallet, model=model_name, task_type=task_type)
+    _emit_job_lifecycle(
+        job_id=job_id,
+        wallet=wallet,
+        job_type=task_type,
+        lifecycle_status="QUEUED",
+        settlement_status="queued",
+        model=model_name,
+        message="Job queued",
+    )
     return jsonify({"status": "queued", "job_id": job_id}), 200
 
 
@@ -2535,8 +3101,27 @@ def generate_video_job() -> Any:
             float(weight),
             invite_code,
         )
+    try:
+        _create_settlement_ticket_for_submission(
+            job_id=job_id,
+            wallet=wallet,
+            job_type="VIDEO_GEN",
+            model=selected_model_name,
+            job_data=job_data,
+        )
+    except Exception as exc:
+        log_event("Settlement ticket creation failed (non-fatal)", job_id=job_id, error=str(exc))
     log_event("Video job queued", wallet=wallet, model=model_name, job_id=job_id)
     _emit_job_event("job_queued", job_id, wallet, model=model_name, task_type="VIDEO_GEN")
+    _emit_job_lifecycle(
+        job_id=job_id,
+        wallet=wallet,
+        job_type="VIDEO_GEN",
+        lifecycle_status="QUEUED",
+        settlement_status="queued",
+        model=model_name,
+        message="Job queued",
+    )
     return jsonify({"status": "queued", "job_id": job_id}), 200
 
 
@@ -2597,8 +3182,27 @@ def submit_faceswap_job_endpoint() -> Any:
             float(weight),
             invite_code,
         )
+    try:
+        _create_settlement_ticket_for_submission(
+            job_id=job_id,
+            wallet=wallet,
+            job_type="FACE_SWAP",
+            model=selected_model_name,
+            job_data=job_data,
+        )
+    except Exception as exc:
+        log_event("Settlement ticket creation failed (non-fatal)", job_id=job_id, error=str(exc))
     log_event("Face-swap job queued", wallet=wallet, model=model_name, job_id=job_id)
     _emit_job_event("job_queued", job_id, wallet, model=model_name, task_type="FACE_SWAP")
+    _emit_job_lifecycle(
+        job_id=job_id,
+        wallet=wallet,
+        job_type="FACE_SWAP",
+        lifecycle_status="QUEUED",
+        settlement_status="queued",
+        model=model_name,
+        message="Job queued",
+    )
     return jsonify({"status": "queued", "job_id": job_id}), 200
 
 
@@ -2616,10 +3220,12 @@ def register() -> Any:
 
     with LOCK:
         node = NODES.get(node_id)
+        incoming_gpu = _extract_gpu_payload(data.get("gpu"), data.get("gpu_stats"))
+        incoming_supports = _normalize_supports(data.get("supports", []))
         if not node:
             node = {
                 "os": data.get("os", "unknown"),
-                "gpu": data.get("gpu", {}),
+                "gpu": incoming_gpu,
                 "rewards": 0.0,
                 "avg_utilization": 0.0,
                 "utilization": data.get("utilization", 0.0),
@@ -2631,30 +3237,27 @@ def register() -> Any:
                 "start_time": data.get("start_time", unix_now()),
                 "role": data.get("role", "worker"),
                 "node_name": data.get("node_name") or node_id,
+                "operator_display_name": data.get("operator_display_name") or data.get("node_name") or node_id,
                 "loras": [],
             }
             NODES[node_id] = node
             log_event("Node registered", node_id=node_id, role=node["role"], version=data.get("version"))
 
         node["os"] = data.get("os", node.get("os", "unknown"))
-        node["gpu"] = data.get("gpu", node.get("gpu", {}))
+        node["gpu"] = incoming_gpu or node.get("gpu", {})
         node["role"] = data.get("role", node.get("role", "worker"))
         node["node_name"] = data.get("node_name") or node.get("node_name", node_id)
+        node["operator_display_name"] = (
+            data.get("operator_display_name")
+            or node.get("operator_display_name")
+            or node.get("node_name")
+            or node_id
+        )
         node["version"] = data.get("version", "dev")
-        node["pipelines"] = data.get("pipelines", node.get("pipelines", []))
-        node["models"] = data.get("models", node.get("models", []))
-        supports_raw = data.get("supports", node.get("supports", []))
-        if isinstance(supports_raw, list):
-            node["supports"] = sorted(
-                {
-                    str(item).strip().lower()
-                    for item in supports_raw
-                    if str(item).strip()
-                }
-            )
-        else:
-            node["supports"] = node.get("supports", [])
-        util = data.get("gpu", {}).get("utilization") if isinstance(data.get("gpu"), dict) else data.get("utilization")
+        node["pipelines"] = _normalize_string_list(data.get("pipelines", node.get("pipelines", [])), lower=True)
+        node["models"] = _normalize_string_list(data.get("models", node.get("models", [])), lower=False)
+        node["supports"] = incoming_supports or _normalize_supports(node.get("supports", []))
+        util = incoming_gpu.get("utilization") if isinstance(incoming_gpu, dict) else data.get("utilization")
         util = float(util or node.get("utilization", 0.0))
         node["utilization"] = util
         samples = node.setdefault("util_samples", [])
@@ -2664,9 +3267,18 @@ def register() -> Any:
         node["avg_utilization"] = round(sum(samples) / len(samples), 2) if samples else util
         node["last_seen"] = iso_now()
         node["last_seen_unix"] = unix_now()
+        _upsert_node_operator_registry(node_id, node, heartbeat_status="online")
     save_nodes()
 
-    _emit_node_event("node_heartbeat", node_id, role=node.get("role", "worker"), wallet=node.get("wallet"))
+    _emit_node_event(
+        "node_heartbeat",
+        node_id,
+        role=node.get("role", "worker"),
+        wallet=node.get("wallet"),
+        node_name=node.get("node_name"),
+        supports=node.get("supports", []),
+        supported_job_types=_supports_to_job_types(node.get("supports", [])),
+    )
     return jsonify({"status": "ok", "node": node_id}), 200
 
 
@@ -2693,6 +3305,7 @@ def link_wallet() -> Any:
     node_id = data.get("node_id")
     wallet = data.get("wallet")
     node_name = data.get("node_name", node_id)
+    operator_display_name = data.get("operator_display_name")
     if not node_id or not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid payload"}), 400
 
@@ -2719,6 +3332,9 @@ def link_wallet() -> Any:
         })
         node["wallet"] = wallet
         node["node_name"] = node_name or node.get("node_name", node_id)
+        if operator_display_name:
+            node["operator_display_name"] = str(operator_display_name).strip()
+        _upsert_node_operator_registry(node_id, node, heartbeat_status="online")
         save_nodes()
     log_event("Wallet linked", node_id=node_id, wallet=wallet)
     return jsonify({"status": "linked"}), 200
@@ -2795,9 +3411,19 @@ def get_creator_tasks() -> Any:
                     except Exception:
                         pass  # non-fatal — settlement is additive
                     log_event("Job claimed by node", job_id=job["id"], node_id=node_id)
-                    _emit_job_event("job_running", job["id"], job.get("wallet", ""), node_id=node_id, model=job["model"])
-                    reward_weight = float(job["weight"] or cfg.get("reward_weight", rewards.resolve_weight(job["model"], 10.0)))
                     job_task_type = (job.get("task_type") or CREATOR_TASK_TYPE).upper()
+                    _emit_job_event("job_running", job["id"], job.get("wallet", ""), node_id=node_id, model=job["model"])
+                    _emit_job_lifecycle(
+                        job_id=job["id"],
+                        wallet=job.get("wallet", ""),
+                        job_type=job_task_type,
+                        lifecycle_status="RUNNING",
+                        settlement_status="claimed",
+                        node_id=node_id,
+                        model=job["model"],
+                        message="Job running on node",
+                    )
+                    reward_weight = float(job["weight"] or cfg.get("reward_weight", rewards.resolve_weight(job["model"], 10.0)))
                     pending_entry = {
                             "task_id": job["id"],
                             "task_type": job_task_type,
@@ -3180,6 +3806,8 @@ def submit_results() -> Any:
         rewards.record_reward(wallet, task_id, reward)
 
         # --- Settlement: validate, settle, payout ---
+        settlement_result: Dict[str, Any] = {}
+        quality = settlement.QUALITY_UNCHECKED
         try:
             settlement.complete_attempt(
                 task_id, node_id, status,
@@ -3200,7 +3828,7 @@ def submit_results() -> Any:
                 exec_status = settlement.STATUS_TECHNICAL_FAILED
                 quality = settlement.QUALITY_UNCHECKED
 
-            settlement.settle_job(
+            settlement_result = settlement.settle_job(
                 job_id=task_id,
                 node_id=node_id,
                 execution_status=exec_status,
@@ -3221,6 +3849,26 @@ def submit_results() -> Any:
             "job_success" if status == "success" else "job_failed",
             task_id, wallet or "",
             node_id=node_id, model=model_name, status=status,
+        )
+        task_type_upper = str(task.get("task_type", CREATOR_TASK_TYPE)).upper()
+        status_upper = str(status or "").upper()
+        if status_upper == "SUCCESS":
+            lifecycle_status = "SUCCEEDED"
+        elif status_upper in {"CANCELLED", "CANCELED"}:
+            lifecycle_status = "CANCELLED"
+        else:
+            lifecycle_status = "FAILED"
+        _emit_job_lifecycle(
+            job_id=task_id,
+            wallet=wallet or "",
+            job_type=task_type_upper,
+            lifecycle_status=lifecycle_status,
+            settlement_status=str(settlement_result.get("settlement_outcome") or ""),
+            quality_status=quality,
+            reason=str(metrics.get("error", "")) if status != "success" else "",
+            node_id=node_id,
+            model=model_name,
+            message="Job completed" if status == "success" else "Job failed",
         )
         if reward > 0:
             _emit_job_event("reward_computed", task_id, wallet or "", reward=reward, node_id=node_id)
@@ -3270,6 +3918,10 @@ def disconnect_node() -> Any:
         except Exception:
             conn.rollback()
             raise
+        try:
+            _mark_node_operator_status(node_id, "disconnected")
+        except Exception:
+            pass
 
     log_event("Node disconnected", node_id=node_id)
     _emit_node_event("node_disconnected", node_id)
@@ -3963,6 +4615,7 @@ def job_detail(job_id: str) -> Any:
     except Exception:
         payload = {}
     reward_factors = payload.get("reward_factors") if isinstance(payload, dict) else None
+    model_metadata = _canonical_metadata_for_job(job_id)
 
     return jsonify(
         {
@@ -3978,7 +4631,159 @@ def job_detail(job_id: str) -> Any:
             "reward": reward_value,
             "reward_timestamp": reward_ts,
             "reward_factors": reward_factors,
+            "model_metadata": model_metadata,
             "data": payload,
+        }
+    )
+
+
+@app.route("/jobs/<job_id>/cancel", methods=["POST"])
+def job_cancel(job_id: str) -> Any:
+    """Cancel a queued/running job and release reserved credits when applicable."""
+    if not rate_limit(f"jobs-cancel:{request.remote_addr}", limit=60):
+        return jsonify({"error": "rate limit"}), 429
+
+    data = request.get_json(silent=True) or {}
+    wallet = str(data.get("wallet", "")).strip()
+
+    conn = get_db()
+    row = conn.execute(
+        "SELECT id, wallet, model, task_type, status, node_id FROM jobs WHERE id=?",
+        (job_id,),
+    ).fetchone()
+    if not row:
+        return jsonify({"error": "job_not_found", "job_id": job_id}), 404
+
+    owner_wallet = str(row["wallet"] or "")
+    if wallet and owner_wallet.lower() != wallet.lower():
+        return jsonify({"error": "not_your_job"}), 403
+
+    current_status = str(row["status"] or "").lower()
+    job_type = str(row["task_type"] or CREATOR_TASK_TYPE).upper()
+    node_id = str(row["node_id"] or "")
+
+    if current_status in {"cancelled", "canceled"}:
+        record = settlement.get_job_settlement(job_id)
+        return jsonify(
+            {
+                "status": "cancelled",
+                "job_id": job_id,
+                "already_cancelled": True,
+                "job_type": job_type,
+                "settlement_status": (record or {}).get("settlement_outcome"),
+                "quality_status": (record or {}).get("quality_status"),
+            }
+        )
+
+    if current_status in {"success", "completed", "failed"}:
+        return jsonify(
+            {
+                "error": "job_finalized",
+                "message": f"Job is already finalized with status '{current_status}'.",
+                "job_id": job_id,
+                "status": current_status,
+            }
+        ), 409
+
+    if current_status not in {"queued", "running"}:
+        return jsonify(
+            {
+                "error": "invalid_job_state",
+                "message": f"Cannot cancel job in state '{current_status}'.",
+                "job_id": job_id,
+                "status": current_status,
+            }
+        ), 409
+
+    now_ts = unix_now()
+    cur = conn.execute(
+        "UPDATE jobs SET status='cancelled', completed_at=? WHERE id=? AND status IN ('queued', 'running')",
+        (now_ts, job_id),
+    )
+    conn.commit()
+    if cur.rowcount != 1:
+        latest = conn.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+        latest_status = str(latest["status"] or "") if latest else "unknown"
+        return jsonify(
+            {
+                "error": "cancel_conflict",
+                "message": "Job state changed before cancellation could be applied.",
+                "job_id": job_id,
+                "status": latest_status,
+            }
+        ), 409
+
+    with LOCK:
+        TASKS.pop(job_id, None)
+        if node_id and node_id in NODES:
+            current_task = NODES[node_id].get("current_task") or {}
+            if str(current_task.get("task_id") or "") == job_id:
+                NODES[node_id]["current_task"] = None
+            save_nodes()
+
+    settlement_result: Dict[str, Any] = {}
+    settlement_record = settlement.get_job_settlement(job_id)
+    if settlement_record and settlement_record.get("settlement_outcome") == settlement.OUTCOME_PENDING:
+        settlement_node = node_id or str(settlement_record.get("assigned_node_id") or "cancelled")
+        if node_id:
+            try:
+                settlement.complete_attempt(
+                    job_id,
+                    node_id,
+                    "cancelled",
+                    error_message="cancelled_by_user",
+                    execution_metadata={"cancelled": True},
+                )
+            except Exception:
+                pass
+        try:
+            settlement_result = settlement.settle_job(
+                job_id=job_id,
+                node_id=settlement_node,
+                execution_status=settlement.STATUS_TECHNICAL_FAILED,
+                quality_status=settlement.QUALITY_UNCHECKED,
+                reward_amount=0.0,
+                deposit_fn=credits.deposit_credits,
+            )
+        except Exception as exc:
+            log_event("Job cancel settlement failed (non-fatal)", job_id=job_id, error=str(exc))
+
+    updated_record = settlement.get_job_settlement(job_id)
+    settlement_status = str(
+        settlement_result.get("settlement_outcome")
+        or (updated_record or {}).get("settlement_outcome")
+        or ""
+    )
+    quality_status = str((updated_record or {}).get("quality_status") or "")
+
+    _emit_job_event(
+        "job_failed",
+        job_id,
+        owner_wallet,
+        node_id=node_id or None,
+        model=row["model"],
+        status="cancelled",
+        reason="cancelled_by_user",
+    )
+    _emit_job_lifecycle(
+        job_id=job_id,
+        wallet=owner_wallet,
+        job_type=job_type,
+        lifecycle_status="CANCELLED",
+        settlement_status=settlement_status,
+        quality_status=quality_status,
+        reason="cancelled_by_user",
+        message="Job cancelled by user",
+        node_id=node_id or None,
+        model=row["model"],
+    )
+    return jsonify(
+        {
+            "status": "cancelled",
+            "job_id": job_id,
+            "job_type": job_type,
+            "settlement_status": settlement_status or None,
+            "quality_status": quality_status or None,
         }
     )
 
@@ -4013,12 +4818,78 @@ def quota_status() -> Any:
 
 @app.route("/nodes/<node_id>", methods=["GET"])
 def node_detail(node_id: str) -> Any:
+    attempts_limit = _clamp(_coerce_int(request.args.get("attempts"), 20), 1, 200)
+    payouts_limit = _clamp(_coerce_int(request.args.get("payouts"), 20), 1, 200)
     with LOCK:
         node = NODES.get(node_id)
-        if not node:
+        registry_row = _fetch_node_operator_registry_row(node_id)
+        if not node and not registry_row:
             return jsonify({"error": "node_not_found", "node_id": node_id}), 404
-        payload = dict(node)
-        payload["node_id"] = node_id
+        node_payload = dict(node) if node else None
+    payload = _worker_snapshot(
+        node_id,
+        node_info=node_payload,
+        registry_row=registry_row,
+        include_history=True,
+        attempts_limit=attempts_limit,
+        payouts_limit=payouts_limit,
+    )
+    return jsonify(payload)
+
+
+@app.route("/operators/workers", methods=["GET"])
+def operator_workers() -> Any:
+    status_filter = str(request.args.get("status", "")).strip().lower()
+    limit = _clamp(_coerce_int(request.args.get("limit"), 200), 1, 1000)
+    with LOCK:
+        nodes_snapshot = {node_id: dict(info) for node_id, info in NODES.items()}
+        registry_rows = _fetch_node_operator_registry_rows(limit=max(500, limit * 2))
+
+    worker_ids = set(nodes_snapshot.keys()) | set(registry_rows.keys())
+    workers: List[Dict[str, Any]] = []
+    for worker_id in worker_ids:
+        payload = _worker_snapshot(
+            worker_id,
+            node_info=nodes_snapshot.get(worker_id),
+            registry_row=registry_rows.get(worker_id),
+            include_history=False,
+        )
+        if status_filter and str(payload.get("status", "")).lower() != status_filter:
+            continue
+        workers.append(payload)
+
+    workers.sort(key=lambda item: float(item.get("recent_activity_at") or 0.0), reverse=True)
+    workers = workers[:limit]
+    online_count = sum(1 for item in workers if item.get("online"))
+    total_payout = sum(float((item.get("payouts") or {}).get("total") or 0.0) for item in workers)
+    summary = {
+        "total_workers": len(workers),
+        "online_workers": online_count,
+        "offline_workers": len(workers) - online_count,
+        "total_payouts": round(total_payout, 6),
+        "timestamp": iso_now(),
+    }
+    return jsonify({"workers": workers, "summary": summary})
+
+
+@app.route("/operators/workers/<node_id>", methods=["GET"])
+def operator_worker_detail(node_id: str) -> Any:
+    attempts_limit = _clamp(_coerce_int(request.args.get("attempts"), 25), 1, 200)
+    payouts_limit = _clamp(_coerce_int(request.args.get("payouts"), 25), 1, 200)
+    with LOCK:
+        node_payload = dict(NODES.get(node_id) or {})
+        registry_row = _fetch_node_operator_registry_row(node_id)
+    if not node_payload and not registry_row:
+        return jsonify({"error": "worker_not_found", "node_id": node_id}), 404
+
+    payload = _worker_snapshot(
+        node_id,
+        node_info=node_payload or None,
+        registry_row=registry_row,
+        include_history=True,
+        attempts_limit=attempts_limit,
+        payouts_limit=payouts_limit,
+    )
     return jsonify(payload)
 
 
@@ -4183,10 +5054,12 @@ def models_list() -> Any:
         {
           "models": [
             {
+              "model_key": str,
               "name": str,
               "tier": str,           # S, A, B, C, D
               "weight": float,
               "reward_weight": float,
+              "credit_cost": float,
               "task_type": str,      # IMAGE_GEN, VIDEO_GEN, ANIMATEDIFF
               "pipeline": str,       # sdxl, sd15, ltx2, animatediff
               "available": bool,
@@ -4207,19 +5080,6 @@ def models_list() -> Any:
         }
     """
 
-    def weight_to_tier(weight: float) -> str:
-        """Map weight to tier label (S/A/B/C/D)."""
-        if weight >= 20:
-            return "S"
-        elif weight >= 10:
-            return "A"
-        elif weight >= 8:
-            return "B"
-        elif weight >= 5:
-            return "C"
-        else:
-            return "D"
-
     refresh_manifest()
     models = []
     with LOCK:
@@ -4230,6 +5090,7 @@ def models_list() -> Any:
         native_task_type = _normalize_task_type(str(model_data.get("task_type", CREATOR_TASK_TYPE)))
         pipeline = str(model_data.get("pipeline", "sd15")).lower()
         weight = float(model_data.get("reward_weight", 10.0))
+        credit_cost = float(credits.resolve_credit_cost(model_name, native_task_type))
 
         image_defaults: Optional[Dict[str, Any]] = None
         video_defaults: Optional[Dict[str, Any]] = None
@@ -4277,10 +5138,12 @@ def models_list() -> Any:
 
         models.append(
             {
+                "model_key": model_key_norm,
                 "name": model_name,
-                "tier": weight_to_tier(weight),
+                "tier": _weight_to_tier(weight),
                 "weight": weight,
                 "reward_weight": weight,
+                "credit_cost": credit_cost,
                 "task_type": native_task_type,
                 "pipeline": pipeline,
                 "available": online_nodes > 0,
@@ -4484,6 +5347,99 @@ def credits_hai_fundings() -> Any:
     })
 
 
+@app.route("/credits/tester-distribution/request", methods=["POST"])
+def tester_distribution_request() -> Any:
+    """Create a trusted tester request for HAI distribution support."""
+    if not rate_limit(f"tester-dist-request:{request.remote_addr}", limit=15):
+        return jsonify({"error": "rate_limit", "message": "Too many tester distribution requests."}), 429
+
+    data = request.get_json(silent=True) or {}
+    wallet = str(data.get("wallet", "")).strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid_wallet", "message": "Invalid wallet address."}), 400
+
+    requested_hai = data.get("requested_hai")
+    request_note = str(data.get("request_note", "")).strip()
+    result = hai_funding.create_tester_distribution_request(
+        wallet=wallet,
+        requested_hai=requested_hai,
+        request_note=request_note,
+    )
+    if result.get("error") == "disabled":
+        return jsonify(result), 403
+    if result.get("error") == "wallet_not_allowed":
+        return jsonify(result), 403
+    if result.get("error") in {"invalid_amount"}:
+        return jsonify(result), 400
+    if result.get("error") == "cooldown_active":
+        return jsonify(result), 429
+    return jsonify(result), 201 if result.get("status") == "pending" else 200
+
+
+@app.route("/credits/tester-distribution/requests", methods=["GET"])
+def tester_distribution_requests() -> Any:
+    """List tester distribution requests for a wallet (or all requests for admins)."""
+    wallet = request.args.get("wallet", "").strip()
+    status = request.args.get("status", "").strip().lower() or None
+    limit = _clamp(_coerce_int(request.args.get("limit"), 20), 1, 200)
+
+    if wallet:
+        if not WALLET_REGEX.match(wallet):
+            return jsonify({"error": "invalid_wallet"}), 400
+        requests_payload = hai_funding.list_tester_distribution_requests(
+            wallet=wallet,
+            status=status,
+            limit=limit,
+        )
+        return jsonify(
+            {
+                "wallet": wallet,
+                "requests": requests_payload,
+                "tester_distribution": hai_funding.tester_distribution_config(),
+            }
+        )
+
+    if not check_join_token():
+        abort(403)
+    requests_payload = hai_funding.list_tester_distribution_requests(
+        wallet=None,
+        status=status,
+        limit=limit,
+    )
+    return jsonify(
+        {
+            "requests": requests_payload,
+            "tester_distribution": hai_funding.tester_distribution_config(),
+        }
+    )
+
+
+@app.route("/credits/tester-distribution/requests/<int:request_id>/resolve", methods=["POST"])
+def tester_distribution_resolve(request_id: int) -> Any:
+    """Admin-only resolution endpoint for tester distribution requests."""
+    if not check_join_token():
+        abort(403)
+
+    data = request.get_json(silent=True) or {}
+    status = str(data.get("status", "")).strip().lower()
+    admin_note = str(data.get("admin_note", "")).strip()
+    tx_hash = str(data.get("tx_hash", "")).strip() or None
+    credits_granted = data.get("credits_granted")
+
+    result = hai_funding.resolve_tester_distribution_request(
+        request_id=request_id,
+        new_status=status,
+        admin_note=admin_note,
+        tx_hash=tx_hash,
+        credits_granted=credits_granted,
+    )
+    if result.get("error") == "not_found":
+        return jsonify(result), 404
+    if result.get("error") in {"invalid_status", "invalid_credits_granted"}:
+        return jsonify(result), 400
+    return jsonify(result)
+
+
 # ---------------------------------------------------------------------------
 # Settlement query endpoints
 # ---------------------------------------------------------------------------
@@ -4496,6 +5452,7 @@ def settlement_detail(job_id: str) -> Any:
     if not record:
         return jsonify({"error": "not_found", "job_id": job_id}), 404
     attempts = settlement.get_job_attempts(job_id)
+    record["canonical_model_metadata"] = _canonical_metadata_for_job(job_id)
     record["attempts"] = attempts
     return jsonify(record)
 
@@ -4803,6 +5760,16 @@ def api_gallery_create_listing() -> Any:
         return jsonify({"error": "not_your_job"}), 403
     if job_row["status"] not in ("completed", "success"):
         return jsonify({"error": "job_not_completed"}), 400
+    if not settlement.is_marketplace_eligible(job_id):
+        return jsonify(
+            {
+                "error": "marketplace_ineligible",
+                "message": (
+                    "This output is not eligible for marketplace listing under current "
+                    "settlement policy."
+                ),
+            }
+        ), 400
 
     title = str(data.get("title", "")).strip()[:200] or f"Generation #{job_id[:8]}"
     description = str(data.get("description", "")).strip()[:2000]
@@ -4810,14 +5777,15 @@ def api_gallery_create_listing() -> Any:
     category = str(data.get("category", "")).strip()
     task_type = str(job_row["task_type"] or "").upper()
     asset_type = "video" if "VIDEO" in task_type else "image"
-    model = job_row["model"] or ""
-
-    prompt = ""
-    try:
-        job_data = json.loads(job_row["data"]) if job_row["data"] else {}
-        prompt = str(job_data.get("prompt", ""))
-    except (json.JSONDecodeError, TypeError):
-        pass
+    canonical_metadata = _canonical_metadata_for_job(job_id) or {}
+    model = str(canonical_metadata.get("model_name") or job_row["model"] or "")
+    prompt = str(canonical_metadata.get("prompt") or "")
+    if not prompt:
+        try:
+            job_data = json.loads(job_row["data"]) if job_row["data"] else {}
+            prompt = str(job_data.get("prompt", ""))
+        except (json.JSONDecodeError, TypeError):
+            pass
 
     result = gallery.create_listing(
         job_id=job_id,
@@ -4830,6 +5798,13 @@ def api_gallery_create_listing() -> Any:
         model=model,
         prompt=prompt,
     )
+    if canonical_metadata:
+        result["model_key"] = canonical_metadata.get("model_key")
+        result["model_tier"] = canonical_metadata.get("tier")
+        result["model_reward_weight"] = canonical_metadata.get("reward_weight")
+        result["model_credit_cost"] = canonical_metadata.get("credit_cost")
+        result["model_pipeline"] = canonical_metadata.get("pipeline")
+        result["model_task_type"] = canonical_metadata.get("task_type")
     return jsonify(result), 201
 
 
@@ -5111,59 +6086,13 @@ def stitch_videos() -> Any:
 @app.route("/nodes", methods=["GET"])
 def nodes_endpoint() -> Any:
     with LOCK:
-        now = unix_now()
-        payload = []
-        total_util = 0.0
-        total_rewards = 0.0
-        online_count = 0
-        for node_id, info in NODES.items():
-            last_seen_unix = info.get("last_seen_unix", parse_timestamp(info.get("last_seen")))
-            online = (now - last_seen_unix) <= ONLINE_THRESHOLD
-            if online:
-                online_count += 1
-            avg_util = float(info.get("avg_utilization", info.get("utilization", 0.0)))
-            total_util += avg_util
-            node_rewards = float(info.get("rewards", 0.0))
-            total_rewards += node_rewards
-            start_time = parse_timestamp(info.get("start_time"))
-            uptime_seconds = max(0, int(now - start_time))
-            # Normalize possibly-null fields from node telemetry
-            last_result = info.get("last_result") or {}
-            current_task = info.get("current_task") or {}
-            model_name = (last_result.get("model_name") or current_task.get("model_name"))
-            inference_time = last_result.get("metrics", {}).get("inference_time_ms")
-            task_type = (last_result.get("task_type") or current_task.get("task_type") or CREATOR_TASK_TYPE)
-            weight = (
-                last_result.get("metrics", {}).get("reward_weight")
-                or current_task.get("weight")
-                or MODEL_WEIGHTS.get((model_name or "triomerge_v10").lower(), 10.0)
-            )
-            try:
-                weight = float(weight)
-            except (TypeError, ValueError):
-                weight = rewards.resolve_weight(model_name or "triomerge_v10", 10.0)
-            payload.append(
-                {
-                    "node_id": node_id,
-                    "node_name": info.get("node_name", node_id),
-                    "role": info.get("role", "worker"),
-                    "wallet": info.get("wallet"),
-                    "task_type": task_type,
-                    "model_name": model_name,
-                    "model_weight": weight,
-                    "inference_time_ms": inference_time,
-                    "gpu_utilization": info.get("utilization", 0.0),
-                    "avg_utilization": avg_util,
-                    "rewards": node_rewards,
-                    "last_reward": info.get("last_reward", 0.0),
-                    "last_seen": info.get("last_seen"),
-                    "uptime_human": format_duration(uptime_seconds),
-                    "pipelines": info.get("pipelines", []),
-                    "models": info.get("models", []),
-                    "status": "online" if online else "offline",
-                    "last_result": last_result,
-                }
-            )
+        payload = [
+            _worker_snapshot(node_id, node_info=dict(info), include_history=False)
+            for node_id, info in NODES.items()
+        ]
+        total_util = sum(float(item.get("avg_utilization", 0.0) or 0.0) for item in payload)
+        total_rewards = sum(float(item.get("rewards", 0.0) or 0.0) for item in payload)
+        online_count = sum(1 for item in payload if item.get("online"))
         total_nodes = len(payload)
         summary = {
             "timestamp": iso_now(),

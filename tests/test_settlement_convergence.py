@@ -477,6 +477,183 @@ class SettlementConvergenceTests(unittest.TestCase):
         self.assertEqual(detail.get("model"), IMAGE_MODEL)
         self.assertEqual(detail.get("model_tier"), "A")
 
+    def test_gallery_listing_duplicate_active_returns_existing_listing(self) -> None:
+        conn = app_module.get_db()
+        now = time.time()
+        job_id = "job-duplicate-active"
+
+        conn.execute(
+            """
+            INSERT INTO jobs (id, wallet, model, data, task_type, weight, status, node_id, timestamp, completed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+            """,
+            (
+                job_id,
+                VALID_WALLET,
+                IMAGE_MODEL,
+                json.dumps({"prompt": "duplicate active"}),
+                "IMAGE_GEN",
+                10.0,
+                "success",
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+
+        app_module.settlement.create_job_ticket(
+            job_id=job_id,
+            wallet=VALID_WALLET,
+            job_type="IMAGE_GEN",
+            model=IMAGE_MODEL,
+            estimated_cost=1.0,
+            prompt="duplicate active",
+        )
+        conn.execute(
+            """
+            UPDATE job_settlement
+            SET execution_status = 'settled',
+                quality_status = 'valid',
+                settlement_outcome = 'spent',
+                reserved_amount = 1.0,
+                spent_amount = 1.0,
+                updated_at = ?
+            WHERE job_id = ?
+            """,
+            (now, job_id),
+        )
+        conn.commit()
+
+        payload = {
+            "wallet": VALID_WALLET,
+            "job_id": job_id,
+            "title": "Duplicate active",
+            "price_credits": 2.0,
+            "nonce": "nonce",
+            "signature": "sig",
+        }
+
+        with patch.object(app_module, "rate_limit", return_value=True), patch.object(
+            app_module,
+            "_verify_wallet_signature",
+            return_value=(True, None),
+        ):
+            first_resp = self.client.post("/gallery/listings", json=payload)
+            second_resp = self.client.post("/gallery/listings", json=payload)
+
+        self.assertEqual(first_resp.status_code, 201)
+        self.assertEqual(second_resp.status_code, 201)
+        first = first_resp.get_json()
+        second = second_resp.get_json()
+        self.assertEqual(first.get("id"), second.get("id"))
+        self.assertTrue(bool(second.get("already_listed")))
+
+    def test_gallery_listing_can_relist_after_previous_sale(self) -> None:
+        conn = app_module.get_db()
+        now = time.time()
+        job_id = "job-relist-after-sale"
+
+        conn.execute(
+            """
+            INSERT INTO jobs (id, wallet, model, data, task_type, weight, status, node_id, timestamp, completed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+            """,
+            (
+                job_id,
+                VALID_WALLET,
+                IMAGE_MODEL,
+                json.dumps({"prompt": "relist after sale"}),
+                "IMAGE_GEN",
+                10.0,
+                "success",
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+
+        app_module.settlement.create_job_ticket(
+            job_id=job_id,
+            wallet=VALID_WALLET,
+            job_type="IMAGE_GEN",
+            model=IMAGE_MODEL,
+            estimated_cost=1.0,
+            prompt="relist after sale",
+        )
+        conn.execute(
+            """
+            UPDATE job_settlement
+            SET execution_status = 'settled',
+                quality_status = 'valid',
+                settlement_outcome = 'spent',
+                reserved_amount = 1.0,
+                spent_amount = 1.0,
+                updated_at = ?
+            WHERE job_id = ?
+            """,
+            (now, job_id),
+        )
+        conn.commit()
+
+        payload = {
+            "wallet": VALID_WALLET,
+            "job_id": job_id,
+            "title": "Relist after sale",
+            "price_credits": 3.0,
+            "nonce": "nonce",
+            "signature": "sig",
+        }
+
+        with patch.object(app_module, "rate_limit", return_value=True), patch.object(
+            app_module,
+            "_verify_wallet_signature",
+            return_value=(True, None),
+        ):
+            first_resp = self.client.post("/gallery/listings", json=payload)
+
+        self.assertEqual(first_resp.status_code, 201)
+        first_listing = first_resp.get_json()
+        first_id = int(first_listing["id"])
+
+        conn.execute(
+            "UPDATE gallery_listings SET sold = 1, updated_at = ? WHERE id = ?",
+            (time.time(), first_id),
+        )
+        conn.commit()
+
+        with patch.object(app_module, "rate_limit", return_value=True), patch.object(
+            app_module,
+            "_verify_wallet_signature",
+            return_value=(True, None),
+        ):
+            second_resp = self.client.post("/gallery/listings", json=payload)
+
+        self.assertEqual(second_resp.status_code, 201)
+        second_listing = second_resp.get_json()
+        second_id = int(second_listing["id"])
+
+        self.assertNotEqual(first_id, second_id)
+        self.assertFalse(bool(second_listing.get("already_listed")))
+
+        sold_row = conn.execute(
+            "SELECT sold FROM gallery_listings WHERE id = ?",
+            (first_id,),
+        ).fetchone()
+        relisted_row = conn.execute(
+            "SELECT sold, listed FROM gallery_listings WHERE id = ?",
+            (second_id,),
+        ).fetchone()
+
+        self.assertEqual(int(sold_row["sold"]), 1)
+        self.assertEqual(int(relisted_row["sold"]), 0)
+        self.assertEqual(int(relisted_row["listed"]), 1)
+
+        browse_resp = self.client.get("/gallery/browse")
+        self.assertEqual(browse_resp.status_code, 200)
+        browse_listings = browse_resp.get_json().get("listings", [])
+        active_ids = [int(item["id"]) for item in browse_listings]
+        self.assertIn(second_id, active_ids)
+
 
 if __name__ == "__main__":
     unittest.main()

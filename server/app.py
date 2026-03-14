@@ -127,12 +127,16 @@ CREDITS_ENABLED = os.getenv("HAVNAI_CREDITS_ENABLED", "").strip().lower() in {"1
 WALLET_NONCE_PURPOSE_CONVERT = "convert_credits_to_hai"
 WALLET_NONCE_PURPOSE_GALLERY_PURCHASE = "gallery_purchase"
 WALLET_NONCE_PURPOSE_GALLERY_LIST = "gallery_list"
+WALLET_NONCE_PURPOSE_GALLERY_RELIST = "gallery_relist"
+WALLET_NONCE_PURPOSE_GALLERY_DELIST = "gallery_delist"
 WALLET_NONCE_PURPOSE_IDENTITY_ANCHOR_CREATE = "identity_anchor_create"
 WALLET_NONCE_PURPOSE_IDENTITY_ANCHOR_DELETE = "identity_anchor_delete"
 WALLET_NONCE_ALLOWED_PURPOSES = {
     WALLET_NONCE_PURPOSE_CONVERT,
     WALLET_NONCE_PURPOSE_GALLERY_PURCHASE,
     WALLET_NONCE_PURPOSE_GALLERY_LIST,
+    WALLET_NONCE_PURPOSE_GALLERY_RELIST,
+    WALLET_NONCE_PURPOSE_GALLERY_DELIST,
     WALLET_NONCE_PURPOSE_IDENTITY_ANCHOR_CREATE,
     WALLET_NONCE_PURPOSE_IDENTITY_ANCHOR_DELETE,
 }
@@ -4232,6 +4236,17 @@ def wallet_nonce() -> Any:
         job_id_ctx = str(data.get("job_id", "")).strip() or None
         if not job_id_ctx:
             return jsonify({"error": "missing job_id", "message": "job_id required for gallery_list"}), 400
+    elif purpose == WALLET_NONCE_PURPOSE_GALLERY_RELIST:
+        job_id_ctx = str(data.get("job_id", "")).strip() or None
+        if not job_id_ctx:
+            return jsonify({"error": "missing job_id", "message": "job_id required for gallery_relist"}), 400
+    elif purpose == WALLET_NONCE_PURPOSE_GALLERY_DELIST:
+        try:
+            listing_id = int(data.get("listing_id", 0))
+        except (TypeError, ValueError):
+            listing_id = None
+        if not listing_id:
+            return jsonify({"error": "missing listing_id", "message": "listing_id required for gallery_delist"}), 400
 
     now_ts = unix_now()
     issued_at_iso = datetime.fromtimestamp(now_ts, timezone.utc).isoformat().replace("+00:00", "Z")
@@ -5788,7 +5803,7 @@ def api_marketplace_browse() -> Any:
 
 @app.route("/gallery/browse", methods=["GET"])
 def api_gallery_browse() -> Any:
-    """Browse gallery listings."""
+    """Browse gallery listings (prompts stripped for non-owners)."""
     search = request.args.get("search", "").strip() or None
     category = request.args.get("category", "").strip() or None
     asset_type = request.args.get("asset_type", "").strip() or None
@@ -5838,14 +5853,17 @@ def api_gallery_create_listing() -> Any:
     if not sig_ok:
         return sig_err
 
-    # Verify the job belongs to this wallet and is completed
+    # Verify the job belongs to this wallet (original creator or current owner) and is completed
     conn = get_db()
     job_row = conn.execute(
         "SELECT wallet, status, model, data, task_type FROM jobs WHERE id = ?", (job_id,)
     ).fetchone()
     if not job_row:
         return jsonify({"error": "job_not_found"}), 404
-    if job_row["wallet"] != wallet:
+    is_job_creator = job_row["wallet"] == wallet
+    current_owner = gallery.get_asset_owner(job_id)
+    is_current_owner = current_owner and current_owner.lower() == wallet.lower()
+    if not is_job_creator and not is_current_owner:
         return jsonify({"error": "not_your_job"}), 403
     if job_row["status"] not in ("completed", "success"):
         return jsonify({"error": "job_not_completed"}), 400
@@ -5899,10 +5917,14 @@ def api_gallery_create_listing() -> Any:
 
 @app.route("/gallery/listings/<int:listing_id>", methods=["GET"])
 def api_gallery_listing_detail(listing_id: int) -> Any:
-    """Get listing details."""
+    """Get listing details. Prompt is only visible to the current owner."""
     listing = gallery.get_listing(listing_id)
     if not listing:
         return jsonify({"error": "listing_not_found"}), 404
+    viewer_wallet = request.args.get("wallet", "").strip().lower()
+    owner_wallet = (listing.get("owner_wallet") or "").lower()
+    if viewer_wallet != owner_wallet:
+        listing.pop("prompt", None)
     return jsonify(listing)
 
 
@@ -5954,9 +5976,9 @@ def api_gallery_purchase(listing_id: int) -> Any:
         credits.deposit_credits(buyer_wallet, price, reason=f"gallery-refund-{listing_id}")
         return jsonify({"error": result.get("error", "purchase_failed")}), 400
 
-    # Credit the seller
+    # Credit the previous owner (the wallet that listed it)
     credits.deposit_credits(
-        listing["seller_wallet"], price,
+        result["sale"]["seller_wallet"], price,
         reason=f"gallery-sale-{listing_id}",
     )
 
@@ -5969,11 +5991,23 @@ def api_gallery_purchase(listing_id: int) -> Any:
 
 @app.route("/gallery/listings/<int:listing_id>", methods=["DELETE"])
 def api_gallery_delist(listing_id: int) -> Any:
-    """Remove a listing (seller only)."""
+    """Remove a listing (current owner only, requires signature)."""
     data = request.get_json() or {}
     wallet = str(data.get("wallet", "")).strip()
     if not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid wallet"}), 400
+
+    nonce_str = str(data.get("nonce", "")).strip()
+    signature = str(data.get("signature", "")).strip()
+    if nonce_str and signature:
+        sig_ok, sig_err = _verify_wallet_signature(
+            wallet, nonce_str, signature,
+            allowed_purposes={WALLET_NONCE_PURPOSE_GALLERY_DELIST},
+            log_label="Gallery delist",
+        )
+        if not sig_ok:
+            return sig_err
+
     ok = gallery.delist(listing_id, wallet)
     if not ok:
         return jsonify({"error": "listing_not_found_or_unauthorized"}), 404
@@ -5999,6 +6033,77 @@ def api_gallery_purchases() -> Any:
         return jsonify({"error": "invalid wallet"}), 400
     purchases = gallery.buyer_purchases(wallet)
     return jsonify({"purchases": purchases})
+
+
+@app.route("/gallery/collection", methods=["GET"])
+def api_gallery_collection() -> Any:
+    """Get all assets currently owned by a wallet (exclusive ownership)."""
+    wallet = request.args.get("wallet", "").strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    assets = gallery.get_owned_assets(wallet)
+    return jsonify({"assets": assets})
+
+
+@app.route("/gallery/ownership/<job_id>", methods=["GET"])
+def api_gallery_ownership_history(job_id: str) -> Any:
+    """Get the full ownership provenance chain for an asset."""
+    if not job_id or not job_id.strip():
+        return jsonify({"error": "missing job_id"}), 400
+    history = gallery.get_ownership_history(job_id.strip())
+    return jsonify({"history": history})
+
+
+@app.route("/gallery/relist", methods=["POST"])
+def api_gallery_relist() -> Any:
+    """Re-list an owned asset on the marketplace (requires wallet signature)."""
+    if not rate_limit(f"gallery-relist:{request.remote_addr}", limit=30):
+        return jsonify({"error": "rate limit"}), 429
+    data = request.get_json() or {}
+    wallet = str(data.get("wallet", "")).strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    job_id = str(data.get("job_id", "")).strip()
+    if not job_id:
+        return jsonify({"error": "missing job_id"}), 400
+
+    nonce_str = str(data.get("nonce", "")).strip()
+    signature = str(data.get("signature", "")).strip()
+    if not nonce_str or not signature:
+        return jsonify({"error": "signature_required", "message": "nonce and signature are required"}), 400
+
+    price = data.get("price_credits")
+    try:
+        price_credits = float(price)
+        if price_credits <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid price_credits — must be > 0"}), 400
+
+    sig_ok, sig_err = _verify_wallet_signature(
+        wallet, nonce_str, signature,
+        allowed_purposes={WALLET_NONCE_PURPOSE_GALLERY_RELIST},
+        expected_amount=price_credits,
+        log_label="Gallery relist",
+    )
+    if not sig_ok:
+        return sig_err
+
+    title = str(data.get("title", "")).strip()[:200] or f"Re-listed #{job_id[:8]}"
+    description = str(data.get("description", "")).strip()[:2000]
+    category = str(data.get("category", "")).strip()
+
+    result = gallery.relist_owned_asset(
+        job_id=job_id,
+        owner_wallet=wallet,
+        title=title,
+        price_credits=price_credits,
+        description=description,
+        category=category,
+    )
+    if not result.get("ok"):
+        return jsonify({"error": result.get("error", "relist_failed")}), 400
+    return jsonify(result.get("listing", {})), 201
 
 
 # ---------------------------------------------------------------------------

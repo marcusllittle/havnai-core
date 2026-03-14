@@ -84,7 +84,18 @@ def init_gallery_tables(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_ownership_log_to ON gallery_ownership_log(to_wallet)"
     )
 
-    # Migration: backfill owner_wallet for existing rows if column was added
+    # Migration: add owner_wallet column if missing (table may predate this column)
+    try:
+        conn.execute("SELECT owner_wallet FROM gallery_listings LIMIT 0")
+    except sqlite3.OperationalError:
+        try:
+            conn.execute(
+                "ALTER TABLE gallery_listings ADD COLUMN owner_wallet TEXT NOT NULL DEFAULT ''"
+            )
+        except Exception:
+            pass
+
+    # Migration: backfill owner_wallet for existing rows
     try:
         conn.execute(
             "UPDATE gallery_listings SET owner_wallet = seller_wallet WHERE owner_wallet = '' OR owner_wallet IS NULL"

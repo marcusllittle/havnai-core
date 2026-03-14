@@ -5928,7 +5928,35 @@ def api_gallery_listing_detail(listing_id: int) -> Any:
     return jsonify(listing)
 
 
-@app.route("/gallery/listings/<int:listing_id>/purchase", methods=["POST"])
+@app.route("/gallery/listings/<int:listing_id>/download", methods=["GET"])
+def api_gallery_download(listing_id: int) -> Any:
+    """Download the full-resolution asset. Only the current owner can download."""
+    wallet = request.args.get("wallet", "").strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+
+    listing = gallery.get_listing(listing_id)
+    if not listing:
+        return jsonify({"error": "listing_not_found"}), 404
+
+    owner_wallet = (listing.get("owner_wallet") or "").lower()
+    if wallet.lower() != owner_wallet:
+        return jsonify({"error": "not_owner", "message": "Only the current owner can download this asset."}), 403
+
+    job_id = listing.get("job_id", "")
+    if not job_id:
+        return jsonify({"error": "missing_job_id"}), 400
+
+    # Try video first, then image
+    video_path = OUTPUTS_DIR / "videos" / f"{job_id}.mp4"
+    image_path = OUTPUTS_DIR / f"{job_id}.png"
+
+    if video_path.exists():
+        return send_file(video_path, as_attachment=True, download_name=f"havnai-{job_id[:8]}.mp4")
+    if image_path.exists():
+        return send_file(image_path, as_attachment=True, download_name=f"havnai-{job_id[:8]}.png")
+
+    return jsonify({"error": "asset_not_found", "message": "Output file is no longer available on this server."}), 404
 def api_gallery_purchase(listing_id: int) -> Any:
     """Purchase a gallery listing using credits (requires wallet signature)."""
     if not rate_limit(f"gallery-purchase:{request.remote_addr}", limit=10):

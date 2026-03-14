@@ -46,6 +46,7 @@ import analytics
 import validators
 import workflows
 import gallery
+import astra_rewards
 
 try:
     from eth_account import Account  # type: ignore
@@ -608,6 +609,10 @@ def _inject_module_dependencies() -> None:
     gallery.WALLET_REGEX = WALLET_REGEX  # type: ignore[attr-defined]
     gallery.build_result_payload = _build_result_payload  # type: ignore[attr-defined]
 
+    # Astra Rewards module
+    astra_rewards.get_db = get_db  # type: ignore[attr-defined]
+    astra_rewards.log_event = log_event  # type: ignore[attr-defined]
+
     # Settlement module
     settlement.get_db = get_db  # type: ignore[attr-defined]
     settlement.log_event = log_event  # type: ignore[attr-defined]
@@ -908,6 +913,7 @@ blockchain.init_blockchain_tables(get_db())
 validators.init_validator_tables(get_db())
 workflows.init_workflow_tables(get_db())
 gallery.init_gallery_tables(get_db())
+astra_rewards.init_astra_tables(get_db())
 
 # Optional: clear database and in-memory state on startup for a fresh dashboard
 if RESET_ON_STARTUP:
@@ -5481,6 +5487,89 @@ def credit_ledger() -> Any:
     limit = _clamp(_coerce_int(request.args.get("limit"), 50), 1, 200)
     entries = settlement.get_credit_ledger(wallet, limit=limit)
     return jsonify({"wallet": wallet, "entries": entries})
+
+
+# ---------------------------------------------------------------------------
+# Astra Valkyries game economy endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.route("/astra/reward", methods=["POST"])
+def astra_reward() -> Any:
+    """Submit a game run and receive bounded credit reward."""
+    if not rate_limit(f"astra-reward:{request.remote_addr}", limit=30):
+        return jsonify({"error": "rate limit"}), 429
+
+    data = request.get_json(silent=True) or {}
+    wallet = (data.get("wallet") or "").strip().lower()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+
+    if not rate_limit(f"astra-reward:wallet:{wallet}", limit=10):
+        return jsonify({"error": "rate limit", "detail": "per-wallet limit exceeded"}), 429
+
+    score = _coerce_int(data.get("score"), 0)
+    grade = str(data.get("grade", "")).strip() or "?"
+    duration_s = _clamp_float(data.get("duration_s"), 0.0, 0.0, 7200.0)
+    map_id = str(data.get("map_id", "")).strip() or "unknown"
+
+    result = astra_rewards.submit_reward(
+        wallet=wallet,
+        score=score,
+        grade=grade,
+        duration_s=duration_s,
+        map_id=map_id,
+        deposit_fn=credits.deposit_credits,
+        ledger_fn=settlement._record_ledger,
+    )
+
+    status_code = 200 if result.get("ok") else 422
+    return jsonify(result), status_code
+
+
+@app.route("/astra/spend", methods=["POST"])
+def astra_spend() -> Any:
+    """Deduct shared credits for a gacha action."""
+    if not rate_limit(f"astra-spend:{request.remote_addr}", limit=30):
+        return jsonify({"error": "rate limit"}), 429
+
+    data = request.get_json(silent=True) or {}
+    wallet = (data.get("wallet") or "").strip().lower()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+
+    if not rate_limit(f"astra-spend:wallet:{wallet}", limit=20):
+        return jsonify({"error": "rate limit", "detail": "per-wallet limit exceeded"}), 429
+
+    action = str(data.get("action", "")).strip()
+    if not action:
+        return jsonify({"error": "missing action"}), 400
+
+    result = astra_rewards.process_spend(
+        wallet=wallet,
+        action=action,
+        deduct_fn=credits.deduct_credits,
+        ledger_fn=settlement._record_ledger,
+    )
+
+    status_code = 200 if result.get("ok") else 422
+    return jsonify(result), status_code
+
+
+@app.route("/astra/leaderboard", methods=["GET"])
+def astra_leaderboard() -> Any:
+    """Top Astra players by best score."""
+    limit = _clamp(_coerce_int(request.args.get("limit"), 50), 1, 100)
+    return jsonify({"leaderboard": astra_rewards.get_leaderboard(limit)})
+
+
+@app.route("/astra/stats", methods=["GET"])
+def astra_stats() -> Any:
+    """Player stats for a wallet."""
+    wallet = (request.args.get("wallet") or "").strip().lower()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    return jsonify(astra_rewards.get_player_stats(wallet))
 
 
 # ---------------------------------------------------------------------------

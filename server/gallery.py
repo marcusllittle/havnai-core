@@ -110,13 +110,16 @@ def create_listing(
     conn = get_db()
     now = time.time()
 
-    # Prevent duplicate active listings for the same job
+    # Prevent duplicate active listings for the same job. Sold rows stay in the
+    # table for history and should not block a fresh relist.
     existing = conn.execute(
         "SELECT id FROM gallery_listings WHERE job_id = ? AND listed = 1 AND sold = 0",
         (job_id,),
     ).fetchone()
     if existing:
-        return get_listing(existing["id"]) or {}
+        listing = get_listing(existing["id"]) or {"id": existing["id"]}
+        listing["already_listed"] = True
+        return listing
 
     cursor = conn.execute(
         """

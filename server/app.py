@@ -4131,7 +4131,7 @@ def _parse_positive_amount(raw_amount: Any) -> Tuple[Optional[float], Optional[A
 @app.route("/credits/balance", methods=["GET"])
 def credits_balance() -> Any:
     """Return credit balance for a wallet."""
-    wallet = request.args.get("wallet", "").strip()
+    wallet = request.args.get("wallet", "").strip().lower()
     if not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid wallet"}), 400
     conn = get_db()
@@ -4168,7 +4168,7 @@ def credits_deposit() -> Any:
     if not check_join_token():
         return jsonify({"error": "unauthorized"}), 403
     data = request.get_json() or {}
-    wallet = str(data.get("wallet", "")).strip()
+    wallet = str(data.get("wallet", "")).strip().lower()
     if not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid wallet"}), 400
     try:

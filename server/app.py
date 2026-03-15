@@ -5947,14 +5947,21 @@ def api_gallery_download(listing_id: int) -> Any:
     if not job_id:
         return jsonify({"error": "missing_job_id"}), 400
 
-    # Try video first, then image
+    # "original=true" requests the unwatermarked version (owner perk)
+    want_original = request.args.get("original", "").lower() in ("true", "1", "yes")
+
+    # Try video first, then image — prefer originals/ dir for unwatermarked copies
     video_path = OUTPUTS_DIR / "videos" / f"{job_id}.mp4"
     image_path = OUTPUTS_DIR / f"{job_id}.png"
+    original_image_path = OUTPUTS_DIR / "originals" / f"{job_id}.png"
+    original_video_path = OUTPUTS_DIR / "videos" / "originals" / f"{job_id}.mp4"
 
     if video_path.exists():
-        return send_file(video_path, as_attachment=True, download_name=f"havnai-{job_id[:8]}.mp4")
+        serve = original_video_path if (want_original and original_video_path.exists()) else video_path
+        return send_file(serve, as_attachment=True, download_name=f"havnai-{job_id[:8]}.mp4")
     if image_path.exists():
-        return send_file(image_path, as_attachment=True, download_name=f"havnai-{job_id[:8]}.png")
+        serve = original_image_path if (want_original and original_image_path.exists()) else image_path
+        return send_file(serve, as_attachment=True, download_name=f"havnai-{job_id[:8]}.png")
 
     return jsonify({"error": "asset_not_found", "message": "Output file is no longer available on this server."}), 404
 def api_gallery_purchase(listing_id: int) -> Any:

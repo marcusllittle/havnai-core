@@ -436,8 +436,16 @@ def _apply_output_watermark(image: Any, task_id: str = "") -> Any:
 
 
 def _save_output_image(image: Any, output_path: Path, task_id: str = "") -> None:
-    final_image = _apply_output_watermark(image, task_id=task_id)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    # Save the original (unwatermarked) copy for owner downloads
+    original_dir = output_path.parent / "originals"
+    original_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        image.save(original_dir / output_path.name)
+    except Exception as exc:
+        log(f"Failed to save original copy: {exc}", prefix="⚠️", task_id=task_id)
+    # Save the watermarked version as the default output
+    final_image = _apply_output_watermark(image, task_id=task_id)
     final_image.save(output_path)
 
 

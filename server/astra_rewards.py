@@ -30,10 +30,18 @@ REWARD_COOLDOWN_SECONDS = 60
 MIN_SCORE_THRESHOLD = 5000        # roughly "Grade B" territory
 MIN_RUN_DURATION_SECONDS = 30     # minimum plausible game run length
 
+# Bonus multipliers
+FIRST_WIN_DAILY_MULTIPLIER = 2.0  # 2x credits on first completed run of the day
+STREAK_THRESHOLD = 3              # play 3 runs in a row → streak bonus
+STREAK_MULTIPLIER = 1.5           # 1.5x credits during streak
+STREAK_WINDOW_SECONDS = 600       # runs within 10 minutes count as streak
+
 # Spend costs (shared credits — rebalanced from local economy)
 SPEND_COSTS: Dict[str, float] = {
     "gacha_1":  10.0,   # single pull
     "gacha_10": 80.0,   # ten-pull (~17% discount)
+    "continue": 15.0,   # revive once per run
+    "boost_damage": 5.0,  # temporary +10% damage for one run
 }
 
 # Score → credit reward curve (linear interpolation between thresholds)
@@ -119,6 +127,26 @@ def _last_reward_time(db: sqlite3.Connection, wallet: str) -> Optional[float]:
     return float(row[0]) if row and row[0] is not None else None
 
 
+def _is_first_win_today(db: sqlite3.Connection, wallet: str) -> bool:
+    """Check if this is the player's first rewarded run of the UTC day."""
+    day_start = float(int(time.time() // 86400) * 86400)
+    row = db.execute(
+        "SELECT COUNT(*) FROM astra_runs WHERE wallet = ? AND created_at >= ? AND reward > 0",
+        (wallet, day_start),
+    ).fetchone()
+    return row[0] == 0
+
+
+def _recent_run_count(db: sqlite3.Connection, wallet: str, now: float) -> int:
+    """Count runs within the streak window."""
+    cutoff = now - STREAK_WINDOW_SECONDS
+    row = db.execute(
+        "SELECT COUNT(*) FROM astra_runs WHERE wallet = ? AND created_at >= ?",
+        (wallet, cutoff),
+    ).fetchone()
+    return row[0]
+
+
 # ─── Core operations ─────────────────────────────────────────
 
 def submit_reward(
@@ -168,7 +196,20 @@ def submit_reward(
 
     # ── Compute reward ───────────────────────────────────────
     raw_reward = _interpolate_reward(score)
-    reward = min(raw_reward, MAX_CREDITS_PER_RUN, remaining_cap)
+
+    # Apply bonus multipliers
+    multiplier = 1.0
+    bonus_reasons = []
+    if _is_first_win_today(db, wallet):
+        multiplier *= FIRST_WIN_DAILY_MULTIPLIER
+        bonus_reasons.append("first_win_of_day")
+    recent = _recent_run_count(db, wallet, now)
+    if recent >= STREAK_THRESHOLD:
+        multiplier *= STREAK_MULTIPLIER
+        bonus_reasons.append("streak_bonus")
+
+    raw_reward *= multiplier
+    reward = min(raw_reward, MAX_CREDITS_PER_RUN * multiplier, remaining_cap)
     reward = round(reward, 2)
 
     # ── Persist ──────────────────────────────────────────────
@@ -192,6 +233,8 @@ def submit_reward(
         "reward": reward,
         "daily_earned": round(earned_today + reward, 2),
         "daily_cap": DAILY_EARN_CAP,
+        "bonuses": bonus_reasons if bonus_reasons else None,
+        "multiplier": multiplier if multiplier > 1.0 else None,
     }
 
 

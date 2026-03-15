@@ -473,6 +473,7 @@ else:
     CORS(app, resources={r"/*": {"origins": [
         "https://joinhavn.io",
         "https://www.joinhavn.io",
+        "https://astra.joinhavn.io",
         "http://localhost:3000",
     ]}})
 

@@ -102,9 +102,9 @@ def init_astra_tables(db: sqlite3.Connection) -> None:
 
 # ─── Anti-abuse helpers ──────────────────────────────────────
 
-def _run_hash(wallet: str, score: int, map_id: str, duration: float) -> str:
+def _run_hash(wallet: str, score: int, grade: str, map_id: str, duration: float) -> str:
     """Deterministic hash for replay detection."""
-    raw = f"{wallet}:{score}:{map_id}:{duration:.1f}"
+    raw = f"{wallet}:{score}:{grade}:{map_id}:{duration:.1f}:{int(time.time() // 60)}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
@@ -187,7 +187,7 @@ def submit_reward(
         return {"ok": False, "reason": "daily_cap_reached", "reward": 0}
 
     # Replay detection
-    rh = _run_hash(wallet, score, map_id, duration_s)
+    rh = _run_hash(wallet, score, grade, map_id, duration_s)
     dup = db.execute(
         "SELECT 1 FROM astra_runs WHERE run_hash = ? AND wallet = ?", (rh, wallet)
     ).fetchone()

@@ -5588,6 +5588,43 @@ def astra_stats() -> Any:
     return jsonify(astra_rewards.get_player_stats(wallet))
 
 
+@app.route("/astra/generate-reward", methods=["POST"])
+def astra_generate_reward() -> Any:
+    """Generate a reward image for Astra Valkyries game context."""
+    data = request.get_json(silent=True) or {}
+    wallet = (data.get("wallet") or "").strip().lower()
+    pilot_id = (data.get("pilotId") or "").strip()
+    context = (data.get("context") or "").strip()
+
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "Missing or invalid wallet"}), 400
+    if not pilot_id:
+        return jsonify({"error": "Missing pilotId"}), 400
+
+    # Placeholder: return a placeholder image URL
+    # In production, this calls the image generation pipeline
+    return jsonify({
+        "imageUrl": f"/static/rewards/placeholder_{pilot_id}.png",
+        "pilotId": pilot_id,
+        "context": context,
+    })
+
+
+@app.route("/astra/gallery", methods=["GET"])
+def astra_gallery() -> Any:
+    """Fetch player's earned game reward images."""
+    wallet = (request.args.get("wallet") or "").strip().lower()
+
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "Missing or invalid wallet"}), 400
+
+    # Placeholder: return empty gallery
+    # In production, this queries the database for earned images
+    return jsonify({
+        "images": []
+    })
+
+
 # ---------------------------------------------------------------------------
 # Analytics endpoints
 # ---------------------------------------------------------------------------

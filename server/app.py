@@ -142,18 +142,20 @@ WALLET_NONCE_ALLOWED_PURPOSES = {
 }
 WALLET_NONCE_TTL_SECONDS = max(60, int(os.getenv("HAVNAI_WALLET_NONCE_TTL_SECONDS", "300")))
 
-SUPPORTED_TASK_TYPES = {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP"}
+SUPPORTED_TASK_TYPES = {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP", "LTX_VIDEO_GEN"}
 TASK_SUPPORT_MAP = {
     CREATOR_TASK_TYPE: "image",
     "VIDEO_GEN": "video",
     "ANIMATEDIFF": "animatediff",
     "FACE_SWAP": "face_swap",
+    "LTX_VIDEO_GEN": "ltx_video",
 }
 SUPPORT_TO_JOB_TYPE_MAP = {
     "image": CREATOR_TASK_TYPE,
     "video": "VIDEO_GEN",
     "animatediff": "ANIMATEDIFF",
     "face_swap": "FACE_SWAP",
+    "ltx_video": "LTX_VIDEO_GEN",
 }
 
 # ---------------------------------------------------------------------------
@@ -186,6 +188,7 @@ _RUNTIME_DEFAULT_PROFILES: Dict[str, Dict[str, Dict[str, Any]]] = {
         "image_sdxl": {"steps": 24, "guidance": 5.8, "width": 768, "height": 1152},
         "image_sd15": {"steps": 24, "guidance": 6.2, "width": 576, "height": 768},
         "video_ltx2": {"steps": 16, "guidance": 5.0, "frames": 12, "fps": 8, "width": 512, "height": 512},
+        "video_ltx_video": {"steps": 30, "guidance": 3.0, "frames": 65, "fps": 24, "width": 768, "height": 512},
         "video_animatediff": {"steps": 18, "guidance": 5.5, "frames": 16, "fps": 8, "width": 512, "height": 512},
         "face_swap": {"num_steps": 14, "guidance": 4.5, "strength": 0.75},
     },
@@ -193,6 +196,7 @@ _RUNTIME_DEFAULT_PROFILES: Dict[str, Dict[str, Dict[str, Any]]] = {
         "image_sdxl": {"steps": 28, "guidance": 6.0, "width": 768, "height": 1152},
         "image_sd15": {"steps": 28, "guidance": 6.5, "width": 576, "height": 768},
         "video_ltx2": {"steps": 25, "guidance": 7.0, "frames": 16, "fps": 8, "width": 512, "height": 512},
+        "video_ltx_video": {"steps": 50, "guidance": 3.0, "frames": 97, "fps": 24, "width": 768, "height": 512},
         "video_animatediff": {"steps": 25, "guidance": 7.5, "frames": 16, "fps": 8, "width": 512, "height": 512},
         "face_swap": {"num_steps": 18, "guidance": 5.0, "strength": 0.8},
     },
@@ -200,6 +204,7 @@ _RUNTIME_DEFAULT_PROFILES: Dict[str, Dict[str, Dict[str, Any]]] = {
         "image_sdxl": {"steps": 32, "guidance": 6.5, "width": 832, "height": 1216},
         "image_sd15": {"steps": 36, "guidance": 7.0, "width": 640, "height": 896},
         "video_ltx2": {"steps": 28, "guidance": 7.0, "frames": 16, "fps": 8, "width": 512, "height": 512},
+        "video_ltx_video": {"steps": 50, "guidance": 3.0, "frames": 97, "fps": 24, "width": 768, "height": 512},
         "video_animatediff": {"steps": 28, "guidance": 7.0, "frames": 16, "fps": 8, "width": 512, "height": 512},
         "face_swap": {"num_steps": 24, "guidance": 6.0, "strength": 0.85},
     },
@@ -223,6 +228,7 @@ REWARD_CONFIG: Dict[str, float] = {
     "sd15_factor": float(os.getenv("REWARD_SD15_FACTOR", "1.0")),
     "anime_factor": float(os.getenv("REWARD_ANIME_FACTOR", "0.7")),
     "ltx2_factor": float(os.getenv("REWARD_LTX2_FACTOR", "2.0")),
+    "ltx_video_factor": float(os.getenv("REWARD_LTX_VIDEO_FACTOR", "3.0")),
     "base_reward": float(os.getenv("REWARD_BASE_HAI", "0.05")),
 }
 
@@ -400,9 +406,24 @@ POSITIVE_VIDEO_ANIMATEDIFF = (
     "professional, sharp details, smooth motion, flowing motion, (best quality:1.1)"
 )
 
+# LTX-Video 2.3 uses a DiT architecture with different prompt behavior.
+# Lighter negative prompts work better; the model handles quality natively.
+NEGATIVE_VIDEO_LTX_VIDEO = ", ".join([
+    "jitter, flicker, temporal artifacts, blurry motion, ghosting",
+    "low quality, watermark, text overlay, compression artifacts",
+    "distorted faces, morphing face, inconsistent appearance",
+])
+
+POSITIVE_VIDEO_LTX_VIDEO = (
+    "high quality, cinematic, professional, sharp details, smooth motion, "
+    "consistent lighting, natural movement"
+)
+
 def get_video_negative(model_name: str) -> str:
     """Return the appropriate negative prompt for a video model."""
     model_lower = (model_name or "").lower()
+    if "ltx_video" in model_lower:
+        return NEGATIVE_VIDEO_LTX_VIDEO
     if "ltx" in model_lower or "latte" in model_lower:
         return NEGATIVE_VIDEO_LTXL
     if "animat" in model_lower:
@@ -412,6 +433,8 @@ def get_video_negative(model_name: str) -> str:
 def get_video_positive_suffix(model_name: str) -> str:
     """Return quality tokens to append to video prompts."""
     model_lower = (model_name or "").lower()
+    if "ltx_video" in model_lower:
+        return POSITIVE_VIDEO_LTX_VIDEO
     if "ltx" in model_lower or "latte" in model_lower:
         return POSITIVE_VIDEO_LTXL
     if "animat" in model_lower:
@@ -975,6 +998,12 @@ def load_manifest() -> None:
             "task_type": entry.get("task_type", CREATOR_TASK_TYPE),
             "strengths": entry.get("strengths"),
             "weaknesses": entry.get("weaknesses"),
+            # LTX-Video 2.3 model family fields
+            "model_family": entry.get("model_family", ""),
+            "model_version": entry.get("model_version", ""),
+            "checkpoint_variant": entry.get("checkpoint_variant", ""),
+            "capabilities": entry.get("capabilities", []),
+            "available_modes": entry.get("available_modes", []),
         }
         MANIFEST_MODELS[key] = entry_data
         MODEL_STATS.setdefault(key, {"count": 0.0, "total_time": 0.0})
@@ -2221,11 +2250,24 @@ def resolve_video_defaults(
 ) -> Tuple[Dict[str, Any], Dict[str, str]]:
     normalized_task = _normalize_task_type(task_type)
     is_animatediff = normalized_task == "ANIMATEDIFF"
-    profile_key = "video_animatediff" if is_animatediff else "video_ltx2"
+    is_ltx_video = normalized_task == "LTX_VIDEO_GEN" or str((model_cfg or {}).get("pipeline", "")).lower() == "ltx_video"
+    if is_ltx_video:
+        profile_key = "video_ltx_video"
+    elif is_animatediff:
+        profile_key = "video_animatediff"
+    else:
+        profile_key = "video_ltx2"
     profile_defaults = dict(profile.get(profile_key) or {})
     model_defaults = dict((model_cfg or {}).get("video_defaults") or {})
 
-    if is_animatediff:
+    if is_ltx_video:
+        env_steps = ("HAVNAI_LTX_VIDEO_STEPS", "HAVNAI_VIDEO_STEPS")
+        env_guidance = ("HAVNAI_LTX_VIDEO_GUIDANCE", "HAVNAI_VIDEO_GUIDANCE")
+        env_frames = ("HAVNAI_LTX_VIDEO_FRAMES", "HAVNAI_VIDEO_FRAMES")
+        env_fps = ("HAVNAI_LTX_VIDEO_FPS", "HAVNAI_VIDEO_FPS")
+        env_width = ("HAVNAI_LTX_VIDEO_WIDTH", "HAVNAI_VIDEO_WIDTH")
+        env_height = ("HAVNAI_LTX_VIDEO_HEIGHT", "HAVNAI_VIDEO_HEIGHT")
+    elif is_animatediff:
         env_steps = ("HAVNAI_ANIMATEDIFF_STEPS", "HAVNAI_VIDEO_STEPS")
         env_guidance = ("HAVNAI_ANIMATEDIFF_GUIDANCE", "HAVNAI_VIDEO_GUIDANCE")
         env_frames = ("HAVNAI_ANIMATEDIFF_FRAMES", "HAVNAI_VIDEO_FRAMES")
@@ -2301,7 +2343,16 @@ def resolve_video_defaults(
         parse_value=_try_parse_int,
     )
 
-    if is_animatediff:
+    if is_ltx_video:
+        resolved = {
+            "steps": _clamp(int(steps), 1, 150),
+            "guidance": max(0.0, min(20.0, float(guidance))),
+            "width": _clamp(int(width), 256, 1280),
+            "height": _clamp(int(height), 256, 1280),
+            "frames": _clamp(int(frames), 1, 257),
+            "fps": _clamp(int(fps), 1, 60),
+        }
+    elif is_animatediff:
         width_val = int(width)
         height_val = int(height)
         if width_val not in {512, 768}:
@@ -2671,6 +2722,7 @@ def submit_job() -> Any:
             }
         ), 400
     is_ltx2 = model_name == "ltx2" or pipeline_name == "ltx2"
+    is_ltx_video = pipeline_name == "ltx_video" or str(cfg.get("model_family", "")).lower() == "ltx_video"
 
     # Special-case AnimateDiff video jobs with rich structured payload
     is_animatediff = model_name == "animatediff" or pipeline_name == "animatediff"
@@ -2683,7 +2735,76 @@ def submit_job() -> Any:
         or pipeline_name in {"wan_i2v", "wan-i2v", "wan22_i2v", "wan2.2-i2v"}
     )
 
-    if is_wan_i2v:
+    if is_ltx_video:
+        # LTX-Video 2.3 job — structured payload with pipeline mode, variant, upscaler
+        prompt_text = enhanced_prompt
+        prompt_lower = prompt_text.lower()
+        if prompt_text and "best quality" not in prompt_lower and "masterpiece" not in prompt_lower:
+            prompt_text = f"{prompt_text}, {get_video_positive_suffix(model_name)}"
+        negative_prompt = _merge_negative_prompts(
+            str(payload.get("negative_prompt") or "").strip(),
+            get_video_negative(model_name),
+            NO_WATERMARK_NEGATIVE,
+            SFW_NEGATIVE_PROMPT if sfw_mode else "",
+        )
+        seed = payload.get("seed")
+        try:
+            seed = int(seed) if seed is not None else None
+        except (TypeError, ValueError):
+            seed = None
+        if seed is None:
+            seed = random.randint(0, 2**31 - 1)
+        init_image = (
+            payload.get("init_image")
+            or payload.get("init_image_url")
+            or payload.get("init_image_b64")
+            or None
+        )
+        resolved_video_defaults, video_default_sources = resolve_video_defaults(
+            cfg, payload, RUNTIME_PROFILE, "LTX_VIDEO_GEN",
+        )
+        ltx_video_timeout = int(os.getenv("HAVNAI_LTX_VIDEO_JOB_TIMEOUT", "600"))
+        settings: Dict[str, Any] = {
+            "prompt": prompt_text,
+            "negative_prompt": negative_prompt,
+            "seed": seed,
+            "steps": resolved_video_defaults["steps"],
+            "guidance": resolved_video_defaults["guidance"],
+            "width": resolved_video_defaults["width"],
+            "height": resolved_video_defaults["height"],
+            "frames": resolved_video_defaults["frames"],
+            "fps": resolved_video_defaults["fps"],
+            "timeout": ltx_video_timeout,
+            # LTX-Video 2.3 extended fields
+            "pipeline_mode": str(payload.get("pipeline_mode") or cfg.get("available_modes", ["two_stage"])[0] if cfg.get("available_modes") else "two_stage"),
+            "checkpoint_variant": str(payload.get("checkpoint_variant") or cfg.get("checkpoint_variant") or "dev"),
+            "upscaler": str(payload.get("upscaler") or ""),
+            "temporal_upscale": bool(payload.get("temporal_upscale", False)),
+            "model_family": "ltx_video",
+            "model_version": str(cfg.get("model_version", "2.3")),
+            "capabilities": cfg.get("capabilities", []),
+            "defaults_source": {"video": video_default_sources},
+            "defaults_confidence": {"video": _resolve_confidence(video_default_sources)},
+        }
+        if init_image:
+            settings["init_image"] = init_image
+        # Pass through audio/keyframe/retake if provided
+        audio_input = payload.get("audio_input") or payload.get("audio_url")
+        if audio_input:
+            settings["audio_input"] = audio_input
+        keyframes = payload.get("keyframes")
+        if keyframes:
+            settings["keyframes"] = keyframes
+        retake_segments = payload.get("retake_segments")
+        if retake_segments:
+            settings["retake_segments"] = retake_segments
+        ic_lora = payload.get("ic_lora_path")
+        if ic_lora:
+            settings["ic_lora_path"] = ic_lora
+            settings["ic_lora_strength"] = float(payload.get("ic_lora_strength", 1.0))
+        job_data = json.dumps(settings)
+        task_type = "LTX_VIDEO_GEN"
+    elif is_wan_i2v:
         # Persist VIDEO_GEN controls inside the job data blob as JSON.
         prompt_text = enhanced_prompt
         # Append positive quality suffix if prompt doesn't have quality tokens
@@ -5180,6 +5301,12 @@ def models_list() -> Any:
                 "face_swap_defaults": face_swap_defaults,
                 "defaults_source": defaults_source or None,
                 "defaults_confidence": defaults_confidence or None,
+                # LTX-Video 2.3 model family metadata
+                "model_family": model_data.get("model_family") or None,
+                "model_version": model_data.get("model_version") or None,
+                "checkpoint_variant": model_data.get("checkpoint_variant") or None,
+                "capabilities": model_data.get("capabilities") or None,
+                "available_modes": model_data.get("available_modes") or None,
             }
         )
 

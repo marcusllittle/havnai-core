@@ -473,6 +473,76 @@
       ],
       "task_type": "ANIMATEDIFF",
       "reward_weight": 15.0
+    },
+    {
+      "name": "ltx_video_dev",
+      "pipeline": "ltx_video",
+      "path": "/mnt/d/havnai-storage/models/ltx_video/ltx-video-2b-v0.9.5.safetensors",
+      "type": "checkpoint",
+      "tags": [
+        "video",
+        "ltx_video",
+        "dit",
+        "audio_video",
+        "text_to_video",
+        "image_to_video"
+      ],
+      "task_type": "VIDEO_GEN",
+      "weight": 25,
+      "reward_weight": 25,
+      "model_family": "ltx_video",
+      "model_version": "2.3",
+      "checkpoint_variant": "dev",
+      "capabilities": [
+        "text_to_video",
+        "image_to_video",
+        "audio_to_video",
+        "keyframe_interpolation",
+        "spatial_upscale",
+        "temporal_upscale",
+        "retake"
+      ],
+      "available_modes": [
+        "two_stage",
+        "two_stage_hq",
+        "one_stage",
+        "ic_lora",
+        "keyframe",
+        "audio_to_video",
+        "retake"
+      ],
+      "strengths": "Lightricks DiT-based model with synchronized audio+video generation, native portrait support, strong prompt adherence, and excellent motion consistency.",
+      "weaknesses": "Requires 16GB+ VRAM for full-quality. Dev checkpoint is slower than distilled variant."
+    },
+    {
+      "name": "ltx_video_distilled",
+      "pipeline": "ltx_video",
+      "path": "/mnt/d/havnai-storage/models/ltx_video/ltx-video-2b-v0.9.5-distilled.safetensors",
+      "type": "checkpoint",
+      "tags": [
+        "video",
+        "ltx_video",
+        "dit",
+        "distilled",
+        "fast"
+      ],
+      "task_type": "VIDEO_GEN",
+      "weight": 20,
+      "reward_weight": 20,
+      "model_family": "ltx_video",
+      "model_version": "2.3",
+      "checkpoint_variant": "distilled",
+      "capabilities": [
+        "text_to_video",
+        "image_to_video",
+        "distilled_inference",
+        "spatial_upscale"
+      ],
+      "available_modes": [
+        "distilled_fast"
+      ],
+      "strengths": "Fast inference (8 steps vs 50) with good quality trade-off. Lower VRAM requirements than dev checkpoint.",
+      "weaknesses": "Slightly lower quality than dev. Does not support all pipeline modes (keyframe, audio, retake)."
     }
   ]
 }

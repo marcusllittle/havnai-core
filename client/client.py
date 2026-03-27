@@ -466,6 +466,8 @@ WATERMARK_MAX_WIDTH_PCT = max(0.08, min(0.4, _env_float("HAVNAI_WATERMARK_MAX_WI
 WATERMARK_MIN_WIDTH = max(48, _env_int("HAVNAI_WATERMARK_MIN_WIDTH", 96))
 LTX2_MODEL_ID = os.environ.get("LTX2_MODEL_ID") or ENV_VARS.get("LTX2_MODEL_ID") or "maxin-cn/Latte-1"
 LTX2_MODEL_PATH = os.environ.get("LTX2_MODEL_PATH") or ENV_VARS.get("LTX2_MODEL_PATH", "")
+# LTX-Video 2.3 (Lightricks) — distinct from legacy LTX2/Latte-1
+LTX_VIDEO_ENABLED = _env_flag("HAVNAI_LTX_VIDEO_ENABLED", True)
 ANIMATEDIFF_ADAPTER_ID = (
     os.environ.get("ANIMATEDIFF_MOTION_ADAPTER")
     or ENV_VARS.get("ANIMATEDIFF_MOTION_ADAPTER")
@@ -725,6 +727,13 @@ def discover_supports(capabilities: Dict[str, List[str]]) -> List[str]:
 
     if "ltx2" in pipelines and "ltx2" in models and _has_runner("engines.ltx2.ltx2_runner", "run_ltx2"):
         supports.append("video")
+
+    if (
+        LTX_VIDEO_ENABLED
+        and "ltx_video" in pipelines
+        and _has_runner("engines.ltx_video.runner", "run_ltx_video")
+    ):
+        supports.append("ltx_video")
 
     if (
         "animatediff" in pipelines
@@ -1651,6 +1660,71 @@ def _run_ltx2_task(
     return metrics, util_int, video_b64
 
 
+def _run_ltx_video_task(
+    task_id: str,
+    entry: ModelEntry,
+    reward_weight: float,
+    task: Dict[str, Any],
+) -> Tuple[Dict[str, Any], int, Optional[str]]:
+    """Execute an LTX-Video 2.3 generation job."""
+    try:
+        from engines.ltx_video.runner import run_ltx_video, video_to_b64 as ltx_video_to_b64  # type: ignore
+        from engines.ltx_video.config import load_config as load_ltx_video_config  # type: ignore
+    except Exception as exc:
+        return (
+            {
+                "status": "failed",
+                "task_type": "video_gen",
+                "model_name": entry.name,
+                "model_family": "ltx_video",
+                "reward_weight": reward_weight,
+                "error": f"LTX-Video runtime unavailable: {exc}",
+            },
+            utilization_hint,
+            None,
+        )
+
+    ltx_config = load_ltx_video_config()
+    task_payload = dict(task)
+    task_payload["task_id"] = task_id
+    task_payload["model_name"] = entry.name
+    task_payload["reward_weight"] = reward_weight
+    task_payload.setdefault("seed", random.randint(0, 2**31 - 1))
+
+    try:
+        metrics, util, video_path = run_ltx_video(
+            task_payload,
+            log_fn=lambda message: log(message, prefix="🎬", task_id=task_id),
+            outputs_dir=OUTPUTS_DIR,
+            read_gpu_stats=read_gpu_stats,
+            utilization_hint=utilization_hint,
+            config=ltx_config,
+        )
+    except Exception as exc:
+        return (
+            {
+                "status": "failed",
+                "task_type": "video_gen",
+                "model_name": entry.name,
+                "model_family": "ltx_video",
+                "reward_weight": reward_weight,
+                "error": f"LTX-Video execution failed: {exc}",
+            },
+            utilization_hint,
+            None,
+        )
+
+    video_b64 = ltx_video_to_b64(video_path) if video_path else None
+    if metrics.get("status") == "success" and not video_b64:
+        metrics["status"] = "failed"
+        metrics["error"] = "LTX-Video produced no output video payload"
+    try:
+        util_int = int(util)
+    except (TypeError, ValueError):
+        util_int = utilization_hint
+    return metrics, util_int, video_b64
+
+
 def _run_animatediff_task(
     task_id: str,
     entry: ModelEntry,
@@ -2032,6 +2106,8 @@ def execute_task(task: Dict[str, Any]) -> None:
             )
         elif task_type == "VIDEO_GEN":
             metrics, util, video_b64 = _run_ltx2_task(task_id, entry, reward_weight, task)
+        elif task_type == "LTX_VIDEO_GEN":
+            metrics, util, video_b64 = _run_ltx_video_task(task_id, entry, reward_weight, task)
         elif task_type == "ANIMATEDIFF":
             metrics, util, video_b64 = _run_animatediff_task(task_id, entry, model_path, reward_weight, task)
         elif task_type == "FACE_SWAP":

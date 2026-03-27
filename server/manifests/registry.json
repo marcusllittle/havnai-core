@@ -437,6 +437,31 @@
       "reward_weight": 20.0
     },
     {
+      "name": "copaxTimeless_xplus2BNSFW1",
+      "pipeline": "sd15",
+      "path": "/mnt/d/havnai-storage/models/creator/copaxTimeless_xplus2BNSFW1.safetensors",
+      "vae_path": "/mnt/d/havnai-storage/models/creator/clearvaeSD15_v23.safetensors",
+      "controlnet_path": "/mnt/d/havnai-storage/models/controlnet/control_v11p_sd15_openpose.pth",
+      "type": "checkpoint",
+      "tags": [
+        "realism",
+        "nsfw",
+        "smooth_skin",
+        "portrait"
+      ],
+      "task_type": "IMAGE_GEN",
+      "weight": 10,
+      "reward_weight": 10,
+      "strengths": "Strong semi-realistic portraits with smooth skin rendering. Good at NSFW content with natural lighting and body proportions.",
+      "weaknesses": "SD1.5 hand limitations. Can over-smooth textures in some lighting conditions.",
+      "sampler": "dpm++_sde_karras",
+      "steps": 35,
+      "guidance": 7.0,
+      "width": 672,
+      "height": 1344,
+      "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, deformed hands, merged limbs, duplicate face, multiple faces, bad anatomy, low quality, blurry, text, watermark, signature"
+    },
+    {
       "name": "animatediff",
       "pipeline": "animatediff",
       "path": "/home/marcus/.havnai/models/creator/realisticVisionV60B1_v51HyperVAE.safetensors",

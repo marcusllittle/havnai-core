@@ -57,7 +57,7 @@ curl -fsSL "$SERVER_URL/client/requirements" -o "$HAVNAI_HOME/requirements-node.
 
 echo "[3/6] Installing Python dependencies…"
 python -m pip install -r "$HAVNAI_HOME/requirements-node.txt"
-python -m pip install "diffusers>=0.30" "transformers>=4.36" "accelerate>=0.24" pillow scipy safetensors || true
+python -m pip install "diffusers>=0.32" "transformers>=4.36" "accelerate>=0.24" pillow scipy safetensors || true
 
 echo "[4/6] Writing environment file…"
 ENV_FILE="$HAVNAI_HOME/.env"

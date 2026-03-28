@@ -3216,11 +3216,12 @@ def generate_video_job() -> Any:
 
     selected_model_name = str(cfg.get("name") or model_name).strip()
     selected_model_key = selected_model_name.lower()
-    if _eligible_online_node_count(selected_model_key, "VIDEO_GEN") <= 0:
-        return _no_capacity_response(selected_model_key, "VIDEO_GEN")
+    capacity_task_type = "LTX_VIDEO_GEN" if is_ltx_video else "VIDEO_GEN"
+    if _eligible_online_node_count(selected_model_key, capacity_task_type) <= 0:
+        return _no_capacity_response(selected_model_key, capacity_task_type)
 
     # Credit gate — only active when HAVNAI_CREDITS_ENABLED=true
-    credit_err = credits.check_and_deduct_credits(wallet, selected_model_name, "VIDEO_GEN")
+    credit_err = credits.check_and_deduct_credits(wallet, selected_model_name, capacity_task_type)
     if credit_err:
         return credit_err
 
@@ -5272,7 +5273,12 @@ def models_list() -> Any:
             defaults_source["face_swap"] = face_swap_sources
             defaults_confidence["face_swap"] = _resolve_confidence(face_swap_sources)
 
-        online_nodes = _eligible_online_node_count(model_key_norm, native_task_type)
+        capacity_task_type = (
+            "LTX_VIDEO_GEN"
+            if pipeline == "ltx_video" or str(model_data.get("model_family", "")).lower() == "ltx_video"
+            else native_task_type
+        )
+        online_nodes = _eligible_online_node_count(model_key_norm, capacity_task_type)
         face_swap_online_nodes = (
             _eligible_online_node_count(model_key_norm, "FACE_SWAP")
             if "sdxl" in pipeline

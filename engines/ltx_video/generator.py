@@ -110,8 +110,8 @@ def _load_pipeline(
             # bundle text encoder weights).
             if text_encoder_id and checkpoint_path.is_file():
                 try:
-                    from transformers import T5EncoderModel, T5Tokenizer  # type: ignore
-                    te_kwargs: Dict[str, Any] = {"torch_dtype": dtype}
+                    from transformers import T5EncoderModel, T5TokenizerFast  # type: ignore
+                    te_kwargs: Dict[str, Any] = {"dtype": dtype}
                     tok_kwargs: Dict[str, Any] = {}
                     if text_encoder_subfolder:
                         te_kwargs["subfolder"] = text_encoder_subfolder
@@ -122,12 +122,14 @@ def _load_pipeline(
                     load_kwargs["text_encoder"] = T5EncoderModel.from_pretrained(
                         text_encoder_id, **te_kwargs
                     )
-                    load_kwargs["tokenizer"] = T5Tokenizer.from_pretrained(
+                    load_kwargs["tokenizer"] = T5TokenizerFast.from_pretrained(
                         text_encoder_id, **tok_kwargs
                     )
                     _LOGGER.info("T5 text encoder loaded successfully")
                 except Exception as te_exc:
-                    _LOGGER.warning("Could not pre-load T5 text encoder: %s", te_exc)
+                    raise RuntimeError(
+                        f"Failed to pre-load LTX text encoder from {text_encoder_id}: {te_exc}"
+                    ) from te_exc
 
             if checkpoint_path.is_file() and hasattr(pipeline_cls, "from_single_file"):
                 _LOGGER.info("Loading pipeline via from_single_file: %s", checkpoint_path)

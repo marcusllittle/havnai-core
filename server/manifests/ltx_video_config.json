@@ -48,7 +48,7 @@
     },
     "text_encoder": {
       "type": "huggingface",
-      "repo_id": "Lightricks/LTX-Video-0.9.7",
+      "repo_id": "Lightricks/LTX-Video",
       "subfolder": "text_encoder",
       "description": "T5 text encoder required for prompt conditioning",
       "dtype": "bfloat16",

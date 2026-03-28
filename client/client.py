@@ -1701,6 +1701,7 @@ def _run_ltx_video_task(
     task: Dict[str, Any],
 ) -> Tuple[Dict[str, Any], int, Optional[str]]:
     """Execute an LTX-Video 2.3 generation job."""
+    global utilization_hint
     log(f"LTX-Video task received: model={entry.name}, variant={task.get('checkpoint_variant', 'dev')}, mode={task.get('pipeline_mode', 'two_stage')}", prefix="🎬", task_id=task_id)
     try:
         from engines.ltx_video.runner import run_ltx_video, video_to_b64 as ltx_video_to_b64  # type: ignore

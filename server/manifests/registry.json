@@ -487,7 +487,7 @@
         "text_to_video",
         "image_to_video"
       ],
-      "task_type": "VIDEO_GEN",
+      "task_type": "LTX_VIDEO_GEN",
       "weight": 25,
       "reward_weight": 25,
       "model_family": "ltx_video",
@@ -517,7 +517,7 @@
     {
       "name": "ltx_video_distilled",
       "pipeline": "ltx_video",
-      "path": "/mnt/d/havnai-storage/models/ltx_video/ltx-video-2b-v0.9.5-distilled.safetensors",
+      "path": "/mnt/d/havnai-storage/models/ltx_video/ltxv-2b-0.9.8-distilled.safetensors",
       "type": "checkpoint",
       "tags": [
         "video",
@@ -526,7 +526,7 @@
         "distilled",
         "fast"
       ],
-      "task_type": "VIDEO_GEN",
+      "task_type": "LTX_VIDEO_GEN",
       "weight": 20,
       "reward_weight": 20,
       "model_family": "ltx_video",

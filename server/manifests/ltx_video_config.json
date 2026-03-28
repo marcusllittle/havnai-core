@@ -19,7 +19,7 @@
       "size_hint_gb": 10.5
     },
     "distilled": {
-      "filename": "ltx-video-2b-v0.9.5-distilled.safetensors",
+      "filename": "ltxv-2b-0.9.8-distilled.safetensors",
       "description": "Distilled checkpoint — faster inference, slightly lower quality",
       "dtype": "bfloat16",
       "size_hint_gb": 10.5
@@ -35,14 +35,8 @@
 
   "assets": {
     "spatial_upscaler_x2": {
-      "filename": "ltxv-spatial-upscaler-0.9.7-x2.safetensors",
-      "description": "Spatial resolution upscaler 2x",
-      "dtype": "bfloat16",
-      "size_hint_gb": 1.2
-    },
-    "spatial_upscaler_x1_5": {
-      "filename": "ltxv-spatial-upscaler-0.9.7-x1.5.safetensors",
-      "description": "Spatial resolution upscaler 1.5x",
+      "filename": "ltxv-spatial-upscaler-0.9.7.safetensors",
+      "description": "Spatial resolution upscaler",
       "dtype": "bfloat16",
       "size_hint_gb": 1.2
     },
@@ -66,7 +60,7 @@
       "description": "Recommended production path: base generation + spatial upscale",
       "requires_checkpoint": ["dev"],
       "requires_assets": ["text_encoder"],
-      "optional_assets": ["spatial_upscaler_x2", "spatial_upscaler_x1_5", "temporal_upscaler_x2"],
+      "optional_assets": ["spatial_upscaler_x2", "temporal_upscaler_x2"],
       "default_upscaler": "spatial_upscaler_x2",
       "supports_image_input": true,
       "supports_audio_input": false,
@@ -86,7 +80,7 @@
       "description": "High-quality two-stage: base gen + spatial + temporal upscale",
       "requires_checkpoint": ["dev"],
       "requires_assets": ["text_encoder", "spatial_upscaler_x2", "temporal_upscaler_x2"],
-      "optional_assets": ["spatial_upscaler_x1_5"],
+      "optional_assets": [],
       "supports_image_input": true,
       "supports_audio_input": false,
       "supports_keyframes": false,
@@ -125,7 +119,7 @@
       "requires_checkpoint": ["distilled"],
       "optional_checkpoint": ["distilled_lora"],
       "requires_assets": ["text_encoder"],
-      "optional_assets": ["spatial_upscaler_x2", "spatial_upscaler_x1_5"],
+      "optional_assets": ["spatial_upscaler_x2"],
       "supports_image_input": true,
       "supports_audio_input": false,
       "supports_keyframes": false,

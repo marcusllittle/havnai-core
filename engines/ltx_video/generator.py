@@ -248,13 +248,21 @@ def generate_frames(
         # Step callback
         if callback_on_step_end is not None:
             if "callback_on_step_end" in param_names:
+                _LOGGER.debug("Pipeline supports callback_on_step_end")
                 call_kwargs["callback_on_step_end"] = callback_on_step_end
             elif "callback" in param_names:
+                _LOGGER.debug("Pipeline supports callback (compat mode)")
                 def _compat_cb(step: int, timestep: Any, latents: Any) -> None:
                     callback_on_step_end(pipe, step, timestep, {})
                 call_kwargs["callback"] = _compat_cb
+            else:
+                _LOGGER.warning(
+                    "Pipeline does NOT support step callbacks — timeout watchdog "
+                    "will not function. Available params: %s", sorted(param_names)
+                )
 
-    except Exception:
+    except Exception as _sig_exc:
+        _LOGGER.warning("Signature introspection failed (%s), using fallback params", _sig_exc)
         # Best-effort fallback
         call_kwargs["num_frames"] = frames
 

@@ -75,6 +75,7 @@ def _load_pipeline(
     pipeline_cls: Any,
     checkpoint_path: Path,
     text_encoder_id: Optional[str],
+    text_encoder_subfolder: Optional[str] = None,
     dtype_str: str = "bfloat16",
     device: str = "cuda",
     cpu_offload_threshold_gb: float = 16.0,
@@ -104,46 +105,60 @@ def _load_pipeline(
         try:
             load_kwargs: Dict[str, Any] = {"torch_dtype": dtype}
 
-            # Supply text encoder if the pipeline init accepts it
-            if text_encoder_id:
+            # LTX-Video requires a T5 text encoder loaded separately when
+            # using from_single_file (the safetensors checkpoint does not
+            # bundle text encoder weights).
+            if text_encoder_id and checkpoint_path.is_file():
                 try:
-                    from transformers import AutoTokenizer, AutoModel  # type: ignore
-                    sig = inspect.signature(pipeline_cls.from_pretrained)
-                    if "text_encoder" in sig.parameters:
-                        load_kwargs["text_encoder"] = AutoModel.from_pretrained(
-                            text_encoder_id, torch_dtype=dtype
-                        )
-                    if "tokenizer" in sig.parameters:
-                        load_kwargs["tokenizer"] = AutoTokenizer.from_pretrained(text_encoder_id)
+                    from transformers import T5EncoderModel, T5Tokenizer  # type: ignore
+                    te_kwargs: Dict[str, Any] = {"torch_dtype": dtype}
+                    tok_kwargs: Dict[str, Any] = {}
+                    if text_encoder_subfolder:
+                        te_kwargs["subfolder"] = text_encoder_subfolder
+                        tok_kwargs["subfolder"] = "tokenizer"
+                        _LOGGER.info("Loading T5 text encoder from %s (subfolder=%s) ...", text_encoder_id, text_encoder_subfolder)
+                    else:
+                        _LOGGER.info("Loading T5 text encoder from %s ...", text_encoder_id)
+                    load_kwargs["text_encoder"] = T5EncoderModel.from_pretrained(
+                        text_encoder_id, **te_kwargs
+                    )
+                    load_kwargs["tokenizer"] = T5Tokenizer.from_pretrained(
+                        text_encoder_id, **tok_kwargs
+                    )
+                    _LOGGER.info("T5 text encoder loaded successfully")
                 except Exception as te_exc:
-                    _LOGGER.warning("Could not pre-load Gemma text encoder: %s", te_exc)
+                    _LOGGER.warning("Could not pre-load T5 text encoder: %s", te_exc)
 
             if checkpoint_path.is_file() and hasattr(pipeline_cls, "from_single_file"):
+                _LOGGER.info("Loading pipeline via from_single_file: %s", checkpoint_path)
                 pipe = pipeline_cls.from_single_file(str(checkpoint_path), **load_kwargs)
             else:
+                _LOGGER.info("Loading pipeline via from_pretrained: %s", checkpoint_path)
                 pipe = pipeline_cls.from_pretrained(str(checkpoint_path), **load_kwargs)
-
-            pipe = pipe.to(device)
         finally:
             if offline_was is not None:
                 os.environ["HF_HUB_OFFLINE"] = offline_was
 
-        # Memory management
+        # Memory management — decide BEFORE moving to GPU
         force_offload = os.environ.get("LTX_VIDEO_CPU_OFFLOAD", "").lower() in ("1", "true", "yes")
         disable_offload = os.environ.get("LTX_VIDEO_NO_OFFLOAD", "").lower() in ("1", "true", "yes")
         vram_gb = 0.0
         if torch.cuda.is_available():
             vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
 
-        _LOGGER.info("LTX-Video pipeline loaded on %s (VRAM=%.1fGB)", device, vram_gb)
+        use_offload = not disable_offload and (force_offload or vram_gb < cpu_offload_threshold_gb)
 
-        if not disable_offload and (force_offload or vram_gb < cpu_offload_threshold_gb):
+        if use_offload:
+            # CPU offload manages device placement — do NOT call pipe.to(device)
+            # or the full model will be loaded into VRAM and OOM.
             try:
                 pipe.enable_model_cpu_offload()
                 _LOGGER.info("LTX-Video CPU offload enabled (VRAM=%.1fGB, threshold=%.1fGB)", vram_gb, cpu_offload_threshold_gb)
             except Exception as exc:
-                _LOGGER.warning("LTX-Video CPU offload failed (non-fatal): %s", exc)
+                _LOGGER.warning("LTX-Video CPU offload failed, falling back to .to(%s): %s", device, exc)
+                pipe = pipe.to(device)
         else:
+            pipe = pipe.to(device)
             _LOGGER.info("LTX-Video running full GPU mode (VRAM=%.1fGB)", vram_gb)
 
         if vae_slicing:
@@ -188,6 +203,7 @@ def generate_frames(
 
     ckpt_path = config.checkpoint_path(checkpoint_variant)
     text_encoder_id = config.asset_repo_id("text_encoder")
+    text_encoder_subfolder = config.asset_subfolder("text_encoder")
     defaults = config.defaults
 
     # Select pipeline class based on input type
@@ -200,6 +216,7 @@ def generate_frames(
         pipeline_cls,
         ckpt_path,
         text_encoder_id=text_encoder_id,
+        text_encoder_subfolder=text_encoder_subfolder,
         dtype_str=defaults.get("dtype", "bfloat16"),
         device=device,
         cpu_offload_threshold_gb=defaults.get("cpu_offload_threshold_gb", 16.0),

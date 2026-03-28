@@ -48,10 +48,11 @@
     },
     "text_encoder": {
       "type": "huggingface",
-      "repo_id": "google/gemma-3-4b-pt",
-      "description": "Gemma 3 text encoder required for prompt conditioning",
+      "repo_id": "Lightricks/LTX-Video-0.9.7",
+      "subfolder": "text_encoder",
+      "description": "T5 text encoder required for prompt conditioning",
       "dtype": "bfloat16",
-      "size_hint_gb": 8.0
+      "size_hint_gb": 4.0
     }
   },
 

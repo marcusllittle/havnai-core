@@ -67,11 +67,12 @@ def fetch_next_job_for_node(node_id: str) -> Optional[Dict[str, Any]]:
         "VIDEO_GEN": "video",
         "ANIMATEDIFF": "animatediff",
         "FACE_SWAP": "face_swap",
+        "LTX_VIDEO_GEN": "ltx_video",
     }
     for row in rows:
         task_type = (row["task_type"] or CREATOR_TASK_TYPE).upper()
-        # Support standard IMAGE_GEN, LTX2 video jobs, AnimateDiff video jobs, and face swap.
-        if task_type not in {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP"}:
+        # Support standard IMAGE_GEN, LTX2 video jobs, LTX-Video 2.3, AnimateDiff, and face swap.
+        if task_type not in {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP", "LTX_VIDEO_GEN"}:
             continue
         if role != "creator":
             continue

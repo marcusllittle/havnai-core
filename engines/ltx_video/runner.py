@@ -270,7 +270,11 @@ def run_ltx_video(
         log_fn(f"[{job_id}] Overriding checkpoint to {checkpoint_variant!r} for mode {pipeline_mode!r}")
 
     # Upscaler selection
-    upscaler = str(job.get("upscaler") or mode_cfg.get("default_upscaler") or "").strip()
+    if "upscaler" in job:
+        raw_upscaler = str(job.get("upscaler") or "").strip()
+        upscaler = "" if raw_upscaler.lower() in {"", "none", "off", "false", "disabled"} else raw_upscaler
+    else:
+        upscaler = str(mode_cfg.get("default_upscaler") or "").strip()
     enable_temporal_upscale = bool(job.get("temporal_upscale", False))
     if pipeline_mode == "two_stage_hq":
         enable_temporal_upscale = True

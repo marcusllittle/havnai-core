@@ -164,11 +164,14 @@ def _load_pipeline(
             _LOGGER.info("LTX-Video running full GPU mode (VRAM=%.1fGB)", vram_gb)
 
         if vae_slicing:
-            try:
-                pipe.enable_vae_slicing()
-                _LOGGER.debug("VAE slicing enabled")
-            except Exception as exc:
-                _LOGGER.warning("VAE slicing failed (non-fatal): %s", exc)
+            if hasattr(pipe, "enable_vae_slicing"):
+                try:
+                    pipe.enable_vae_slicing()
+                    _LOGGER.debug("VAE slicing enabled")
+                except Exception as exc:
+                    _LOGGER.warning("VAE slicing failed (non-fatal): %s", exc)
+            else:
+                _LOGGER.debug("VAE slicing not supported by %s", pipeline_cls.__name__)
 
         _PIPES[key] = pipe
         _LOGGER.info("LTX-Video pipeline ready: %s", pipeline_cls.__name__)

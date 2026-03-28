@@ -493,6 +493,16 @@
       "model_family": "ltx_video",
       "model_version": "2.3",
       "checkpoint_variant": "dev",
+      "default_pipeline_mode": "one_stage",
+      "default_upscaler": "",
+      "video_defaults": {
+        "steps": 12,
+        "guidance": 3.0,
+        "width": 640,
+        "height": 384,
+        "frames": 49,
+        "fps": 24
+      },
       "capabilities": [
         "text_to_video",
         "image_to_video",
@@ -532,6 +542,16 @@
       "model_family": "ltx_video",
       "model_version": "2.3",
       "checkpoint_variant": "distilled",
+      "default_pipeline_mode": "distilled_fast",
+      "default_upscaler": "",
+      "video_defaults": {
+        "steps": 8,
+        "guidance": 1.0,
+        "width": 640,
+        "height": 384,
+        "frames": 65,
+        "fps": 24
+      },
       "capabilities": [
         "text_to_video",
         "image_to_video",

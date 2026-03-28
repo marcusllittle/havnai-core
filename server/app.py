@@ -2764,6 +2764,10 @@ def submit_job() -> Any:
             cfg, payload, RUNTIME_PROFILE, "LTX_VIDEO_GEN",
         )
         ltx_video_timeout = int(os.getenv("HAVNAI_LTX_VIDEO_JOB_TIMEOUT", "600"))
+        default_pipeline_mode = str(
+            cfg.get("default_pipeline_mode")
+            or (cfg.get("available_modes", ["two_stage"])[0] if cfg.get("available_modes") else "two_stage")
+        )
         settings: Dict[str, Any] = {
             "prompt": prompt_text,
             "negative_prompt": negative_prompt,
@@ -2776,9 +2780,8 @@ def submit_job() -> Any:
             "fps": resolved_video_defaults["fps"],
             "timeout": ltx_video_timeout,
             # LTX-Video 2.3 extended fields
-            "pipeline_mode": str(payload.get("pipeline_mode") or cfg.get("available_modes", ["two_stage"])[0] if cfg.get("available_modes") else "two_stage"),
+            "pipeline_mode": str(payload.get("pipeline_mode") or default_pipeline_mode),
             "checkpoint_variant": str(payload.get("checkpoint_variant") or cfg.get("checkpoint_variant") or "dev"),
-            "upscaler": str(payload.get("upscaler") or ""),
             "temporal_upscale": bool(payload.get("temporal_upscale", False)),
             "model_family": "ltx_video",
             "model_version": str(cfg.get("model_version", "2.3")),
@@ -2786,6 +2789,10 @@ def submit_job() -> Any:
             "defaults_source": {"video": video_default_sources},
             "defaults_confidence": {"video": _resolve_confidence(video_default_sources)},
         }
+        if "upscaler" in payload:
+            settings["upscaler"] = str(payload.get("upscaler") or "")
+        elif "default_upscaler" in cfg:
+            settings["upscaler"] = str(cfg.get("default_upscaler") or "")
         if init_image:
             settings["init_image"] = init_image
         # Pass through audio/keyframe/retake if provided
@@ -3652,6 +3659,38 @@ def get_creator_tasks() -> Any:
                     ):
                         if key in ad_settings and ad_settings[key] is not None:
                             task_payload[key] = ad_settings[key]
+            if task_payload["type"].upper() == "LTX_VIDEO_GEN":
+                try:
+                    raw_ltx = task.get("data") or ""
+                    ltx_settings = json.loads(raw_ltx) if isinstance(raw_ltx, str) else {}
+                except Exception:
+                    ltx_settings = {}
+                if isinstance(ltx_settings, dict):
+                    for key in (
+                        "prompt",
+                        "negative_prompt",
+                        "seed",
+                        "steps",
+                        "guidance",
+                        "width",
+                        "height",
+                        "frames",
+                        "fps",
+                        "init_image",
+                        "strength",
+                        "pipeline_mode",
+                        "checkpoint_variant",
+                        "upscaler",
+                        "temporal_upscale",
+                        "audio_input",
+                        "keyframes",
+                        "retake_segments",
+                        "ic_lora_path",
+                        "ic_lora_strength",
+                        "timeout",
+                    ):
+                        if key in ltx_settings and ltx_settings[key] is not None:
+                            task_payload[key] = ltx_settings[key]
             if task_payload["type"].upper() == "FACE_SWAP":
                 try:
                     raw_fs = task.get("data") or ""
@@ -5313,6 +5352,8 @@ def models_list() -> Any:
                 "checkpoint_variant": model_data.get("checkpoint_variant") or None,
                 "capabilities": model_data.get("capabilities") or None,
                 "available_modes": model_data.get("available_modes") or None,
+                "default_pipeline_mode": model_data.get("default_pipeline_mode") or None,
+                "default_upscaler": model_data.get("default_upscaler") if "default_upscaler" in model_data else None,
             }
         )
 

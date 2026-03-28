@@ -584,12 +584,46 @@ def ensure_model_entry(model_name: str) -> ModelEntry:
         raise RuntimeError(f"Model '{model_name}' missing from manifest") from exc
 
 
+def _ltx_video_checkpoint_variant(entry: ModelEntry) -> str:
+    variant = str(getattr(entry, "checkpoint_variant", "") or "").strip().lower()
+    if variant:
+        return variant
+    name = str(getattr(entry, "name", "") or "").strip().lower()
+    if "distilled" in name:
+        return "distilled"
+    return "dev"
+
+
+def _resolve_family_model_path(entry: ModelEntry) -> Optional[Path]:
+    pipeline = str(getattr(entry, "pipeline", "") or "").strip().lower()
+    model_family = str(getattr(entry, "model_family", "") or "").strip().lower()
+    if pipeline != "ltx_video" and model_family != "ltx_video":
+        return None
+    try:
+        from engines.ltx_video.config import load_config  # type: ignore
+
+        cfg = load_config()
+        return cfg.checkpoint_path(_ltx_video_checkpoint_variant(entry))
+    except Exception:
+        return None
+
+
 def ensure_model_path(entry: ModelEntry) -> Path:
     path_value = str(getattr(entry, "path", "") or "").strip()
     if path_value:
         path = Path(path_value).expanduser()
         if path.exists():
             return path
+
+    family_path = _resolve_family_model_path(entry)
+    if family_path is not None:
+        if family_path.exists():
+            try:
+                entry.path = str(family_path)
+            except Exception:
+                pass
+            return family_path
+        raise FileNotFoundError(f"Model path missing on node: {family_path}")
 
     fallback = resolve_model_path_from_name(entry.name)
     if fallback is not None:

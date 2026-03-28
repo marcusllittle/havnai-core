@@ -59,6 +59,7 @@ class ModelEntry:
     negative_prompt_default: str = ""
     # Model family support (e.g. "ltx_video" for LTX-Video 2.3)
     model_family: str = ""
+    checkpoint_variant: str = ""
     capabilities: List[str] = field(default_factory=list)
     available_modes: List[str] = field(default_factory=list)
 

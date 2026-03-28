@@ -8,7 +8,7 @@ onnxruntime
 
 # Core AI stack
 torch
-diffusers>=0.30.0
+diffusers>=0.32.0
 transformers>=4.36.0
 accelerate>=0.24.0
 safetensors

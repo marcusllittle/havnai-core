@@ -332,7 +332,13 @@ def run_ltx_video(
         elapsed = now - _progress_started["start"]
         log_fn(f"[{job_id}] step {step + 1}/{steps} ({elapsed:.1f}s elapsed)")
         if _timed_out.is_set():
-            raise _JobTimeout(f"Exceeded {timeout}s timeout at step {step + 1}")
+            if step + 1 >= steps:
+                log_fn(
+                    f"[{job_id}] Timeout threshold reached on final denoise step; "
+                    "allowing generation to complete and save output"
+                )
+            else:
+                raise _JobTimeout(f"Exceeded {timeout}s timeout at step {step + 1}")
         return kwargs
 
     def _watchdog() -> None:

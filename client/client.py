@@ -1667,10 +1667,13 @@ def _run_ltx_video_task(
     task: Dict[str, Any],
 ) -> Tuple[Dict[str, Any], int, Optional[str]]:
     """Execute an LTX-Video 2.3 generation job."""
+    log(f"LTX-Video task received: model={entry.name}, variant={task.get('checkpoint_variant', 'dev')}, mode={task.get('pipeline_mode', 'two_stage')}", prefix="🎬", task_id=task_id)
     try:
         from engines.ltx_video.runner import run_ltx_video, video_to_b64 as ltx_video_to_b64  # type: ignore
         from engines.ltx_video.config import load_config as load_ltx_video_config  # type: ignore
+        log("LTX-Video engine imported successfully", prefix="🎬", task_id=task_id)
     except Exception as exc:
+        log(f"LTX-Video engine import FAILED: {exc}", prefix="❌", task_id=task_id)
         return (
             {
                 "status": "failed",
@@ -1684,7 +1687,23 @@ def _run_ltx_video_task(
             None,
         )
 
-    ltx_config = load_ltx_video_config()
+    try:
+        ltx_config = load_ltx_video_config()
+        log(f"LTX-Video config loaded: version={ltx_config.version}, available_modes={ltx_config.available_modes()}", prefix="🎬", task_id=task_id)
+    except Exception as exc:
+        log(f"LTX-Video config load FAILED: {exc}", prefix="❌", task_id=task_id)
+        return (
+            {
+                "status": "failed",
+                "task_type": "video_gen",
+                "model_name": entry.name,
+                "model_family": "ltx_video",
+                "reward_weight": reward_weight,
+                "error": f"LTX-Video config load failed: {exc}",
+            },
+            utilization_hint,
+            None,
+        )
     task_payload = dict(task)
     task_payload["task_id"] = task_id
     task_payload["model_name"] = entry.name

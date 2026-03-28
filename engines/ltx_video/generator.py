@@ -92,7 +92,9 @@ def _load_pipeline(
     key = _cache_key(str(checkpoint_path), pipeline_cls.__name__)
     with _PIPE_LOCK:
         if key in _PIPES:
+            _LOGGER.debug("LTX-Video pipeline cache HIT: %s", key)
             return _PIPES[key]
+        _LOGGER.info("LTX-Video pipeline cache MISS — loading fresh: %s", key)
 
         dtype = _resolve_dtype(dtype_str)
         _LOGGER.info("Loading LTX-Video pipeline: %s from %s", pipeline_cls.__name__, checkpoint_path)
@@ -133,20 +135,26 @@ def _load_pipeline(
         if torch.cuda.is_available():
             vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
 
+        _LOGGER.info("LTX-Video pipeline loaded on %s (VRAM=%.1fGB)", device, vram_gb)
+
         if not disable_offload and (force_offload or vram_gb < cpu_offload_threshold_gb):
             try:
                 pipe.enable_model_cpu_offload()
                 _LOGGER.info("LTX-Video CPU offload enabled (VRAM=%.1fGB, threshold=%.1fGB)", vram_gb, cpu_offload_threshold_gb)
-            except Exception:
-                pass
+            except Exception as exc:
+                _LOGGER.warning("LTX-Video CPU offload failed (non-fatal): %s", exc)
+        else:
+            _LOGGER.info("LTX-Video running full GPU mode (VRAM=%.1fGB)", vram_gb)
 
         if vae_slicing:
             try:
                 pipe.enable_vae_slicing()
-            except Exception:
-                pass
+                _LOGGER.debug("VAE slicing enabled")
+            except Exception as exc:
+                _LOGGER.warning("VAE slicing failed (non-fatal): %s", exc)
 
         _PIPES[key] = pipe
+        _LOGGER.info("LTX-Video pipeline ready: %s", pipeline_cls.__name__)
         return pipe
 
 

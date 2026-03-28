@@ -55,14 +55,18 @@ class LTXVideoConfig:
         """Return absolute path to a checkpoint variant's file."""
         entry = self.checkpoints.get(variant)
         if entry is None:
+            _LOGGER.error("Unknown checkpoint variant: %r (available: %s)", variant, list(self.checkpoints.keys()))
             raise LTXVideoAssetError(f"Unknown checkpoint variant: {variant!r}")
         filename = entry["filename"]
         # Allow env-var override per-variant: HAVNAI_LTX_VIDEO_CKPT_DEV=/some/path
         env_key = f"HAVNAI_LTX_VIDEO_CKPT_{variant.upper()}"
         override = os.environ.get(env_key, "").strip()
         if override:
+            _LOGGER.info("Checkpoint %r overridden via %s → %s", variant, env_key, override)
             return Path(override)
-        return self.base_dir / filename
+        resolved = self.base_dir / filename
+        _LOGGER.debug("Checkpoint %r resolved to %s (exists=%s)", variant, resolved, resolved.exists())
+        return resolved
 
     def asset_path(self, asset_key: str) -> Optional[Path]:
         """Return absolute path to an auxiliary asset, or *None* if HuggingFace-hosted."""
@@ -109,13 +113,21 @@ class LTXVideoConfig:
             p = self.checkpoint_path(variant)
             if not p.exists():
                 missing.append(f"checkpoint:{variant} ({p})")
+                _LOGGER.warning("Mode %r: checkpoint %r NOT FOUND at %s", mode, variant, p)
+            else:
+                _LOGGER.debug("Mode %r: checkpoint %r OK at %s", mode, variant, p)
 
         for asset_key in mode_cfg.get("requires_assets", []):
             p = self.asset_path(asset_key)
             if p is not None and not p.exists():
                 missing.append(f"asset:{asset_key} ({p})")
+                _LOGGER.warning("Mode %r: asset %r NOT FOUND at %s", mode, asset_key, p)
             # HF-hosted assets validated at load time, not here
 
+        if missing:
+            _LOGGER.warning("Mode %r has %d missing assets: %s", mode, len(missing), missing)
+        else:
+            _LOGGER.info("Mode %r: all required assets present", mode)
         return missing
 
     def available_modes(self) -> List[str]:

@@ -207,18 +207,24 @@ def run_ltx_video(
     config = config or load_config()
 
     job_id = str(job.get("task_id") or job.get("job_id") or "ltx_video")
+    log_fn(f"[{job_id}] LTX-Video job received: model_family=ltx_video, version={config.version}")
+    log_fn(f"[{job_id}] Config: {len(config.checkpoints)} checkpoints, {len(config.assets)} assets, available_modes={config.available_modes()}")
+
     prompt = str(job.get("prompt") or "").strip()
     if not prompt:
+        log_fn(f"[{job_id}] REJECTED: prompt is required")
         return _fail(job, "prompt is required", utilization_hint)
 
     seed_raw = job.get("seed")
     try:
         seed = int(seed_raw)
     except Exception:
+        log_fn(f"[{job_id}] REJECTED: seed is required (got {seed_raw!r})")
         return _fail(job, "seed is required", utilization_hint)
 
     # Pipeline mode selection
     pipeline_mode = str(job.get("pipeline_mode") or config.defaults.get("pipeline_mode", "two_stage"))
+    log_fn(f"[{job_id}] Pipeline mode requested: {pipeline_mode}")
     try:
         mode_cfg = config.mode_config(pipeline_mode)
     except Exception as exc:
@@ -227,6 +233,7 @@ def run_ltx_video(
     # Validate assets
     missing = config.validate_mode_assets(pipeline_mode)
     if missing:
+        log_fn(f"[{job_id}] REJECTED: mode {pipeline_mode!r} missing assets: {missing}")
         return _fail(
             job,
             f"Pipeline mode {pipeline_mode!r} missing assets: {', '.join(missing)}",
@@ -278,7 +285,12 @@ def run_ltx_video(
         if not mode_cfg.get("supports_image_input", False):
             log_fn(f"[{job_id}] Warning: mode {pipeline_mode!r} does not support image input; ignoring init_image")
         else:
-            init_image = _load_init_image(init_image_raw)
+            try:
+                init_image = _load_init_image(init_image_raw)
+                log_fn(f"[{job_id}] Init image loaded successfully")
+            except Exception as exc:
+                log_fn(f"[{job_id}] Failed to load init_image: {exc}")
+                return _fail(job, f"Failed to load init_image: {exc}", utilization_hint)
 
     # Timeout
     timeout_raw = job.get("timeout", 0)
@@ -333,10 +345,19 @@ def run_ltx_video(
         wd_thread.start()
 
     try:
-        if torch is None or not torch.cuda.is_available():
+        if torch is None:
+            log_fn(f"[{job_id}] FATAL: torch is not installed")
+            raise RuntimeError("torch is not installed")
+        if not torch.cuda.is_available():
+            log_fn(f"[{job_id}] FATAL: CUDA is not available")
             raise RuntimeError("CUDA is not available")
 
+        vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+        gpu_name = torch.cuda.get_device_name(0)
+        log_fn(f"[{job_id}] GPU: {gpu_name}, VRAM: {vram_gb:.1f}GB")
+
         # --- Stage 1: base generation ---
+        log_fn(f"[{job_id}] Starting base generation (ckpt={checkpoint_variant}, mode={pipeline_mode})...")
         video_frames = generate_frames(
             config,
             prompt=prompt,

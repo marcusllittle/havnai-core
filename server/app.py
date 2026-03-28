@@ -2387,6 +2387,65 @@ def resolve_video_defaults(
     return resolved, sources
 
 
+_LTX_VIDEO_TIMEOUT_BASELINE_AREA = 768 * 512
+_LTX_VIDEO_TIMEOUT_PER_STEP_FRAME = {
+    "distilled_fast": 0.10,
+    "one_stage": 0.22,
+    "two_stage": 0.28,
+    "two_stage_hq": 0.40,
+    "ic_lora": 0.24,
+    "keyframe": 0.24,
+    "audio_to_video": 0.24,
+    "retake": 0.22,
+}
+
+
+def _resolve_ltx_video_timeout_seconds(
+    model_cfg: Dict[str, Any],
+    payload: Dict[str, Any],
+    resolved_video_defaults: Dict[str, Any],
+    *,
+    pipeline_mode: str,
+    checkpoint_variant: str,
+) -> Tuple[int, str]:
+    env_timeout = _coerce_int(os.getenv("HAVNAI_LTX_VIDEO_JOB_TIMEOUT"), 600)
+    if _is_truthy(os.getenv("HAVNAI_LTX_VIDEO_JOB_TIMEOUT_FIXED")):
+        return max(0, env_timeout), "env_fixed"
+    if env_timeout <= 0:
+        return 0, "env"
+
+    width = max(256, _coerce_int(resolved_video_defaults.get("width"), 768))
+    height = max(256, _coerce_int(resolved_video_defaults.get("height"), 512))
+    steps = max(1, _coerce_int(resolved_video_defaults.get("steps"), 50))
+    frames = max(1, _coerce_int(resolved_video_defaults.get("frames"), 97))
+
+    normalized_mode = str(pipeline_mode or "two_stage").strip().lower() or "two_stage"
+    normalized_variant = str(checkpoint_variant or model_cfg.get("checkpoint_variant") or "dev").strip().lower() or "dev"
+    pixel_ratio = max(0.25, (width * height) / float(_LTX_VIDEO_TIMEOUT_BASELINE_AREA))
+    per_step_frame = _LTX_VIDEO_TIMEOUT_PER_STEP_FRAME.get(normalized_mode, 0.24)
+    if normalized_variant == "distilled":
+        per_step_frame *= 0.75
+
+    raw_upscaler = str(payload.get("upscaler") or "").strip().lower()
+    if raw_upscaler and raw_upscaler not in {"none", "off", "false", "disabled"} and normalized_mode not in {"two_stage", "two_stage_hq"}:
+        per_step_frame *= 1.15
+    if _is_truthy(payload.get("temporal_upscale")) and normalized_mode != "two_stage_hq":
+        per_step_frame *= 1.15
+
+    warmup_buffer = 180
+    if normalized_mode in {"two_stage", "audio_to_video", "keyframe", "ic_lora"}:
+        warmup_buffer += 90
+    if normalized_mode == "two_stage_hq":
+        warmup_buffer += 180
+
+    estimated_timeout = warmup_buffer + int(steps * frames * pixel_ratio * per_step_frame)
+    max_timeout = _coerce_int(os.getenv("HAVNAI_LTX_VIDEO_JOB_TIMEOUT_MAX"), 7200)
+    timeout = max(env_timeout, estimated_timeout)
+    if max_timeout > 0:
+        timeout = min(timeout, max_timeout)
+    return timeout, "adaptive"
+
+
 def resolve_faceswap_defaults(
     model_cfg: Dict[str, Any],
     payload: Dict[str, Any],
@@ -2763,10 +2822,18 @@ def submit_job() -> Any:
         resolved_video_defaults, video_default_sources = resolve_video_defaults(
             cfg, payload, RUNTIME_PROFILE, "LTX_VIDEO_GEN",
         )
-        ltx_video_timeout = int(os.getenv("HAVNAI_LTX_VIDEO_JOB_TIMEOUT", "600"))
         default_pipeline_mode = str(
             cfg.get("default_pipeline_mode")
             or (cfg.get("available_modes", ["two_stage"])[0] if cfg.get("available_modes") else "two_stage")
+        )
+        pipeline_mode = str(payload.get("pipeline_mode") or default_pipeline_mode)
+        checkpoint_variant = str(payload.get("checkpoint_variant") or cfg.get("checkpoint_variant") or "dev")
+        ltx_video_timeout, ltx_video_timeout_source = _resolve_ltx_video_timeout_seconds(
+            cfg,
+            payload,
+            resolved_video_defaults,
+            pipeline_mode=pipeline_mode,
+            checkpoint_variant=checkpoint_variant,
         )
         settings: Dict[str, Any] = {
             "prompt": prompt_text,
@@ -2779,9 +2846,10 @@ def submit_job() -> Any:
             "frames": resolved_video_defaults["frames"],
             "fps": resolved_video_defaults["fps"],
             "timeout": ltx_video_timeout,
+            "timeout_source": ltx_video_timeout_source,
             # LTX-Video 2.3 extended fields
-            "pipeline_mode": str(payload.get("pipeline_mode") or default_pipeline_mode),
-            "checkpoint_variant": str(payload.get("checkpoint_variant") or cfg.get("checkpoint_variant") or "dev"),
+            "pipeline_mode": pipeline_mode,
+            "checkpoint_variant": checkpoint_variant,
             "temporal_upscale": bool(payload.get("temporal_upscale", False)),
             "model_family": "ltx_video",
             "model_version": str(cfg.get("model_version", "2.3")),

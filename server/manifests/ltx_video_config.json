@@ -1,0 +1,246 @@
+{
+  "_comment": [
+    "LTX-Video 2.3 model family configuration.",
+    "Checkpoint filenames are authoritative — do NOT assume from model-size labels.",
+    "Official docs show naming drift (20b vs 22b); use exact filenames from the repo."
+  ],
+
+  "family": "ltx_video",
+  "version": "2.3",
+  "provider": "Lightricks",
+
+  "base_dir": "/mnt/d/havnai-storage/models/ltx_video",
+
+  "checkpoints": {
+    "dev": {
+      "filename": "ltx-video-2b-v0.9.5.safetensors",
+      "description": "Full dev checkpoint — highest quality, slower inference",
+      "dtype": "bfloat16",
+      "size_hint_gb": 10.5
+    },
+    "distilled": {
+      "filename": "ltx-video-2b-v0.9.5-distilled.safetensors",
+      "description": "Distilled checkpoint — faster inference, slightly lower quality",
+      "dtype": "bfloat16",
+      "size_hint_gb": 10.5
+    },
+    "distilled_lora": {
+      "filename": "ltx-video-2b-v0.9.5-distilled-lora.safetensors",
+      "description": "LoRA weights applied on top of distilled checkpoint",
+      "dtype": "bfloat16",
+      "size_hint_gb": 0.4,
+      "requires_base": "distilled"
+    }
+  },
+
+  "assets": {
+    "spatial_upscaler_x2": {
+      "filename": "ltxv-spatial-upscaler-0.9.7-x2.safetensors",
+      "description": "Spatial resolution upscaler 2x",
+      "dtype": "bfloat16",
+      "size_hint_gb": 1.2
+    },
+    "spatial_upscaler_x1_5": {
+      "filename": "ltxv-spatial-upscaler-0.9.7-x1.5.safetensors",
+      "description": "Spatial resolution upscaler 1.5x",
+      "dtype": "bfloat16",
+      "size_hint_gb": 1.2
+    },
+    "temporal_upscaler_x2": {
+      "filename": "ltxv-temporal-upscaler-0.9.7.safetensors",
+      "description": "Temporal frame interpolation upscaler 2x",
+      "dtype": "bfloat16",
+      "size_hint_gb": 1.2
+    },
+    "text_encoder": {
+      "type": "huggingface",
+      "repo_id": "google/gemma-3-4b-pt",
+      "description": "Gemma 3 text encoder required for prompt conditioning",
+      "dtype": "bfloat16",
+      "size_hint_gb": 8.0
+    }
+  },
+
+  "pipeline_modes": {
+    "two_stage": {
+      "description": "Recommended production path: base generation + spatial upscale",
+      "requires_checkpoint": ["dev"],
+      "requires_assets": ["text_encoder"],
+      "optional_assets": ["spatial_upscaler_x2", "spatial_upscaler_x1_5", "temporal_upscaler_x2"],
+      "default_upscaler": "spatial_upscaler_x2",
+      "supports_image_input": true,
+      "supports_audio_input": false,
+      "supports_keyframes": false,
+      "supports_retake": false,
+      "default_steps": 50,
+      "default_guidance": 3.0,
+      "default_width": 768,
+      "default_height": 512,
+      "default_frames": 97,
+      "default_fps": 24,
+      "max_frames": 257,
+      "max_width": 1280,
+      "max_height": 1280
+    },
+    "two_stage_hq": {
+      "description": "High-quality two-stage: base gen + spatial + temporal upscale",
+      "requires_checkpoint": ["dev"],
+      "requires_assets": ["text_encoder", "spatial_upscaler_x2", "temporal_upscaler_x2"],
+      "optional_assets": ["spatial_upscaler_x1_5"],
+      "supports_image_input": true,
+      "supports_audio_input": false,
+      "supports_keyframes": false,
+      "supports_retake": false,
+      "default_steps": 50,
+      "default_guidance": 3.0,
+      "default_width": 768,
+      "default_height": 512,
+      "default_frames": 97,
+      "default_fps": 24,
+      "max_frames": 257,
+      "max_width": 1280,
+      "max_height": 1280
+    },
+    "one_stage": {
+      "description": "Single-pass generation without upscaling — faster, lower res",
+      "requires_checkpoint": ["dev"],
+      "requires_assets": ["text_encoder"],
+      "optional_assets": [],
+      "supports_image_input": true,
+      "supports_audio_input": false,
+      "supports_keyframes": false,
+      "supports_retake": false,
+      "default_steps": 50,
+      "default_guidance": 3.0,
+      "default_width": 768,
+      "default_height": 512,
+      "default_frames": 97,
+      "default_fps": 24,
+      "max_frames": 257,
+      "max_width": 1280,
+      "max_height": 1280
+    },
+    "distilled_fast": {
+      "description": "Fast path using distilled checkpoint — fewer steps needed",
+      "requires_checkpoint": ["distilled"],
+      "optional_checkpoint": ["distilled_lora"],
+      "requires_assets": ["text_encoder"],
+      "optional_assets": ["spatial_upscaler_x2", "spatial_upscaler_x1_5"],
+      "supports_image_input": true,
+      "supports_audio_input": false,
+      "supports_keyframes": false,
+      "supports_retake": false,
+      "default_steps": 8,
+      "default_guidance": 1.0,
+      "default_width": 768,
+      "default_height": 512,
+      "default_frames": 97,
+      "default_fps": 24,
+      "max_frames": 257,
+      "max_width": 1280,
+      "max_height": 1280
+    },
+    "ic_lora": {
+      "description": "IC-LoRA path for style/control transformations",
+      "requires_checkpoint": ["dev"],
+      "requires_assets": ["text_encoder"],
+      "optional_assets": ["spatial_upscaler_x2"],
+      "supports_image_input": true,
+      "supports_audio_input": false,
+      "supports_keyframes": false,
+      "supports_retake": false,
+      "default_steps": 50,
+      "default_guidance": 3.0,
+      "default_width": 768,
+      "default_height": 512,
+      "default_frames": 97,
+      "default_fps": 24,
+      "max_frames": 257,
+      "max_width": 1280,
+      "max_height": 1280,
+      "extra_params": {
+        "ic_lora_path": null,
+        "ic_lora_strength": 1.0
+      }
+    },
+    "keyframe": {
+      "description": "Keyframe interpolation — generate video between key frames",
+      "requires_checkpoint": ["dev"],
+      "requires_assets": ["text_encoder"],
+      "optional_assets": ["spatial_upscaler_x2", "temporal_upscaler_x2"],
+      "supports_image_input": true,
+      "supports_audio_input": false,
+      "supports_keyframes": true,
+      "supports_retake": false,
+      "default_steps": 50,
+      "default_guidance": 3.0,
+      "default_width": 768,
+      "default_height": 512,
+      "default_frames": 97,
+      "default_fps": 24,
+      "max_frames": 257,
+      "max_width": 1280,
+      "max_height": 1280
+    },
+    "audio_to_video": {
+      "description": "Audio-conditioned video generation — synced audio+video",
+      "requires_checkpoint": ["dev"],
+      "requires_assets": ["text_encoder"],
+      "optional_assets": ["spatial_upscaler_x2"],
+      "supports_image_input": true,
+      "supports_audio_input": true,
+      "supports_keyframes": false,
+      "supports_retake": false,
+      "default_steps": 50,
+      "default_guidance": 3.0,
+      "default_width": 768,
+      "default_height": 512,
+      "default_frames": 97,
+      "default_fps": 24,
+      "max_frames": 257,
+      "max_width": 1280,
+      "max_height": 1280
+    },
+    "retake": {
+      "description": "Partial regeneration — re-render segments with new params",
+      "requires_checkpoint": ["dev"],
+      "requires_assets": ["text_encoder"],
+      "optional_assets": ["spatial_upscaler_x2"],
+      "supports_image_input": true,
+      "supports_audio_input": false,
+      "supports_keyframes": false,
+      "supports_retake": true,
+      "default_steps": 50,
+      "default_guidance": 3.0,
+      "default_width": 768,
+      "default_height": 512,
+      "default_frames": 97,
+      "default_fps": 24,
+      "max_frames": 257,
+      "max_width": 1280,
+      "max_height": 1280
+    }
+  },
+
+  "capabilities": [
+    "text_to_video",
+    "image_to_video",
+    "audio_to_video",
+    "keyframe_interpolation",
+    "spatial_upscale",
+    "temporal_upscale",
+    "retake",
+    "distilled_inference",
+    "ic_lora"
+  ],
+
+  "defaults": {
+    "pipeline_mode": "two_stage",
+    "checkpoint_variant": "dev",
+    "dtype": "bfloat16",
+    "device": "cuda",
+    "cpu_offload_threshold_gb": 16,
+    "vae_slicing": true,
+    "timeout_seconds": 600
+  }
+}

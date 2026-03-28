@@ -22,6 +22,7 @@ DEFAULT_CREDIT_COSTS: Dict[str, float] = {
     "sdxl": 1.0,
     "sd15": 0.5,
     "ltx2": 3.0,
+    "ltx_video": 5.0,
     "animatediff": 2.0,
     "face_swap": 1.5,
 }
@@ -49,6 +50,8 @@ def resolve_credit_cost(model_name: str, task_type: str = "") -> float:
         return DEFAULT_CREDIT_COSTS.get("face_swap", 1.5)
     if tt == "VIDEO_GEN":
         return DEFAULT_CREDIT_COSTS.get("ltx2", 3.0)
+    if tt == "LTX_VIDEO_GEN":
+        return DEFAULT_CREDIT_COSTS.get("ltx_video", 5.0)
     if tt == "ANIMATEDIFF":
         return DEFAULT_CREDIT_COSTS.get("animatediff", 2.0)
     return 1.0

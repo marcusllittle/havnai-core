@@ -28,6 +28,14 @@ class JobSpec:
     scheduler: str = ""
     settings: Dict[str, Any] = field(default_factory=dict)
     task_type: str = "IMAGE_GEN"
+    # LTX-Video 2.3 extended fields
+    pipeline_mode: str = ""
+    checkpoint_variant: str = ""
+    upscaler: str = ""
+    temporal_upscale: bool = False
+    audio_input: str | None = None
+    keyframes: List[Dict[str, Any]] = field(default_factory=list)
+    retake_segments: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -49,6 +57,10 @@ class ModelEntry:
     height: int | None = None
     sampler: str | None = None
     negative_prompt_default: str = ""
+    # Model family support (e.g. "ltx_video" for LTX-Video 2.3)
+    model_family: str = ""
+    capabilities: List[str] = field(default_factory=list)
+    available_modes: List[str] = field(default_factory=list)
 
 
 @dataclass

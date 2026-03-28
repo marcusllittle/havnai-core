@@ -9,7 +9,8 @@
       "epicrealismxl_vxviicrystalclear"
     ],
     "pipelines": [
-      "sdxl"
+      "sdxl",
+      "ltx_video"
     ],
     "current_task": {
       "task_id": "job-anchor-task",

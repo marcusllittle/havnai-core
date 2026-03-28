@@ -5254,7 +5254,7 @@ def models_list() -> Any:
             defaults_source["image"] = image_sources
             defaults_confidence["image"] = _resolve_confidence(image_sources)
 
-        if native_task_type in {"VIDEO_GEN", "ANIMATEDIFF"}:
+        if native_task_type in {"VIDEO_GEN", "ANIMATEDIFF", "LTX_VIDEO_GEN"}:
             video_defaults, video_sources = resolve_video_defaults(
                 model_data,
                 {},

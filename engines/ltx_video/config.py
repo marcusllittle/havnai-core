@@ -89,6 +89,13 @@ class LTXVideoConfig:
             return entry.get("repo_id")
         return None
 
+    def asset_subfolder(self, asset_key: str) -> Optional[str]:
+        """Return HuggingFace subfolder for a hub-hosted asset, or *None*."""
+        entry = self.assets.get(asset_key)
+        if entry and entry.get("type") == "huggingface":
+            return entry.get("subfolder")
+        return None
+
     # -- pipeline mode helpers ---------------------------------------------
 
     def mode_config(self, mode: str) -> Dict[str, Any]:

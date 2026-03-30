@@ -1887,6 +1887,8 @@ def _run_faceswap_task(
             seed = int(seed) if seed is not None else random.randint(0, 2**31 - 1)
         except (TypeError, ValueError):
             seed = random.randint(0, 2**31 - 1)
+        if seed < 0:
+            seed = random.randint(0, 2**31 - 1)
 
         base_image, base_error = load_image_source_with_error(task.get("base_image_url"))
         if base_image is None:
@@ -2802,8 +2804,8 @@ def run_image_generation(
                 seed = int(seed) if seed is not None else None
             except (TypeError, ValueError):
                 seed = None
-            if seed is None:
-                seed = int(time.time()) & 0x7FFFFFFF
+            if seed is None or seed < 0:
+                seed = random.randint(0, 2**31 - 1)
             generator = torch.Generator(device=device).manual_seed(seed)
             pos_text = prompt or "a high quality photo of a golden retriever on a beach at sunset"
             neg_text = negative_prompt or ""

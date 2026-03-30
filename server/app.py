@@ -2811,6 +2811,8 @@ def submit_job() -> Any:
             seed = int(seed) if seed is not None else None
         except (TypeError, ValueError):
             seed = None
+        if seed is not None and seed < 0:
+            seed = random.randint(0, 2**31 - 1)
         if seed is None:
             seed = random.randint(0, 2**31 - 1)
         init_image = (
@@ -2897,6 +2899,8 @@ def submit_job() -> Any:
             seed = int(seed) if seed is not None else None
         except (TypeError, ValueError):
             seed = None
+        if seed is not None and seed < 0:
+            seed = random.randint(0, 2**31 - 1)
         if seed is None:
             seed = random.randint(0, 2**31 - 1)
         init_image = (
@@ -2966,6 +2970,8 @@ def submit_job() -> Any:
             seed = int(seed) if seed is not None else None
         except (TypeError, ValueError):
             seed = None
+        if seed is not None and seed < 0:
+            seed = random.randint(0, 2**31 - 1)
         lora_strength = payload.get("lora_strength")
         try:
             lora_strength = float(lora_strength) if lora_strength is not None else None
@@ -3126,6 +3132,8 @@ def submit_job() -> Any:
             seed = int(seed) if seed is not None else None
         except (TypeError, ValueError):
             seed = None
+        if seed is not None and seed < 0:
+            seed = random.randint(0, 2**31 - 1)
         if seed is not None:
             overrides["seed"] = seed
         if overrides:

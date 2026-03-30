@@ -2681,7 +2681,7 @@ def submit_job() -> Any:
     block_reason = safety.check_safety(prompt_raw, negative_raw)
     if block_reason:
         return jsonify({"error": "prompt_blocked", "reason": block_reason}), 400
-    wallet = str(payload.get("wallet", "")).strip()
+    wallet = str(payload.get("wallet", "")).strip().lower()
     model_name_raw = str(payload.get("model", "")).strip()
     model_name = model_name_raw.lower()
     weight = payload.get("weight")
@@ -3211,7 +3211,7 @@ def generate_video_job() -> Any:
     if not prompt_text:
         return jsonify({"error": "missing prompt"}), 400
 
-    wallet = str(payload.get("wallet", "")).strip()
+    wallet = str(payload.get("wallet", "")).strip().lower()
     if not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid wallet"}), 400
     # Per-wallet rate limiting (10 video jobs per 60 seconds per wallet)
@@ -3341,7 +3341,7 @@ def submit_faceswap_job_endpoint() -> Any:
     invite_code, invite_error = invite.enforce_invite_limits(payload)
     if invite_error:
         return invite_error
-    wallet = str(payload.get("wallet", "")).strip()
+    wallet = str(payload.get("wallet", "")).strip().lower()
     model_name_raw = str(payload.get("model") or "epicrealismxl_vxviicrystalclear").strip()
     model_name = model_name_raw.lower()
     prompt_text = str(payload.get("prompt") or "").strip()

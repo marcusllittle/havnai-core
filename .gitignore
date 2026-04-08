@@ -5,3 +5,5 @@ server/__pycache__/
 tmp_gpu/
 server/logs/
 db/
+static/outputs/
+nodes.json.bak

@@ -278,6 +278,30 @@ def get_positive_suffix(model_cfg: Optional[Dict[str, Any]] = None) -> str:
         return POSITIVE_SUFFIX_SDXL
     return POSITIVE_SUFFIX_SD15_REALISM
 
+
+def prompt_targets_person_subject(prompt: str) -> bool:
+    """Heuristic guard so portrait/anatomy quality hints only apply to human subjects."""
+    text = (prompt or "").lower()
+    if not text:
+        return False
+
+    human_markers = {
+        "woman", "man", "girl", "boy", "person", "people", "human", "portrait",
+        "face", "headshot", "selfie", "model", "bride", "groom", "queen", "king",
+        "empress", "warrior", "character", "body", "skin", "eyes", "smile",
+        "hands", "hand", "legs", "leg", "feet", "foot",
+    }
+    non_human_markers = {
+        "product", "photo of a product", "still life", "wallet", "bag", "shoe", "watch",
+        "bottle", "perfume", "chair", "lamp", "table", "desk", "phone", "laptop",
+        "car", "vehicle", "building", "architecture", "room", "interior", "food",
+        "drink", "plate", "packaging", "logo", "mockup", "render of a product",
+    }
+
+    if any(marker in text for marker in non_human_markers):
+        return False
+    return any(marker in text for marker in human_markers)
+
 # Backward-compatible alias used by older code paths
 GLOBAL_POSITIVE_SUFFIX = POSITIVE_SUFFIX_SD15_REALISM
 
@@ -2821,12 +2845,14 @@ def submit_job() -> Any:
         task_type = "ANIMATEDIFF"
     else:
         prompt_text = enhanced_prompt
-        if hardcore_prompt and HARDCORE_POSITIVE_SUFFIX.lower() not in prompt_text.lower():
+        person_subject = prompt_targets_person_subject(prompt_text)
+        positive_suffix = get_positive_suffix(cfg) if person_subject else POSITIVE_SUFFIX_SDXL
+        if hardcore_prompt and person_subject and HARDCORE_POSITIVE_SUFFIX.lower() not in prompt_text.lower():
             prompt_text = f"{prompt_text}, {HARDCORE_POSITIVE_SUFFIX}" if prompt_text else HARDCORE_POSITIVE_SUFFIX
         if prompt_text:
-            prompt_text = f"{prompt_text}, {GLOBAL_POSITIVE_SUFFIX}"
+            prompt_text = f"{prompt_text}, {positive_suffix}"
         else:
-            prompt_text = GLOBAL_POSITIVE_SUFFIX
+            prompt_text = positive_suffix
         negative_prompt = str(payload.get("negative_prompt") or "").strip()
         seed = payload.get("seed")
         try:
@@ -2864,9 +2890,9 @@ def submit_job() -> Any:
             NO_WATERMARK_NEGATIVE,
             SFW_NEGATIVE_PROMPT if sfw_mode else "",
         )
-        if position_negative:
+        if position_negative and person_subject:
             combined_negative = _merge_negative_prompts(combined_negative, position_negative)
-        if hardcore_prompt:
+        if hardcore_prompt and person_subject:
             for extra_negative in (ANTI_OVERLAY_NEGATIVE, SHARPNESS_NEGATIVE):
                 if not extra_negative:
                     continue

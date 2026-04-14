@@ -4440,7 +4440,8 @@ def wallet_nonce() -> Any:
     if not isinstance(data, dict):
         return jsonify({"error": "malformed_payload", "message": "JSON object payload required"}), 400
 
-    wallet = str(data.get("wallet", "")).strip()
+    # Normalize here too
+    wallet = str(data.get("wallet", "")).strip().lower()
     if not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid wallet"}), 400
     if not rate_limit(f"wallet-nonce:wallet:{wallet}", limit=20):
@@ -4460,7 +4461,6 @@ def wallet_nonce() -> Any:
         return amount_error
     assert amount is not None
 
-    # Optional context fields for gallery purposes
     listing_id = None
     job_id_ctx = None
     if purpose == WALLET_NONCE_PURPOSE_GALLERY_PURCHASE:
@@ -4497,8 +4497,16 @@ def wallet_nonce() -> Any:
         message = _build_convert_nonce_message(wallet, amount, nonce, issued_at_iso, expires_at_iso, origin, domain)
     else:
         message = _build_gallery_nonce_message(
-            purpose, wallet, amount, nonce, issued_at_iso, expires_at_iso, origin, domain,
-            listing_id=listing_id, job_id=job_id_ctx,
+            purpose,
+            wallet,
+            amount,
+            nonce,
+            issued_at_iso,
+            expires_at_iso,
+            origin,
+            domain,
+            listing_id=listing_id,
+            job_id=job_id_ctx,
         )
 
     conn = get_db()
@@ -6113,7 +6121,6 @@ def api_gallery_create_listing() -> Any:
 
     data = request.get_json() or {}
 
-    # Normalize wallet once, early, and use the normalized form everywhere.
     wallet = str(data.get("wallet", "")).strip().lower()
     if not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid wallet"}), 400
@@ -6122,7 +6129,6 @@ def api_gallery_create_listing() -> Any:
     if not job_id:
         return jsonify({"error": "missing job_id"}), 400
 
-    # Verify wallet ownership via signature
     nonce_str = str(data.get("nonce", "")).strip()
     signature = str(data.get("signature", "")).strip()
     if not nonce_str or not signature:
@@ -6152,7 +6158,6 @@ def api_gallery_create_listing() -> Any:
     if not sig_ok:
         return sig_err
 
-    # Verify the job belongs to this wallet (original creator or current owner) and is completed
     conn = get_db()
     job_row = conn.execute(
         "SELECT wallet, status, model, data, task_type FROM jobs WHERE id = ?",

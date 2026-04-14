@@ -6110,10 +6110,14 @@ def api_gallery_create_listing() -> Any:
     """Create a gallery listing from a completed job (requires wallet signature)."""
     if not rate_limit(f"gallery-list:{request.remote_addr}", limit=30):
         return jsonify({"error": "rate limit"}), 429
+
     data = request.get_json() or {}
-    wallet = str(data.get("wallet", "")).strip()
+
+    # Normalize wallet once, early, and use the normalized form everywhere.
+    wallet = str(data.get("wallet", "")).strip().lower()
     if not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid wallet"}), 400
+
     job_id = str(data.get("job_id", "")).strip()
     if not job_id:
         return jsonify({"error": "missing job_id"}), 400
@@ -6122,7 +6126,12 @@ def api_gallery_create_listing() -> Any:
     nonce_str = str(data.get("nonce", "")).strip()
     signature = str(data.get("signature", "")).strip()
     if not nonce_str or not signature:
-        return jsonify({"error": "signature_required", "message": "nonce and signature are required"}), 400
+        return jsonify(
+            {
+                "error": "signature_required",
+                "message": "nonce and signature are required",
+            }
+        ), 400
 
     price = data.get("price_credits")
     try:
@@ -6133,7 +6142,9 @@ def api_gallery_create_listing() -> Any:
         return jsonify({"error": "invalid price_credits — must be > 0"}), 400
 
     sig_ok, sig_err = _verify_wallet_signature(
-        wallet, nonce_str, signature,
+        wallet,
+        nonce_str,
+        signature,
         allowed_purposes={WALLET_NONCE_PURPOSE_GALLERY_LIST},
         expected_amount=price_credits,
         log_label="Gallery listing",
@@ -6144,17 +6155,35 @@ def api_gallery_create_listing() -> Any:
     # Verify the job belongs to this wallet (original creator or current owner) and is completed
     conn = get_db()
     job_row = conn.execute(
-        "SELECT wallet, status, model, data, task_type FROM jobs WHERE id = ?", (job_id,)
+        "SELECT wallet, status, model, data, task_type FROM jobs WHERE id = ?",
+        (job_id,),
     ).fetchone()
     if not job_row:
         return jsonify({"error": "job_not_found"}), 404
-    is_job_creator = job_row["wallet"] == wallet
-    current_owner = gallery.get_asset_owner(job_id)
-    is_current_owner = current_owner and current_owner.lower() == wallet.lower()
+
+    request_wallet = wallet
+    job_wallet = str(job_row["wallet"] or "").strip().lower()
+    current_owner = str(gallery.get_asset_owner(job_id) or "").strip().lower()
+
+    is_job_creator = job_wallet == request_wallet
+    is_current_owner = bool(current_owner) and current_owner == request_wallet
+
     if not is_job_creator and not is_current_owner:
-        return jsonify({"error": "not_your_job"}), 403
-    if job_row["status"] not in ("completed", "success"):
+        return jsonify(
+            {
+                "error": "not_your_job",
+                "debug": {
+                    "job_id": job_id,
+                    "request_wallet": request_wallet,
+                    "job_wallet": job_wallet,
+                    "current_owner": current_owner or None,
+                },
+            }
+        ), 403
+
+    if str(job_row["status"] or "").lower() not in ("completed", "success"):
         return jsonify({"error": "job_not_completed"}), 400
+
     if not settlement.is_marketplace_eligible(job_id):
         return jsonify(
             {
@@ -6168,13 +6197,15 @@ def api_gallery_create_listing() -> Any:
 
     title = str(data.get("title", "")).strip()[:200] or f"Generation #{job_id[:8]}"
     description = str(data.get("description", "")).strip()[:2000]
-
     category = str(data.get("category", "")).strip()
+
     task_type = str(job_row["task_type"] or "").upper()
     asset_type = "video" if "VIDEO" in task_type else "image"
+
     canonical_metadata = _canonical_metadata_for_job(job_id) or {}
     model = str(canonical_metadata.get("model_name") or job_row["model"] or "")
     prompt = str(canonical_metadata.get("prompt") or "")
+
     if not prompt:
         try:
             job_data = json.loads(job_row["data"]) if job_row["data"] else {}
@@ -6184,7 +6215,7 @@ def api_gallery_create_listing() -> Any:
 
     result = gallery.create_listing(
         job_id=job_id,
-        seller_wallet=wallet,
+        seller_wallet=request_wallet,
         title=title,
         price_credits=price_credits,
         description=description,
@@ -6193,6 +6224,7 @@ def api_gallery_create_listing() -> Any:
         model=model,
         prompt=prompt,
     )
+
     if canonical_metadata:
         result["model_key"] = canonical_metadata.get("model_key")
         result["model_tier"] = canonical_metadata.get("tier")
@@ -6200,6 +6232,7 @@ def api_gallery_create_listing() -> Any:
         result["model_credit_cost"] = canonical_metadata.get("credit_cost")
         result["model_pipeline"] = canonical_metadata.get("pipeline")
         result["model_task_type"] = canonical_metadata.get("task_type")
+
     return jsonify(result), 201
 
 

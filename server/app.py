@@ -4523,18 +4523,24 @@ def credits_reference() -> Any:
 
 @app.route("/payments/packages", methods=["GET"])
 def payments_packages() -> Any:
-    """Return available credit packages and whether Stripe is enabled."""
+    """Return available credit packages and whether Stripe is ready."""
     return jsonify({
         "packages": stripe_payments.CREDIT_PACKAGES,
-        "stripe_enabled": stripe_payments.STRIPE_ENABLED,
+        "stripe_enabled": stripe_payments.is_stripe_ready(),
+        "stripe_configured": stripe_payments.STRIPE_ENABLED,
+        "missing_config": stripe_payments.stripe_missing_config(),
     })
 
 
 @app.route("/payments/checkout", methods=["POST"])
 def payments_checkout() -> Any:
     """Create a Stripe Checkout Session for buying credits."""
-    if not stripe_payments.STRIPE_ENABLED:
-        return jsonify({"error": "payments_disabled", "message": "Stripe payments are not enabled."}), 503
+    if not stripe_payments.is_stripe_ready():
+        return jsonify({
+            "error": "payments_disabled",
+            "message": "Stripe payments are not enabled.",
+            "missing_config": stripe_payments.stripe_missing_config(),
+        }), 503
     data = request.get_json() or {}
     wallet = str(data.get("wallet", "")).strip()
     if not wallet or not WALLET_REGEX.match(wallet):
@@ -4559,8 +4565,8 @@ def payments_checkout() -> Any:
 @app.route("/payments/webhook", methods=["POST"])
 def payments_webhook() -> Any:
     """Handle Stripe webhook events (payment confirmations)."""
-    if not stripe_payments.STRIPE_ENABLED:
-        return jsonify({"error": "payments_disabled"}), 503
+    if not stripe_payments.is_stripe_ready():
+        return jsonify({"error": "payments_disabled", "missing_config": stripe_payments.stripe_missing_config()}), 503
     payload = request.get_data()
     sig_header = request.headers.get("Stripe-Signature", "")
     try:
@@ -4588,8 +4594,12 @@ def payments_history() -> Any:
 @app.route("/stripe/create-subscription", methods=["POST"])
 def stripe_create_subscription() -> Any:
     """Create a Stripe subscription for monthly credits + $HAI rewards."""
-    if not stripe_payments.STRIPE_ENABLED:
-        return jsonify({"error": "payments_disabled", "message": "Stripe payments are not enabled."}), 503
+    if not stripe_payments.is_stripe_ready():
+        return jsonify({
+            "error": "payments_disabled",
+            "message": "Stripe payments are not enabled.",
+            "missing_config": stripe_payments.stripe_missing_config(),
+        }), 503
     create_subscription = getattr(stripe_payments, "create_subscription", None)
     if create_subscription is None:
         return jsonify(
@@ -4626,7 +4636,9 @@ def stripe_subscription_tiers() -> Any:
     subscriptions_enabled = hasattr(stripe_payments, "create_subscription")
     return jsonify({
         "tiers": tiers,
-        "stripe_enabled": stripe_payments.STRIPE_ENABLED,
+        "stripe_enabled": stripe_payments.is_stripe_ready(),
+        "stripe_configured": stripe_payments.STRIPE_ENABLED,
+        "missing_config": stripe_payments.stripe_missing_config(),
         "subscriptions_enabled": subscriptions_enabled,
     })
 

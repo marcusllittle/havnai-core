@@ -27,6 +27,21 @@ STRIPE_SECRET_KEY: str = os.getenv("STRIPE_SECRET_KEY", "").strip()
 STRIPE_WEBHOOK_SECRET: str = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
 STRIPE_ENABLED: bool = os.getenv("STRIPE_ENABLED", "").strip().lower() in {"1", "true", "yes"}
 
+
+def is_stripe_ready() -> bool:
+    return bool(STRIPE_ENABLED and STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET)
+
+
+def stripe_missing_config() -> List[str]:
+    missing: List[str] = []
+    if not STRIPE_ENABLED:
+        missing.append("STRIPE_ENABLED")
+    if not STRIPE_SECRET_KEY:
+        missing.append("STRIPE_SECRET_KEY")
+    if not STRIPE_WEBHOOK_SECRET:
+        missing.append("STRIPE_WEBHOOK_SECRET")
+    return missing
+
 # Credit packages – price in USD cents, credits granted.
 CREDIT_PACKAGES: List[Dict[str, Any]] = [
     {"id": "starter", "name": "Starter Pack", "credits": 50, "price_cents": 500, "description": "50 credits"},

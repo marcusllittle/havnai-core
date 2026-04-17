@@ -146,6 +146,34 @@ This repo is a standard Python/Flask application with a bundled node client. A m
    curl http://localhost:8080/api/models/stats
    ```
 
+### Stripe checkout setup
+
+To enable card checkout for credits, set these env vars on the deployed `havnai-core` service:
+
+```bash
+STRIPE_ENABLED=true
+STRIPE_SECRET_KEY=sk_test_...   # or sk_live_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+```
+
+Then create a Stripe webhook pointing to:
+
+```text
+POST https://<your-havnai-core-host>/payments/webhook
+```
+
+Recommended events:
+
+- `checkout.session.completed`
+
+Sanity check after deploy:
+
+```bash
+curl https://<your-havnai-core-host>/payments/packages
+```
+
+Expected: `"stripe_enabled": true` only when all required Stripe env vars are present.
+
 ---
 
 ## API Endpoints

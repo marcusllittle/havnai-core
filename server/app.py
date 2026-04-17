@@ -266,17 +266,56 @@ POSITIVE_SUFFIX_SDXL = (
 # Tags that indicate a stylized (non-realism) model
 _STYLIZED_TAGS = {"anime", "cartoon", "pixar", "manhwa", "webtoon", "stylized", "fantasy"}
 
-def get_positive_suffix(model_cfg: Optional[Dict[str, Any]] = None) -> str:
-    """Return the appropriate positive suffix based on model config."""
+# Keywords that indicate the prompt is about a human or humanoid subject.
+# When NONE of these appear we skip anatomy/skin quality tokens to avoid
+# degrading object, vehicle, environment, and non-human scene generations.
+_HUMAN_SUBJECT_KEYWORDS = {
+    "woman", "man", "girl", "boy", "person", "people", "human",
+    "portrait", "face", "body", "figure", "character", "model",
+    "pilot", "warrior", "soldier", "knight", "mage", "wizard",
+    "nude", "naked", "skin", "eyes", "hair", "hands",
+    "she", "he", "her", "his",
+    # explicit / adult — always count as human-subject
+    "nsfw", "sexy", "erotic", "lingerie", "bikini",
+}
+
+
+def _prompt_has_human_subject(prompt: str) -> bool:
+    """Return True if the prompt appears to describe a human or humanoid subject.
+
+    This is intentionally liberal — any single keyword match is enough to
+    keep anatomy/skin quality tokens active. Non-matches (objects, ships,
+    environments, products, abstract scenes) skip those tokens.
+    """
+    if not prompt:
+        return False
+    words = set(re.split(r"[\s,.:;!?()\[\]{}\"']+", prompt.lower()))
+    return bool(words & _HUMAN_SUBJECT_KEYWORDS)
+
+
+def get_positive_suffix(model_cfg: Optional[Dict[str, Any]] = None, prompt: str = "") -> str:
+    """Return the appropriate positive suffix based on model config and prompt subject.
+
+    * Stylized models (anime/cartoon/etc.) → lightweight quality tokens only.
+    * SDXL pipeline → SDXL-tuned quality tokens.
+    * SD1.5 realism with a human/humanoid subject → full anatomy + skin tokens.
+    * SD1.5 realism with a non-human subject (objects, ships, environments…)
+      → lightweight quality tokens to avoid injecting irrelevant anatomy hints.
+    """
     if model_cfg is None:
-        return POSITIVE_SUFFIX_SD15_REALISM
+        # Legacy call-site without config — only apply full realism suffix when
+        # the prompt contains human-subject keywords.
+        return POSITIVE_SUFFIX_SD15_REALISM if _prompt_has_human_subject(prompt) else POSITIVE_SUFFIX_STYLIZED
     tags = set(t.lower() for t in (model_cfg.get("tags") or []))
     pipeline = (model_cfg.get("pipeline") or "sd15").lower()
     if tags & _STYLIZED_TAGS:
         return POSITIVE_SUFFIX_STYLIZED
     if "sdxl" in pipeline or "xl" in pipeline:
         return POSITIVE_SUFFIX_SDXL
-    return POSITIVE_SUFFIX_SD15_REALISM
+    # SD1.5 realism: gate anatomy/skin tokens on subject type
+    if _prompt_has_human_subject(prompt):
+        return POSITIVE_SUFFIX_SD15_REALISM
+    return POSITIVE_SUFFIX_STYLIZED
 
 # Backward-compatible alias used by older code paths
 GLOBAL_POSITIVE_SUFFIX = POSITIVE_SUFFIX_SD15_REALISM
@@ -2823,10 +2862,11 @@ def submit_job() -> Any:
         prompt_text = enhanced_prompt
         if hardcore_prompt and HARDCORE_POSITIVE_SUFFIX.lower() not in prompt_text.lower():
             prompt_text = f"{prompt_text}, {HARDCORE_POSITIVE_SUFFIX}" if prompt_text else HARDCORE_POSITIVE_SUFFIX
+        _positive_suffix = get_positive_suffix(cfg, prompt=prompt_text)
         if prompt_text:
-            prompt_text = f"{prompt_text}, {GLOBAL_POSITIVE_SUFFIX}"
+            prompt_text = f"{prompt_text}, {_positive_suffix}"
         else:
-            prompt_text = GLOBAL_POSITIVE_SUFFIX
+            prompt_text = _positive_suffix
         negative_prompt = str(payload.get("negative_prompt") or "").strip()
         seed = payload.get("seed")
         try:

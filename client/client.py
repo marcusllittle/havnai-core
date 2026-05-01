@@ -2430,9 +2430,33 @@ def _release_image_pipeline(pipe: Any) -> None:
             pipe.unload_lora_weights()
     except Exception:
         pass
-    # The caller has already removed this pipeline from any cache. Moving an
-    # fp16 CUDA pipeline to CPU during teardown triggers diffusers warnings and
-    # can temporarily increase host RAM without making release safer.
+    if torch is not None and torch.cuda.is_available():
+        # Move weights off VRAM during teardown without calling pipeline.to("cpu"),
+        # which logs noisy fp16/CPU warnings in diffusers 0.36.
+        moved_module = False
+        failed_module = False
+        modules = list(getattr(pipe, "components", {}).values())
+        image_proj = getattr(pipe, "image_proj_model", None)
+        if image_proj is not None:
+            modules.append(image_proj)
+        for module in modules:
+            if not isinstance(module, torch.nn.Module):
+                continue
+            try:
+                module.to("cpu")
+                moved_module = True
+            except Exception:
+                failed_module = True
+        if not moved_module or failed_module:
+            try:
+                pipe.to("cpu", silence_dtype_warnings=True)
+            except TypeError:
+                try:
+                    pipe.to("cpu")
+                except Exception:
+                    pass
+            except Exception:
+                pass
     gc.collect()
     if torch is not None and torch.cuda.is_available():
         try:

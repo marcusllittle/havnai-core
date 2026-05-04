@@ -28,6 +28,10 @@ except Exception:  # pragma: no cover
         height: int | None = None
         sampler: str | None = None
         negative_prompt_default: str = ""
+        checkpoint_variant: str = ""
+        model_family: str = ""
+        capabilities: List[str] = field(default_factory=list)
+        available_modes: List[str] = field(default_factory=list)
 
     @dataclass
     class Manifest:  # type: ignore

@@ -142,18 +142,20 @@ WALLET_NONCE_ALLOWED_PURPOSES = {
 }
 WALLET_NONCE_TTL_SECONDS = max(60, int(os.getenv("HAVNAI_WALLET_NONCE_TTL_SECONDS", "300")))
 
-SUPPORTED_TASK_TYPES = {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP"}
+SUPPORTED_TASK_TYPES = {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP", "LTX_VIDEO_GEN"}
 TASK_SUPPORT_MAP = {
     CREATOR_TASK_TYPE: "image",
     "VIDEO_GEN": "video",
     "ANIMATEDIFF": "animatediff",
     "FACE_SWAP": "face_swap",
+    "LTX_VIDEO_GEN": "ltx_video",
 }
 SUPPORT_TO_JOB_TYPE_MAP = {
     "image": CREATOR_TASK_TYPE,
     "video": "VIDEO_GEN",
     "animatediff": "ANIMATEDIFF",
     "face_swap": "FACE_SWAP",
+    "ltx_video": "LTX_VIDEO_GEN",
 }
 
 # ---------------------------------------------------------------------------
@@ -186,6 +188,7 @@ _RUNTIME_DEFAULT_PROFILES: Dict[str, Dict[str, Dict[str, Any]]] = {
         "image_sdxl": {"steps": 24, "guidance": 5.8, "width": 768, "height": 1152},
         "image_sd15": {"steps": 24, "guidance": 6.2, "width": 576, "height": 768},
         "video_ltx2": {"steps": 16, "guidance": 5.0, "frames": 12, "fps": 8, "width": 512, "height": 512},
+        "video_ltx_video": {"steps": 30, "guidance": 3.0, "frames": 65, "fps": 24, "width": 768, "height": 512},
         "video_animatediff": {"steps": 18, "guidance": 5.5, "frames": 16, "fps": 8, "width": 512, "height": 512},
         "face_swap": {"num_steps": 14, "guidance": 4.5, "strength": 0.75},
     },
@@ -193,6 +196,7 @@ _RUNTIME_DEFAULT_PROFILES: Dict[str, Dict[str, Dict[str, Any]]] = {
         "image_sdxl": {"steps": 28, "guidance": 6.0, "width": 768, "height": 1152},
         "image_sd15": {"steps": 28, "guidance": 6.5, "width": 576, "height": 768},
         "video_ltx2": {"steps": 25, "guidance": 7.0, "frames": 16, "fps": 8, "width": 512, "height": 512},
+        "video_ltx_video": {"steps": 50, "guidance": 3.0, "frames": 97, "fps": 24, "width": 768, "height": 512},
         "video_animatediff": {"steps": 25, "guidance": 7.5, "frames": 16, "fps": 8, "width": 512, "height": 512},
         "face_swap": {"num_steps": 18, "guidance": 5.0, "strength": 0.8},
     },
@@ -200,6 +204,7 @@ _RUNTIME_DEFAULT_PROFILES: Dict[str, Dict[str, Dict[str, Any]]] = {
         "image_sdxl": {"steps": 32, "guidance": 6.5, "width": 832, "height": 1216},
         "image_sd15": {"steps": 36, "guidance": 7.0, "width": 640, "height": 896},
         "video_ltx2": {"steps": 28, "guidance": 7.0, "frames": 16, "fps": 8, "width": 512, "height": 512},
+        "video_ltx_video": {"steps": 50, "guidance": 3.0, "frames": 97, "fps": 24, "width": 768, "height": 512},
         "video_animatediff": {"steps": 28, "guidance": 7.0, "frames": 16, "fps": 8, "width": 512, "height": 512},
         "face_swap": {"num_steps": 24, "guidance": 6.0, "strength": 0.85},
     },
@@ -223,6 +228,7 @@ REWARD_CONFIG: Dict[str, float] = {
     "sd15_factor": float(os.getenv("REWARD_SD15_FACTOR", "1.0")),
     "anime_factor": float(os.getenv("REWARD_ANIME_FACTOR", "0.7")),
     "ltx2_factor": float(os.getenv("REWARD_LTX2_FACTOR", "2.0")),
+    "ltx_video_factor": float(os.getenv("REWARD_LTX_VIDEO_FACTOR", "3.0")),
     "base_reward": float(os.getenv("REWARD_BASE_HAI", "0.05")),
 }
 
@@ -266,17 +272,56 @@ POSITIVE_SUFFIX_SDXL = (
 # Tags that indicate a stylized (non-realism) model
 _STYLIZED_TAGS = {"anime", "cartoon", "pixar", "manhwa", "webtoon", "stylized", "fantasy"}
 
-def get_positive_suffix(model_cfg: Optional[Dict[str, Any]] = None) -> str:
-    """Return the appropriate positive suffix based on model config."""
+# Keywords that indicate the prompt is about a human or humanoid subject.
+# When NONE of these appear we skip anatomy/skin quality tokens to avoid
+# degrading object, vehicle, environment, and non-human scene generations.
+_HUMAN_SUBJECT_KEYWORDS = {
+    "woman", "man", "girl", "boy", "person", "people", "human",
+    "portrait", "face", "body", "figure", "character", "model",
+    "pilot", "warrior", "soldier", "knight", "mage", "wizard",
+    "nude", "naked", "skin", "eyes", "hair", "hands",
+    "she", "he", "her", "his",
+    # explicit / adult — always count as human-subject
+    "nsfw", "sexy", "erotic", "lingerie", "bikini",
+}
+
+
+def _prompt_has_human_subject(prompt: str) -> bool:
+    """Return True if the prompt appears to describe a human or humanoid subject.
+
+    This is intentionally liberal — any single keyword match is enough to
+    keep anatomy/skin quality tokens active. Non-matches (objects, ships,
+    environments, products, abstract scenes) skip those tokens.
+    """
+    if not prompt:
+        return False
+    words = set(re.split(r"[\s,.:;!?()\[\]{}\"']+", prompt.lower()))
+    return bool(words & _HUMAN_SUBJECT_KEYWORDS)
+
+
+def get_positive_suffix(model_cfg: Optional[Dict[str, Any]] = None, prompt: str = "") -> str:
+    """Return the appropriate positive suffix based on model config and prompt subject.
+
+    * Stylized models (anime/cartoon/etc.) → lightweight quality tokens only.
+    * SDXL pipeline → SDXL-tuned quality tokens.
+    * SD1.5 realism with a human/humanoid subject → full anatomy + skin tokens.
+    * SD1.5 realism with a non-human subject (objects, ships, environments…)
+      → lightweight quality tokens to avoid injecting irrelevant anatomy hints.
+    """
     if model_cfg is None:
-        return POSITIVE_SUFFIX_SD15_REALISM
+        # Legacy call-site without config — only apply full realism suffix when
+        # the prompt contains human-subject keywords.
+        return POSITIVE_SUFFIX_SD15_REALISM if _prompt_has_human_subject(prompt) else POSITIVE_SUFFIX_STYLIZED
     tags = set(t.lower() for t in (model_cfg.get("tags") or []))
     pipeline = (model_cfg.get("pipeline") or "sd15").lower()
     if tags & _STYLIZED_TAGS:
         return POSITIVE_SUFFIX_STYLIZED
     if "sdxl" in pipeline or "xl" in pipeline:
         return POSITIVE_SUFFIX_SDXL
-    return POSITIVE_SUFFIX_SD15_REALISM
+    # SD1.5 realism: gate anatomy/skin tokens on subject type
+    if _prompt_has_human_subject(prompt):
+        return POSITIVE_SUFFIX_SD15_REALISM
+    return POSITIVE_SUFFIX_STYLIZED
 
 # Backward-compatible alias used by older code paths
 GLOBAL_POSITIVE_SUFFIX = POSITIVE_SUFFIX_SD15_REALISM
@@ -400,9 +445,24 @@ POSITIVE_VIDEO_ANIMATEDIFF = (
     "professional, sharp details, smooth motion, flowing motion, (best quality:1.1)"
 )
 
+# LTX-Video 2.3 uses a DiT architecture with different prompt behavior.
+# Lighter negative prompts work better; the model handles quality natively.
+NEGATIVE_VIDEO_LTX_VIDEO = ", ".join([
+    "jitter, flicker, temporal artifacts, blurry motion, ghosting",
+    "low quality, watermark, text overlay, compression artifacts",
+    "distorted faces, morphing face, inconsistent appearance",
+])
+
+POSITIVE_VIDEO_LTX_VIDEO = (
+    "high quality, cinematic, professional, sharp details, smooth motion, "
+    "consistent lighting, natural movement"
+)
+
 def get_video_negative(model_name: str) -> str:
     """Return the appropriate negative prompt for a video model."""
     model_lower = (model_name or "").lower()
+    if "ltx_video" in model_lower:
+        return NEGATIVE_VIDEO_LTX_VIDEO
     if "ltx" in model_lower or "latte" in model_lower:
         return NEGATIVE_VIDEO_LTXL
     if "animat" in model_lower:
@@ -412,6 +472,8 @@ def get_video_negative(model_name: str) -> str:
 def get_video_positive_suffix(model_name: str) -> str:
     """Return quality tokens to append to video prompts."""
     model_lower = (model_name or "").lower()
+    if "ltx_video" in model_lower:
+        return POSITIVE_VIDEO_LTX_VIDEO
     if "ltx" in model_lower or "latte" in model_lower:
         return POSITIVE_VIDEO_LTXL
     if "animat" in model_lower:
@@ -975,6 +1037,12 @@ def load_manifest() -> None:
             "task_type": entry.get("task_type", CREATOR_TASK_TYPE),
             "strengths": entry.get("strengths"),
             "weaknesses": entry.get("weaknesses"),
+            # LTX-Video 2.3 model family fields
+            "model_family": entry.get("model_family", ""),
+            "model_version": entry.get("model_version", ""),
+            "checkpoint_variant": entry.get("checkpoint_variant", ""),
+            "capabilities": entry.get("capabilities", []),
+            "available_modes": entry.get("available_modes", []),
         }
         MANIFEST_MODELS[key] = entry_data
         MODEL_STATS.setdefault(key, {"count": 0.0, "total_time": 0.0})
@@ -1777,7 +1845,7 @@ def pending_tasks_for_node(node_id: str) -> List[Dict[str, Any]]:
         if task.get("status") not in relevant_status:
             continue
         task_type = (task.get("task_type") or CREATOR_TASK_TYPE).upper()
-        if task_type not in {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP"}:
+        if task_type not in {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP", "LTX_VIDEO_GEN"}:
             continue
         tasks.append(task)
     return tasks
@@ -2221,11 +2289,24 @@ def resolve_video_defaults(
 ) -> Tuple[Dict[str, Any], Dict[str, str]]:
     normalized_task = _normalize_task_type(task_type)
     is_animatediff = normalized_task == "ANIMATEDIFF"
-    profile_key = "video_animatediff" if is_animatediff else "video_ltx2"
+    is_ltx_video = normalized_task == "LTX_VIDEO_GEN" or str((model_cfg or {}).get("pipeline", "")).lower() == "ltx_video"
+    if is_ltx_video:
+        profile_key = "video_ltx_video"
+    elif is_animatediff:
+        profile_key = "video_animatediff"
+    else:
+        profile_key = "video_ltx2"
     profile_defaults = dict(profile.get(profile_key) or {})
     model_defaults = dict((model_cfg or {}).get("video_defaults") or {})
 
-    if is_animatediff:
+    if is_ltx_video:
+        env_steps = ("HAVNAI_LTX_VIDEO_STEPS", "HAVNAI_VIDEO_STEPS")
+        env_guidance = ("HAVNAI_LTX_VIDEO_GUIDANCE", "HAVNAI_VIDEO_GUIDANCE")
+        env_frames = ("HAVNAI_LTX_VIDEO_FRAMES", "HAVNAI_VIDEO_FRAMES")
+        env_fps = ("HAVNAI_LTX_VIDEO_FPS", "HAVNAI_VIDEO_FPS")
+        env_width = ("HAVNAI_LTX_VIDEO_WIDTH", "HAVNAI_VIDEO_WIDTH")
+        env_height = ("HAVNAI_LTX_VIDEO_HEIGHT", "HAVNAI_VIDEO_HEIGHT")
+    elif is_animatediff:
         env_steps = ("HAVNAI_ANIMATEDIFF_STEPS", "HAVNAI_VIDEO_STEPS")
         env_guidance = ("HAVNAI_ANIMATEDIFF_GUIDANCE", "HAVNAI_VIDEO_GUIDANCE")
         env_frames = ("HAVNAI_ANIMATEDIFF_FRAMES", "HAVNAI_VIDEO_FRAMES")
@@ -2301,7 +2382,16 @@ def resolve_video_defaults(
         parse_value=_try_parse_int,
     )
 
-    if is_animatediff:
+    if is_ltx_video:
+        resolved = {
+            "steps": _clamp(int(steps), 1, 150),
+            "guidance": max(0.0, min(20.0, float(guidance))),
+            "width": _clamp(int(width), 256, 1280),
+            "height": _clamp(int(height), 256, 1280),
+            "frames": _clamp(int(frames), 1, 257),
+            "fps": _clamp(int(fps), 1, 60),
+        }
+    elif is_animatediff:
         width_val = int(width)
         height_val = int(height)
         if width_val not in {512, 768}:
@@ -2334,6 +2424,65 @@ def resolve_video_defaults(
         "fps": fps_source,
     }
     return resolved, sources
+
+
+_LTX_VIDEO_TIMEOUT_BASELINE_AREA = 768 * 512
+_LTX_VIDEO_TIMEOUT_PER_STEP_FRAME = {
+    "distilled_fast": 0.10,
+    "one_stage": 0.22,
+    "two_stage": 0.28,
+    "two_stage_hq": 0.40,
+    "ic_lora": 0.24,
+    "keyframe": 0.24,
+    "audio_to_video": 0.24,
+    "retake": 0.22,
+}
+
+
+def _resolve_ltx_video_timeout_seconds(
+    model_cfg: Dict[str, Any],
+    payload: Dict[str, Any],
+    resolved_video_defaults: Dict[str, Any],
+    *,
+    pipeline_mode: str,
+    checkpoint_variant: str,
+) -> Tuple[int, str]:
+    env_timeout = _coerce_int(os.getenv("HAVNAI_LTX_VIDEO_JOB_TIMEOUT"), 600)
+    if _is_truthy(os.getenv("HAVNAI_LTX_VIDEO_JOB_TIMEOUT_FIXED")):
+        return max(0, env_timeout), "env_fixed"
+    if env_timeout <= 0:
+        return 0, "env"
+
+    width = max(256, _coerce_int(resolved_video_defaults.get("width"), 768))
+    height = max(256, _coerce_int(resolved_video_defaults.get("height"), 512))
+    steps = max(1, _coerce_int(resolved_video_defaults.get("steps"), 50))
+    frames = max(1, _coerce_int(resolved_video_defaults.get("frames"), 97))
+
+    normalized_mode = str(pipeline_mode or "two_stage").strip().lower() or "two_stage"
+    normalized_variant = str(checkpoint_variant or model_cfg.get("checkpoint_variant") or "dev").strip().lower() or "dev"
+    pixel_ratio = max(0.25, (width * height) / float(_LTX_VIDEO_TIMEOUT_BASELINE_AREA))
+    per_step_frame = _LTX_VIDEO_TIMEOUT_PER_STEP_FRAME.get(normalized_mode, 0.24)
+    if normalized_variant == "distilled":
+        per_step_frame *= 0.75
+
+    raw_upscaler = str(payload.get("upscaler") or "").strip().lower()
+    if raw_upscaler and raw_upscaler not in {"none", "off", "false", "disabled"} and normalized_mode not in {"two_stage", "two_stage_hq"}:
+        per_step_frame *= 1.15
+    if _is_truthy(payload.get("temporal_upscale")) and normalized_mode != "two_stage_hq":
+        per_step_frame *= 1.15
+
+    warmup_buffer = 180
+    if normalized_mode in {"two_stage", "audio_to_video", "keyframe", "ic_lora"}:
+        warmup_buffer += 90
+    if normalized_mode == "two_stage_hq":
+        warmup_buffer += 180
+
+    estimated_timeout = warmup_buffer + int(steps * frames * pixel_ratio * per_step_frame)
+    max_timeout = _coerce_int(os.getenv("HAVNAI_LTX_VIDEO_JOB_TIMEOUT_MAX"), 7200)
+    timeout = max(env_timeout, estimated_timeout)
+    if max_timeout > 0:
+        timeout = min(timeout, max_timeout)
+    return timeout, "adaptive"
 
 
 def resolve_faceswap_defaults(
@@ -2571,7 +2720,7 @@ def submit_job() -> Any:
     block_reason = safety.check_safety(prompt_raw, negative_raw)
     if block_reason:
         return jsonify({"error": "prompt_blocked", "reason": block_reason}), 400
-    wallet = str(payload.get("wallet", "")).strip()
+    wallet = str(payload.get("wallet", "")).strip().lower()
     model_name_raw = str(payload.get("model", "")).strip()
     model_name = model_name_raw.lower()
     weight = payload.get("weight")
@@ -2671,6 +2820,7 @@ def submit_job() -> Any:
             }
         ), 400
     is_ltx2 = model_name == "ltx2" or pipeline_name == "ltx2"
+    is_ltx_video = pipeline_name == "ltx_video" or str(cfg.get("model_family", "")).lower() == "ltx_video"
 
     # Special-case AnimateDiff video jobs with rich structured payload
     is_animatediff = model_name == "animatediff" or pipeline_name == "animatediff"
@@ -2683,7 +2833,94 @@ def submit_job() -> Any:
         or pipeline_name in {"wan_i2v", "wan-i2v", "wan22_i2v", "wan2.2-i2v"}
     )
 
-    if is_wan_i2v:
+    if is_ltx_video:
+        # LTX-Video 2.3 job — structured payload with pipeline mode, variant, upscaler
+        prompt_text = enhanced_prompt
+        prompt_lower = prompt_text.lower()
+        if prompt_text and "best quality" not in prompt_lower and "masterpiece" not in prompt_lower:
+            prompt_text = f"{prompt_text}, {get_video_positive_suffix(model_name)}"
+        negative_prompt = _merge_negative_prompts(
+            str(payload.get("negative_prompt") or "").strip(),
+            get_video_negative(model_name),
+            NO_WATERMARK_NEGATIVE,
+            SFW_NEGATIVE_PROMPT if sfw_mode else "",
+        )
+        seed = payload.get("seed")
+        try:
+            seed = int(seed) if seed is not None else None
+        except (TypeError, ValueError):
+            seed = None
+        if seed is not None and seed < 0:
+            seed = random.randint(0, 2**31 - 1)
+        if seed is None:
+            seed = random.randint(0, 2**31 - 1)
+        init_image = (
+            payload.get("init_image")
+            or payload.get("init_image_url")
+            or payload.get("init_image_b64")
+            or None
+        )
+        resolved_video_defaults, video_default_sources = resolve_video_defaults(
+            cfg, payload, RUNTIME_PROFILE, "LTX_VIDEO_GEN",
+        )
+        default_pipeline_mode = str(
+            cfg.get("default_pipeline_mode")
+            or (cfg.get("available_modes", ["two_stage"])[0] if cfg.get("available_modes") else "two_stage")
+        )
+        pipeline_mode = str(payload.get("pipeline_mode") or default_pipeline_mode)
+        checkpoint_variant = str(payload.get("checkpoint_variant") or cfg.get("checkpoint_variant") or "dev")
+        ltx_video_timeout, ltx_video_timeout_source = _resolve_ltx_video_timeout_seconds(
+            cfg,
+            payload,
+            resolved_video_defaults,
+            pipeline_mode=pipeline_mode,
+            checkpoint_variant=checkpoint_variant,
+        )
+        settings: Dict[str, Any] = {
+            "prompt": prompt_text,
+            "negative_prompt": negative_prompt,
+            "seed": seed,
+            "steps": resolved_video_defaults["steps"],
+            "guidance": resolved_video_defaults["guidance"],
+            "width": resolved_video_defaults["width"],
+            "height": resolved_video_defaults["height"],
+            "frames": resolved_video_defaults["frames"],
+            "fps": resolved_video_defaults["fps"],
+            "timeout": ltx_video_timeout,
+            "timeout_source": ltx_video_timeout_source,
+            # LTX-Video 2.3 extended fields
+            "pipeline_mode": pipeline_mode,
+            "checkpoint_variant": checkpoint_variant,
+            "temporal_upscale": bool(payload.get("temporal_upscale", False)),
+            "model_family": "ltx_video",
+            "model_version": str(cfg.get("model_version", "2.3")),
+            "capabilities": cfg.get("capabilities", []),
+            "defaults_source": {"video": video_default_sources},
+            "defaults_confidence": {"video": _resolve_confidence(video_default_sources)},
+        }
+        if "upscaler" in payload:
+            settings["upscaler"] = str(payload.get("upscaler") or "")
+        elif "default_upscaler" in cfg:
+            settings["upscaler"] = str(cfg.get("default_upscaler") or "")
+        if init_image:
+            settings["init_image"] = init_image
+        # Pass through audio/keyframe/retake if provided
+        audio_input = payload.get("audio_input") or payload.get("audio_url")
+        if audio_input:
+            settings["audio_input"] = audio_input
+        keyframes = payload.get("keyframes")
+        if keyframes:
+            settings["keyframes"] = keyframes
+        retake_segments = payload.get("retake_segments")
+        if retake_segments:
+            settings["retake_segments"] = retake_segments
+        ic_lora = payload.get("ic_lora_path")
+        if ic_lora:
+            settings["ic_lora_path"] = ic_lora
+            settings["ic_lora_strength"] = float(payload.get("ic_lora_strength", 1.0))
+        job_data = json.dumps(settings)
+        task_type = "LTX_VIDEO_GEN"
+    elif is_wan_i2v:
         # Persist VIDEO_GEN controls inside the job data blob as JSON.
         prompt_text = enhanced_prompt
         # Append positive quality suffix if prompt doesn't have quality tokens
@@ -2701,6 +2938,8 @@ def submit_job() -> Any:
             seed = int(seed) if seed is not None else None
         except (TypeError, ValueError):
             seed = None
+        if seed is not None and seed < 0:
+            seed = random.randint(0, 2**31 - 1)
         if seed is None:
             seed = random.randint(0, 2**31 - 1)
         init_image = (
@@ -2770,6 +3009,8 @@ def submit_job() -> Any:
             seed = int(seed) if seed is not None else None
         except (TypeError, ValueError):
             seed = None
+        if seed is not None and seed < 0:
+            seed = random.randint(0, 2**31 - 1)
         lora_strength = payload.get("lora_strength")
         try:
             lora_strength = float(lora_strength) if lora_strength is not None else None
@@ -2823,10 +3064,11 @@ def submit_job() -> Any:
         prompt_text = enhanced_prompt
         if hardcore_prompt and HARDCORE_POSITIVE_SUFFIX.lower() not in prompt_text.lower():
             prompt_text = f"{prompt_text}, {HARDCORE_POSITIVE_SUFFIX}" if prompt_text else HARDCORE_POSITIVE_SUFFIX
+        _positive_suffix = get_positive_suffix(cfg, prompt=prompt_text)
         if prompt_text:
-            prompt_text = f"{prompt_text}, {GLOBAL_POSITIVE_SUFFIX}"
+            prompt_text = f"{prompt_text}, {_positive_suffix}"
         else:
-            prompt_text = GLOBAL_POSITIVE_SUFFIX
+            prompt_text = _positive_suffix
         negative_prompt = str(payload.get("negative_prompt") or "").strip()
         seed = payload.get("seed")
         try:
@@ -2930,6 +3172,8 @@ def submit_job() -> Any:
             seed = int(seed) if seed is not None else None
         except (TypeError, ValueError):
             seed = None
+        if seed is not None and seed < 0:
+            seed = random.randint(0, 2**31 - 1)
         if seed is not None:
             overrides["seed"] = seed
         if overrides:
@@ -3015,7 +3259,7 @@ def generate_video_job() -> Any:
     if not prompt_text:
         return jsonify({"error": "missing prompt"}), 400
 
-    wallet = str(payload.get("wallet", "")).strip()
+    wallet = str(payload.get("wallet", "")).strip().lower()
     if not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid wallet"}), 400
     # Per-wallet rate limiting (10 video jobs per 60 seconds per wallet)
@@ -3095,11 +3339,12 @@ def generate_video_job() -> Any:
 
     selected_model_name = str(cfg.get("name") or model_name).strip()
     selected_model_key = selected_model_name.lower()
-    if _eligible_online_node_count(selected_model_key, "VIDEO_GEN") <= 0:
-        return _no_capacity_response(selected_model_key, "VIDEO_GEN")
+    capacity_task_type = "LTX_VIDEO_GEN" if is_ltx_video else "VIDEO_GEN"
+    if _eligible_online_node_count(selected_model_key, capacity_task_type) <= 0:
+        return _no_capacity_response(selected_model_key, capacity_task_type)
 
     # Credit gate — only active when HAVNAI_CREDITS_ENABLED=true
-    credit_err = credits.check_and_deduct_credits(wallet, selected_model_name, "VIDEO_GEN")
+    credit_err = credits.check_and_deduct_credits(wallet, selected_model_name, capacity_task_type)
     if credit_err:
         return credit_err
 
@@ -3144,7 +3389,7 @@ def submit_faceswap_job_endpoint() -> Any:
     invite_code, invite_error = invite.enforce_invite_limits(payload)
     if invite_error:
         return invite_error
-    wallet = str(payload.get("wallet", "")).strip()
+    wallet = str(payload.get("wallet", "")).strip().lower()
     model_name_raw = str(payload.get("model") or "epicrealismxl_vxviicrystalclear").strip()
     model_name = model_name_raw.lower()
     prompt_text = str(payload.get("prompt") or "").strip()
@@ -3530,6 +3775,38 @@ def get_creator_tasks() -> Any:
                     ):
                         if key in ad_settings and ad_settings[key] is not None:
                             task_payload[key] = ad_settings[key]
+            if task_payload["type"].upper() == "LTX_VIDEO_GEN":
+                try:
+                    raw_ltx = task.get("data") or ""
+                    ltx_settings = json.loads(raw_ltx) if isinstance(raw_ltx, str) else {}
+                except Exception:
+                    ltx_settings = {}
+                if isinstance(ltx_settings, dict):
+                    for key in (
+                        "prompt",
+                        "negative_prompt",
+                        "seed",
+                        "steps",
+                        "guidance",
+                        "width",
+                        "height",
+                        "frames",
+                        "fps",
+                        "init_image",
+                        "strength",
+                        "pipeline_mode",
+                        "checkpoint_variant",
+                        "upscaler",
+                        "temporal_upscale",
+                        "audio_input",
+                        "keyframes",
+                        "retake_segments",
+                        "ic_lora_path",
+                        "ic_lora_strength",
+                        "timeout",
+                    ):
+                        if key in ltx_settings and ltx_settings[key] is not None:
+                            task_payload[key] = ltx_settings[key]
             if task_payload["type"].upper() == "FACE_SWAP":
                 try:
                     raw_fs = task.get("data") or ""
@@ -4203,7 +4480,8 @@ def wallet_nonce() -> Any:
     if not isinstance(data, dict):
         return jsonify({"error": "malformed_payload", "message": "JSON object payload required"}), 400
 
-    wallet = str(data.get("wallet", "")).strip()
+    # Normalize here too
+    wallet = str(data.get("wallet", "")).strip().lower()
     if not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid wallet"}), 400
     if not rate_limit(f"wallet-nonce:wallet:{wallet}", limit=20):
@@ -4223,7 +4501,6 @@ def wallet_nonce() -> Any:
         return amount_error
     assert amount is not None
 
-    # Optional context fields for gallery purposes
     listing_id = None
     job_id_ctx = None
     if purpose == WALLET_NONCE_PURPOSE_GALLERY_PURCHASE:
@@ -4260,8 +4537,16 @@ def wallet_nonce() -> Any:
         message = _build_convert_nonce_message(wallet, amount, nonce, issued_at_iso, expires_at_iso, origin, domain)
     else:
         message = _build_gallery_nonce_message(
-            purpose, wallet, amount, nonce, issued_at_iso, expires_at_iso, origin, domain,
-            listing_id=listing_id, job_id=job_id_ctx,
+            purpose,
+            wallet,
+            amount,
+            nonce,
+            issued_at_iso,
+            expires_at_iso,
+            origin,
+            domain,
+            listing_id=listing_id,
+            job_id=job_id_ctx,
         )
 
     conn = get_db()
@@ -5132,7 +5417,7 @@ def models_list() -> Any:
             defaults_source["image"] = image_sources
             defaults_confidence["image"] = _resolve_confidence(image_sources)
 
-        if native_task_type in {"VIDEO_GEN", "ANIMATEDIFF"}:
+        if native_task_type in {"VIDEO_GEN", "ANIMATEDIFF", "LTX_VIDEO_GEN"}:
             video_defaults, video_sources = resolve_video_defaults(
                 model_data,
                 {},
@@ -5151,7 +5436,12 @@ def models_list() -> Any:
             defaults_source["face_swap"] = face_swap_sources
             defaults_confidence["face_swap"] = _resolve_confidence(face_swap_sources)
 
-        online_nodes = _eligible_online_node_count(model_key_norm, native_task_type)
+        capacity_task_type = (
+            "LTX_VIDEO_GEN"
+            if pipeline == "ltx_video" or str(model_data.get("model_family", "")).lower() == "ltx_video"
+            else native_task_type
+        )
+        online_nodes = _eligible_online_node_count(model_key_norm, capacity_task_type)
         face_swap_online_nodes = (
             _eligible_online_node_count(model_key_norm, "FACE_SWAP")
             if "sdxl" in pipeline
@@ -5180,6 +5470,14 @@ def models_list() -> Any:
                 "face_swap_defaults": face_swap_defaults,
                 "defaults_source": defaults_source or None,
                 "defaults_confidence": defaults_confidence or None,
+                # LTX-Video 2.3 model family metadata
+                "model_family": model_data.get("model_family") or None,
+                "model_version": model_data.get("model_version") or None,
+                "checkpoint_variant": model_data.get("checkpoint_variant") or None,
+                "capabilities": model_data.get("capabilities") or None,
+                "available_modes": model_data.get("available_modes") or None,
+                "default_pipeline_mode": model_data.get("default_pipeline_mode") or None,
+                "default_upscaler": model_data.get("default_upscaler") if "default_upscaler" in model_data else None,
             }
         )
 
@@ -5588,6 +5886,43 @@ def astra_stats() -> Any:
     return jsonify(astra_rewards.get_player_stats(wallet))
 
 
+@app.route("/astra/generate-reward", methods=["POST"])
+def astra_generate_reward() -> Any:
+    """Generate a reward image for Astra Valkyries game context."""
+    data = request.get_json(silent=True) or {}
+    wallet = (data.get("wallet") or "").strip().lower()
+    pilot_id = (data.get("pilotId") or "").strip()
+    context = (data.get("context") or "").strip()
+
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "Missing or invalid wallet"}), 400
+    if not pilot_id:
+        return jsonify({"error": "Missing pilotId"}), 400
+
+    # Placeholder: return a placeholder image URL
+    # In production, this calls the image generation pipeline
+    return jsonify({
+        "imageUrl": f"/static/rewards/placeholder_{pilot_id}.png",
+        "pilotId": pilot_id,
+        "context": context,
+    })
+
+
+@app.route("/astra/gallery", methods=["GET"])
+def astra_gallery() -> Any:
+    """Fetch player's earned game reward images."""
+    wallet = (request.args.get("wallet") or "").strip().lower()
+
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "Missing or invalid wallet"}), 400
+
+    # Placeholder: return empty gallery
+    # In production, this queries the database for earned images
+    return jsonify({
+        "images": []
+    })
+
+
 # ---------------------------------------------------------------------------
 # Analytics endpoints
 # ---------------------------------------------------------------------------
@@ -5823,19 +6158,26 @@ def api_gallery_create_listing() -> Any:
     """Create a gallery listing from a completed job (requires wallet signature)."""
     if not rate_limit(f"gallery-list:{request.remote_addr}", limit=30):
         return jsonify({"error": "rate limit"}), 429
+
     data = request.get_json() or {}
-    wallet = str(data.get("wallet", "")).strip()
+
+    wallet = str(data.get("wallet", "")).strip().lower()
     if not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid wallet"}), 400
+
     job_id = str(data.get("job_id", "")).strip()
     if not job_id:
         return jsonify({"error": "missing job_id"}), 400
 
-    # Verify wallet ownership via signature
     nonce_str = str(data.get("nonce", "")).strip()
     signature = str(data.get("signature", "")).strip()
     if not nonce_str or not signature:
-        return jsonify({"error": "signature_required", "message": "nonce and signature are required"}), 400
+        return jsonify(
+            {
+                "error": "signature_required",
+                "message": "nonce and signature are required",
+            }
+        ), 400
 
     price = data.get("price_credits")
     try:
@@ -5846,7 +6188,9 @@ def api_gallery_create_listing() -> Any:
         return jsonify({"error": "invalid price_credits — must be > 0"}), 400
 
     sig_ok, sig_err = _verify_wallet_signature(
-        wallet, nonce_str, signature,
+        wallet,
+        nonce_str,
+        signature,
         allowed_purposes={WALLET_NONCE_PURPOSE_GALLERY_LIST},
         expected_amount=price_credits,
         log_label="Gallery listing",
@@ -5854,20 +6198,37 @@ def api_gallery_create_listing() -> Any:
     if not sig_ok:
         return sig_err
 
-    # Verify the job belongs to this wallet (original creator or current owner) and is completed
     conn = get_db()
     job_row = conn.execute(
-        "SELECT wallet, status, model, data, task_type FROM jobs WHERE id = ?", (job_id,)
+        "SELECT wallet, status, model, data, task_type FROM jobs WHERE id = ?",
+        (job_id,),
     ).fetchone()
     if not job_row:
         return jsonify({"error": "job_not_found"}), 404
-    is_job_creator = job_row["wallet"] == wallet
-    current_owner = gallery.get_asset_owner(job_id)
-    is_current_owner = current_owner and current_owner.lower() == wallet.lower()
+
+    request_wallet = wallet
+    job_wallet = str(job_row["wallet"] or "").strip().lower()
+    current_owner = str(gallery.get_asset_owner(job_id) or "").strip().lower()
+
+    is_job_creator = job_wallet == request_wallet
+    is_current_owner = bool(current_owner) and current_owner == request_wallet
+
     if not is_job_creator and not is_current_owner:
-        return jsonify({"error": "not_your_job"}), 403
-    if job_row["status"] not in ("completed", "success"):
+        return jsonify(
+            {
+                "error": "not_your_job",
+                "debug": {
+                    "job_id": job_id,
+                    "request_wallet": request_wallet,
+                    "job_wallet": job_wallet,
+                    "current_owner": current_owner or None,
+                },
+            }
+        ), 403
+
+    if str(job_row["status"] or "").lower() not in ("completed", "success"):
         return jsonify({"error": "job_not_completed"}), 400
+
     if not settlement.is_marketplace_eligible(job_id):
         return jsonify(
             {
@@ -5881,13 +6242,15 @@ def api_gallery_create_listing() -> Any:
 
     title = str(data.get("title", "")).strip()[:200] or f"Generation #{job_id[:8]}"
     description = str(data.get("description", "")).strip()[:2000]
-
     category = str(data.get("category", "")).strip()
+
     task_type = str(job_row["task_type"] or "").upper()
     asset_type = "video" if "VIDEO" in task_type else "image"
+
     canonical_metadata = _canonical_metadata_for_job(job_id) or {}
     model = str(canonical_metadata.get("model_name") or job_row["model"] or "")
     prompt = str(canonical_metadata.get("prompt") or "")
+
     if not prompt:
         try:
             job_data = json.loads(job_row["data"]) if job_row["data"] else {}
@@ -5897,7 +6260,7 @@ def api_gallery_create_listing() -> Any:
 
     result = gallery.create_listing(
         job_id=job_id,
-        seller_wallet=wallet,
+        seller_wallet=request_wallet,
         title=title,
         price_credits=price_credits,
         description=description,
@@ -5906,6 +6269,7 @@ def api_gallery_create_listing() -> Any:
         model=model,
         prompt=prompt,
     )
+
     if canonical_metadata:
         result["model_key"] = canonical_metadata.get("model_key")
         result["model_tier"] = canonical_metadata.get("tier")
@@ -5913,6 +6277,7 @@ def api_gallery_create_listing() -> Any:
         result["model_credit_cost"] = canonical_metadata.get("credit_cost")
         result["model_pipeline"] = canonical_metadata.get("pipeline")
         result["model_task_type"] = canonical_metadata.get("task_type")
+
     return jsonify(result), 201
 
 

@@ -48,6 +48,8 @@ def compute_reward(
             compute_cost_factor = float(REWARD_CONFIG.get("sd15_factor", 1.0))
         elif pipeline_norm == "ltx2":
             compute_cost_factor = float(REWARD_CONFIG.get("ltx2_factor", 2.0))
+        elif pipeline_norm == "ltx_video":
+            compute_cost_factor = float(REWARD_CONFIG.get("ltx_video_factor", 3.0))
         elif pipeline_norm in {"anime", "cartoon"}:
             compute_cost_factor = float(REWARD_CONFIG.get("anime_factor", 0.7))
         else:

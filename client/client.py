@@ -466,6 +466,8 @@ WATERMARK_MAX_WIDTH_PCT = max(0.08, min(0.4, _env_float("HAVNAI_WATERMARK_MAX_WI
 WATERMARK_MIN_WIDTH = max(48, _env_int("HAVNAI_WATERMARK_MIN_WIDTH", 96))
 LTX2_MODEL_ID = os.environ.get("LTX2_MODEL_ID") or ENV_VARS.get("LTX2_MODEL_ID") or "maxin-cn/Latte-1"
 LTX2_MODEL_PATH = os.environ.get("LTX2_MODEL_PATH") or ENV_VARS.get("LTX2_MODEL_PATH", "")
+# LTX-Video 2.3 (Lightricks) — distinct from legacy LTX2/Latte-1
+LTX_VIDEO_ENABLED = _env_flag("HAVNAI_LTX_VIDEO_ENABLED", True)
 ANIMATEDIFF_ADAPTER_ID = (
     os.environ.get("ANIMATEDIFF_MOTION_ADAPTER")
     or ENV_VARS.get("ANIMATEDIFF_MOTION_ADAPTER")
@@ -582,12 +584,46 @@ def ensure_model_entry(model_name: str) -> ModelEntry:
         raise RuntimeError(f"Model '{model_name}' missing from manifest") from exc
 
 
+def _ltx_video_checkpoint_variant(entry: ModelEntry) -> str:
+    variant = str(getattr(entry, "checkpoint_variant", "") or "").strip().lower()
+    if variant:
+        return variant
+    name = str(getattr(entry, "name", "") or "").strip().lower()
+    if "distilled" in name:
+        return "distilled"
+    return "dev"
+
+
+def _resolve_family_model_path(entry: ModelEntry) -> Optional[Path]:
+    pipeline = str(getattr(entry, "pipeline", "") or "").strip().lower()
+    model_family = str(getattr(entry, "model_family", "") or "").strip().lower()
+    if pipeline != "ltx_video" and model_family != "ltx_video":
+        return None
+    try:
+        from engines.ltx_video.config import load_config  # type: ignore
+
+        cfg = load_config()
+        return cfg.checkpoint_path(_ltx_video_checkpoint_variant(entry))
+    except Exception:
+        return None
+
+
 def ensure_model_path(entry: ModelEntry) -> Path:
     path_value = str(getattr(entry, "path", "") or "").strip()
     if path_value:
         path = Path(path_value).expanduser()
         if path.exists():
             return path
+
+    family_path = _resolve_family_model_path(entry)
+    if family_path is not None:
+        if family_path.exists():
+            try:
+                entry.path = str(family_path)
+            except Exception:
+                pass
+            return family_path
+        raise FileNotFoundError(f"Model path missing on node: {family_path}")
 
     fallback = resolve_model_path_from_name(entry.name)
     if fallback is not None:
@@ -725,6 +761,13 @@ def discover_supports(capabilities: Dict[str, List[str]]) -> List[str]:
 
     if "ltx2" in pipelines and "ltx2" in models and _has_runner("engines.ltx2.ltx2_runner", "run_ltx2"):
         supports.append("video")
+
+    if (
+        LTX_VIDEO_ENABLED
+        and "ltx_video" in pipelines
+        and _has_runner("engines.ltx_video.runner", "run_ltx_video")
+    ):
+        supports.append("ltx_video")
 
     if (
         "animatediff" in pipelines
@@ -1651,6 +1694,91 @@ def _run_ltx2_task(
     return metrics, util_int, video_b64
 
 
+def _run_ltx_video_task(
+    task_id: str,
+    entry: ModelEntry,
+    reward_weight: float,
+    task: Dict[str, Any],
+) -> Tuple[Dict[str, Any], int, Optional[str]]:
+    """Execute an LTX-Video 2.3 generation job."""
+    global utilization_hint
+    log(f"LTX-Video task received: model={entry.name}, variant={task.get('checkpoint_variant', 'dev')}, mode={task.get('pipeline_mode', 'two_stage')}", prefix="🎬", task_id=task_id)
+    try:
+        from engines.ltx_video.runner import run_ltx_video, video_to_b64 as ltx_video_to_b64  # type: ignore
+        from engines.ltx_video.config import load_config as load_ltx_video_config  # type: ignore
+        log("LTX-Video engine imported successfully", prefix="🎬", task_id=task_id)
+    except Exception as exc:
+        log(f"LTX-Video engine import FAILED: {exc}", prefix="❌", task_id=task_id)
+        return (
+            {
+                "status": "failed",
+                "task_type": "video_gen",
+                "model_name": entry.name,
+                "model_family": "ltx_video",
+                "reward_weight": reward_weight,
+                "error": f"LTX-Video runtime unavailable: {exc}",
+            },
+            utilization_hint,
+            None,
+        )
+
+    try:
+        ltx_config = load_ltx_video_config()
+        log(f"LTX-Video config loaded: version={ltx_config.version}, available_modes={ltx_config.available_modes()}", prefix="🎬", task_id=task_id)
+    except Exception as exc:
+        log(f"LTX-Video config load FAILED: {exc}", prefix="❌", task_id=task_id)
+        return (
+            {
+                "status": "failed",
+                "task_type": "video_gen",
+                "model_name": entry.name,
+                "model_family": "ltx_video",
+                "reward_weight": reward_weight,
+                "error": f"LTX-Video config load failed: {exc}",
+            },
+            utilization_hint,
+            None,
+        )
+    task_payload = dict(task)
+    task_payload["task_id"] = task_id
+    task_payload["model_name"] = entry.name
+    task_payload["reward_weight"] = reward_weight
+    task_payload.setdefault("seed", random.randint(0, 2**31 - 1))
+
+    try:
+        metrics, util, video_path = run_ltx_video(
+            task_payload,
+            log_fn=lambda message: log(message, prefix="🎬", task_id=task_id),
+            outputs_dir=OUTPUTS_DIR,
+            read_gpu_stats=read_gpu_stats,
+            utilization_hint=utilization_hint,
+            config=ltx_config,
+        )
+    except Exception as exc:
+        return (
+            {
+                "status": "failed",
+                "task_type": "video_gen",
+                "model_name": entry.name,
+                "model_family": "ltx_video",
+                "reward_weight": reward_weight,
+                "error": f"LTX-Video execution failed: {exc}",
+            },
+            utilization_hint,
+            None,
+        )
+
+    video_b64 = ltx_video_to_b64(video_path) if video_path else None
+    if metrics.get("status") == "success" and not video_b64:
+        metrics["status"] = "failed"
+        metrics["error"] = "LTX-Video produced no output video payload"
+    try:
+        util_int = int(util)
+    except (TypeError, ValueError):
+        util_int = utilization_hint
+    return metrics, util_int, video_b64
+
+
 def _run_animatediff_task(
     task_id: str,
     entry: ModelEntry,
@@ -1758,6 +1886,8 @@ def _run_faceswap_task(
         try:
             seed = int(seed) if seed is not None else random.randint(0, 2**31 - 1)
         except (TypeError, ValueError):
+            seed = random.randint(0, 2**31 - 1)
+        if seed < 0:
             seed = random.randint(0, 2**31 - 1)
 
         base_image, base_error = load_image_source_with_error(task.get("base_image_url"))
@@ -2032,6 +2162,8 @@ def execute_task(task: Dict[str, Any]) -> None:
             )
         elif task_type == "VIDEO_GEN":
             metrics, util, video_b64 = _run_ltx2_task(task_id, entry, reward_weight, task)
+        elif task_type == "LTX_VIDEO_GEN":
+            metrics, util, video_b64 = _run_ltx_video_task(task_id, entry, reward_weight, task)
         elif task_type == "ANIMATEDIFF":
             metrics, util, video_b64 = _run_animatediff_task(task_id, entry, model_path, reward_weight, task)
         elif task_type == "FACE_SWAP":
@@ -2294,14 +2426,37 @@ def _release_image_pipeline(pipe: Any) -> None:
     if pipe is None:
         return
     try:
-        pipe.to("cpu")
-    except Exception:
-        pass
-    try:
         if hasattr(pipe, "unload_lora_weights"):
             pipe.unload_lora_weights()
     except Exception:
         pass
+    if torch is not None and torch.cuda.is_available():
+        # Move weights off VRAM during teardown without calling pipeline.to("cpu"),
+        # which logs noisy fp16/CPU warnings in diffusers 0.36.
+        moved_module = False
+        failed_module = False
+        modules = list(getattr(pipe, "components", {}).values())
+        image_proj = getattr(pipe, "image_proj_model", None)
+        if image_proj is not None:
+            modules.append(image_proj)
+        for module in modules:
+            if not isinstance(module, torch.nn.Module):
+                continue
+            try:
+                module.to("cpu")
+                moved_module = True
+            except Exception:
+                failed_module = True
+        if not moved_module or failed_module:
+            try:
+                pipe.to("cpu", silence_dtype_warnings=True)
+            except TypeError:
+                try:
+                    pipe.to("cpu")
+                except Exception:
+                    pass
+            except Exception:
+                pass
     gc.collect()
     if torch is not None and torch.cuda.is_available():
         try:
@@ -2672,8 +2827,8 @@ def run_image_generation(
                 seed = int(seed) if seed is not None else None
             except (TypeError, ValueError):
                 seed = None
-            if seed is None:
-                seed = int(time.time()) & 0x7FFFFFFF
+            if seed is None or seed < 0:
+                seed = random.randint(0, 2**31 - 1)
             generator = torch.Generator(device=device).manual_seed(seed)
             pos_text = prompt or "a high quality photo of a golden retriever on a beach at sunset"
             neg_text = negative_prompt or ""

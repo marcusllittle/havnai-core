@@ -3,13 +3,15 @@
     "role": "creator",
     "supports": [
       "image",
-      "face_swap"
+      "face_swap",
+      "video",
+      "ltx_video"
     ],
-    "models": [
-      "epicrealismxl_vxviicrystalclear"
-    ],
+    "models": [],
     "pipelines": [
-      "sdxl"
+      "sdxl",
+      "ltx2",
+      "ltx_video"
     ],
     "current_task": {
       "task_id": "job-anchor-task",

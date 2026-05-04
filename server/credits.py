@@ -22,9 +22,14 @@ DEFAULT_CREDIT_COSTS: Dict[str, float] = {
     "sdxl": 1.0,
     "sd15": 0.5,
     "ltx2": 3.0,
+    "ltx_video": 5.0,
     "animatediff": 2.0,
     "face_swap": 1.5,
 }
+
+
+def _normalize_wallet(wallet: str) -> str:
+    return str(wallet or "").strip().lower()
 
 
 def resolve_credit_cost(model_name: str, task_type: str = "") -> float:
@@ -49,6 +54,8 @@ def resolve_credit_cost(model_name: str, task_type: str = "") -> float:
         return DEFAULT_CREDIT_COSTS.get("face_swap", 1.5)
     if tt == "VIDEO_GEN":
         return DEFAULT_CREDIT_COSTS.get("ltx2", 3.0)
+    if tt == "LTX_VIDEO_GEN":
+        return DEFAULT_CREDIT_COSTS.get("ltx_video", 5.0)
     if tt == "ANIMATEDIFF":
         return DEFAULT_CREDIT_COSTS.get("animatediff", 2.0)
     return 1.0
@@ -56,6 +63,7 @@ def resolve_credit_cost(model_name: str, task_type: str = "") -> float:
 
 def get_credit_balance(wallet: str) -> float:
     """Return current credit balance for a wallet."""
+    wallet = _normalize_wallet(wallet)
     conn = get_db()
     row = conn.execute(
         "SELECT balance FROM credits WHERE wallet=?", (wallet,)
@@ -65,6 +73,7 @@ def get_credit_balance(wallet: str) -> float:
 
 def deposit_credits(wallet: str, amount: float, reason: str = "") -> float:
     """Add credits to a wallet.  Returns new balance."""
+    wallet = _normalize_wallet(wallet)
     if amount <= 0:
         return get_credit_balance(wallet)
     conn = get_db()
@@ -91,6 +100,7 @@ def deduct_credits(wallet: str, amount: float, job_id: str = "") -> Tuple[bool, 
     Uses an atomic conditional UPDATE to prevent race conditions —
     the WHERE clause ensures balance never goes negative.
     """
+    wallet = _normalize_wallet(wallet)
     conn = get_db()
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -125,6 +135,7 @@ def release_credits(wallet: str, amount: float, reason: str = "") -> float:
     This is the inverse of ``deduct_credits`` — it adds credits back and
     adjusts total_spent downward (clamped to 0).
     """
+    wallet = _normalize_wallet(wallet)
     if amount <= 0:
         return get_credit_balance(wallet)
     conn = get_db()
@@ -153,6 +164,7 @@ def check_and_reserve_credits(
     When credits are disabled, returns (None, 0.0).
     When successful, returns (None, cost) — credits have been reserved.
     """
+    wallet = _normalize_wallet(wallet)
     if not CREDITS_ENABLED:
         return None, 0.0
     if jsonify_func is None:

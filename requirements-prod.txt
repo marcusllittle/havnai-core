@@ -1,0 +1,5 @@
+# Production requirements: extends the base set with PostgreSQL support.
+# Install with: pip install -r requirements-prod.txt
+-r requirements.txt
+psycopg2-binary>=2.9.9
+gunicorn>=21.2.0

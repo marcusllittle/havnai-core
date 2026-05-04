@@ -1,5 +1,6 @@
-# Production requirements: extends the base set with PostgreSQL support.
+# Production requirements: extends the base set with PostgreSQL, Redis, and gunicorn.
 # Install with: pip install -r requirements-prod.txt
 -r requirements.txt
 psycopg2-binary>=2.9.9
+redis>=5.0.0
 gunicorn>=21.2.0

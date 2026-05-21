@@ -4,6 +4,7 @@
       "name": "juggernautXL_ragnarokBy",
       "pipeline": "sdxl",
       "path": "/mnt/d/havnai-storage/models/creator/juggernautXL_ragnarokBy.safetensors",
+      "vae_path": "/mnt/c/Users/marcu/OneDrive/Documents/source-code/havnai-core/models/vae-sdxl/sdxlVAE_sdxlVAE.safetensors",
       "type": "checkpoint",
       "tags": [
         "realism",

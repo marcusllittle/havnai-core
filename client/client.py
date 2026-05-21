@@ -2341,6 +2341,25 @@ def _configure_image_pipeline(pipe: Any, entry: ModelEntry, is_xl: bool, device:
     return pipe
 
 
+def _maybe_load_custom_vae(pipe: Any, entry: ModelEntry, dtype: Any) -> Any:
+    vae_ref = str(getattr(entry, "vae_path", "") or "").strip()
+    if not vae_ref or _AutoencoderKL is None:
+        return pipe
+
+    vae_path = Path(vae_ref).expanduser()
+    if not vae_path.exists():
+        log(f"Custom VAE file missing for {entry.name}", prefix="⚠️", vae=str(vae_path))
+        return pipe
+
+    try:
+        custom_vae = _AutoencoderKL.from_single_file(str(vae_path), torch_dtype=dtype)
+        pipe.vae = custom_vae
+        log(f"Loaded custom VAE for {entry.name}", prefix="✅", vae=str(vae_path))
+    except Exception as exc:
+        log(f"Custom VAE load failed for {entry.name}: {exc}", prefix="⚠️", vae=str(vae_path))
+    return pipe
+
+
 def _construct_base_image_pipeline(
     entry: ModelEntry,
     model_path: Path,
@@ -2367,15 +2386,7 @@ def _construct_base_image_pipeline(
         pipe = _SDPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
     if pipe is None:
         raise RuntimeError("Failed to construct a text2image pipeline for model.")
-    if getattr(entry, "vae_path", "") and pipeline_name != "sdxl":
-        vae_path = Path(str(getattr(entry, "vae_path", ""))).expanduser()
-        if vae_path.exists() and _AutoencoderKL is not None:
-            try:
-                custom_vae = _AutoencoderKL.from_single_file(str(vae_path), torch_dtype=dtype)
-                pipe.vae = custom_vae
-                log(f"Loaded custom VAE for {entry.name}", prefix="✅", vae=str(vae_path))
-            except Exception as exc:
-                log(f"Custom VAE load failed for {entry.name}: {exc}", prefix="⚠️", vae=str(vae_path))
+    pipe = _maybe_load_custom_vae(pipe, entry, dtype)
     pipe = _configure_image_pipeline(pipe, entry, is_xl, device)
     load_ms = int((time.time() - load_t0) * 1000)
     return pipe, load_ms

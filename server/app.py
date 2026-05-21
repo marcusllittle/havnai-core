@@ -89,6 +89,7 @@ SUPPORTED_LORA_EXTS = {".safetensors", ".ckpt", ".pt", ".bin"}
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
+from common.lora_router import route_loras
 from common.prompt_enhancers import (
     ANTI_OVERLAY_NEGATIVE,
     SHARPNESS_NEGATIVE,
@@ -2876,24 +2877,70 @@ def submit_job() -> Any:
         # Pass through per-image overrides for the node to honor.
         job_settings: Dict[str, Any] = {"prompt": prompt_text}
         payload_loras = payload.get("loras") or []
-        loras_list: List[Dict[str, Any]] = []
+        requested_loras_input: List[Dict[str, Any]] = []
         if isinstance(payload_loras, list):
             for item in payload_loras:
                 if isinstance(item, dict):
-                    name = str(item.get("name") or "").strip()
+                    name = str(item.get("name") or item.get("filename") or item.get("id") or "").strip()
                     if not name:
                         continue
                     entry: Dict[str, Any] = {"name": name}
                     if "weight" in item:
                         entry["weight"] = item.get("weight")
-                    loras_list.append(entry)
+                    requested_loras_input.append(entry)
                 else:
                     name = str(item).strip()
                     if name:
-                        loras_list.append({"name": name})
-        if loras_list:
-            job_settings["loras"] = loras_list
-            job_settings["requested_loras"] = loras_list
+                        requested_loras_input.append({"name": name})
+        router_result = route_loras(
+            prompt=prompt_text,
+            pipeline=pipeline_name,
+            task_type="image",
+            requested_loras=requested_loras_input,
+        )
+        router_selected = router_result.get("selected_loras") or []
+        router_warnings = [str(w) for w in (router_result.get("warnings") or []) if str(w).strip()]
+
+        requested_loras: List[Dict[str, Any]] = []
+        routed_loras: List[Dict[str, Any]] = []
+        merged_loras: List[Dict[str, Any]] = []
+        for selected in router_selected:
+            if not isinstance(selected, dict):
+                continue
+            name = str(
+                selected.get("name")
+                or selected.get("filename")
+                or selected.get("id")
+                or ""
+            ).strip()
+            if not name:
+                continue
+            normalized_entry: Dict[str, Any] = {
+                "name": name,
+                "id": str(selected.get("id") or "").strip() or Path(name).stem,
+                "filename": str(selected.get("filename") or Path(name).name),
+                "path": str(selected.get("path") or "").strip(),
+                "trigger_type": str(selected.get("trigger_type") or ""),
+                "trigger_reason": str(selected.get("trigger_reason") or ""),
+            }
+            if selected.get("weight") is not None:
+                normalized_entry["weight"] = selected.get("weight")
+            merged_loras.append(normalized_entry)
+            if normalized_entry["trigger_type"] == "user":
+                requested_loras.append(normalized_entry)
+            else:
+                routed_loras.append(normalized_entry)
+
+        if merged_loras:
+            job_settings["loras"] = merged_loras
+        if requested_loras:
+            job_settings["requested_loras"] = requested_loras
+        if routed_loras:
+            job_settings["routed_loras"] = routed_loras
+        if router_warnings:
+            job_settings["lora_router_warnings"] = router_warnings
+            for warning in router_warnings:
+                log_event("lora_router_warning", warning=warning, model=model_name_raw or model_name)
         if seed is not None:
             job_settings["seed"] = seed
         base_negative = str(cfg.get("negative_prompt_default") or "").strip() if cfg else ""
@@ -2936,18 +2983,18 @@ def submit_job() -> Any:
         if (
             legacy_auto_hardcore
             and not explicit_hardcore_mode
-            and loras_list
+            and merged_loras
             and payload.get("steps") is None
             and int(job_settings.get("steps", 20) or 20) == 40
         ):
             job_settings["steps"] = 30
             hardcore_lora_step_cap_applied = True
 
-        requested_loras = job_settings.get("loras") or []
         log_event(
             "Enhanced prompt: "
             f"{prompt_text} | Selected model: {model_name_raw or model_name} | "
-            f"Requested LoRAs: {requested_loras} | Extra negatives: {position_negative or ''}"
+            f"Requested LoRAs: {requested_loras} | Routed LoRAs: {routed_loras} | "
+            f"Extra negatives: {position_negative or ''}"
         )
 
         overrides: Dict[str, Any] = {}

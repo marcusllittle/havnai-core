@@ -1,7 +1,9 @@
 __pycache__/
 *.pyc
+*.safetensors
 client/__pycache__/
 server/__pycache__/
 tmp_gpu/
 server/logs/
 db/
+models/loras/

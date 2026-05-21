@@ -1,0 +1,46 @@
+{
+ "version": 1,
+ "enabled": true,
+ "lora_dir_env": "HAVNAI_LORA_DIR",
+ "default_lora_dir": "models/loras",
+ "routes": [
+ {
+ "id": "pov_all_in_one_sdxl",
+ "filename": "NsfwPovAllInOneLoraSdxl-000009.safetensors",
+ "weight": 0.45,
+ "trigger_type": "always",
+ "pipeline": "sdxl",
+ "enabled": true
+ },
+ {
+ "id": "sagging_breast",
+ "filename": "sagging-xl-v1.0.safetensors",
+ "weight": 0.65,
+ "trigger_type": "exact_phrase",
+ "phrases": [
+ "sagging breast",
+ "sagging breasts"
+ ],
+ "pipeline": "sdxl",
+ "enabled": true
+ },
+ {
+ "id": "bondage_go_bdsm",
+ "filename": "bdsm_SDXL_1_.safetensors",
+ "weight": 0.65,
+ "trigger_type": "keyword",
+ "keywords": [
+ "bondage",
+ "bdsm",
+ "bound",
+ "restrained",
+ "rope bondage",
+ "shibari",
+ "tied up",
+ "cuffs"
+ ],
+ "pipeline": "sdxl",
+ "enabled": true
+ }
+ ]
+}

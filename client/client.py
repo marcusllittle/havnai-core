@@ -2268,6 +2268,19 @@ def resolve_lora_path(lora_name: str) -> Optional[Path]:
     return None
 
 
+def _lora_reference_from_item(item: Any) -> Tuple[str, Optional[float]]:
+    raw_weight: Optional[float] = None
+    if not isinstance(item, dict):
+        return str(item or "").strip(), raw_weight
+
+    raw_weight = item.get("weight")
+    for key in ("path", "filename", "name", "id"):
+        value = str(item.get(key) or "").strip()
+        if value:
+            return value, raw_weight
+    return "", raw_weight
+
+
 def _resolve_image_runtime(entry: ModelEntry) -> Tuple[str, Any, bool, str]:
     pipeline_name = (getattr(entry, "pipeline", "") or "sd15").lower()
     is_xl = "sdxl" in pipeline_name or ("xl" in pipeline_name and "sd15" not in pipeline_name)
@@ -2554,15 +2567,10 @@ def _collect_explicit_loras(requested_raw: Any, entry: ModelEntry, pipeline_name
     for item in requested:
         if len(lora_entries) >= MAX_LORAS:
             break
-        raw_weight: Optional[float] = None
-        if isinstance(item, dict):
-            name = str(item.get("name") or "").strip()
-            raw_weight = item.get("weight")
-        else:
-            name = str(item or "").strip()
-        if not name:
+        lora_ref, raw_weight = _lora_reference_from_item(item)
+        if not lora_ref:
             continue
-        normalized = normalize_lora_name(name)
+        normalized = normalize_lora_name(lora_ref)
         if normalized in seen:
             continue
         base_type = infer_lora_base_type(normalized)
@@ -2570,7 +2578,7 @@ def _collect_explicit_loras(requested_raw: Any, entry: ModelEntry, pipeline_name
             continue
         if base_type == "sd15" and model_is_sdxl:
             continue
-        lora_path = resolve_lora_path(name)
+        lora_path = resolve_lora_path(lora_ref)
         if not lora_path:
             continue
         role = classify_lora_role(normalized)

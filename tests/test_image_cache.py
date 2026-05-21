@@ -138,6 +138,26 @@ class ImagePipelineCacheTests(unittest.TestCase):
         acquire_mock.assert_not_called()
         release_mock.assert_called_once_with(fake_pipe)
 
+    def test_collect_loras_uses_server_routed_path_before_name(self) -> None:
+        entry = SimpleNamespace(name="juggernautXL_ragnarokBy", pipeline="sdxl")
+        lora_path = Path("/tmp/NsfwPovAllInOneLoraSdxl-000009.safetensors")
+        routed = {
+            "name": "NsfwPovAllInOneLoraSdxl-000009",
+            "filename": "NsfwPovAllInOneLoraSdxl-000009.safetensors",
+            "path": str(lora_path),
+            "weight": 0.45,
+            "trigger_type": "always",
+        }
+
+        with patch.object(client_module.Path, "is_file", autospec=True) as is_file_mock:
+            is_file_mock.side_effect = lambda path: path == lora_path
+            loras = client_module._collect_explicit_loras([routed], entry, "sdxl")
+
+        self.assertEqual(len(loras), 1)
+        self.assertEqual(loras[0][0], lora_path)
+        self.assertEqual(loras[0][1], 0.4)
+        self.assertEqual(loras[0][2], "lora_style_NsfwPovAllInOneLoraSdxl-000009")
+
 
 if __name__ == "__main__":
     unittest.main()

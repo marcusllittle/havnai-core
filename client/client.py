@@ -44,6 +44,16 @@ try:
 except ImportError:  # pragma: no cover
     torch = None
 
+if torch is not None and getattr(torch, "cuda", None) is not None:
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+        if hasattr(torch, "set_float32_matmul_precision"):
+            torch.set_float32_matmul_precision("high")
+    except Exception:
+        pass
+
 try:
     import diffusers  # type: ignore  # noqa: F401
     try:
@@ -130,6 +140,9 @@ LORA_DIR = Path(
     or (DEFAULT_LORA_DIR if DEFAULT_LORA_DIR.exists() else HAVNAI_HOME / "loras")
 ).expanduser()
 MAX_LORAS = 5
+MODEL_LORA_EXCLUDES = {
+    "zavychromaxlv100": {"perfecteyesxl"},
+}
 MODEL_FILE_EXTENSIONS = {".safetensors", ".ckpt", ".pt", ".pth", ".bin"}
 SUPPORTED_LORA_EXTS = {".safetensors", ".ckpt", ".pt", ".bin"}
 MODEL_SEARCH_DIR_CANDIDATES = [
@@ -508,6 +521,7 @@ PRELOAD_IMAGE_MODEL = str(
     or ""
 ).strip()
 ALLOW_REMOTE_LORA_DOWNLOAD = _env_flag("HAI_ALLOW_REMOTE_LORA_DOWNLOAD", False)
+FUSE_IMAGE_LORAS = _env_flag("HAI_FUSE_IMAGE_LORAS", True)
 _allowed_models_from_env = (
     _env_csv("HAI_ALLOWED_MODELS")
     or _env_csv("HAVNAI_ALLOWED_MODELS")
@@ -2294,22 +2308,37 @@ def _resolve_image_runtime(entry: ModelEntry) -> Tuple[str, Any, bool, str]:
     return device, dtype, is_xl, pipeline_name
 
 
-def _image_pipeline_cache_key(model_path: Path, pipeline_name: str, device: str, dtype: Any) -> str:
+def _image_pipeline_cache_key(
+    model_path: Path,
+    pipeline_name: str,
+    device: str,
+    dtype: Any,
+    lora_signature: str = "",
+) -> str:
     try:
         model_ref = str(model_path.resolve())
     except Exception:
         model_ref = str(model_path)
     dtype_ref = str(dtype)
-    return f"{model_ref}|{pipeline_name}|{device}|{dtype_ref}"
+    return f"{model_ref}|{pipeline_name}|{device}|{dtype_ref}|{lora_signature}"
+
+
+def _lora_cache_signature(lora_entries: List[Tuple[Path, float, str]]) -> str:
+    if not lora_entries:
+        return "no_lora"
+    parts: List[str] = []
+    for lora_path, weight, adapter in lora_entries:
+        try:
+            path_ref = str(lora_path.resolve())
+        except Exception:
+            path_ref = str(lora_path)
+        parts.append(f"{adapter}:{weight:.4f}:{path_ref}")
+    return "|".join(parts)
 
 
 def _release_image_pipeline(pipe: Any) -> None:
     if pipe is None:
         return
-    try:
-        pipe.to("cpu")
-    except Exception:
-        pass
     try:
         if hasattr(pipe, "unload_lora_weights"):
             pipe.unload_lora_weights()
@@ -2319,22 +2348,26 @@ def _release_image_pipeline(pipe: Any) -> None:
     if torch is not None and torch.cuda.is_available():
         try:
             torch.cuda.empty_cache()
+            if hasattr(torch.cuda, "ipc_collect"):
+                torch.cuda.ipc_collect()
         except Exception:
             pass
 
 
 def _configure_image_pipeline(pipe: Any, entry: ModelEntry, is_xl: bool, device: str) -> Any:
-    if hasattr(pipe, "enable_attention_slicing"):
-        pipe.enable_attention_slicing("max")
+    xformers_enabled = False
     if hasattr(pipe, "enable_xformers_memory_efficient_attention"):
         if ENABLE_XFORMERS:
             try:
                 pipe.enable_xformers_memory_efficient_attention()
+                xformers_enabled = True
                 log("xformers memory-efficient attention enabled", prefix="✅")
             except Exception as exc:
                 log(f"xformers unavailable, using default attention: {exc}", prefix="ℹ️")
         else:
             log("xformers disabled (set HAI_ENABLE_XFORMERS=1 to enable)", prefix="ℹ️")
+    if not xformers_enabled and hasattr(pipe, "enable_attention_slicing"):
+        pipe.enable_attention_slicing("max")
     if hasattr(pipe, "set_progress_bar_config"):
         pipe.set_progress_bar_config(disable=True)
     if "_DPMSolver" in globals() and _DPMSolver is not None and hasattr(pipe, "scheduler"):
@@ -2343,6 +2376,11 @@ def _configure_image_pipeline(pipe: Any, entry: ModelEntry, is_xl: bool, device:
         except Exception as exc:
             log(f"DPM scheduler setup failed: {exc}", prefix="⚠️")
     pipe = pipe.to(device)
+    if torch is not None and is_xl and hasattr(pipe, "vae") and pipe.vae is not None and hasattr(pipe, "upcast_vae"):
+        def _upcast_vae_without_deprecation() -> None:
+            pipe.vae.to(dtype=torch.float32)
+
+        pipe.upcast_vae = _upcast_vae_without_deprecation
     if torch is not None and not is_xl and hasattr(pipe, "vae") and pipe.vae is not None:
         try:
             pipe.vae.to(device=device, dtype=torch.float32)
@@ -2434,6 +2472,43 @@ def _acquire_base_image_pipeline(
     for old_pipe in evicted:
         _release_image_pipeline(old_pipe)
     return pipe, False, load_ms
+
+
+def _acquire_image_pipeline_with_loras(
+    entry: ModelEntry,
+    model_path: Path,
+    pipeline_name: str,
+    dtype: Any,
+    is_xl: bool,
+    device: str,
+    lora_entries: List[Tuple[Path, float, str]],
+) -> Tuple[Any, bool, int, List[str], int]:
+    lora_signature = _lora_cache_signature(lora_entries)
+    loaded_lora_refs = [f"{path.name}:{weight:.2f}" for path, weight, _ in lora_entries]
+
+    if IMAGE_PIPELINE_CACHE_SIZE <= 0:
+        pipe, load_ms = _construct_base_image_pipeline(entry, model_path, pipeline_name, dtype, is_xl, device)
+        loaded, lora_ms = _apply_explicit_loras(pipe, entry, lora_entries)
+        return pipe, False, load_ms, loaded, lora_ms
+
+    cache_key = _image_pipeline_cache_key(model_path, pipeline_name, device, dtype, lora_signature)
+    with _IMAGE_PIPELINE_CACHE_LOCK:
+        cached_pipe = _IMAGE_PIPELINE_CACHE.pop(cache_key, None)
+        if cached_pipe is not None:
+            _IMAGE_PIPELINE_CACHE[cache_key] = cached_pipe
+            return cached_pipe, True, 0, loaded_lora_refs, 0
+
+    pipe, load_ms = _construct_base_image_pipeline(entry, model_path, pipeline_name, dtype, is_xl, device)
+    loaded, lora_ms = _apply_explicit_loras(pipe, entry, lora_entries)
+    evicted: List[Any] = []
+    with _IMAGE_PIPELINE_CACHE_LOCK:
+        _IMAGE_PIPELINE_CACHE[cache_key] = pipe
+        while len(_IMAGE_PIPELINE_CACHE) > IMAGE_PIPELINE_CACHE_SIZE:
+            _, old_pipe = _IMAGE_PIPELINE_CACHE.popitem(last=False)
+            evicted.append(old_pipe)
+    for old_pipe in evicted:
+        _release_image_pipeline(old_pipe)
+    return pipe, False, load_ms, loaded, lora_ms
 
 
 def _truncate_image_prompts(pipe: Any, pos_text: str, neg_text: str) -> Tuple[str, str]:
@@ -2578,12 +2653,16 @@ def _collect_explicit_loras(requested_raw: Any, entry: ModelEntry, pipeline_name
             continue
         if base_type == "sd15" and model_is_sdxl:
             continue
+        model_key = _normalize_model_key(entry.name)
+        if normalized in MODEL_LORA_EXCLUDES.get(model_key, set()):
+            log(f"Skipping LoRA for {entry.name}: {lora_ref}", prefix="ℹ️")
+            continue
         lora_path = resolve_lora_path(lora_ref)
         if not lora_path:
             continue
         role = classify_lora_role(normalized)
         weight = clamp_lora_weight(raw_weight, role)
-        adapter_name = f"lora_{role}_{lora_path.stem}"
+        adapter_name = _safe_adapter_name(f"lora_{role}_{lora_path.stem}")
         lora_entries.append((lora_path, weight, adapter_name))
         seen.add(normalized)
     return lora_entries
@@ -2616,9 +2695,22 @@ def _apply_explicit_loras(pipe: Any, entry: ModelEntry, lora_entries: List[Tuple
                 pipe.set_adapters(adapter_names, adapter_weights)
             except TypeError:
                 pipe.set_adapters(adapter_names)
-        elif hasattr(pipe, "fuse_lora"):
+        if FUSE_IMAGE_LORAS and hasattr(pipe, "fuse_lora"):
             try:
-                pipe.fuse_lora()
+                pipe.fuse_lora(adapter_names=adapter_names)
+                log(f"Fused LoRA for {entry.name}", prefix="✅")
+                if hasattr(pipe, "unload_lora_weights"):
+                    pipe.unload_lora_weights()
+                    log(f"Unloaded fused LoRA adapters for {entry.name}", prefix="✅")
+            except TypeError:
+                try:
+                    pipe.fuse_lora()
+                    log(f"Fused LoRA for {entry.name}", prefix="✅")
+                    if hasattr(pipe, "unload_lora_weights"):
+                        pipe.unload_lora_weights()
+                        log(f"Unloaded fused LoRA adapters for {entry.name}", prefix="✅")
+                except Exception as exc:
+                    log(f"LoRA fuse failed for {entry.name}: {exc}", prefix="⚠️")
             except Exception as exc:
                 log(f"LoRA fuse failed for {entry.name}: {exc}", prefix="⚠️")
     else:
@@ -2820,21 +2912,26 @@ def run_image_generation(
 
                 pipe_mode = "img2img" if init_pil is not None else "txt2img"
                 log(f"Preparing {pipe_mode} pipeline…", prefix="ℹ️", device=device)
-                transient_pipeline = bool(lora_entries) or IMAGE_PIPELINE_CACHE_SIZE <= 0
+                transient_pipeline = IMAGE_PIPELINE_CACHE_SIZE <= 0
                 pipe: Optional[Any] = None
                 try:
-                    if transient_pipeline:
-                        pipe, pipeline_load_ms = _construct_base_image_pipeline(
-                            entry, model_path, pipeline_name, dtype, is_xl, device
-                        )
-                    else:
-                        pipe, pipeline_cache_hit, pipeline_load_ms = _acquire_base_image_pipeline(
-                            entry, model_path, pipeline_name, dtype, is_xl, device
-                        )
+                    (
+                        pipe,
+                        pipeline_cache_hit,
+                        pipeline_load_ms,
+                        loaded_loras,
+                        lora_load_ms,
+                    ) = _acquire_image_pipeline_with_loras(
+                        entry,
+                        model_path,
+                        pipeline_name,
+                        dtype,
+                        is_xl,
+                        device,
+                        lora_entries,
+                    )
                     if not pipeline_cache_hit:
                         log(f"Pipeline ready in {pipeline_load_ms}ms", prefix="✅")
-                    if lora_entries and pipe is not None:
-                        loaded_loras, lora_load_ms = _apply_explicit_loras(pipe, entry, lora_entries)
                     if pipe is None:
                         raise RuntimeError("Image pipeline is unavailable")
 

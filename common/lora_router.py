@@ -131,6 +131,7 @@ def route_loras(
     pipeline: str = DEFAULT_PIPELINE,
     task_type: str = DEFAULT_TASK_TYPE,
     requested_loras: list | None = None,
+    model_name: str = "",
 ) -> Dict[str, Any]:
     config = load_lora_routes()
     warnings: List[str] = []
@@ -153,12 +154,17 @@ def route_loras(
         return {"selected_loras": selected_loras, "warnings": warnings}
 
     pipeline_lc = _normalize_text(pipeline)
+    model_lc = _normalize_text(model_name)
     for route in config.get("routes") or []:
         if not bool(route.get("enabled", True)):
             continue
 
         route_pipeline = _normalize_text(route.get("pipeline") or DEFAULT_PIPELINE)
         if route_pipeline and pipeline_lc != route_pipeline:
+            continue
+
+        excluded_models = {_normalize_text(item) for item in (route.get("exclude_models") or [])}
+        if model_lc and model_lc in excluded_models:
             continue
 
         matched, trigger_reason = _route_matches_prompt(route, prompt)

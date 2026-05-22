@@ -1013,6 +1013,15 @@ def load_manifest() -> None:
             "weight": legacy_weight,
             "reward_weight": reward_weight,
             "task_type": entry.get("task_type", CREATOR_TASK_TYPE),
+            "vae_path": entry.get("vae_path", ""),
+            "controlnet_path": entry.get("controlnet_path", ""),
+            "steps": entry.get("steps"),
+            "guidance": entry.get("guidance"),
+            "width": entry.get("width"),
+            "height": entry.get("height"),
+            "sampler": entry.get("sampler"),
+            "runtime_caps": entry.get("runtime_caps", {}),
+            "negative_prompt_default": entry.get("negative_prompt_default", ""),
             "strengths": entry.get("strengths"),
             "weaknesses": entry.get("weaknesses"),
         }
@@ -2897,6 +2906,7 @@ def submit_job() -> Any:
             pipeline=pipeline_name,
             task_type="image",
             requested_loras=requested_loras_input,
+            model_name=str(cfg.get("name") or model_name),
         )
         router_selected = router_result.get("selected_loras") or []
         router_warnings = [str(w) for w in (router_result.get("warnings") or []) if str(w).strip()]
@@ -3023,6 +3033,42 @@ def submit_job() -> Any:
             job_settings["overrides"] = overrides
             for key, value in overrides.items():
                 job_settings[key] = value
+
+        runtime_caps = cfg.get("runtime_caps") if isinstance(cfg.get("runtime_caps"), dict) else {}
+        if str(cfg.get("pipeline") or "").lower() == "sdxl" and runtime_caps:
+            caps_applied: Dict[str, Any] = {}
+            try:
+                max_steps = int(runtime_caps.get("max_steps") or 0)
+                current_steps = int(job_settings.get("steps") or 0)
+                if max_steps > 0 and current_steps > max_steps:
+                    caps_applied["steps"] = {"from": current_steps, "to": max_steps}
+                    job_settings["steps"] = max_steps
+            except (TypeError, ValueError):
+                pass
+            try:
+                max_pixels = int(runtime_caps.get("max_pixels") or 0)
+                current_width = int(job_settings.get("width") or 0)
+                current_height = int(job_settings.get("height") or 0)
+                capped_width = int(runtime_caps.get("width") or 0)
+                capped_height = int(runtime_caps.get("height") or 0)
+                if (
+                    max_pixels > 0
+                    and current_width > 0
+                    and current_height > 0
+                    and current_width * current_height > max_pixels
+                    and capped_width > 0
+                    and capped_height > 0
+                ):
+                    caps_applied["size"] = {
+                        "from": [current_width, current_height],
+                        "to": [capped_width, capped_height],
+                    }
+                    job_settings["width"] = capped_width
+                    job_settings["height"] = capped_height
+            except (TypeError, ValueError):
+                pass
+            if caps_applied:
+                job_settings["runtime_caps_applied"] = caps_applied
 
         job_data = json.dumps(job_settings)
         task_type = CREATOR_TASK_TYPE

@@ -23,7 +23,7 @@ import atexit
 import signal
 from typing import Any, Dict, List, Optional, Set, Tuple
 import base64
-from collections import OrderedDict
+from collections import OrderedDict, deque
 
 import requests
 
@@ -106,6 +106,70 @@ _REFERENCE_FACE_PIPE = None
 _REFERENCE_FACE_PIPE_MODEL = ""
 _IMAGE_PIPELINE_CACHE: "OrderedDict[str, Any]" = OrderedDict()
 _IMAGE_PIPELINE_CACHE_LOCK = threading.Lock()
+_RECENT_FINISHED_TASK_IDS: "deque[str]" = deque(maxlen=256)
+_RECENT_FINISHED_TASK_ID_SET: Set[str] = set()
+_RECENT_FINISHED_TASK_LOCK = threading.Lock()
+_RECENT_FINISHED_TASK_FILE = Path(
+    os.environ.get("HAI_COMPLETED_TASK_CACHE")
+    or os.environ.get("HAVNAI_COMPLETED_TASK_CACHE")
+    or (Path.home() / ".havnai" / "completed_tasks.log")
+).expanduser()
+
+
+def _remember_finished_task(task_id: str) -> bool:
+    task_ref = str(task_id or "").strip()
+    if not task_ref:
+        return False
+    with _RECENT_FINISHED_TASK_LOCK:
+        if task_ref in _RECENT_FINISHED_TASK_ID_SET:
+            return False
+        if len(_RECENT_FINISHED_TASK_IDS) == _RECENT_FINISHED_TASK_IDS.maxlen:
+            old = _RECENT_FINISHED_TASK_IDS[0]
+            _RECENT_FINISHED_TASK_ID_SET.discard(old)
+        _RECENT_FINISHED_TASK_IDS.append(task_ref)
+        _RECENT_FINISHED_TASK_ID_SET.add(task_ref)
+    return True
+
+
+def _mark_task_finished(task_id: str) -> None:
+    task_ref = str(task_id or "").strip()
+    if not _remember_finished_task(task_ref):
+        return
+    try:
+        _RECENT_FINISHED_TASK_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with _RECENT_FINISHED_TASK_FILE.open("a", encoding="utf-8") as fh:
+            fh.write(f"{int(time.time())} {task_ref}\n")
+    except Exception:
+        pass
+
+
+def _task_recently_finished(task_id: str) -> bool:
+    task_ref = str(task_id or "").strip()
+    if not task_ref:
+        return False
+    with _RECENT_FINISHED_TASK_LOCK:
+        return task_ref in _RECENT_FINISHED_TASK_ID_SET
+
+
+def _load_recent_finished_tasks() -> None:
+    try:
+        lines = _RECENT_FINISHED_TASK_FILE.read_text(encoding="utf-8").splitlines()[-256:]
+    except Exception:
+        return
+    for line in lines:
+        parts = line.strip().split()
+        if not parts:
+            continue
+        _remember_finished_task(parts[-1])
+
+
+def _restart_node_process(reason: str) -> None:
+    log(f"Restarting node process: {reason}", prefix="ℹ️")
+    try:
+        disconnect()
+    except Exception:
+        pass
+    os._exit(0)
 
 try:
     from huggingface_hub import hf_hub_download  # type: ignore
@@ -514,6 +578,10 @@ FACE_SWAP_PROFILE = (
 SAFE_CUDA_KERNELS = _env_flag("HAI_SAFE_CUDA_KERNELS", True)
 LTX2_LOW_VRAM_CAPS = _env_flag("HAVNAI_LTX2_LOW_VRAM_CAPS", True)
 IMAGE_PIPELINE_CACHE_SIZE = max(0, _env_int("HAI_IMAGE_PIPELINE_CACHE_SIZE", 1))
+SDXL_MAX_STEPS = max(5, _env_int("HAI_SDXL_MAX_STEPS", 28))
+SDXL_MAX_PIXELS = max(256 * 256, _env_int("HAI_SDXL_MAX_PIXELS", 768 * 1152))
+SDXL_CAP_WIDTH = max(256, _env_int("HAI_SDXL_CAP_WIDTH", 768))
+SDXL_CAP_HEIGHT = max(256, _env_int("HAI_SDXL_CAP_HEIGHT", 1152))
 PRELOAD_IMAGE_ON_STARTUP = _env_flag("HAI_PRELOAD_IMAGE_ON_STARTUP", True)
 PRELOAD_IMAGE_MODEL = str(
     os.environ.get("HAI_PRELOAD_IMAGE_MODEL")
@@ -522,6 +590,7 @@ PRELOAD_IMAGE_MODEL = str(
 ).strip()
 ALLOW_REMOTE_LORA_DOWNLOAD = _env_flag("HAI_ALLOW_REMOTE_LORA_DOWNLOAD", False)
 FUSE_IMAGE_LORAS = _env_flag("HAI_FUSE_IMAGE_LORAS", True)
+RESTART_AFTER_IMAGE_TASK = _env_flag("HAI_RESTART_AFTER_IMAGE_TASK", False)
 _allowed_models_from_env = (
     _env_csv("HAI_ALLOWED_MODELS")
     or _env_csv("HAVNAI_ALLOWED_MODELS")
@@ -1953,6 +2022,9 @@ def execute_task(task: Dict[str, Any]) -> None:
     if task_type in {"IMAGE_GEN", "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP"} and ROLE != "creator":
         log(f"Skipping creator task {task_id[:8]} — node not in creator mode", prefix="⚠️")
         return
+    if _task_recently_finished(task_id):
+        log(f"Skipping duplicate completed task {task_id[:8]}", prefix="ℹ️")
+        return
 
     log(f"Executing {task_type.lower()} task {task_id[:8]} · {model_name}", prefix="🚀")
 
@@ -2112,10 +2184,15 @@ def execute_task(task: Dict[str, Any]) -> None:
             break
 
     if submit_error is None:
+        _mark_task_finished(task_id)
         prefix = "✅" if payload["status"] == "success" else "⚠️"
         log(f"Task {task_id[:8]} {payload['status'].upper()} · reward {reward} HAI", prefix=prefix)
     else:
         log(f"Failed to submit result: {submit_error}", prefix="🚫")
+    if task_type == "IMAGE_GEN":
+        _cleanup_cuda_memory()
+        if RESTART_AFTER_IMAGE_TASK and submit_error is None:
+            _restart_node_process("completed image task")
 
 
 def run_ai_inference(entry: ModelEntry, model_path: Path, input_shape: List[int], reward_weight: float) -> (Dict[str, Any], int):
@@ -2354,6 +2431,33 @@ def _release_image_pipeline(pipe: Any) -> None:
             pass
 
 
+def _cleanup_cuda_memory() -> None:
+    gc.collect()
+    if torch is not None and torch.cuda.is_available():
+        try:
+            torch.cuda.synchronize()
+        except Exception:
+            pass
+        try:
+            torch.cuda.empty_cache()
+            if hasattr(torch.cuda, "ipc_collect"):
+                torch.cuda.ipc_collect()
+        except Exception:
+            pass
+
+
+def _reserve_image_pipeline_cache_slot(cache_key: str) -> None:
+    if IMAGE_PIPELINE_CACHE_SIZE <= 0:
+        return
+    evicted: List[Any] = []
+    with _IMAGE_PIPELINE_CACHE_LOCK:
+        while len(_IMAGE_PIPELINE_CACHE) >= IMAGE_PIPELINE_CACHE_SIZE and cache_key not in _IMAGE_PIPELINE_CACHE:
+            _, old_pipe = _IMAGE_PIPELINE_CACHE.popitem(last=False)
+            evicted.append(old_pipe)
+    for old_pipe in evicted:
+        _release_image_pipeline(old_pipe)
+
+
 def _configure_image_pipeline(pipe: Any, entry: ModelEntry, is_xl: bool, device: str) -> Any:
     xformers_enabled = False
     if hasattr(pipe, "enable_xformers_memory_efficient_attention"):
@@ -2462,6 +2566,7 @@ def _acquire_base_image_pipeline(
             _IMAGE_PIPELINE_CACHE[cache_key] = cached_pipe
             return cached_pipe, True, 0
 
+    _reserve_image_pipeline_cache_slot(cache_key)
     pipe, load_ms = _construct_base_image_pipeline(entry, model_path, pipeline_name, dtype, is_xl, device)
     evicted: List[Any] = []
     with _IMAGE_PIPELINE_CACHE_LOCK:
@@ -2498,6 +2603,7 @@ def _acquire_image_pipeline_with_loras(
             _IMAGE_PIPELINE_CACHE[cache_key] = cached_pipe
             return cached_pipe, True, 0, loaded_lora_refs, 0
 
+    _reserve_image_pipeline_cache_slot(cache_key)
     pipe, load_ms = _construct_base_image_pipeline(entry, model_path, pipeline_name, dtype, is_xl, device)
     loaded, lora_ms = _apply_explicit_loras(pipe, entry, lora_entries)
     evicted: List[Any] = []
@@ -2545,6 +2651,66 @@ def _apply_image_sampler(pipe: Any, sampler: Optional[str]) -> None:
         pipe.scheduler = _DPMSolver.from_config(pipe.scheduler.config)
     except Exception as exc:
         log(f"Sampler switch failed: {exc}", prefix="⚠️", sampler=sampler)
+
+
+def _nearest_multiple_of_8(value: int) -> int:
+    return max(256, int(round(value / 8)) * 8)
+
+
+def _cap_sdxl_generation_settings(
+    job_settings: Any,
+    is_xl: bool,
+    pipeline_name: str,
+    steps: int,
+    width: int,
+    height: int,
+) -> Tuple[int, int, int, List[str]]:
+    if not is_xl and "sdxl" not in pipeline_name.lower():
+        return steps, width, height, []
+
+    runtime_caps = job_settings.get("runtime_caps") if isinstance(job_settings, dict) else {}
+    if not isinstance(runtime_caps, dict):
+        runtime_caps = {}
+
+    max_steps = SDXL_MAX_STEPS
+    max_pixels = SDXL_MAX_PIXELS
+    cap_width = SDXL_CAP_WIDTH
+    cap_height = SDXL_CAP_HEIGHT
+    for key, current in (
+        ("max_steps", max_steps),
+        ("max_pixels", max_pixels),
+        ("width", cap_width),
+        ("height", cap_height),
+    ):
+        try:
+            value = int(runtime_caps.get(key) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value <= 0:
+            continue
+        if key == "max_steps":
+            max_steps = min(current, value)
+        elif key == "max_pixels":
+            max_pixels = min(current, value)
+        elif key == "width":
+            cap_width = min(current, value)
+        elif key == "height":
+            cap_height = min(current, value)
+
+    capped: List[str] = []
+    if steps > max_steps:
+        capped.append(f"steps {steps}->{max_steps}")
+        steps = max_steps
+    if width * height > max_pixels:
+        old_width, old_height = width, height
+        if cap_width * cap_height <= max_pixels:
+            width, height = cap_width, cap_height
+        else:
+            scale = (max_pixels / float(width * height)) ** 0.5
+            width = _nearest_multiple_of_8(width * scale)
+            height = _nearest_multiple_of_8(height * scale)
+        capped.append(f"size {old_width}x{old_height}->{width}x{height}")
+    return steps, width, height, capped
 
 
 def _reference_face_pipeline_cache_key(
@@ -2805,6 +2971,22 @@ def run_image_generation(
             guidance = max(1.0, min(15.0, guidance))
             img_h = max(256, min(1536, img_h))
             img_w = max(256, min(1536, img_w))
+            steps, img_w, img_h, caps_applied = _cap_sdxl_generation_settings(
+                job_settings,
+                is_xl,
+                pipeline_name,
+                steps,
+                img_w,
+                img_h,
+            )
+            if caps_applied:
+                log(f"Applied SDXL node caps: {', '.join(caps_applied)}", prefix="ℹ️")
+            log(
+                f"Image settings: {img_w}x{img_h}, steps={steps}, guidance={guidance:.2f}",
+                prefix="ℹ️",
+                model=entry.name,
+                sampler=sampler or "",
+            )
 
             if reference_face_url:
                 if not is_xl or "sdxl" not in pipeline_name:
@@ -2885,6 +3067,7 @@ def run_image_generation(
                 finally:
                     if transient_pipeline and pipe is not None:
                         _release_image_pipeline(pipe)
+                    pipe = None
             else:
                 init_pil = None
                 if use_img2img and init_image_raw:
@@ -2904,7 +3087,7 @@ def run_image_generation(
                             img_bytes = base64.b64decode(init_image_raw)
                             init_pil = _PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
                         if init_pil:
-                            init_pil = init_pil.resize((width, height))
+                            init_pil = init_pil.resize((img_w, img_h))
                             log(f"Init image loaded for img2img (strength={img2img_strength})", prefix="🖼️")
                     except Exception as exc:
                         log(f"Failed to load init image, falling back to txt2img: {exc}", prefix="⚠️")
@@ -2958,6 +3141,7 @@ def run_image_generation(
                 finally:
                     if transient_pipeline and pipe is not None:
                         _release_image_pipeline(pipe)
+                    pipe = None
         elif Image is not None:
             log("Using fast preview placeholder (no SD detected or FAST_PREVIEW enabled)", prefix="ℹ️")
             w = h = 512
@@ -3143,6 +3327,7 @@ def poll_tasks_loop() -> None:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    _load_recent_finished_tasks()
     log(f"Node ID: {NODE_NAME} · Role: {ROLE.upper()} · Version: {CLIENT_VERSION}")
     log(
         (

@@ -7,6 +7,7 @@ except ImportError:
     pass
 
 import json
+import hashlib
 import logging
 from logging.handlers import RotatingFileHandler
 import os
@@ -46,6 +47,9 @@ import analytics
 import validators
 import workflows
 import gallery
+import execution_events
+import proof_receipts
+import merkle_batches
 import astra_rewards
 
 try:
@@ -113,6 +117,14 @@ DB_CONN: Optional[sqlite3.Connection] = None
 RATE_LIMIT_BUCKETS: Dict[str, deque] = defaultdict(deque)
 
 ONLINE_THRESHOLD = 120  # seconds before a node is considered offline
+JOB_LEASE_SECONDS = max(30, int(os.getenv("HAVNAI_JOB_LEASE_SECONDS", "1800")))
+JOB_MAX_RETRIES = max(0, int(os.getenv("HAVNAI_JOB_MAX_RETRIES", "3")))
+SCHEDULER_PREFERENCE_GRACE_SECONDS = max(
+    0.0, float(os.getenv("HAVNAI_SCHEDULER_PREFERENCE_GRACE_SECONDS", "8"))
+)
+RECEIPT_SIGNING_KEY = os.getenv("HAVNAI_RECEIPT_SIGNING_KEY", "").strip()
+RECEIPT_ED25519_PRIVATE_KEY = os.getenv("HAVNAI_RECEIPT_ED25519_PRIVATE_KEY", "").strip()
+MERKLE_BATCH_SIZE = max(1, int(os.getenv("HAVNAI_MERKLE_BATCH_SIZE", "100")))
 WALLET_REGEX = re.compile(r"^0x[a-fA-F0-9]{40}$")
 JOB_ID_REGEX = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -672,6 +684,11 @@ def _inject_module_dependencies() -> None:
 
     # Gallery module
     gallery.get_db = get_db  # type: ignore[attr-defined]
+    execution_events.get_db = get_db  # type: ignore[attr-defined]
+    proof_receipts.get_db = get_db  # type: ignore[attr-defined]
+    proof_receipts.SIGNING_KEY = RECEIPT_SIGNING_KEY
+    proof_receipts.ED25519_PRIVATE_KEY = RECEIPT_ED25519_PRIVATE_KEY
+    merkle_batches.get_db = get_db  # type: ignore[attr-defined]
     gallery.log_event = log_event  # type: ignore[attr-defined]
     gallery.WALLET_REGEX = WALLET_REGEX  # type: ignore[attr-defined]
     gallery.build_result_payload = _build_result_payload  # type: ignore[attr-defined]
@@ -876,13 +893,48 @@ def init_db() -> None:
             timestamp REAL NOT NULL,
             assigned_at REAL,
             completed_at REAL,
-            invite_code TEXT
+            invite_code TEXT,
+            lease_renewed_at REAL,
+            lease_expires_at REAL,
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            last_failure_reason TEXT,
+            preferred_node_id TEXT,
+            dispatch_score REAL,
+            dispatch_reason TEXT
         )
         """
     )
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
     if "invite_code" not in columns:
         conn.execute("ALTER TABLE jobs ADD COLUMN invite_code TEXT")
+    if "lease_renewed_at" not in columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN lease_renewed_at REAL")
+    if "lease_expires_at" not in columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN lease_expires_at REAL")
+    if "retry_count" not in columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0")
+    if "last_failure_reason" not in columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN last_failure_reason TEXT")
+    if "preferred_node_id" not in columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN preferred_node_id TEXT")
+    if "dispatch_score" not in columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN dispatch_score REAL")
+    if "dispatch_reason" not in columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN dispatch_reason TEXT")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_jobs_active_lease ON jobs (status, lease_expires_at)"
+    )
+    # Adopt legacy running claims into the lease system without immediately
+    # invalidating genuinely active work after an upgrade.
+    conn.execute(
+        """
+        UPDATE jobs
+        SET lease_renewed_at=COALESCE(assigned_at, timestamp),
+            lease_expires_at=COALESCE(assigned_at, timestamp) + ?
+        WHERE status='running' AND lease_expires_at IS NULL
+        """,
+        (JOB_LEASE_SECONDS,),
+    )
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS rewards (
@@ -963,7 +1015,9 @@ def init_db() -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_wallet_nonces_used ON wallet_nonces (used_at)"
     )
-    conn.execute("UPDATE jobs SET status='queued', node_id=NULL WHERE status='running'")
+    execution_events.init_execution_event_tables(conn)
+    proof_receipts.init_receipt_tables(conn)
+    merkle_batches.init_merkle_tables(conn)
     conn.commit()
 
 
@@ -974,6 +1028,7 @@ hai_funding.init_hai_funding_tables(get_db())
 
 # Inject dependencies into extracted modules (initial injection)
 _inject_module_dependencies()
+job_helpers.claim_next_job_for_node.lease_seconds = JOB_LEASE_SECONDS
 
 # Initialize tables for new modules (must come after dependency injection)
 blockchain.init_blockchain_tables(get_db())
@@ -1335,6 +1390,47 @@ def _fetch_node_operator_registry_row(node_id: str) -> Optional[Dict[str, Any]]:
     return dict(row) if row else None
 
 
+def _scheduler_score(
+    node_id: str,
+    node: Dict[str, Any],
+    performance: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Calculate a deterministic 0-100 dispatch score and its components."""
+    gpu = _extract_gpu_payload(node.get("gpu"))
+    try:
+        utilization = max(0.0, min(100.0, float(node.get("utilization", gpu.get("utilization", 0.0)) or 0.0)))
+    except (TypeError, ValueError):
+        utilization = 0.0
+    try:
+        vram_gb = max(0.0, float(gpu.get("memory_total_mb") or 0.0) / 1024.0)
+    except (TypeError, ValueError):
+        vram_gb = 0.0
+    performance = performance or settlement.get_node_performance(node_id, window_days=30)
+    trust_value = performance.get("trust_score")
+    # New operators receive a neutral exploration score rather than being
+    # permanently outranked before they have enough attempts to build trust.
+    trust = 50.0 if trust_value is None else max(0.0, min(100.0, float(trust_value)))
+    sample_size = max(0, int(performance.get("sample_size") or 0))
+    confidence = min(1.0, sample_size / 20.0)
+    effective_trust = 50.0 + ((trust - 50.0) * confidence)
+
+    components = {
+        "availability": 20.0 if not node.get("current_task") else 0.0,
+        "gpu_headroom": round((100.0 - utilization) * 0.3, 3),
+        "vram": round(min(vram_gb, 32.0) / 32.0 * 20.0, 3),
+        "trust": round(effective_trust * 0.3, 3),
+        "freshness": 15.0 if _node_is_online(node) else 0.0,
+    }
+    score = round(max(0.0, min(100.0, sum(components.values()))), 3)
+    return {
+        "score": score,
+        "components": components,
+        "utilization": utilization,
+        "vram_gb": round(vram_gb, 2),
+        "sample_size": sample_size,
+    }
+
+
 def _worker_snapshot(
     node_id: str,
     *,
@@ -1482,6 +1578,7 @@ def _worker_snapshot(
             "last_payout_at": performance.get("last_payout_at"),
         },
         "trust": trust,
+        "scheduler": _scheduler_score(node_id, node, performance),
         "recent_activity_at": recent_activity_at,
         "last_result": last_result,
     }
@@ -1776,6 +1873,71 @@ def _node_can_run_task(
     return True
 
 
+def _job_requires_face_swap_support(job: Dict[str, Any]) -> bool:
+    if str(job.get("task_type") or "").upper() != CREATOR_TASK_TYPE:
+        return False
+    try:
+        payload = json.loads(job.get("data") or "{}")
+    except Exception:
+        return False
+    return isinstance(payload, dict) and bool(str(payload.get("reference_face_url") or "").strip())
+
+
+def _dispatch_decision(node_id: str, job: Dict[str, Any]) -> Dict[str, Any]:
+    """Authorize a pull claim using preferred routing with bounded fallback."""
+    now = unix_now()
+    model_name = str(job.get("model") or "").strip().lower()
+    task_type = _normalize_task_type(str(job.get("task_type") or CREATOR_TASK_TYPE))
+    model_cfg = get_model_config(model_name)
+    if not model_cfg:
+        return {"allowed": False, "reason": "model_unavailable"}
+
+    requires_face_swap = _job_requires_face_swap_support(job)
+    candidates: List[Tuple[str, Dict[str, Any]]] = []
+    for candidate_id, candidate in NODES.items():
+        if candidate.get("current_task"):
+            continue
+        if not _node_can_run_task(candidate, model_name, model_cfg, task_type, now=now):
+            continue
+        if requires_face_swap and "face_swap" not in _node_supports(candidate):
+            continue
+        candidates.append((candidate_id, _scheduler_score(candidate_id, candidate)))
+
+    candidates.sort(key=lambda item: (-float(item[1]["score"]), item[0]))
+    requester = next((score for candidate, score in candidates if candidate == node_id), None)
+    if not candidates or requester is None:
+        return {"allowed": False, "reason": "node_ineligible"}
+
+    preferred_node_id, preferred = candidates[0]
+    queued_for = max(0.0, now - float(job.get("timestamp") or now))
+    preferred = dict(preferred)
+    requester = dict(requester)
+    if node_id == preferred_node_id:
+        allowed = True
+        reason = "preferred_score"
+    elif queued_for >= SCHEDULER_PREFERENCE_GRACE_SECONDS:
+        allowed = True
+        reason = "fallback_after_grace"
+    else:
+        allowed = False
+        reason = "waiting_for_preferred_node"
+
+    return {
+        "allowed": allowed,
+        "reason": reason,
+        "preferred_node_id": preferred_node_id,
+        "score": requester["score"],
+        "preferred_score": preferred["score"],
+        "queued_for_seconds": round(queued_for, 3),
+        "preference_grace_seconds": SCHEDULER_PREFERENCE_GRACE_SECONDS,
+        "candidate_count": len(candidates),
+        "components": requester["components"],
+    }
+
+
+job_helpers.get_dispatch_decision = _dispatch_decision
+
+
 def _eligible_online_node_ids(model_name: str, task_type: str) -> List[str]:
     normalized_model = str(model_name or "").lower()
     cfg = get_model_config(normalized_model)
@@ -1849,6 +2011,190 @@ def pending_tasks_for_node(node_id: str) -> List[Dict[str, Any]]:
             continue
         tasks.append(task)
     return tasks
+
+
+def recover_expired_job_leases() -> List[Dict[str, Any]]:
+    """Recover abandoned work and publish the resulting lifecycle changes."""
+    recovered = job_helpers.recover_expired_leases(max_retries=JOB_MAX_RETRIES)
+    for item in recovered:
+        job_id = str(item["job_id"])
+        previous_node_id = str(item.get("previous_node_id") or "")
+        with LOCK:
+            TASKS.pop(job_id, None)
+            node = NODES.get(previous_node_id)
+            if node and str((node.get("current_task") or {}).get("task_id") or "") == job_id:
+                node["current_task"] = None
+        try:
+            settlement.complete_attempt(
+                job_id,
+                previous_node_id,
+                "failed",
+                error_message="claim lease expired",
+                execution_metadata={"reason": "lease_expired", "retry_count": item["retry_count"]},
+            )
+        except Exception:
+            pass
+        settlement_status = "requeued"
+        if item["status"] == "failed":
+            try:
+                settlement_result = settlement.settle_job(
+                    job_id=job_id,
+                    node_id=previous_node_id,
+                    execution_status=settlement.STATUS_TECHNICAL_FAILED,
+                    quality_status=settlement.QUALITY_UNCHECKED,
+                    reward_amount=0.0,
+                    deposit_fn=credits.deposit_credits,
+                )
+                settlement_status = str(
+                    settlement_result.get("settlement_outcome") or "retry_exhausted"
+                )
+            except Exception as exc:
+                settlement_status = "retry_exhausted"
+                log_event(
+                    "Expired claim settlement failed",
+                    level="error",
+                    job_id=job_id,
+                    error=str(exc),
+                )
+        event_name = "job_retry_exhausted" if item["status"] == "failed" else "job_requeued"
+        _emit_job_event(
+            event_name,
+            job_id,
+            str(item.get("wallet") or ""),
+            previous_node_id=previous_node_id,
+            retry_count=item["retry_count"],
+            reason="lease_expired",
+        )
+        _emit_job_lifecycle(
+            job_id=job_id,
+            wallet=str(item.get("wallet") or ""),
+            job_type=str(item.get("task_type") or CREATOR_TASK_TYPE),
+            lifecycle_status="FAILED" if item["status"] == "failed" else "QUEUED",
+            stage="RETRY_EXHAUSTED" if item["status"] == "failed" else "REQUEUED",
+            settlement_status=settlement_status,
+            reason="lease_expired",
+            node_id=previous_node_id,
+            model=str(item.get("model") or ""),
+            message="Claim expired; retry budget exhausted" if item["status"] == "failed" else "Claim expired; job requeued",
+        )
+        log_event(
+            "Expired job claim recovered",
+            level="warning",
+            job_id=job_id,
+            node_id=previous_node_id,
+            retry_count=item["retry_count"],
+            status=item["status"],
+        )
+    return recovered
+
+
+def record_lease_renewal_events(
+    node_id: str,
+    job_id: Optional[str] = None,
+    stage: str = "LEASE_RENEWED",
+    progress_metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    conn = get_db()
+    sql = "SELECT id, wallet, task_type, retry_count, lease_expires_at FROM jobs WHERE node_id=? AND status='running'"
+    params: List[Any] = [node_id]
+    if job_id:
+        sql += " AND id=?"
+        params.append(job_id)
+    for row in conn.execute(sql, params).fetchall():
+        try:
+            execution_events.record_event(
+                str(row["id"]),
+                stage,
+                "RUNNING",
+                node_id=node_id,
+                message="Execution lease renewed",
+                metadata={
+                    "wallet": row["wallet"],
+                    "job_type": row["task_type"],
+                    "retry_count": int(row["retry_count"] or 0),
+                    "lease_expires_at": row["lease_expires_at"],
+                    **(progress_metadata or {}),
+                },
+                dedupe_window_seconds=60.0 if stage == "LEASE_RENEWED" else 5.0,
+            )
+        except Exception as exc:
+            log_event("Lease timeline persistence failed", level="error", job_id=row["id"], error=str(exc))
+
+
+def create_proof_of_creation_receipt(job_id: str) -> Optional[Dict[str, Any]]:
+    """Build an immutable receipt from persisted job, timeline, and settlement truth."""
+    job = get_job(job_id)
+    settlement_record = settlement.get_job_settlement(job_id)
+    if not job or not settlement_record:
+        return None
+
+    image_path = OUTPUTS_DIR / f"{job_id}.png"
+    video_path = OUTPUTS_DIR / "videos" / f"{job_id}.mp4"
+    artifact_path = image_path if image_path.exists() else video_path if video_path.exists() else None
+    if artifact_path is None:
+        return None
+
+    timeline = execution_events.get_timeline(job_id)
+    timeline_projection = [
+        {
+            "sequence": event["sequence"],
+            "stage": event["stage"],
+            "status": event["status"],
+            "node_id": event.get("node_id"),
+            "attempt_number": event.get("attempt_number"),
+            "metadata": event.get("metadata") or {},
+            "created_at": event["created_at"],
+        }
+        for event in timeline["events"]
+    ]
+    timeline_digest = hashlib.sha256(
+        proof_receipts.canonical_json({"events": timeline_projection}).encode("utf-8")
+    ).hexdigest()
+    raw_data = str(job.get("data") or "")
+    model_cfg = get_model_config(str(job.get("model") or "")) or {}
+    attempts = settlement.get_job_attempts(job_id)
+    latest_attempt = attempts[-1] if attempts else {}
+    payload = {
+        "creator": {"wallet": job.get("wallet")},
+        "job": {
+            "type": job.get("task_type"),
+            "prompt_sha256": hashlib.sha256(raw_data.encode("utf-8")).hexdigest(),
+            "queued_at": job.get("timestamp"),
+            "completed_at": job.get("completed_at"),
+            "retry_count": int(job.get("retry_count") or 0),
+        },
+        "model": {
+            "name": job.get("model"),
+            "pipeline": model_cfg.get("pipeline"),
+            "family": model_cfg.get("model_family"),
+            "version": model_cfg.get("model_version"),
+            "checkpoint_variant": model_cfg.get("checkpoint_variant"),
+        },
+        "execution": {
+            "node_id": job.get("node_id"),
+            "attempt_number": latest_attempt.get("attempt_number"),
+            "dispatch_score": job.get("dispatch_score"),
+            "dispatch_reason": job.get("dispatch_reason"),
+        },
+        "timeline": {
+            "sha256": timeline_digest,
+            "through_sequence": timeline["event_count"],
+            "total_elapsed_ms": timeline["total_elapsed_ms"],
+        },
+        "validation": {"quality_status": settlement_record.get("quality_status")},
+        "settlement": {
+            "outcome": settlement_record.get("settlement_outcome"),
+            "spent_amount": settlement_record.get("spent_amount"),
+            "reserved_amount": settlement_record.get("reserved_amount"),
+            "updated_at": settlement_record.get("updated_at"),
+        },
+        "artifact": {
+            "filename": artifact_path.name,
+            "media_type": "image/png" if artifact_path.suffix.lower() == ".png" else "video/mp4",
+            "size_bytes": artifact_path.stat().st_size,
+        },
+    }
+    return proof_receipts.create_receipt(job_id, payload, artifact_path=artifact_path)
 
 
 # ---------------------------------------------------------------------------
@@ -2687,14 +3033,42 @@ def _emit_job_lifecycle(
     reason: Optional[str] = None,
     **extra: Any,
 ) -> None:
-    """Emit canonical lifecycle events across all job types."""
+    """Persist and broadcast canonical lifecycle events across all job types."""
+    stage = str(extra.pop("stage", "") or lifecycle_status or "UNKNOWN").upper()
+    node_id = str(extra.get("node_id") or "").strip() or None
+    attempt_number = extra.get("attempt_number")
+    try:
+        persisted = execution_events.record_event(
+            job_id,
+            stage,
+            lifecycle_status,
+            node_id=node_id,
+            attempt_number=int(attempt_number) if attempt_number is not None else None,
+            message=message,
+            metadata={
+                "wallet": wallet,
+                "job_type": (job_type or CREATOR_TASK_TYPE).upper(),
+                "settlement_status": settlement_status,
+                "quality_status": quality_status,
+                "reason": reason,
+                **extra,
+            },
+        )
+    except Exception as exc:
+        persisted = None
+        log_event("Execution timeline persistence failed", level="error", job_id=job_id, error=str(exc))
     payload: Dict[str, Any] = {
         "event_type": "job_lifecycle",
         "job_type": (job_type or CREATOR_TASK_TYPE).upper(),
         "lifecycle_status": str(lifecycle_status or "").upper(),
         # Backward-compatible alias used by some older clients.
         "status": str(lifecycle_status or "").upper(),
+        "stage": stage,
     }
+    if persisted:
+        payload["sequence"] = persisted["sequence"]
+        payload["stage_latency_ms"] = persisted["stage_latency_ms"]
+        payload["total_elapsed_ms"] = persisted["total_elapsed_ms"]
     if settlement_status:
         payload["settlement_status"] = str(settlement_status)
     if quality_status:
@@ -2806,7 +3180,6 @@ def submit_job() -> Any:
     cfg = get_model_config(model_name)
     if not cfg:
         return jsonify({"error": "unknown model"}), 400
-
     if weight is None:
         weight = cfg.get("reward_weight", rewards.resolve_weight(model_name, 10.0))
 
@@ -3222,6 +3595,7 @@ def submit_job() -> Any:
             job_data=job_data,
         )
     except Exception as exc:
+        get_db().rollback()
         log_event("Settlement ticket creation failed (non-fatal)", job_id=job_id, error=str(exc))
 
     log_event("Public job queued", wallet=wallet, model=model_name, job_id=job_id)
@@ -3272,6 +3646,10 @@ def generate_video_job() -> Any:
     cfg = get_model_config(model_name)
     if not cfg:
         return jsonify({"error": "unknown model"}), 400
+    is_ltx_video = (
+        str(cfg.get("pipeline") or "").strip().lower() == "ltx_video"
+        or str(cfg.get("model_family") or "").strip().lower() == "ltx_video"
+    )
 
     # Append positive quality suffix if prompt doesn't have quality tokens
     raw_prompt_flag = str(payload.get("raw_prompt", "")).lower() in ("1", "true", "yes")
@@ -3352,7 +3730,7 @@ def generate_video_job() -> Any:
         job_id = job_helpers.enqueue_job(
             wallet,
             selected_model_name,
-            "VIDEO_GEN",
+            capacity_task_type,
             job_data,
             float(weight),
             invite_code,
@@ -3361,18 +3739,19 @@ def generate_video_job() -> Any:
         _create_settlement_ticket_for_submission(
             job_id=job_id,
             wallet=wallet,
-            job_type="VIDEO_GEN",
+            job_type=capacity_task_type,
             model=selected_model_name,
             job_data=job_data,
         )
     except Exception as exc:
+        get_db().rollback()
         log_event("Settlement ticket creation failed (non-fatal)", job_id=job_id, error=str(exc))
     log_event("Video job queued", wallet=wallet, model=model_name, job_id=job_id)
-    _emit_job_event("job_queued", job_id, wallet, model=model_name, task_type="VIDEO_GEN")
+    _emit_job_event("job_queued", job_id, wallet, model=model_name, task_type=capacity_task_type)
     _emit_job_lifecycle(
         job_id=job_id,
         wallet=wallet,
-        job_type="VIDEO_GEN",
+        job_type=capacity_task_type,
         lifecycle_status="QUEUED",
         settlement_status="queued",
         model=model_name,
@@ -3447,6 +3826,7 @@ def submit_faceswap_job_endpoint() -> Any:
             job_data=job_data,
         )
     except Exception as exc:
+        get_db().rollback()
         log_event("Settlement ticket creation failed (non-fatal)", job_id=job_id, error=str(exc))
     log_event("Face-swap job queued", wallet=wallet, model=model_name, job_id=job_id)
     _emit_job_event("job_queued", job_id, wallet, model=model_name, task_type="FACE_SWAP")
@@ -3523,6 +3903,9 @@ def register() -> Any:
         node["avg_utilization"] = round(sum(samples) / len(samples), 2) if samples else util
         node["last_seen"] = iso_now()
         node["last_seen_unix"] = unix_now()
+        renewed_leases = job_helpers.renew_job_leases(node_id, JOB_LEASE_SECONDS)
+        if renewed_leases:
+            record_lease_renewal_events(node_id)
         _upsert_node_operator_registry(node_id, node, heartbeat_status="online")
     save_nodes()
 
@@ -3535,7 +3918,12 @@ def register() -> Any:
         supports=node.get("supports", []),
         supported_job_types=_supports_to_job_types(node.get("supports", [])),
     )
-    return jsonify({"status": "ok", "node": node_id}), 200
+    return jsonify({
+        "status": "ok",
+        "node": node_id,
+        "leases_renewed": renewed_leases,
+        "lease_seconds": JOB_LEASE_SECONDS,
+    }), 200
 
 
 @app.route("/register_models", methods=["POST"])
@@ -3602,6 +3990,8 @@ def get_creator_tasks() -> Any:
     if not node_id:
         return jsonify({"tasks": []}), 200
 
+    recover_expired_job_leases()
+
     with LOCK:
         node_info = NODES.get(node_id)
         if not node_info:
@@ -3609,7 +3999,7 @@ def get_creator_tasks() -> Any:
 
         pending = pending_tasks_for_node(node_id)
         if not pending:
-            job = job_helpers.fetch_next_job_for_node(node_id)
+            job = job_helpers.claim_next_job_for_node(node_id)
             if job:
                 cfg = get_model_config(job["model"])
                 if cfg:
@@ -3660,23 +4050,42 @@ def get_creator_tasks() -> Any:
                     # Always send plain prompt text to the node (avoid passing raw JSON)
                     prompt_for_node = prompt_text
 
-                    # Assign under global lock to avoid multiple nodes claiming the same job
-                    job_helpers.assign_job_to_node(job["id"], node_id)
+                    attempt_number: Optional[int] = None
                     try:
-                        settlement.record_claim(job["id"], node_id)
+                        attempt_number = settlement.record_claim(job["id"], node_id)
                     except Exception:
                         pass  # non-fatal — settlement is additive
                     log_event("Job claimed by node", job_id=job["id"], node_id=node_id)
                     job_task_type = (job.get("task_type") or CREATOR_TASK_TYPE).upper()
                     _emit_job_event("job_running", job["id"], job.get("wallet", ""), node_id=node_id, model=job["model"])
+                    if job.get("preferred_node_id"):
+                        _emit_job_lifecycle(
+                            job_id=job["id"],
+                            wallet=job.get("wallet", ""),
+                            job_type=job_task_type,
+                            lifecycle_status="RUNNING",
+                            stage="ROUTED",
+                            settlement_status="routed",
+                            node_id=node_id,
+                            model=job["model"],
+                            preferred_node_id=job.get("preferred_node_id"),
+                            dispatch_score=job.get("dispatch_score"),
+                            dispatch_reason=job.get("dispatch_reason"),
+                            message="Scheduler selected an execution route",
+                        )
                     _emit_job_lifecycle(
                         job_id=job["id"],
                         wallet=job.get("wallet", ""),
                         job_type=job_task_type,
                         lifecycle_status="RUNNING",
+                        stage="CLAIMED",
                         settlement_status="claimed",
                         node_id=node_id,
+                        attempt_number=attempt_number,
                         model=job["model"],
+                        preferred_node_id=job.get("preferred_node_id"),
+                        dispatch_score=job.get("dispatch_score"),
+                        dispatch_reason=job.get("dispatch_reason"),
                         message="Job running on node",
                     )
                     reward_weight = float(job["weight"] or cfg.get("reward_weight", rewards.resolve_weight(job["model"], 10.0)))
@@ -3697,6 +4106,11 @@ def get_creator_tasks() -> Any:
                             "negative_prompt": negative_prompt,
                             "loras": loras,
                             "queued_at": job.get("timestamp"),
+                            "lease_expires_at": job.get("lease_expires_at"),
+                            "retry_count": int(job.get("retry_count") or 0),
+                            "preferred_node_id": job.get("preferred_node_id"),
+                            "dispatch_score": job.get("dispatch_score"),
+                            "dispatch_reason": job.get("dispatch_reason"),
                         }
                     if job_task_type == CREATOR_TASK_TYPE and image_overrides:
                         pending_entry.update(image_overrides)
@@ -3734,6 +4148,13 @@ def get_creator_tasks() -> Any:
                 "loras": task.get("loras") or [],
                 "queued_at": task.get("queued_at"),
                 "assigned_at": task.get("assigned_at"),
+                "lease_expires_at": task.get("lease_expires_at"),
+                "retry_count": task.get("retry_count", 0),
+                "routing": {
+                    "preferred_node_id": task.get("preferred_node_id"),
+                    "dispatch_score": task.get("dispatch_score"),
+                    "dispatch_reason": task.get("dispatch_reason"),
+                },
             }
             if task_payload["type"].upper() == CREATOR_TASK_TYPE:
                 # Forward generation overrides for image tasks only.
@@ -3841,6 +4262,43 @@ def tasks_ai_alias() -> Any:
     return get_creator_tasks()
 
 
+@app.route("/tasks/heartbeat", methods=["POST"])
+def task_heartbeat() -> Any:
+    """Renew one active job claim while a node performs long inference."""
+    if not check_join_token():
+        return jsonify({"error": "unauthorized"}), 403
+    payload = request.get_json() or {}
+    node_id = str(payload.get("node_id") or "").strip()
+    task_id = str(payload.get("task_id") or "").strip()
+    if not node_id or not task_id:
+        return jsonify({"error": "missing node_id or task_id"}), 400
+    renewed = job_helpers.renew_job_leases(
+        node_id,
+        JOB_LEASE_SECONDS,
+        job_id=task_id,
+    )
+    if renewed != 1:
+        return jsonify({"error": "claim_not_found", "task_id": task_id}), 409
+    requested_stage = str(payload.get("stage") or "LEASE_RENEWED").strip().upper()
+    allowed_stages = {"LEASE_RENEWED", "GENERATING", "UPLOADING"}
+    stage = requested_stage if requested_stage in allowed_stages else "LEASE_RENEWED"
+    progress = payload.get("progress")
+    record_lease_renewal_events(
+        node_id,
+        task_id,
+        stage=stage,
+        progress_metadata={"progress": progress} if progress is not None else None,
+    )
+    lease_expires_at = unix_now() + JOB_LEASE_SECONDS
+    return jsonify({
+        "status": "ok",
+        "task_id": task_id,
+        "lease_seconds": JOB_LEASE_SECONDS,
+        "lease_expires_at": lease_expires_at,
+        "stage": stage,
+    })
+
+
 def _extract_last_frame(video_path: Path, output_path: Path) -> bool:
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
@@ -3926,6 +4384,19 @@ def submit_results() -> Any:
                 )
                 TASKS.pop(task_id, None)
                 return jsonify({"error": "conflict"}), 409
+
+        _emit_job_lifecycle(
+            job_id=task_id,
+            wallet=wallet or "",
+            job_type=str(task_type),
+            lifecycle_status="RUNNING",
+            stage="RESULT_RECEIVED",
+            settlement_status="result_received",
+            node_id=node_id,
+            model=model_name,
+            message="Node result received",
+            result_status=status,
+        )
 
         if node:
             node["rewards"] = round(node.get("rewards", 0.0) + reward, 6)
@@ -4116,6 +4587,19 @@ def submit_results() -> Any:
                 exec_status = settlement.STATUS_TECHNICAL_FAILED
                 quality = settlement.QUALITY_UNCHECKED
 
+            _emit_job_lifecycle(
+                job_id=task_id,
+                wallet=wallet or "",
+                job_type=str(task_type),
+                lifecycle_status="RUNNING",
+                stage="VALIDATED",
+                settlement_status="validating",
+                quality_status=quality,
+                node_id=node_id,
+                model=model_name,
+                message="Output validation completed",
+            )
+
             settlement_result = settlement.settle_job(
                 job_id=task_id,
                 node_id=node_id,
@@ -4123,6 +4607,19 @@ def submit_results() -> Any:
                 quality_status=quality,
                 reward_amount=reward,
                 deposit_fn=credits.deposit_credits,
+            )
+            _emit_job_lifecycle(
+                job_id=task_id,
+                wallet=wallet or "",
+                job_type=str(task_type),
+                lifecycle_status="RUNNING",
+                stage="SETTLED",
+                settlement_status=str(settlement_result.get("settlement_outcome") or "settled"),
+                quality_status=quality,
+                node_id=node_id,
+                model=model_name,
+                message="Economic settlement completed",
+                reward=reward,
             )
 
             if status == "success" and quality == settlement.QUALITY_VALID:
@@ -4158,6 +4655,31 @@ def submit_results() -> Any:
             model=model_name,
             message="Job completed" if status == "success" else "Job failed",
         )
+        if status_upper == "SUCCESS" and not settlement_result.get("error"):
+            try:
+                receipt = create_proof_of_creation_receipt(task_id)
+                if receipt:
+                    batch = merkle_batches.create_batch(
+                        limit=MERKLE_BATCH_SIZE,
+                        min_count=MERKLE_BATCH_SIZE,
+                    )
+                    _emit_job_lifecycle(
+                        job_id=task_id,
+                        wallet=wallet or "",
+                        job_type=task_type_upper,
+                        lifecycle_status="SUCCEEDED",
+                        stage="RECEIPT_ISSUED",
+                        settlement_status=str(settlement_result.get("settlement_outcome") or ""),
+                        quality_status=quality,
+                        node_id=node_id,
+                        model=model_name,
+                        message="Proof of Creation receipt issued",
+                        receipt_hash=receipt.get("receipt_hash"),
+                        signed=bool(receipt.get("signature")),
+                        merkle_batch_id=batch.get("id") if batch else None,
+                    )
+            except Exception as exc:
+                log_event("Proof receipt creation failed", level="error", job_id=task_id, error=str(exc))
         if reward > 0:
             _emit_job_event("reward_computed", task_id, wallet or "", reward=reward, node_id=node_id)
 
@@ -4923,6 +5445,8 @@ def job_detail(job_id: str) -> Any:
         payload = {}
     reward_factors = payload.get("reward_factors") if isinstance(payload, dict) else None
     model_metadata = _canonical_metadata_for_job(job_id)
+    timeline = execution_events.get_timeline(job_id)
+    receipt = proof_receipts.get_receipt(job_id)
 
     return jsonify(
         {
@@ -4935,13 +5459,102 @@ def job_detail(job_id: str) -> Any:
             "node_id": job.get("node_id"),
             "timestamp": job.get("timestamp"),
             "completed_at": job.get("completed_at"),
+            "assigned_at": job.get("assigned_at"),
+            "lease_expires_at": job.get("lease_expires_at"),
+            "retry_count": int(job.get("retry_count") or 0),
+            "preferred_node_id": job.get("preferred_node_id"),
+            "dispatch_score": job.get("dispatch_score"),
+            "dispatch_reason": job.get("dispatch_reason"),
             "reward": reward_value,
             "reward_timestamp": reward_ts,
             "reward_factors": reward_factors,
             "model_metadata": model_metadata,
             "data": payload,
+            "timeline_summary": {
+                "event_count": timeline["event_count"],
+                "current_stage": timeline["current_stage"],
+                "total_elapsed_ms": timeline["total_elapsed_ms"],
+            },
+            "proof_receipt": {
+                "available": bool(receipt),
+                "receipt_hash": receipt.get("receipt_hash") if receipt else None,
+                "signed": bool(receipt and receipt.get("signature")),
+            },
         }
     )
+
+
+@app.route("/jobs/<job_id>/timeline", methods=["GET"])
+def job_execution_timeline(job_id: str) -> Any:
+    if not get_job(job_id):
+        return jsonify({"error": "job_not_found", "job_id": job_id}), 404
+    return jsonify(execution_events.get_timeline(job_id))
+
+
+def _public_proof_receipt(receipt: Dict[str, Any]) -> Dict[str, Any]:
+    public = dict(receipt)
+    public.pop("artifact_path", None)
+    return public
+
+
+@app.route("/jobs/<job_id>/receipt", methods=["GET"])
+def job_proof_receipt(job_id: str) -> Any:
+    receipt = proof_receipts.get_receipt(job_id)
+    if not receipt:
+        return jsonify({"error": "receipt_not_found", "job_id": job_id}), 404
+    return jsonify(_public_proof_receipt(receipt))
+
+
+@app.route("/jobs/<job_id>/receipt/verify", methods=["GET"])
+def verify_job_proof_receipt(job_id: str) -> Any:
+    verification = proof_receipts.verify_receipt(job_id)
+    return jsonify(verification), 200 if verification.get("valid") else 422
+
+
+@app.route("/api/v1/receipts/keys", methods=["GET"])
+@app.route("/v1/receipts/keys", methods=["GET"])
+def receipt_verification_keys() -> Any:
+    key = proof_receipts.public_signing_key()
+    return jsonify({
+        "schema_version": "receipt-keys.v1",
+        "keys": [key] if key else [],
+        "preferred_algorithm": "ed25519" if key else "hmac-sha256" if RECEIPT_SIGNING_KEY else "sha256",
+    })
+
+
+@app.route("/api/v1/receipts/batches", methods=["GET"])
+@app.route("/v1/receipts/batches", methods=["GET"])
+def receipt_merkle_batch_list() -> Any:
+    limit = _clamp(_coerce_int(request.args.get("limit"), 50), 1, 500)
+    batches = merkle_batches.list_batches(limit)
+    for batch in batches:
+        batch["anchor_payload"] = {
+            "schema_version": batch["schema_version"],
+            "batch_id": batch["id"],
+            "merkle_root": batch["merkle_root"],
+            "leaf_count": batch["leaf_count"],
+        }
+    return jsonify({"schema_version": "receipt-merkle-batches.v1", "batches": batches})
+
+
+@app.route("/admin/receipts/batches", methods=["POST"])
+def flush_receipt_merkle_batch() -> Any:
+    if not check_join_token():
+        return jsonify({"error": "unauthorized"}), 403
+    payload = request.get_json() or {}
+    limit = _clamp(_coerce_int(payload.get("limit"), MERKLE_BATCH_SIZE), 1, 10000)
+    batch = merkle_batches.create_batch(limit=limit, min_count=1)
+    if not batch:
+        return jsonify({"status": "empty", "message": "No unbatched receipts."}), 200
+    return jsonify({"status": "created", "batch": batch}), 201
+
+
+@app.route("/jobs/<job_id>/receipt/proof", methods=["GET"])
+def job_receipt_inclusion_proof(job_id: str) -> Any:
+    proof = merkle_batches.get_inclusion_proof(job_id)
+    if not proof:
+        return jsonify({"error": "proof_not_found", "job_id": job_id}), 404
+    return jsonify(proof)
 
 
 @app.route("/jobs/<job_id>/cancel", methods=["POST"])
@@ -5177,6 +5790,256 @@ def operator_workers() -> Any:
         "timestamp": iso_now(),
     }
     return jsonify({"workers": workers, "summary": summary})
+
+
+@app.route("/api/v1/network/summary", methods=["GET"])
+@app.route("/v1/network/summary", methods=["GET"])
+def network_summary_v1() -> Any:
+    """Return a stable, network-first snapshot for public clients.
+
+    This endpoint intentionally exposes aggregate capacity rather than the
+    coordinator's internal node representation. Additive fields may be added
+    within v1; breaking shape changes require a new API version.
+    """
+    now = unix_now()
+    with LOCK:
+        nodes_snapshot = {node_id: dict(info) for node_id, info in NODES.items()}
+
+    online_nodes = [
+        node for node in nodes_snapshot.values()
+        if _node_is_online(node, now)
+    ]
+    capacity_by_job_type: Dict[str, int] = defaultdict(int)
+    total_vram_mb = 0
+    utilization_samples: List[float] = []
+    operators: set[str] = set()
+
+    for node in online_nodes:
+        for job_type in _supports_to_job_types(_normalize_supports(node.get("supports", []))):
+            capacity_by_job_type[job_type] += 1
+        gpu = _extract_gpu_payload(node.get("gpu"))
+        try:
+            total_vram_mb += max(0, int(gpu.get("memory_total_mb") or 0))
+        except (TypeError, ValueError):
+            pass
+        try:
+            utilization_samples.append(float(node.get("utilization", gpu.get("utilization", 0.0)) or 0.0))
+        except (TypeError, ValueError):
+            pass
+        operator = str(node.get("wallet") or node.get("operator_display_name") or "").strip().lower()
+        if operator:
+            operators.add(operator)
+
+    conn = get_db()
+    queue_rows = conn.execute(
+        "SELECT status, COUNT(*) AS count FROM jobs GROUP BY status"
+    ).fetchall()
+    queue_counts = {str(row["status"]): int(row["count"] or 0) for row in queue_rows}
+    recovery_row = conn.execute(
+        """
+        SELECT
+            COALESCE(SUM(CASE WHEN retry_count > 0 THEN 1 ELSE 0 END), 0) AS retried,
+            COALESCE(SUM(CASE WHEN status='running' AND lease_expires_at <= ? THEN 1 ELSE 0 END), 0) AS expired
+        FROM jobs
+        """,
+        (now,),
+    ).fetchone()
+
+    return jsonify(
+        {
+            "schema_version": "network-summary.v1",
+            "generated_at": iso_now(),
+            "coordinator": {
+                "status": "operational",
+                "version": APP_VERSION,
+            },
+            "nodes": {
+                "total": len(nodes_snapshot),
+                "online": len(online_nodes),
+                "offline": len(nodes_snapshot) - len(online_nodes),
+                "operators_online": len(operators),
+            },
+            "capacity": {
+                "by_job_type": dict(sorted(capacity_by_job_type.items())),
+                "total_vram_mb": total_vram_mb,
+                "average_gpu_utilization": round(
+                    sum(utilization_samples) / len(utilization_samples), 2
+                ) if utilization_samples else 0.0,
+            },
+            "queue": {
+                "queued": queue_counts.get("queued", 0),
+                "running": queue_counts.get("running", 0),
+                "completed": queue_counts.get("completed", 0),
+                "failed": queue_counts.get("failed", 0),
+            },
+            "recovery": {
+                "lease_seconds": JOB_LEASE_SECONDS,
+                "max_retries": JOB_MAX_RETRIES,
+                "jobs_retried": int(recovery_row["retried"] or 0),
+                "expired_claims": int(recovery_row["expired"] or 0),
+            },
+            "scheduler": {
+                "strategy": "capability_weighted_v1",
+                "preference_grace_seconds": SCHEDULER_PREFERENCE_GRACE_SECONDS,
+                "signals": ["availability", "gpu_headroom", "vram", "trust", "freshness"],
+            },
+        }
+    )
+
+
+def _percentile(values: List[float], percentile: float) -> Optional[float]:
+    if not values:
+        return None
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * max(0.0, min(1.0, percentile))
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    fraction = position - lower
+    return ordered[lower] + ((ordered[upper] - ordered[lower]) * fraction)
+
+
+@app.route("/api/v1/network/control-plane", methods=["GET"])
+@app.route("/v1/network/control-plane", methods=["GET"])
+def network_control_plane_v1() -> Any:
+    """Privacy-safe operational snapshot for the Network Alpha command center."""
+    now = unix_now()
+    with LOCK:
+        nodes_snapshot = {node_id: dict(info) for node_id, info in NODES.items()}
+
+    online_nodes = {
+        node_id: node for node_id, node in nodes_snapshot.items() if _node_is_online(node, now)
+    }
+    busy_node_ids = {
+        node_id for node_id, node in online_nodes.items() if node.get("current_task")
+    }
+    conn = get_db()
+    status_rows = conn.execute(
+        "SELECT status, COUNT(*) AS count FROM jobs GROUP BY status"
+    ).fetchall()
+    status_counts = {str(row["status"]): int(row["count"] or 0) for row in status_rows}
+    oldest_queued = conn.execute(
+        "SELECT MIN(timestamp) AS oldest FROM jobs WHERE status='queued'"
+    ).fetchone()
+    oldest_wait_seconds = max(0.0, now - float(oldest_queued["oldest"])) if oldest_queued and oldest_queued["oldest"] else 0.0
+
+    timing_rows = conn.execute(
+        """
+        SELECT timestamp, assigned_at, completed_at
+        FROM jobs
+        WHERE completed_at IS NOT NULL AND completed_at >= ?
+        """,
+        (now - 86400,),
+    ).fetchall()
+    queue_times = [
+        max(0.0, float(row["assigned_at"]) - float(row["timestamp"]))
+        for row in timing_rows if row["assigned_at"] is not None and row["timestamp"] is not None
+    ]
+    run_times = [
+        max(0.0, float(row["completed_at"]) - float(row["assigned_at"]))
+        for row in timing_rows if row["completed_at"] is not None and row["assigned_at"] is not None
+    ]
+
+    claim_rows = conn.execute(
+        """
+        SELECT id, model, task_type, node_id, assigned_at, lease_expires_at,
+               retry_count, dispatch_score, dispatch_reason
+        FROM jobs
+        WHERE status='running'
+        ORDER BY COALESCE(lease_expires_at, assigned_at) ASC
+        LIMIT 100
+        """
+    ).fetchall()
+    active_claims: List[Dict[str, Any]] = []
+    at_risk_count = 0
+    for row in claim_rows:
+        expires_at = float(row["lease_expires_at"] or 0.0)
+        remaining = max(0.0, expires_at - now) if expires_at else 0.0
+        at_risk = not expires_at or remaining <= min(120.0, JOB_LEASE_SECONDS * 0.2)
+        if at_risk:
+            at_risk_count += 1
+        active_claims.append({
+            "job_id": row["id"],
+            "model": row["model"],
+            "task_type": row["task_type"],
+            "node_id": row["node_id"],
+            "assigned_at": row["assigned_at"],
+            "lease_expires_at": row["lease_expires_at"],
+            "lease_remaining_seconds": round(remaining, 1),
+            "retry_count": int(row["retry_count"] or 0),
+            "dispatch_score": row["dispatch_score"],
+            "dispatch_reason": row["dispatch_reason"],
+            "at_risk": at_risk,
+        })
+
+    routing_rows = conn.execute(
+        """
+        SELECT COALESCE(dispatch_reason, 'untracked') AS reason, COUNT(*) AS count
+        FROM jobs WHERE assigned_at IS NOT NULL AND timestamp >= ?
+        GROUP BY COALESCE(dispatch_reason, 'untracked')
+        """,
+        (now - 86400,),
+    ).fetchall()
+    routing = {str(row["reason"]): int(row["count"] or 0) for row in routing_rows}
+    unbatched_row = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM proof_of_creation_receipts r
+        LEFT JOIN receipt_merkle_leaves l ON l.job_id=r.job_id
+        WHERE l.job_id IS NULL
+        """
+    ).fetchone()
+    batches = merkle_batches.list_batches(5)
+
+    alerts: List[Dict[str, Any]] = []
+    if not online_nodes:
+        alerts.append({"severity": "critical", "code": "no_online_nodes", "message": "No GPU operators are online."})
+    if oldest_wait_seconds >= 300:
+        alerts.append({"severity": "critical", "code": "queue_stalled", "message": "The oldest queued job has waited more than five minutes."})
+    elif oldest_wait_seconds >= 60:
+        alerts.append({"severity": "warning", "code": "queue_delay", "message": "The oldest queued job has waited more than one minute."})
+    if at_risk_count:
+        alerts.append({"severity": "warning", "code": "claims_at_risk", "message": f"{at_risk_count} active claim(s) are near lease expiry."})
+    if len(busy_node_ids) >= len(online_nodes) and online_nodes and status_counts.get("queued", 0) > 0:
+        alerts.append({"severity": "warning", "code": "capacity_saturated", "message": "All online nodes are busy while work remains queued."})
+
+    health = "critical" if any(alert["severity"] == "critical" for alert in alerts) else "degraded" if alerts else "healthy"
+    return jsonify({
+        "schema_version": "network-control-plane.v1",
+        "generated_at": iso_now(),
+        "health": {"status": health, "alerts": alerts},
+        "nodes": {
+            "tracked": len(nodes_snapshot),
+            "online": len(online_nodes),
+            "ready": len(online_nodes) - len(busy_node_ids),
+            "busy": len(busy_node_ids),
+            "offline": len(nodes_snapshot) - len(online_nodes),
+        },
+        "queue": {
+            "queued": status_counts.get("queued", 0),
+            "running": status_counts.get("running", 0),
+            "failed": status_counts.get("failed", 0),
+            "oldest_wait_seconds": round(oldest_wait_seconds, 1),
+        },
+        "latency_24h": {
+            "sample_size": len(timing_rows),
+            "queue_p50_seconds": round(_percentile(queue_times, 0.5) or 0.0, 2),
+            "queue_p95_seconds": round(_percentile(queue_times, 0.95) or 0.0, 2),
+            "run_p50_seconds": round(_percentile(run_times, 0.5) or 0.0, 2),
+            "run_p95_seconds": round(_percentile(run_times, 0.95) or 0.0, 2),
+        },
+        "claims": {"active": active_claims, "at_risk": at_risk_count},
+        "scheduler_24h": {
+            "strategy": "capability_weighted_v1",
+            "decisions": routing,
+            "preferred": routing.get("preferred_score", 0),
+            "fallback": routing.get("fallback_after_grace", 0),
+        },
+        "receipts": {
+            "unbatched": int(unbatched_row["count"] or 0) if unbatched_row else 0,
+            "batch_size": MERKLE_BATCH_SIZE,
+            "recent_batches": batches,
+        },
+    })
 
 
 @app.route("/operators/workers/<node_id>", methods=["GET"])

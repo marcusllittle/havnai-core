@@ -2055,6 +2055,26 @@ def _run_faceswap_task(
     return metrics, util, image_b64
 
 
+def report_task_progress(task_id: str, stage: str, progress: Optional[float] = None) -> None:
+    """Renew a claim and report a coarse execution stage to the coordinator."""
+    payload: Dict[str, Any] = {
+        "node_id": NODE_NAME,
+        "task_id": task_id,
+        "stage": stage,
+    }
+    if progress is not None:
+        payload["progress"] = max(0.0, min(1.0, float(progress)))
+    try:
+        response = SESSION.post(
+            endpoint("/tasks/heartbeat"),
+            data=json.dumps(payload),
+            timeout=HTTP_TIMEOUT_REGISTER,
+        )
+        response.raise_for_status()
+    except Exception as exc:
+        log(f"Task progress update failed: {exc}", prefix="⚠️", task_id=task_id, stage=stage)
+
+
 def execute_task(task: Dict[str, Any]) -> None:
     global utilization_hint
 
@@ -2071,6 +2091,7 @@ def execute_task(task: Dict[str, Any]) -> None:
         return
 
     log(f"Executing {task_type.lower()} task {task_id[:8]} · {model_name}", prefix="🚀")
+    report_task_progress(task_id, "GENERATING", 0.0)
 
     if not _is_model_allowed(model_name):
         log(
@@ -2192,6 +2213,8 @@ def execute_task(task: Dict[str, Any]) -> None:
         payload["image_b64"] = image_b64
     if video_b64:
         payload["video_b64"] = video_b64
+
+    report_task_progress(task_id, "UPLOADING", 0.95)
 
     submit_error: Optional[Exception] = None
     reward: Any = None

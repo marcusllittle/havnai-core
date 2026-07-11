@@ -47,6 +47,7 @@ class SettlementConvergenceTests(unittest.TestCase):
         app_module.init_db()
         app_module.stripe_payments.init_stripe_tables(app_module.get_db())
         app_module.settlement.init_settlement_tables(app_module.get_db())
+        app_module.execution_events.init_execution_event_tables(app_module.get_db())
         app_module.hai_funding.init_hai_funding_tables(app_module.get_db())
         app_module.blockchain.init_blockchain_tables(app_module.get_db())
         app_module.validators.init_validator_tables(app_module.get_db())
@@ -165,6 +166,12 @@ class SettlementConvergenceTests(unittest.TestCase):
         self.assertEqual(image_settlement["execution_status"], "queued")
         self.assertEqual(video_settlement["execution_status"], "queued")
         self.assertEqual(face_settlement["execution_status"], "queued")
+
+        timeline_response = self.client.get(f"/jobs/{image_job_id}/timeline")
+        self.assertEqual(timeline_response.status_code, 200)
+        timeline = timeline_response.get_json()
+        self.assertEqual(timeline["current_stage"], "QUEUED")
+        self.assertEqual(timeline["event_count"], 1)
 
     def test_job_detail_exposes_canonical_model_metadata(self) -> None:
         with self._submission_patch_stack():

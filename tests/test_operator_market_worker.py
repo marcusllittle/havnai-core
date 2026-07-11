@@ -38,6 +38,7 @@ class OperatorMarketWorkerTests(unittest.TestCase):
         app_module.init_db()
         app_module.stripe_payments.init_stripe_tables(app_module.get_db())
         app_module.settlement.init_settlement_tables(app_module.get_db())
+        app_module.execution_events.init_execution_event_tables(app_module.get_db())
         app_module.hai_funding.init_hai_funding_tables(app_module.get_db())
         app_module.blockchain.init_blockchain_tables(app_module.get_db())
         app_module.validators.init_validator_tables(app_module.get_db())
@@ -111,6 +112,28 @@ class OperatorMarketWorkerTests(unittest.TestCase):
         self.assertIn("VIDEO_GEN", worker.get("supported_job_types", []))
         self.assertEqual(worker["status"], "online")
 
+        summary_response = self.client.get("/api/v1/network/summary")
+        self.assertEqual(summary_response.status_code, 200)
+        summary = summary_response.get_json()
+        self.assertEqual(summary["schema_version"], "network-summary.v1")
+        self.assertEqual(summary["nodes"]["online"], 1)
+        self.assertEqual(summary["nodes"]["operators_online"], 1)
+        self.assertEqual(summary["capacity"]["by_job_type"]["IMAGE_GEN"], 1)
+        self.assertEqual(summary["capacity"]["by_job_type"]["FACE_SWAP"], 1)
+        self.assertGreaterEqual(summary["capacity"]["total_vram_mb"], 24576)
+        self.assertEqual(summary["scheduler"]["strategy"], "capability_weighted_v1")
+        self.assertIn("gpu_headroom", summary["scheduler"]["signals"])
+        self.assertGreater(worker["scheduler"]["score"], 0)
+
+        control_response = self.client.get("/api/v1/network/control-plane")
+        self.assertEqual(control_response.status_code, 200)
+        control = control_response.get_json()
+        self.assertEqual(control["schema_version"], "network-control-plane.v1")
+        self.assertEqual(control["nodes"]["online"], 1)
+        self.assertEqual(control["nodes"]["ready"], 1)
+        self.assertIn(control["health"]["status"], {"healthy", "degraded"})
+        self.assertIn("queue_p95_seconds", control["latency_24h"])
+
     def test_operator_detail_includes_attempt_and_payout_metrics(self) -> None:
         self._register_node()
 
@@ -176,6 +199,33 @@ class OperatorMarketWorkerTests(unittest.TestCase):
         self.assertIn("performance", node_row)
         self.assertIn("payouts", node_row)
         self.assertIn("trust", node_row)
+
+    def test_task_heartbeat_renews_owned_claim(self) -> None:
+        self._register_node()
+        conn = app_module.get_db()
+        now = app_module.unix_now()
+        conn.execute(
+            """
+            INSERT INTO jobs (
+                id, wallet, model, data, task_type, weight, status, node_id,
+                timestamp, assigned_at, lease_renewed_at, lease_expires_at
+            ) VALUES (?, ?, ?, '{}', 'IMAGE_GEN', 1.0, 'running', ?, ?, ?, ?, ?)
+            """,
+            ("job-heartbeat", WALLET, "perfectdeliberate_v60", NODE_ID, now, now, now, now + 5),
+        )
+        conn.commit()
+
+        response = self.client.post(
+            "/tasks/heartbeat",
+            headers={"X-Join-Token": JOIN_TOKEN},
+            json={"node_id": NODE_ID, "task_id": "job-heartbeat"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        row = conn.execute(
+            "SELECT lease_expires_at FROM jobs WHERE id='job-heartbeat'"
+        ).fetchone()
+        self.assertGreater(row["lease_expires_at"], now + 5)
 
 
 if __name__ == "__main__":

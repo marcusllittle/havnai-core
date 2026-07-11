@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -r server/requirements.txt
+      - name: Run coordinator control-plane tests
+        run: >-
+          python -m unittest -v
+          tests.test_atomic_job_claim
+          tests.test_execution_events
+          tests.test_proof_receipts
+          tests.test_merkle_batches
+          tests.test_operator_market_worker
+          tests.test_recovery_plan
+          tests.test_settlement_convergence

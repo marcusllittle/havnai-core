@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 # Will be injected by app.py
 get_db: Callable[[], sqlite3.Connection]
 get_model_config: Callable[[str], Optional[Dict[str, Any]]]
+get_dispatch_decision: Optional[Callable[[str, Dict[str, Any]], Dict[str, Any]]] = None
 NODES: Dict[str, Dict[str, Any]]
 CREATOR_TASK_TYPE: str = "IMAGE_GEN"
 
@@ -53,9 +54,13 @@ def enqueue_job(
     return job_id
 
 
-def fetch_next_job_for_node(node_id: str) -> Optional[Dict[str, Any]]:
-    conn = get_db()
-    rows = conn.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY timestamp ASC").fetchall()
+def _eligible_job_for_node(
+    node_id: str,
+    rows: Any,
+    *,
+    enforce_preference: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """Return the oldest job compatible with a node from a row iterable."""
     node = NODES.get(node_id, {})
     role = node.get("role", "worker")
     node_supports = {s.lower() for s in node.get("supports", []) if isinstance(s, str)}
@@ -92,8 +97,157 @@ def fetch_next_job_for_node(node_id: str) -> Optional[Dict[str, Any]]:
         node_pipelines = {p.lower() for p in node.get("pipelines", []) if isinstance(p, str)}
         if node_pipelines and required_pipeline not in node_pipelines:
             continue
-        return dict(row)
+        job = dict(row)
+        if enforce_preference and callable(get_dispatch_decision):
+            decision = get_dispatch_decision(node_id, job)
+            if not decision.get("allowed", False):
+                continue
+            job["dispatch_decision"] = decision
+        return job
     return None
+
+
+def fetch_next_job_for_node(node_id: str) -> Optional[Dict[str, Any]]:
+    """Inspect the queue without claiming a job.
+
+    New dispatch code should use :func:`claim_next_job_for_node` so selection
+    and assignment happen atomically. This function remains for callers that
+    only need queue visibility.
+    """
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY timestamp ASC").fetchall()
+    return _eligible_job_for_node(node_id, rows)
+
+
+def claim_next_job_for_node(node_id: str) -> Optional[Dict[str, Any]]:
+    """Atomically select and claim the oldest compatible queued job.
+
+    ``BEGIN IMMEDIATE`` serializes writers at the database boundary, which
+    keeps two coordinator processes from dispatching the same job. The
+    conditional UPDATE is an additional guard for databases with different
+    transaction semantics.
+    """
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            "SELECT * FROM jobs WHERE status='queued' ORDER BY timestamp ASC"
+        ).fetchall()
+        job = _eligible_job_for_node(node_id, rows, enforce_preference=True)
+        if not job:
+            conn.rollback()
+            return None
+
+        assigned_at = time.time()
+        lease_seconds = max(30, int(getattr(claim_next_job_for_node, "lease_seconds", 1800)))
+        lease_expires_at = assigned_at + lease_seconds
+        dispatch_decision = job.pop("dispatch_decision", {})
+        cursor = conn.execute(
+            """
+            UPDATE jobs
+            SET status='running', node_id=?, assigned_at=?,
+                lease_renewed_at=?, lease_expires_at=?, last_failure_reason=NULL
+                , preferred_node_id=?, dispatch_score=?, dispatch_reason=?
+            WHERE id=? AND status='queued'
+            """,
+            (
+                node_id,
+                assigned_at,
+                assigned_at,
+                lease_expires_at,
+                dispatch_decision.get("preferred_node_id"),
+                dispatch_decision.get("score"),
+                dispatch_decision.get("reason"),
+                job["id"],
+            ),
+        )
+        if cursor.rowcount != 1:
+            conn.rollback()
+            return None
+        conn.commit()
+        job.update({
+            "status": "running",
+            "node_id": node_id,
+            "assigned_at": assigned_at,
+            "lease_renewed_at": assigned_at,
+            "lease_expires_at": lease_expires_at,
+            "preferred_node_id": dispatch_decision.get("preferred_node_id"),
+            "dispatch_score": dispatch_decision.get("score"),
+            "dispatch_reason": dispatch_decision.get("reason"),
+        })
+        return job
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def renew_job_leases(node_id: str, lease_seconds: int = 1800, job_id: Optional[str] = None) -> int:
+    """Extend active claims owned by a node and return the renewed count."""
+    conn = get_db()
+    now = time.time()
+    expires_at = now + max(30, int(lease_seconds))
+    sql = """
+        UPDATE jobs
+        SET lease_renewed_at=?, lease_expires_at=?
+        WHERE node_id=? AND status='running'
+    """
+    params: list[Any] = [now, expires_at, node_id]
+    if job_id:
+        sql += " AND id=?"
+        params.append(job_id)
+    cursor = conn.execute(sql, params)
+    conn.commit()
+    return int(cursor.rowcount)
+
+
+def recover_expired_leases(now: Optional[float] = None, max_retries: int = 3) -> list[Dict[str, Any]]:
+    """Requeue expired claims, failing jobs that exhausted their retry budget."""
+    conn = get_db()
+    current_time = float(now if now is not None else time.time())
+    retry_limit = max(0, int(max_retries))
+    recovered: list[Dict[str, Any]] = []
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            """
+            SELECT * FROM jobs
+            WHERE status='running'
+              AND lease_expires_at IS NOT NULL
+              AND lease_expires_at <= ?
+            ORDER BY lease_expires_at ASC
+            """,
+            (current_time,),
+        ).fetchall()
+        for row in rows:
+            job = dict(row)
+            retry_count = int(job.get("retry_count") or 0) + 1
+            exhausted = retry_count > retry_limit
+            next_status = "failed" if exhausted else "queued"
+            conn.execute(
+                """
+                UPDATE jobs
+                SET status=?, node_id=NULL, assigned_at=NULL,
+                    lease_renewed_at=NULL, lease_expires_at=NULL,
+                    retry_count=?, last_failure_reason='lease_expired',
+                    completed_at=?
+                WHERE id=? AND status='running'
+                """,
+                (next_status, retry_count, current_time if exhausted else None, job["id"]),
+            )
+            recovered.append({
+                "job_id": job["id"],
+                "wallet": job.get("wallet"),
+                "model": job.get("model"),
+                "task_type": job.get("task_type"),
+                "previous_node_id": job.get("node_id"),
+                "retry_count": retry_count,
+                "status": next_status,
+            })
+        conn.commit()
+        return recovered
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def assign_job_to_node(job_id: str, node_id: str) -> None:

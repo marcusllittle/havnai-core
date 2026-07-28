@@ -1,4 +1,4 @@
-"""LTX-Video 2.3 configuration loader and asset resolver.
+"""LTX-Video 0.9.x configuration loader and asset resolver.
 
 Loads ``ltx_video_config.json`` and provides helpers to:
   - resolve checkpoint / asset paths on disk
@@ -41,7 +41,7 @@ class LTXVideoConfig:
 
     def __init__(self, raw: Dict[str, Any], base_dir_override: Optional[str] = None) -> None:
         self.raw = raw
-        self.version: str = raw.get("version", "2.3")
+        self.version: str = raw.get("version", "0.9.x")
         self.base_dir = Path(base_dir_override or raw.get("base_dir", _DEFAULT_BASE_DIR))
         self.checkpoints: Dict[str, Dict[str, Any]] = raw.get("checkpoints", {})
         self.assets: Dict[str, Dict[str, Any]] = raw.get("assets", {})

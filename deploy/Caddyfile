@@ -1,0 +1,33 @@
+api.joinhavn.io {
+    encode zstd gzip
+
+    request_body {
+        max_size 2GB
+    }
+
+    reverse_proxy 127.0.0.1:5001 {
+        transport http {
+            dial_timeout 10s
+            response_header_timeout 120s
+        }
+        health_uri /healthz
+        health_interval 30s
+        health_timeout 5s
+    }
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        -Server
+    }
+
+    log {
+        output file /var/log/caddy/havnai-api.json {
+            roll_size 25MiB
+            roll_keep 10
+        }
+        format json
+    }
+}

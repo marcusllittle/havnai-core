@@ -1,0 +1,10 @@
+[Unit]
+Description=Back up HavnAI coordinator database
+After=havnai-coordinator.service tailscaled.service
+
+[Service]
+Type=oneshot
+User=havnai
+Group=havnai
+EnvironmentFile=/etc/havnai/backup.env
+ExecStart=/opt/havnai/venv/bin/python /opt/havnai/current/scripts/backup_coordinator.py

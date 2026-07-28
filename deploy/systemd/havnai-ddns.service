@@ -1,0 +1,11 @@
+[Unit]
+Description=Update and verify api.joinhavn.io Dynadot DDNS
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=havnai
+Group=havnai
+EnvironmentFile=/etc/havnai/ddns.env
+ExecStart=/opt/havnai/venv/bin/python /opt/havnai/current/scripts/dynadot_ddns.py

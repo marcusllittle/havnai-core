@@ -1,0 +1,10 @@
+[Unit]
+Description=Apply HavnAI artifact retention
+After=havnai-backup.service
+
+[Service]
+Type=oneshot
+User=havnai
+Group=havnai
+EnvironmentFile=/etc/havnai/coordinator.env
+ExecStart=/opt/havnai/venv/bin/python /opt/havnai/current/scripts/retain_artifacts.py

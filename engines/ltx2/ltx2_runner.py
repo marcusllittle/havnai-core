@@ -271,10 +271,13 @@ def run_ltx2(
 
     # --- step-level progress callback ---
     _timed_out = threading.Event()
+    cancel_event = job.get("_cancel_event")
     progress_started_at: Optional[float] = None
 
     def _step_callback(pipe: Any, step: int, timestep: Any, kwargs: Any) -> Any:
         nonlocal progress_started_at
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("cancelled_by_user")
         now = time.time()
         if progress_started_at is None:
             progress_started_at = now
@@ -395,7 +398,7 @@ def run_ltx2(
             except Exception:
                 pass
     except RuntimeError as exc:
-        status = "failed"
+        status = "cancelled" if str(exc) == "cancelled_by_user" else "failed"
         error_msg = str(exc)
         if "out of memory" in error_msg.lower() and torch is not None:
             try:
@@ -441,7 +444,7 @@ def run_ltx2(
         "timed_out": "timeout" in error_msg.lower() if error_msg else False,
         "output_path": str(output_path) if status == "success" else None,
     }
-    if status == "failed":
+    if status != "success":
         metrics["error"] = error_msg or "ltx2 generation error"
     return metrics, int(util), output_path if status == "success" else None
 

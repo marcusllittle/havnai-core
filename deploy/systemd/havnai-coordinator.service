@@ -1,0 +1,26 @@
+[Unit]
+Description=HavnAI Coordinator API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=havnai
+Group=havnai
+WorkingDirectory=/opt/havnai/current/server
+EnvironmentFile=/etc/havnai/coordinator.env
+ExecStart=/opt/havnai/venv/bin/gunicorn --worker-class gthread --workers 1 --threads 8 --bind 127.0.0.1:5001 --timeout 120 --graceful-timeout 30 --access-logfile - --error-logfile - wsgi:app
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=45
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/havnai /var/log/havnai
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

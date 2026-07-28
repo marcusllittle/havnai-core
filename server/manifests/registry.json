@@ -497,6 +497,48 @@
       "reward_weight": 15.0
     },
     {
+      "name": "ltx23_wangp_distilled",
+      "pipeline": "ltx23_wangp",
+      "path": "/home/marcus/.havnai/tools/Wan2GP/ckpts/ltx-2.3-22b-distilled-1.1_diffusion_model_quanto_bf16_int8.safetensors",
+      "type": "checkpoint",
+      "tags": [
+        "video",
+        "ltx_2_3",
+        "wangp",
+        "image_to_video",
+        "native_audio",
+        "distilled"
+      ],
+      "task_type": "LTX_VIDEO_GEN",
+      "weight": 35,
+      "reward_weight": 35,
+      "model_family": "ltx23_wangp",
+      "model_version": "2.3-distilled-1.1",
+      "license_status": "research_owner_only",
+      "checkpoint_variant": "distilled_1_1",
+      "default_pipeline_mode": "distilled_1_1",
+      "default_upscaler": "spatial_x2_1_1",
+      "timeout_seconds": 3600,
+      "video_defaults": {
+        "steps": 8,
+        "guidance": 1.0,
+        "width": 1280,
+        "height": 704,
+        "frames": 97,
+        "fps": 24
+      },
+      "capabilities": [
+        "image_to_video",
+        "native_audio",
+        "distilled_inference"
+      ],
+      "available_modes": [
+        "distilled_1_1"
+      ],
+      "strengths": "Current LTX-2.3 22B distilled image-to-video through the verified WanGP runtime, with native sound and strong first-frame preservation.",
+      "weaknesses": "Cold model startup can take 20 minutes on the RTX 3060 node; one video job runs at a time."
+    },
+    {
       "name": "ltx_video_dev",
       "pipeline": "ltx_video",
       "path": "/mnt/d/havnai-storage/models/ltx_video/ltx-video-2b-v0.9.5.safetensors",
@@ -505,7 +547,6 @@
         "video",
         "ltx_video",
         "dit",
-        "audio_video",
         "text_to_video",
         "image_to_video"
       ],
@@ -513,7 +554,8 @@
       "weight": 25,
       "reward_weight": 25,
       "model_family": "ltx_video",
-      "model_version": "2.3",
+      "model_version": "0.9.5",
+      "license_status": "research_owner_only",
       "checkpoint_variant": "dev",
       "default_pipeline_mode": "one_stage",
       "default_upscaler": "",
@@ -527,24 +569,13 @@
       },
       "capabilities": [
         "text_to_video",
-        "image_to_video",
-        "audio_to_video",
-        "keyframe_interpolation",
-        "spatial_upscale",
-        "temporal_upscale",
-        "retake"
+        "image_to_video"
       ],
       "available_modes": [
-        "two_stage",
-        "two_stage_hq",
-        "one_stage",
-        "ic_lora",
-        "keyframe",
-        "audio_to_video",
-        "retake"
+        "one_stage"
       ],
-      "strengths": "Lightricks DiT-based model with synchronized audio+video generation, native portrait support, strong prompt adherence, and excellent motion consistency.",
-      "weaknesses": "Requires 16GB+ VRAM for full-quality. Dev checkpoint is slower than distilled variant."
+      "strengths": "LTX-Video 0.9.5 2B checkpoint with text-to-video and first-frame image-to-video support.",
+      "weaknesses": "Slower than the distilled 0.9.8 checkpoint; synchronized audio, retakes, keyframes, and model-native upscaling are not implemented."
     },
     {
       "name": "ltx_video_distilled",
@@ -562,7 +593,8 @@
       "weight": 20,
       "reward_weight": 20,
       "model_family": "ltx_video",
-      "model_version": "2.3",
+      "model_version": "0.9.8-distilled",
+      "license_status": "research_owner_only",
       "checkpoint_variant": "distilled",
       "default_pipeline_mode": "distilled_fast",
       "default_upscaler": "",
@@ -577,8 +609,7 @@
       "capabilities": [
         "text_to_video",
         "image_to_video",
-        "distilled_inference",
-        "spatial_upscale"
+        "distilled_inference"
       ],
       "available_modes": [
         "distilled_fast"

@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh api.joinhavn.io DDNS every five minutes
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=5min
+AccuracySec=15s
+Persistent=true
+Unit=havnai-ddns.service
+
+[Install]
+WantedBy=timers.target

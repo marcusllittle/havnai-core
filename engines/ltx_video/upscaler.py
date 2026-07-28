@@ -1,7 +1,7 @@
-"""LTX-Video 2.3 upscaler stages (spatial and temporal).
+"""Legacy experimental upscaler helpers, excluded from production capabilities.
 
-These are applied as post-processing after the base generation pass
-in two-stage and two-stage-hq pipeline modes.
+The pinned 0.9.x runtime does not import this module. Fast preset scaling is
+performed deterministically with FFmpeg until a benchmarked alternative wins.
 """
 from __future__ import annotations
 

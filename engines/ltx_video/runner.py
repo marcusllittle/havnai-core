@@ -1,13 +1,12 @@
-"""LTX-Video 2.3 job runner.
+"""LTX-Video 0.9.x job runner.
 
 This is the main entry-point called by ``client.py`` for VIDEO_GEN jobs
 that target the ``ltx_video`` pipeline family.  It orchestrates:
 
   1. Parameter validation and clamping
   2. Base generation (via ``generator.generate_frames``)
-  3. Optional upscaler stages (spatial / temporal)
-  4. Frame normalization → MP4 encoding
-  5. Metrics collection
+  3. Frame normalization and MP4 encoding
+  4. Metrics collection
 
 The legacy ``engines/ltx2/ltx2_runner.py`` (Latte-1) remains untouched
 for backward compatibility.
@@ -54,14 +53,13 @@ except Exception:  # pragma: no cover
 
 from .config import LTXVideoConfig, load_config
 from .generator import generate_frames
-from .upscaler import apply_spatial_upscale, apply_temporal_upscale
 
 LogFn = Callable[[str], None]
 
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
-_DEFAULT_TIMEOUT = int(os.environ.get("HAVNAI_LTX_VIDEO_JOB_TIMEOUT", "600"))
+_DEFAULT_TIMEOUT = min(600, int(os.environ.get("HAVNAI_LTX_VIDEO_JOB_TIMEOUT", "600")))
 
 
 class _JobTimeout(Exception):
@@ -197,7 +195,7 @@ def run_ltx_video(
     utilization_hint: int = 0,
     config: Optional[LTXVideoConfig] = None,
 ) -> Tuple[Dict[str, Any], int, Optional[Path]]:
-    """Execute an LTX-Video 2.3 job.
+    """Execute an LTX-Video 0.9.x job.
 
     Returns ``(metrics_dict, gpu_utilization, output_path_or_None)``.
     """
@@ -223,7 +221,7 @@ def run_ltx_video(
         return _fail(job, "seed is required", utilization_hint)
 
     # Pipeline mode selection
-    pipeline_mode = str(job.get("pipeline_mode") or config.defaults.get("pipeline_mode", "two_stage"))
+    pipeline_mode = str(job.get("pipeline_mode") or config.defaults.get("pipeline_mode", "distilled_fast"))
     log_fn(f"[{job_id}] Pipeline mode requested: {pipeline_mode}")
     try:
         mode_cfg = config.mode_config(pipeline_mode)
@@ -269,16 +267,6 @@ def run_ltx_video(
         checkpoint_variant = required_ckpts[0]
         log_fn(f"[{job_id}] Overriding checkpoint to {checkpoint_variant!r} for mode {pipeline_mode!r}")
 
-    # Upscaler selection
-    if "upscaler" in job:
-        raw_upscaler = str(job.get("upscaler") or "").strip()
-        upscaler = "" if raw_upscaler.lower() in {"", "none", "off", "false", "disabled"} else raw_upscaler
-    else:
-        upscaler = str(mode_cfg.get("default_upscaler") or "").strip()
-    enable_temporal_upscale = bool(job.get("temporal_upscale", False))
-    if pipeline_mode == "two_stage_hq":
-        enable_temporal_upscale = True
-
     # Init image
     init_image_raw = (
         job.get("init_image") or job.get("init_image_url")
@@ -304,15 +292,14 @@ def run_ltx_video(
         timeout = 0
     if timeout <= 0:
         timeout = _DEFAULT_TIMEOUT
+    timeout = min(timeout, 600)
 
     output_path = outputs_dir / f"video_{job_id}.mp4"
 
     log_fn(
         f"[{job_id}] LTX-Video start: mode={pipeline_mode}, "
         f"ckpt={checkpoint_variant}, steps={steps}, frames={frames}, "
-        f"fps={fps}, {width}x{height}, guidance={guidance}, "
-        f"upscaler={upscaler or 'none'}, temporal_up={enable_temporal_upscale}, "
-        f"timeout={timeout}s"
+        f"fps={fps}, {width}x{height}, guidance={guidance}, timeout={timeout}s"
     )
 
     start_stats = read_gpu_stats()
@@ -322,9 +309,12 @@ def run_ltx_video(
 
     # Timeout machinery
     _timed_out = threading.Event()
+    cancel_event = job.get("_cancel_event")
     _progress_started: Dict[str, float] = {}
 
     def _step_cb(pipe: Any, step: int, timestep: Any, kwargs: Any) -> Any:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("cancelled_by_user")
         now = time.time()
         if "start" not in _progress_started:
             _progress_started["start"] = now
@@ -386,18 +376,6 @@ def run_ltx_video(
         gen_time = time.time() - started
         log_fn(f"[{job_id}] Base generation complete in {gen_time:.1f}s")
 
-        # --- Stage 2: optional upscalers ---
-        if upscaler and upscaler.startswith("spatial_upscaler"):
-            scale = "x2" if "x2" in upscaler else "x1_5"
-            up_start = time.time()
-            video_frames = apply_spatial_upscale(video_frames, config, scale=scale)
-            log_fn(f"[{job_id}] Spatial upscale ({scale}) done in {time.time() - up_start:.1f}s")
-
-        if enable_temporal_upscale:
-            up_start = time.time()
-            video_frames = apply_temporal_upscale(video_frames, config)
-            log_fn(f"[{job_id}] Temporal upscale done in {time.time() - up_start:.1f}s")
-
         # --- Normalize and save ---
         frames_np = _normalize_frames(video_frames)
         _save_video(frames_np, output_path, fps)
@@ -408,7 +386,7 @@ def run_ltx_video(
         log_fn(f"[{job_id}] LTX-Video TIMEOUT: {error_msg}")
         _cuda_cleanup()
     except RuntimeError as exc:
-        status = "failed"
+        status = "cancelled" if str(exc) == "cancelled_by_user" else "failed"
         error_msg = str(exc)
         if "out of memory" in error_msg.lower():
             _cuda_cleanup()
@@ -452,12 +430,10 @@ def run_ltx_video(
         "fps": fps,
         "seed": seed,
         "timeout": timeout,
-        "upscaler": upscaler or None,
-        "temporal_upscale": enable_temporal_upscale,
         "timed_out": "timeout" in error_msg.lower() if error_msg else False,
         "output_path": str(output_path) if status == "success" else None,
     }
-    if status == "failed":
+    if status != "success":
         metrics["error"] = error_msg or "ltx_video generation error"
 
     return metrics, int(util), output_path if status == "success" else None

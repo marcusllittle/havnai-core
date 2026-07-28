@@ -1,0 +1,18 @@
+[Unit]
+Description=HavnAI GPU Node Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.havnai/current
+EnvironmentFile=%h/.config/havnai/node.env
+ExecStart=%h/.havnai/venv/bin/python -m client.client
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=45
+KillMode=mixed
+LimitNOFILE=65536
+
+[Install]
+WantedBy=default.target

@@ -30,8 +30,12 @@ except Exception:  # pragma: no cover
         negative_prompt_default: str = ""
         checkpoint_variant: str = ""
         model_family: str = ""
+        model_version: str = ""
+        license_status: str = "unreviewed"
         capabilities: List[str] = field(default_factory=list)
         available_modes: List[str] = field(default_factory=list)
+        default_pipeline_mode: str = ""
+        default_upscaler: str = ""
 
     @dataclass
     class Manifest:  # type: ignore
@@ -51,7 +55,12 @@ class ModelRegistry:
         session: Optional[requests.Session] = None,
         endpoint: str = "/models/list",
     ) -> None:
-        self.base_url = (base_url or os.environ.get("COORDINATOR_URL") or os.environ.get("SERVER_URL") or "http://127.0.0.1:5001").rstrip("/")
+        self.base_url = (
+            base_url
+            or os.environ.get("COORDINATOR_URL")
+            or os.environ.get("SERVER_URL")
+            or "https://api.joinhavn.io"
+        ).rstrip("/")
         self.endpoint = endpoint
         self.session = session or requests.Session()
         self._lock = threading.Lock()

@@ -16,7 +16,7 @@ print_usage() {
 Usage: bash install-node.sh [--server URL] [--token TOKEN] [--wallet 0x...] [--creator]
 
 Options:
-  --server   Base URL of the HavnAI coordinator (e.g. http://192.168.1.10:5001)
+  --server   Base URL of the HavnAI coordinator (default: https://api.joinhavn.io)
   --token    Optional join token required by the coordinator
   --wallet   Optional wallet address to pre-populate ~/.havnai/.env
   --creator  Enable creator mode (set CREATOR_MODE=true)
@@ -54,7 +54,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$SERVER_URL" ]]; then
-  SERVER_URL="http://api.joinhavn.io:5001"
+  SERVER_URL="https://api.joinhavn.io"
   echo "[WARN] --server not provided, defaulting to $SERVER_URL"
 fi
 

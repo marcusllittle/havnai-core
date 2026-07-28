@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import io
 import json
 import logging
@@ -12,6 +13,7 @@ from logging.handlers import RotatingFileHandler
 import os
 import random
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -27,7 +29,10 @@ from collections import OrderedDict
 
 import requests
 
-from registry import REGISTRY, ModelEntry, ManifestError
+try:
+    from .registry import REGISTRY, ModelEntry, ManifestError
+except ImportError:  # Support direct execution via `python client/client.py`.
+    from registry import REGISTRY, ModelEntry, ManifestError
 
 try:
     import numpy as np  # type: ignore
@@ -235,7 +240,7 @@ def load_env_file() -> Dict[str, str]:
             key, value = line.split("=", 1)
             env[key.strip()] = value.strip()
     defaults = {
-        "SERVER_URL": os.environ.get("SERVER_URL") or os.environ.get("HAVNAI_SERVER") or "http://127.0.0.1:5001",
+        "SERVER_URL": os.environ.get("SERVER_URL") or os.environ.get("HAVNAI_SERVER") or "https://api.joinhavn.io",
         "WALLET": env.get("WALLET", "0xYOUR_WALLET_ADDRESS"),
         "CREATOR_MODE": env.get("CREATOR_MODE", "false"),
         "NODE_NAME": env.get("NODE_NAME", socket.gethostname()),
@@ -449,7 +454,7 @@ def _save_output_image(image: Any, output_path: Path, task_id: str = "") -> None
     final_image.save(output_path)
 
 
-SERVER_BASE = ENV_VARS.get("SERVER_URL", "http://127.0.0.1:5001").rstrip("/")
+SERVER_BASE = ENV_VARS.get("SERVER_URL", "https://api.joinhavn.io").rstrip("/")
 JOIN_TOKEN = ENV_VARS.get("JOIN_TOKEN", "").strip()
 ROLE = "creator" if ENV_VARS.get("CREATOR_MODE", "false").lower() in {"1", "true", "yes"} else "worker"
 NODE_NAME = ENV_VARS.get("NODE_NAME", socket.gethostname())
@@ -466,8 +471,10 @@ WATERMARK_MAX_WIDTH_PCT = max(0.08, min(0.4, _env_float("HAVNAI_WATERMARK_MAX_WI
 WATERMARK_MIN_WIDTH = max(48, _env_int("HAVNAI_WATERMARK_MIN_WIDTH", 96))
 LTX2_MODEL_ID = os.environ.get("LTX2_MODEL_ID") or ENV_VARS.get("LTX2_MODEL_ID") or "maxin-cn/Latte-1"
 LTX2_MODEL_PATH = os.environ.get("LTX2_MODEL_PATH") or ENV_VARS.get("LTX2_MODEL_PATH", "")
-# LTX-Video 2.3 (Lightricks) — distinct from legacy LTX2/Latte-1
+# LTX-Video 0.9.x (Lightricks), distinct from legacy LTX2/Latte-1.
 LTX_VIDEO_ENABLED = _env_flag("HAVNAI_LTX_VIDEO_ENABLED", True)
+WANGP_LTX23_ENABLED = _env_flag("HAVNAI_WANGP_LTX23_ENABLED", True)
+VIDEO_TASK_TIMEOUT_MAX = max(600, _env_int("HAVNAI_VIDEO_TASK_TIMEOUT_MAX", 7200))
 ANIMATEDIFF_ADAPTER_ID = (
     os.environ.get("ANIMATEDIFF_MOTION_ADAPTER")
     or ENV_VARS.get("ANIMATEDIFF_MOTION_ADAPTER")
@@ -569,6 +576,200 @@ def endpoint(path: str) -> str:
     return f"{SERVER_BASE}{path}"
 
 
+class TaskCancelled(RuntimeError):
+    pass
+
+
+def _node_auth_headers() -> Dict[str, str]:
+    return {"X-Join-Token": JOIN_TOKEN} if JOIN_TOKEN else {}
+
+
+def _report_task_progress(task: Dict[str, Any], progress: float, stage: str) -> bool:
+    attempt_id = str(task.get("attempt_id") or "")
+    task_id = str(task.get("task_id") or "")
+    if not attempt_id or not task_id:
+        return False
+    try:
+        response = SESSION.post(
+            endpoint(f"/v1/node/jobs/{task_id}/progress"),
+            data=json.dumps({
+                "node_id": NODE_NAME,
+                "attempt_id": attempt_id,
+                "progress": max(0.0, min(100.0, float(progress))),
+                "stage": stage,
+            }),
+            timeout=HTTP_TIMEOUT_REGISTER,
+        )
+        response.raise_for_status()
+        return True
+    except Exception as exc:
+        log(f"Progress update failed for {task_id[:8]}: {exc}", prefix="⚠️")
+        return False
+
+
+def _lease_monitor(task: Dict[str, Any], stop_event: threading.Event, cancel_event: threading.Event) -> None:
+    attempt_id = str(task.get("attempt_id") or "")
+    task_id = str(task.get("task_id") or "")
+    if not attempt_id or not task_id:
+        return
+    interval = max(5.0, min(20.0, float(task.get("lease_seconds") or 90) / 3.0))
+    while not stop_event.wait(interval):
+        try:
+            response = SESSION.get(
+                endpoint(f"/v1/node/jobs/{task_id}/control"),
+                params={"node_id": NODE_NAME, "attempt_id": attempt_id},
+                timeout=HTTP_TIMEOUT_REGISTER,
+            )
+            if response.status_code == 404:
+                cancel_event.set()
+                return
+            response.raise_for_status()
+            if bool(response.json().get("cancel_requested")):
+                log(f"Cancellation requested for {task_id[:8]}", prefix="🛑")
+                cancel_event.set()
+                return
+        except Exception as exc:
+            log(f"Lease renewal failed for {task_id[:8]}: {exc}", prefix="⚠️")
+
+
+def _download_task_asset(asset_id: str, task_id: str, kind: str) -> Path:
+    asset_dir = HAVNAI_HOME / "assets" / task_id
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    destination = asset_dir / f"{kind}.bin"
+    temporary = destination.with_suffix(".part")
+    response = SESSION.get(
+        endpoint(f"/v1/assets/{urllib.parse.quote(asset_id, safe='')}/content"),
+        stream=True,
+        timeout=HTTP_TIMEOUT_RESULTS,
+    )
+    response.raise_for_status()
+    content_type = str(response.headers.get("Content-Type") or "").lower()
+    extension_map = {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/webp": ".webp",
+        "audio/mpeg": ".mp3",
+        "audio/wav": ".wav",
+        "audio/x-wav": ".wav",
+        "audio/mp4": ".m4a",
+        "audio/ogg": ".ogg",
+    }
+    destination = destination.with_suffix(extension_map.get(content_type.split(";", 1)[0], ".bin"))
+    temporary = destination.with_suffix(destination.suffix + ".part")
+    with temporary.open("wb") as handle:
+        for chunk in response.iter_content(chunk_size=1024 * 1024):
+            if chunk:
+                handle.write(chunk)
+    temporary.replace(destination)
+    return destination
+
+
+def _task_output_path(task_id: str, task_type: str) -> Optional[Path]:
+    if task_type in {"IMAGE_GEN", "FACE_SWAP"}:
+        path = OUTPUTS_DIR / f"{task_id}.png"
+        return path if path.is_file() else None
+    candidates = [
+        OUTPUTS_DIR / f"video_{task_id}.mp4",
+        OUTPUTS_DIR / f"animatediff_{task_id}.mp4",
+        OUTPUTS_DIR / f"{task_id}.mp4",
+    ]
+    return next((path for path in candidates if path.is_file()), None)
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+_MODEL_HASH_CACHE_PATH = HAVNAI_HOME / "model_hashes.json"
+_MODEL_HASH_LOCK = threading.Lock()
+
+
+def _cached_model_sha256(path: Path) -> str:
+    """Hash large model files once per size/mtime and persist the result."""
+    stat = path.stat()
+    cache_key = str(path.resolve())
+    fingerprint = f"{stat.st_size}:{stat.st_mtime_ns}"
+    with _MODEL_HASH_LOCK:
+        try:
+            cache = json.loads(_MODEL_HASH_CACHE_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            cache = {}
+        cached = cache.get(cache_key) if isinstance(cache, dict) else None
+        if isinstance(cached, dict) and cached.get("fingerprint") == fingerprint:
+            value = str(cached.get("sha256") or "")
+            if value:
+                return value
+        value = _file_sha256(path)
+        cache[cache_key] = {"fingerprint": fingerprint, "sha256": value}
+        temporary = _MODEL_HASH_CACHE_PATH.with_suffix(".json.part")
+        temporary.write_text(json.dumps(cache, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        temporary.replace(_MODEL_HASH_CACHE_PATH)
+        return value
+
+
+def _postprocess_video(task: Dict[str, Any], path: Path) -> Path:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        if task.get("audio_input") or task.get("delivery_width"):
+            log("ffmpeg missing; skipping video delivery processing", prefix="⚠️")
+        return path
+    delivery_width = task.get("delivery_width")
+    delivery_height = task.get("delivery_height")
+    audio_path = str(task.get("audio_input") or "").strip()
+    if not delivery_width and not audio_path:
+        return path
+    output_path = path.with_name(f"{path.stem}_delivery.mp4")
+    command = [ffmpeg, "-y", "-i", str(path)]
+    if audio_path:
+        command.extend(["-stream_loop", "-1", "-i", audio_path])
+    if delivery_width and delivery_height:
+        command.extend(["-vf", f"scale={int(delivery_width)}:{int(delivery_height)}:flags=lanczos"])
+        command.extend(["-c:v", "libx264", "-preset", "medium", "-crf", "17", "-pix_fmt", "yuv420p"])
+    else:
+        command.extend(["-c:v", "copy"])
+    if audio_path:
+        command.extend(["-map", "0:v:0", "-map", "1:a:0", "-c:a", "aac", "-b:a", "192k", "-shortest"])
+    command.extend(["-movflags", "+faststart", str(output_path)])
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg delivery processing failed: {result.stderr[-500:]}")
+    output_path.replace(path)
+    return path
+
+
+def _upload_task_artifact(task: Dict[str, Any], path: Path, kind: str, metadata: Dict[str, Any]) -> bool:
+    attempt_id = str(task.get("attempt_id") or "")
+    if not attempt_id:
+        return False
+    with path.open("rb") as handle:
+        response = requests.post(
+            endpoint(f"/v1/node/jobs/{task['task_id']}/artifacts"),
+            headers=_node_auth_headers(),
+            data={
+                "node_id": NODE_NAME,
+                "attempt_id": attempt_id,
+                "kind": kind,
+                "metadata": json.dumps(metadata),
+            },
+            files={
+                "file": (
+                    path.name,
+                    handle,
+                    {"image": "image/png", "video": "video/mp4", "manifest": "application/json"}.get(
+                        kind, "application/octet-stream"
+                    ),
+                )
+            },
+            timeout=HTTP_TIMEOUT_RESULTS,
+        )
+    response.raise_for_status()
+    return True
+
+
 def _is_model_allowed(model_name: str) -> bool:
     if not ALLOWED_MODEL_KEYS:
         return True
@@ -597,6 +798,19 @@ def _ltx_video_checkpoint_variant(entry: ModelEntry) -> str:
 def _resolve_family_model_path(entry: ModelEntry) -> Optional[Path]:
     pipeline = str(getattr(entry, "pipeline", "") or "").strip().lower()
     model_family = str(getattr(entry, "model_family", "") or "").strip().lower()
+    if pipeline == "ltx23_wangp" or model_family == "ltx23_wangp":
+        path_value = str(getattr(entry, "path", "") or "").strip()
+        if path_value:
+            return Path(path_value).expanduser()
+        try:
+            from engines.wangp.runner import MODEL_FILENAME  # type: ignore
+
+            wangp_root = Path(
+                os.getenv("HAVNAI_WANGP_ROOT", str(HAVNAI_HOME / "tools" / "Wan2GP"))
+            ).expanduser()
+            return wangp_root / "ckpts" / MODEL_FILENAME
+        except Exception:
+            return None
     if pipeline != "ltx_video" and model_family != "ltx_video":
         return None
     try:
@@ -672,9 +886,10 @@ def resolve_model_path_from_name(model_name: str) -> Optional[Path]:
     return None
 
 
-def discover_capabilities() -> Dict[str, List[str]]:
+def discover_capabilities() -> Dict[str, Any]:
     pipelines: set[str] = set()
     models: List[str] = []
+    details: Dict[str, Dict[str, Any]] = {}
     for entry in REGISTRY.list_entries():
         pipeline = str(getattr(entry, "pipeline", "") or "").lower()
         name = str(getattr(entry, "name", "") or "").strip()
@@ -686,14 +901,49 @@ def discover_capabilities() -> Dict[str, List[str]]:
         if pipeline == "ltx2":
             pipelines.add(pipeline)
             models.append(name)
+            details[name] = {
+                "pipeline": pipeline,
+                "files_present": True,
+                "source": "huggingface",
+                "capabilities": list(getattr(entry, "capabilities", []) or []),
+            }
             continue
         try:
-            ensure_model_path(entry)
-        except Exception:
+            resolved_path = ensure_model_path(entry)
+        except Exception as exc:
+            details[name] = {
+                "pipeline": pipeline,
+                "files_present": False,
+                "error": str(exc),
+            }
             continue
         pipelines.add(pipeline or "sd15")
         models.append(name)
-    return {"pipelines": sorted(pipelines), "models": sorted(models)}
+        stat = resolved_path.stat()
+        entry_capabilities = list(getattr(entry, "capabilities", []) or [])
+        if pipeline == "ltx_video":
+            try:
+                from engines.ltx_video.config import load_config  # type: ignore
+
+                entry_capabilities = sorted(load_config().advertised_capabilities())
+            except Exception as exc:
+                entry_capabilities = []
+                details.setdefault(name, {})["probe_error"] = str(exc)
+        details[name] = {
+            **details.get(name, {}),
+            "pipeline": pipeline or "sd15",
+            "model_family": str(getattr(entry, "model_family", "") or ""),
+            "model_version": str(getattr(entry, "model_version", "") or ""),
+            "license_status": str(getattr(entry, "license_status", "unreviewed") or "unreviewed"),
+            "checkpoint_variant": str(getattr(entry, "checkpoint_variant", "") or ""),
+            "files_present": True,
+            "path": str(resolved_path),
+            "size_bytes": int(stat.st_size),
+            "modified_at": float(stat.st_mtime),
+            "capabilities": entry_capabilities,
+            "available_modes": list(getattr(entry, "available_modes", []) or []),
+        }
+    return {"pipelines": sorted(pipelines), "models": sorted(models), "details": details}
 
 
 def _has_runner(module_name: str, function_name: str) -> bool:
@@ -748,7 +998,7 @@ def _instantid_assets_ready() -> bool:
     return hf_hub_download is not None
 
 
-def discover_supports(capabilities: Dict[str, List[str]]) -> List[str]:
+def discover_supports(capabilities: Dict[str, Any]) -> List[str]:
     if ROLE != "creator":
         return []
 
@@ -768,6 +1018,16 @@ def discover_supports(capabilities: Dict[str, List[str]]) -> List[str]:
         and _has_runner("engines.ltx_video.runner", "run_ltx_video")
     ):
         supports.append("ltx_video")
+
+    if WANGP_LTX23_ENABLED and "ltx23_wangp" in pipelines:
+        try:
+            from engines.wangp.runner import runtime_probe  # type: ignore
+
+            wangp_ready, _ = runtime_probe()
+        except Exception:
+            wangp_ready = False
+        if wangp_ready and _has_runner("engines.wangp.runner", "run_wangp_ltx23"):
+            supports.append("ltx_video")
 
     if (
         "animatediff" in pipelines
@@ -888,10 +1148,7 @@ def disconnect() -> None:
 def _handle_signal(signum, frame):  # type: ignore
     log(f"Received signal {signum}, disconnecting...", prefix="ℹ️")
     disconnect()
-    try:
-        sys.exit(0)
-    except SystemExit:
-        pass
+    raise SystemExit(0)
 
 
 def random_input(shape: List[int]) -> np.ndarray:
@@ -1683,10 +1940,11 @@ def _run_ltx2_task(
             None,
         )
 
-    video_b64 = ltx2_video_to_b64(video_path) if video_path else None
-    if metrics.get("status") == "success" and not video_b64:
+    stream_artifact = bool(task.get("attempt_id"))
+    video_b64 = ltx2_video_to_b64(video_path) if video_path and not stream_artifact else None
+    if metrics.get("status") == "success" and not video_path:
         metrics["status"] = "failed"
-        metrics["error"] = "LTX2 produced no output video payload"
+        metrics["error"] = "LTX2 produced no output video"
     try:
         util_int = int(util)
     except (TypeError, ValueError):
@@ -1700,8 +1958,70 @@ def _run_ltx_video_task(
     reward_weight: float,
     task: Dict[str, Any],
 ) -> Tuple[Dict[str, Any], int, Optional[str]]:
-    """Execute an LTX-Video 2.3 generation job."""
+    """Execute a verified LTX video runtime without changing legacy behavior."""
     global utilization_hint
+    pipeline = str(getattr(entry, "pipeline", "") or "").strip().lower()
+    model_family = str(getattr(entry, "model_family", "") or "").strip().lower()
+    if pipeline == "ltx23_wangp" or model_family == "ltx23_wangp":
+        log(
+            f"LTX-2.3 WanGP task received: model={entry.name}",
+            prefix="🎬",
+            task_id=task_id,
+        )
+        try:
+            from engines.wangp.runner import run_wangp_ltx23, video_to_b64 as wangp_video_to_b64  # type: ignore
+        except Exception as exc:
+            return (
+                {
+                    "status": "failed",
+                    "task_type": "video_gen",
+                    "model_name": entry.name,
+                    "model_family": "ltx23_wangp",
+                    "reward_weight": reward_weight,
+                    "error": f"WanGP LTX-2.3 runtime unavailable: {exc}",
+                },
+                utilization_hint,
+                None,
+            )
+
+        task_payload = dict(task)
+        task_payload["task_id"] = task_id
+        task_payload["model_name"] = entry.name
+        task_payload["reward_weight"] = reward_weight
+        task_payload["_server_base"] = SERVER_BASE
+        task_payload.setdefault("seed", random.randint(0, 2**31 - 1))
+        try:
+            metrics, util, video_path = run_wangp_ltx23(
+                task_payload,
+                log_fn=lambda message: log(message, prefix="🎬", task_id=task_id),
+                outputs_dir=OUTPUTS_DIR,
+                read_gpu_stats=read_gpu_stats,
+                utilization_hint=utilization_hint,
+                progress_fn=lambda progress, stage: _report_task_progress(task, progress, stage),
+            )
+        except Exception as exc:
+            return (
+                {
+                    "status": "failed",
+                    "task_type": "video_gen",
+                    "model_name": entry.name,
+                    "model_family": "ltx23_wangp",
+                    "reward_weight": reward_weight,
+                    "error": f"WanGP LTX-2.3 execution failed: {exc}",
+                },
+                utilization_hint,
+                None,
+            )
+
+        metrics["reward_weight"] = reward_weight
+        stream_artifact = bool(task.get("attempt_id"))
+        video_b64 = wangp_video_to_b64(video_path) if video_path and not stream_artifact else None
+        try:
+            util_int = int(util)
+        except (TypeError, ValueError):
+            util_int = utilization_hint
+        return metrics, util_int, video_b64
+
     log(f"LTX-Video task received: model={entry.name}, variant={task.get('checkpoint_variant', 'dev')}, mode={task.get('pipeline_mode', 'two_stage')}", prefix="🎬", task_id=task_id)
     try:
         from engines.ltx_video.runner import run_ltx_video, video_to_b64 as ltx_video_to_b64  # type: ignore
@@ -1768,10 +2088,11 @@ def _run_ltx_video_task(
             None,
         )
 
-    video_b64 = ltx_video_to_b64(video_path) if video_path else None
-    if metrics.get("status") == "success" and not video_b64:
+    stream_artifact = bool(task.get("attempt_id"))
+    video_b64 = ltx_video_to_b64(video_path) if video_path and not stream_artifact else None
+    if metrics.get("status") == "success" and not video_path:
         metrics["status"] = "failed"
-        metrics["error"] = "LTX-Video produced no output video payload"
+        metrics["error"] = "LTX-Video produced no output video"
     try:
         util_int = int(util)
     except (TypeError, ValueError):
@@ -1829,10 +2150,11 @@ def _run_animatediff_task(
             None,
         )
 
-    video_b64 = ad_video_to_b64(video_path) if video_path else None
-    if metrics.get("status") == "success" and not video_b64:
+    stream_artifact = bool(task.get("attempt_id"))
+    video_b64 = ad_video_to_b64(video_path) if video_path and not stream_artifact else None
+    if metrics.get("status") == "success" and not video_path:
         metrics["status"] = "failed"
-        metrics["error"] = "AnimateDiff produced no output video payload"
+        metrics["error"] = "AnimateDiff produced no output video"
 
     if isinstance(util_info, dict):
         try:
@@ -2066,7 +2388,7 @@ def execute_task(task: Dict[str, Any]) -> None:
     prompt = task.get("prompt") or ""
     negative_prompt = task.get("negative_prompt") or ""
 
-    if task_type in {"IMAGE_GEN", "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP"} and ROLE != "creator":
+    if task_type in {"IMAGE_GEN", "VIDEO_GEN", "LTX_VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP"} and ROLE != "creator":
         log(f"Skipping creator task {task_id[:8]} — node not in creator mode", prefix="⚠️")
         return
 
@@ -2097,6 +2419,30 @@ def execute_task(task: Dict[str, Any]) -> None:
             log(f"Failed to submit disallowed-model result: {exc}", prefix="🚫", task_id=task_id)
         return
 
+    lease_stop = threading.Event()
+    cancel_event = threading.Event()
+    lease_thread: Optional[threading.Thread] = None
+    if task.get("attempt_id"):
+        _report_task_progress(task, 1, "loading")
+        lease_thread = threading.Thread(
+            target=_lease_monitor,
+            args=(task, lease_stop, cancel_event),
+            daemon=True,
+        )
+        lease_thread.start()
+
+    asset_error: Optional[str] = None
+    try:
+        source_asset_id = str(task.get("source_asset_id") or "").strip()
+        if source_asset_id:
+            task["init_image"] = str(_download_task_asset(source_asset_id, task_id, "source"))
+        audio_asset_id = str(task.get("audio_asset_id") or "").strip()
+        if audio_asset_id:
+            task["audio_input"] = str(_download_task_asset(audio_asset_id, task_id, "audio"))
+    except Exception as exc:
+        asset_error = f"Asset download failed: {exc}"
+    task["_cancel_event"] = cancel_event
+
     image_b64: Optional[str] = None
     video_b64: Optional[str] = None
     metrics: Dict[str, Any]
@@ -2104,9 +2450,21 @@ def execute_task(task: Dict[str, Any]) -> None:
     entry: Optional[ModelEntry] = None
     model_path: Optional[Path] = None
     try:
+        if asset_error:
+            raise RuntimeError(asset_error)
+        if cancel_event.is_set():
+            raise TaskCancelled("cancelled before model load")
         entry = ensure_model_entry(model_name)
         if task_type in {"IMAGE_GEN", "ANIMATEDIFF", "FACE_SWAP"}:
             model_path = ensure_model_path(entry)
+    except TaskCancelled as exc:
+        metrics = {
+            "status": "cancelled",
+            "task_type": task_type.lower(),
+            "model_name": model_name,
+            "reward_weight": reward_weight,
+            "error": str(exc),
+        }
     except Exception as exc:
         metrics = {
             "status": "failed",
@@ -2150,6 +2508,10 @@ def execute_task(task: Dict[str, Any]) -> None:
                     if job_settings is None:
                         job_settings = {}
                     job_settings.setdefault(key, value)
+            if job_settings is None:
+                job_settings = {}
+            job_settings["_cancel_event"] = cancel_event
+            job_settings["_return_b64"] = not bool(task.get("attempt_id"))
 
             metrics, util, image_b64 = run_image_generation(
                 task_id,
@@ -2177,20 +2539,99 @@ def execute_task(task: Dict[str, Any]) -> None:
                 "error": f"Unsupported task type: {task_type}",
             }
 
+    if cancel_event.is_set() and metrics.get("status", "success") == "success":
+        metrics["status"] = "cancelled"
+        metrics["error"] = "cancelled_by_user"
+        image_b64 = None
+        video_b64 = None
+
+    output_path = _task_output_path(task_id, task_type)
+    artifact_uploaded = False
+    if metrics.get("status", "success") == "success" and output_path is not None:
+        try:
+            _report_task_progress(task, 95, "uploading")
+            if task_type not in {"IMAGE_GEN", "FACE_SWAP"}:
+                output_path = _postprocess_video(task, output_path)
+            resolved_spec = dict(task.get("resolved_spec")) if isinstance(task.get("resolved_spec"), dict) else {}
+            metrics["output_sha256"] = _file_sha256(output_path)
+            metrics["software"] = {
+                "node_version": CLIENT_VERSION,
+                "python": sys.version.split()[0],
+                "torch": getattr(torch, "__version__", None),
+                "diffusers": getattr(diffusers, "__version__", None),
+            }
+            if task.get("attempt_id"):
+                resolved_spec["prompts"] = {
+                    "original": str(task.get("prompt") or ""),
+                    "resolved": str(metrics.get("resolved_prompt") or task.get("prompt") or ""),
+                    "negative": str(metrics.get("resolved_negative_prompt") or task.get("negative_prompt") or ""),
+                }
+                model_spec = dict(resolved_spec.get("model") or {})
+                model_spec.update({
+                    "id": getattr(entry, "name", model_name),
+                    "version": getattr(entry, "model_version", "") if entry else "",
+                })
+                resolved_model_path = model_path or (_resolve_family_model_path(entry) if entry else None)
+                if resolved_model_path and resolved_model_path.is_file():
+                    model_spec["path"] = str(resolved_model_path)
+                    model_spec["sha256"] = _cached_model_sha256(resolved_model_path)
+                vae_path_raw = str(getattr(entry, "vae_path", "") or "") if entry else ""
+                if vae_path_raw:
+                    vae_path = Path(vae_path_raw).expanduser()
+                    model_spec["vae"] = {
+                        "path": str(vae_path),
+                        "sha256": _cached_model_sha256(vae_path) if vae_path.is_file() else None,
+                    }
+                resolved_spec["model"] = model_spec
+                resolved_spec["loras"] = metrics.get("loras", [])
+                parameters = dict(resolved_spec.get("parameters") or {})
+                for key in ("seed", "steps", "guidance", "sampler", "width", "height", "frames", "fps"):
+                    if metrics.get(key) is not None:
+                        parameters[key] = metrics[key]
+                resolved_spec["parameters"] = parameters
+                resolved_spec["software"] = metrics["software"]
+                resolved_spec["timing"] = {
+                    key: metrics[key]
+                    for key in ("pipeline_load_ms", "lora_load_ms", "generation_ms", "inference_time_ms")
+                    if metrics.get(key) is not None
+                }
+                resolved_spec["output"] = {
+                    "sha256": metrics["output_sha256"],
+                    "filename": output_path.name,
+                }
+            metrics["resolved_render_spec"] = resolved_spec
+            artifact_uploaded = _upload_task_artifact(
+                task,
+                output_path,
+                "image" if task_type in {"IMAGE_GEN", "FACE_SWAP"} else "video",
+                {"resolved_render_spec": resolved_spec, "metrics": metrics},
+            )
+            if artifact_uploaded and task.get("attempt_id"):
+                manifest_path = OUTPUTS_DIR / "manifests" / f"{task_id}.json"
+                manifest_path.parent.mkdir(parents=True, exist_ok=True)
+                manifest_path.write_text(
+                    json.dumps(resolved_spec, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                _upload_task_artifact(task, manifest_path, "manifest", {"schema_version": 1})
+        except Exception as exc:
+            log(f"Streamed artifact upload failed for {task_id[:8]}: {exc}", prefix="⚠️")
+
     with lock:
         utilization_hint = util
 
     payload = {
         "node_id": NODE_NAME,
         "task_id": task_id,
+        "attempt_id": task.get("attempt_id"),
         "status": metrics.pop("status", "success"),
         "metrics": metrics,
         "utilization": utilization_hint,
         "submitted_at": time.time(),
     }
-    if image_b64:
+    if image_b64 and not artifact_uploaded:
         payload["image_b64"] = image_b64
-    if video_b64:
+    if video_b64 and not artifact_uploaded:
         payload["video_b64"] = video_b64
 
     submit_error: Optional[Exception] = None
@@ -2234,6 +2675,91 @@ def execute_task(task: Dict[str, Any]) -> None:
         log(f"Task {task_id[:8]} {payload['status'].upper()} · reward {reward} HAI", prefix=prefix)
     else:
         log(f"Failed to submit result: {submit_error}", prefix="🚫")
+    lease_stop.set()
+    if lease_thread is not None:
+        lease_thread.join(timeout=2.0)
+
+
+def _submit_isolated_terminal(task: Dict[str, Any], status: str, error: str) -> None:
+    payload = {
+        "node_id": NODE_NAME,
+        "task_id": task.get("task_id"),
+        "attempt_id": task.get("attempt_id"),
+        "status": status,
+        "metrics": {
+            "task_type": str(task.get("type") or "video_gen").lower(),
+            "model_name": task.get("model_name"),
+            "reward_weight": task.get("reward_weight", 1.0),
+            "error": error,
+            "error_code": "cancelled" if status == "cancelled" else "timeout" if "timeout" in error else "executor",
+        },
+        "utilization": utilization_hint,
+        "submitted_at": time.time(),
+    }
+    try:
+        response = SESSION.post(
+            endpoint("/results"), data=json.dumps(payload), timeout=HTTP_TIMEOUT_RESULTS
+        )
+        if response.status_code != 409:
+            response.raise_for_status()
+    except Exception as exc:
+        log(f"Failed to settle isolated task {str(task.get('task_id'))[:8]}: {exc}", prefix="🚫")
+
+
+def execute_video_task_isolated(task: Dict[str, Any]) -> None:
+    """Run a v1 video job in a killable process while this agent stays online."""
+    task_id = str(task.get("task_id") or "unknown")
+    task_dir = HAVNAI_HOME / "tasks"
+    task_dir.mkdir(parents=True, exist_ok=True)
+    task_path = task_dir / f"{task_id}.json"
+    temporary = task_path.with_suffix(".json.part")
+    temporary.write_text(json.dumps(task), encoding="utf-8")
+    temporary.replace(task_path)
+
+    python_bin = str(os.getenv("HAVNAI_LTX_VIDEO_PYTHON") or sys.executable)
+    process = subprocess.Popen(
+        [python_bin, "-m", "client.task_executor", str(task_path)],
+        cwd=str(REPO_ROOT),
+        start_new_session=True,
+    )
+    timeout = min(VIDEO_TASK_TIMEOUT_MAX, max(1, int(task.get("timeout") or 600)))
+    deadline = time.monotonic() + timeout
+    terminal_status: Optional[str] = None
+    terminal_error = ""
+    try:
+        while process.poll() is None:
+            if time.monotonic() >= deadline:
+                terminal_status = "failed"
+                terminal_error = f"hard_timeout_{timeout}s"
+                break
+            try:
+                response = SESSION.get(
+                    endpoint(f"/v1/node/jobs/{task_id}/control"),
+                    params={"node_id": NODE_NAME, "attempt_id": task.get("attempt_id")},
+                    timeout=HTTP_TIMEOUT_REGISTER,
+                )
+                if response.status_code == 200 and response.json().get("cancel_requested"):
+                    terminal_status = "cancelled"
+                    terminal_error = "cancelled_by_user"
+                    break
+            except Exception as exc:
+                log(f"Executor control check failed for {task_id[:8]}: {exc}", prefix="⚠️")
+            time.sleep(2.0)
+
+        if terminal_status:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+            except ProcessLookupError:
+                pass
+            _submit_isolated_terminal(task, terminal_status, terminal_error)
+        elif process.returncode:
+            _submit_isolated_terminal(task, "failed", f"executor_exit_{process.returncode}")
+    finally:
+        task_path.unlink(missing_ok=True)
 
 
 def run_ai_inference(entry: ModelEntry, model_path: Path, input_shape: List[int], reward_weight: float) -> (Dict[str, Any], int):
@@ -2603,6 +3129,30 @@ def _apply_image_sampler(pipe: Any, sampler: Optional[str]) -> None:
         log(f"Sampler switch failed: {exc}", prefix="⚠️", sampler=sampler)
 
 
+def _pipeline_cancel_kwargs(pipe: Any, cancel_event: Optional[threading.Event]) -> Dict[str, Any]:
+    if cancel_event is None:
+        return {}
+    try:
+        parameters = inspect.signature(pipe.__call__).parameters
+    except Exception:
+        return {}
+
+    def check_cancel(*args: Any, **kwargs: Any) -> Any:
+        if cancel_event.is_set():
+            raise TaskCancelled("cancelled_by_user")
+        if kwargs:
+            return kwargs
+        if args and isinstance(args[-1], dict):
+            return args[-1]
+        return None
+
+    if "callback_on_step_end" in parameters:
+        return {"callback_on_step_end": check_cancel}
+    if "callback" in parameters:
+        return {"callback": check_cancel, "callback_steps": 1}
+    return {}
+
+
 def _reference_face_pipeline_cache_key(
     model_path: Path,
     controlnet_ref: str,
@@ -2792,6 +3342,16 @@ def run_image_generation(
     reference_face_url = ""
     reference_face_used = False
     reference_face_pipeline: Optional[str] = None
+    resolved_seed: Optional[int] = None
+    resolved_steps: Optional[int] = None
+    resolved_guidance: Optional[float] = None
+    resolved_width: Optional[int] = None
+    resolved_height: Optional[int] = None
+    resolved_sampler: Optional[str] = None
+    resolved_prompt = prompt
+    resolved_negative_prompt = negative_prompt
+    cancel_event = job_settings.get("_cancel_event") if isinstance(job_settings, dict) else None
+    return_b64 = bool(job_settings.get("_return_b64", True)) if isinstance(job_settings, dict) else True
     if job_settings and isinstance(job_settings, dict):
         try:
             width = int(job_settings.get("width", width) or width)
@@ -2829,6 +3389,7 @@ def run_image_generation(
                 seed = None
             if seed is None or seed < 0:
                 seed = random.randint(0, 2**31 - 1)
+            resolved_seed = seed
             generator = torch.Generator(device=device).manual_seed(seed)
             pos_text = prompt or "a high quality photo of a golden retriever on a beach at sunset"
             neg_text = negative_prompt or ""
@@ -2849,6 +3410,11 @@ def run_image_generation(
             guidance = max(1.0, min(15.0, guidance))
             img_h = max(256, min(1536, img_h))
             img_w = max(256, min(1536, img_w))
+            resolved_steps = steps
+            resolved_guidance = guidance
+            resolved_width = img_w
+            resolved_height = img_h
+            resolved_sampler = sampler
 
             if reference_face_url:
                 if not is_xl or "sdxl" not in pipeline_name:
@@ -2888,6 +3454,7 @@ def run_image_generation(
                         raise RuntimeError("Reference face pipeline is unavailable")
 
                     pos_text, neg_text = _truncate_image_prompts(pipe, pos_text, neg_text)
+                    resolved_prompt, resolved_negative_prompt = pos_text, neg_text
                     _apply_image_sampler(pipe, sampler)
 
                     reference_image, reference_error = load_image_source_with_error(reference_face_url)
@@ -2919,13 +3486,15 @@ def run_image_generation(
                             image_embeds=face_embedding,
                             controlnet_conditioning_scale=0.8,
                             ip_adapter_scale=0.8,
+                            **_pipeline_cancel_kwargs(pipe, cancel_event),
                         )
                     generation_ms = int((time.time() - gen_t0) * 1000)
                     log(f"Generated in {generation_ms}ms", prefix="✅")
                     img = result.images[0]
                     _save_output_image(img, output_path, task_id=task_id)
-                    with output_path.open("rb") as fh:
-                        image_b64 = base64.b64encode(fh.read()).decode("utf-8")
+                    if return_b64:
+                        with output_path.open("rb") as fh:
+                            image_b64 = base64.b64encode(fh.read()).decode("utf-8")
                 finally:
                     if transient_pipeline and pipe is not None:
                         _release_image_pipeline(pipe)
@@ -2975,6 +3544,7 @@ def run_image_generation(
                         raise RuntimeError("Image pipeline is unavailable")
 
                     pos_text, neg_text = _truncate_image_prompts(pipe, pos_text, neg_text)
+                    resolved_prompt, resolved_negative_prompt = pos_text, neg_text
                     _apply_image_sampler(pipe, sampler)
 
                     gen_t0 = time.time()
@@ -2987,13 +3557,15 @@ def run_image_generation(
                             generator=generator,
                             height=img_h,
                             width=img_w,
+                            **_pipeline_cancel_kwargs(pipe, cancel_event),
                         )
                     generation_ms = int((time.time() - gen_t0) * 1000)
                     log(f"Generated in {generation_ms}ms", prefix="✅")
                     img = result.images[0]
                     _save_output_image(img, output_path, task_id=task_id)
-                    with output_path.open("rb") as fh:
-                        image_b64 = base64.b64encode(fh.read()).decode("utf-8")
+                    if return_b64:
+                        with output_path.open("rb") as fh:
+                            image_b64 = base64.b64encode(fh.read()).decode("utf-8")
                 finally:
                     if transient_pipeline and pipe is not None:
                         _release_image_pipeline(pipe)
@@ -3011,12 +3583,13 @@ def run_image_generation(
                 arr = None
             img = Image.fromarray(arr) if arr is not None else Image.new("RGB", (w, h), color=(40, 60, 80))
             _save_output_image(img, output_path, task_id=task_id)
-            with output_path.open("rb") as fh:
-                image_b64 = base64.b64encode(fh.read()).decode("utf-8")
+            if return_b64:
+                with output_path.open("rb") as fh:
+                    image_b64 = base64.b64encode(fh.read()).decode("utf-8")
         else:
             time.sleep(random.uniform(1.2, 2.2))
     except Exception as exc:
-        status = "failed"
+        status = "cancelled" if isinstance(exc, TaskCancelled) else "failed"
         error_msg = str(exc)
         log(f"Image generation failed: {error_msg}", prefix="🚫")
 
@@ -3038,12 +3611,20 @@ def run_image_generation(
         "lora_load_ms": int(lora_load_ms),
         "generation_ms": int(generation_ms),
         "reference_face_used": bool(reference_face_used),
+        "seed": resolved_seed,
+        "steps": resolved_steps,
+        "guidance": resolved_guidance,
+        "width": resolved_width,
+        "height": resolved_height,
+        "sampler": resolved_sampler,
+        "resolved_prompt": resolved_prompt,
+        "resolved_negative_prompt": resolved_negative_prompt,
     }
     if reference_face_pipeline:
         metrics["reference_face_pipeline"] = reference_face_pipeline
     if loaded_loras:
         metrics["loras"] = loaded_loras
-    if status == "failed":
+    if status != "success":
         metrics["error"] = error_msg or "image generation error"
     return metrics, util, image_b64
 
@@ -3134,6 +3715,7 @@ def heartbeat_loop() -> None:
             "loras": list_local_loras(),
             "pipelines": capabilities["pipelines"],
             "supports": supports,
+            "capabilities": capabilities.get("details", {}),
         }
         try:
             resp = SESSION.post(endpoint("/register"), data=json.dumps(payload), timeout=HTTP_TIMEOUT_REGISTER)
@@ -3167,7 +3749,11 @@ def poll_tasks_loop() -> None:
             if tasks:
                 log(f"Received {len(tasks)} task(s)", prefix="📥")
             for task in tasks:
-                execute_task(task)
+                task_type = str(task.get("type") or "").upper()
+                if task.get("attempt_id") and task_type in {"VIDEO_GEN", "LTX_VIDEO_GEN", "ANIMATEDIFF"}:
+                    execute_video_task_isolated(task)
+                else:
+                    execute_task(task)
             backoff = BACKOFF_BASE
         except Exception as exc:
             log(f"Task poll failed: {exc}", prefix="⚠️")

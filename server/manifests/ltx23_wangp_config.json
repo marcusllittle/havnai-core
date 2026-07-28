@@ -1,0 +1,18 @@
+{
+  "engine": "wangp",
+  "pipeline": "ltx23_wangp",
+  "model_type": "ltx2_22B_distilled_1_1",
+  "model_version": "2.3-distilled-1.1",
+  "root_env": "HAVNAI_WANGP_ROOT",
+  "python_env": "HAVNAI_WANGP_PYTHON",
+  "default_root": "/home/marcus/.havnai/tools/Wan2GP",
+  "checkpoint": "ckpts/ltx-2.3-22b-distilled-1.1_diffusion_model_quanto_bf16_int8.safetensors",
+  "defaults": {
+    "steps": 8,
+    "guidance": 1.0,
+    "resolution": "1280x720",
+    "frames": 97,
+    "fps": 24,
+    "timeout_seconds": 3600
+  }
+}

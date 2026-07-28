@@ -13,8 +13,8 @@
 </head>
 <body>
   <h1>Join the HavnAI GPU Grid</h1>
-  <p>Run this installer on your GPU machine. Replace <code>&lt;server&gt;</code> with your coordinator address if different.</p>
-  <pre>curl -fsSL http://&lt;server&gt;:5001/installers/install-node.sh | bash -s -- --server http://&lt;server&gt;:5001</pre>
+  <p>Run this installer on your GPU machine.</p>
+  <pre>curl -fsSL https://api.joinhavn.io/installers/install-node.sh | bash -s -- --server https://api.joinhavn.io</pre>
   <p>If you have a join token, append <code>--token &lt;TOKEN&gt;</code>. To prefill a wallet, add <code>--wallet 0x...</code>.</p>
   <h2>Prerequisites</h2>
   <ul>
@@ -31,6 +31,6 @@
     <li>Monitor progress via <a href="/dashboard">dashboard</a> and <a href="/network/leaderboard">leaderboard</a></li>
   </ol>
   <p>To disconnect later:</p>
-  <pre>curl -X POST http://&lt;server&gt;:5001/disconnect -H 'Content-Type: application/json' -d '{"node_id":"&lt;your-hostname&gt;"}'</pre>
+  <pre>curl -X POST https://api.joinhavn.io/disconnect -H 'Content-Type: application/json' -d '{"node_id":"&lt;your-hostname&gt;"}'</pre>
 </body>
 </html>

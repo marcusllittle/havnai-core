@@ -1,4 +1,4 @@
-"""LTX-Video 2.3 pipeline loading and frame generation.
+"""LTX-Video 0.9.x pipeline loading and frame generation.
 
 Wraps the real Lightricks LTXPipeline / LTXImageToVideoPipeline from
 ``diffusers`` (>= 0.32.0).  The old Latte-1 pipeline in ``engines/ltx2``

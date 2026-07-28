@@ -10,7 +10,7 @@ set -euo pipefail
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [options]
-  -s <server_url>     Coordinator base URL (e.g. http://192.168.1.10:5001)
+  -s <server_url>     Coordinator base URL (e.g. https://api.joinhavn.io)
   -t <join_token>     Join token required by the server
   -w <wallet>         EVM wallet address (0x...)
   -n <node_name>      Node name (defaults to hostname)

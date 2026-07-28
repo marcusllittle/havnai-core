@@ -44,7 +44,7 @@ def analytics_jobs(days: int = 30, wallet: Optional[str] = None) -> Dict[str, An
             """
             SELECT date(timestamp, 'unixepoch') AS day,
                    COUNT(*) AS count,
-                   SUM(CASE WHEN status IN ('completed', 'success') THEN 1 ELSE 0 END) AS success,
+                   SUM(CASE WHEN status IN ('completed', 'success', 'succeeded') THEN 1 ELSE 0 END) AS success,
                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
             FROM jobs
             WHERE timestamp >= ? AND wallet = ?
@@ -57,7 +57,7 @@ def analytics_jobs(days: int = 30, wallet: Optional[str] = None) -> Dict[str, An
             """
             SELECT date(timestamp, 'unixepoch') AS day,
                    COUNT(*) AS count,
-                   SUM(CASE WHEN status IN ('completed', 'success') THEN 1 ELSE 0 END) AS success,
+                   SUM(CASE WHEN status IN ('completed', 'success', 'succeeded') THEN 1 ELSE 0 END) AS success,
                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
             FROM jobs
             WHERE timestamp >= ?
@@ -293,7 +293,7 @@ def analytics_overview() -> Dict[str, Any]:
 
     # Completed / failed counts
     completed = conn.execute(
-        "SELECT COUNT(*) FROM jobs WHERE status IN ('completed', 'success')"
+        "SELECT COUNT(*) FROM jobs WHERE status IN ('completed', 'success', 'succeeded')"
     ).fetchone()[0]
     failed = conn.execute(
         "SELECT COUNT(*) FROM jobs WHERE status = 'failed'"

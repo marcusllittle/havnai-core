@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily HavnAI artifact retention
+
+[Timer]
+OnCalendar=*-*-* 04:15:00
+RandomizedDelaySec=15min
+Persistent=true
+Unit=havnai-retention.service
+
+[Install]
+WantedBy=timers.target

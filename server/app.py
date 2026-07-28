@@ -47,6 +47,7 @@ import validators
 import workflows
 import gallery
 import astra_rewards
+import platform_v1
 
 try:
     from eth_account import Account  # type: ignore
@@ -73,8 +74,9 @@ MANIFESTS_DIR = Path(os.getenv("HAVNAI_MANIFEST_DIR", Path(__file__).resolve().p
 MANIFEST_FILE = Path(os.getenv("HAVNAI_MANIFEST_FILE", MANIFESTS_DIR / "registry.json"))
 LOGS_DIR = Path(os.getenv("HAVNAI_LOG_DIR", Path(__file__).resolve().parent / "logs"))
 OUTPUTS_DIR = Path(os.getenv("HAVNAI_OUTPUTS_DIR", STATIC_DIR / "outputs"))
-REGISTRY_FILE = BASE_DIR / "nodes.json"
-DB_PATH = BASE_DIR / "db" / "ledger.db"
+ASSETS_DIR = Path(os.getenv("HAVNAI_ASSETS_DIR", STATIC_DIR / "assets"))
+REGISTRY_FILE = Path(os.getenv("HAVNAI_NODES_PATH", BASE_DIR / "nodes.json"))
+DB_PATH = Path(os.getenv("HAVNAI_DB_PATH", BASE_DIR / "db" / "ledger.db"))
 CLIENT_PATH = BASE_DIR / "client" / "client.py"
 CLIENT_REGISTRY = BASE_DIR / "client" / "registry.py"
 CLIENT_REQUIREMENTS = BASE_DIR / "client" / "requirements-node.txt"
@@ -117,6 +119,13 @@ WALLET_REGEX = re.compile(r"^0x[a-fA-F0-9]{40}$")
 JOB_ID_REGEX = re.compile(r"^[A-Za-z0-9_-]+$")
 
 SERVER_JOIN_TOKEN = os.getenv("SERVER_JOIN_TOKEN", "").strip()
+OWNER_API_TOKEN = os.getenv("HAVNAI_OWNER_TOKEN", "").strip()
+NODE_API_TOKEN = os.getenv("HAVNAI_NODE_TOKEN", SERVER_JOIN_TOKEN).strip()
+ADMIN_API_TOKEN = os.getenv("HAVNAI_ADMIN_TOKEN", SERVER_JOIN_TOKEN).strip()
+ASSET_MAX_BYTES = max(1024 * 1024, int(os.getenv("HAVNAI_ASSET_MAX_BYTES", str(250 * 1024 * 1024))))
+ARTIFACT_MAX_BYTES = max(1024 * 1024, int(os.getenv("HAVNAI_ARTIFACT_MAX_BYTES", str(2 * 1024 * 1024 * 1024))))
+MIN_FREE_DISK_BYTES = max(0, int(os.getenv("HAVNAI_MIN_FREE_DISK_BYTES", str(5 * 1024 * 1024 * 1024))))
+VIDEO_V2_ENABLED = os.getenv("HAVNAI_VIDEO_V2_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "").strip()
 RESET_ON_STARTUP = os.getenv("RESET_ON_STARTUP", "").strip()
 INVITE_CONFIG_PATH = Path(
@@ -157,6 +166,14 @@ SUPPORT_TO_JOB_TYPE_MAP = {
     "face_swap": "FACE_SWAP",
     "ltx_video": "LTX_VIDEO_GEN",
 }
+LTX_VIDEO_PIPELINES = {"ltx_video", "ltx23_wangp"}
+
+
+def _is_ltx_video_config(config: Optional[Dict[str, Any]]) -> bool:
+    config = config or {}
+    pipeline = str(config.get("pipeline") or "").strip().lower()
+    family = str(config.get("model_family") or "").strip().lower()
+    return pipeline in LTX_VIDEO_PIPELINES or family in LTX_VIDEO_PIPELINES
 
 # ---------------------------------------------------------------------------
 # GPU profile presets – select via HAVNAI_GPU_PROFILE env var.
@@ -445,7 +462,7 @@ POSITIVE_VIDEO_ANIMATEDIFF = (
     "professional, sharp details, smooth motion, flowing motion, (best quality:1.1)"
 )
 
-# LTX-Video 2.3 uses a DiT architecture with different prompt behavior.
+# LTX-Video 0.9.x uses a DiT architecture with different prompt behavior.
 # Lighter negative prompts work better; the model handles quality natively.
 NEGATIVE_VIDEO_LTX_VIDEO = ", ".join([
     "jitter, flicker, temporal artifacts, blurry motion, ghosting",
@@ -461,7 +478,7 @@ POSITIVE_VIDEO_LTX_VIDEO = (
 def get_video_negative(model_name: str) -> str:
     """Return the appropriate negative prompt for a video model."""
     model_lower = (model_name or "").lower()
-    if "ltx_video" in model_lower:
+    if "ltx_video" in model_lower or "ltx23" in model_lower:
         return NEGATIVE_VIDEO_LTX_VIDEO
     if "ltx" in model_lower or "latte" in model_lower:
         return NEGATIVE_VIDEO_LTXL
@@ -472,7 +489,7 @@ def get_video_negative(model_name: str) -> str:
 def get_video_positive_suffix(model_name: str) -> str:
     """Return quality tokens to append to video prompts."""
     model_lower = (model_name or "").lower()
-    if "ltx_video" in model_lower:
+    if "ltx_video" in model_lower or "ltx23" in model_lower:
         return POSITIVE_VIDEO_LTX_VIDEO
     if "ltx" in model_lower or "latte" in model_lower:
         return POSITIVE_VIDEO_LTXL
@@ -584,7 +601,11 @@ LOGGER = setup_logging()
 
 # Startup warnings for missing configuration
 if not SERVER_JOIN_TOKEN:
-    LOGGER.warning("SERVER_JOIN_TOKEN is not set — admin endpoints are unprotected!")
+    LOGGER.warning("SERVER_JOIN_TOKEN is not set — legacy join-token routes are unprotected!")
+if not OWNER_API_TOKEN:
+    LOGGER.warning("HAVNAI_OWNER_TOKEN is not set — owner endpoints will reject requests")
+if not NODE_API_TOKEN:
+    LOGGER.warning("HAVNAI_NODE_TOKEN is not set — node endpoints will reject requests")
 if not CORS_ORIGINS:
     LOGGER.warning("CORS_ORIGINS is not set — using default allowlist (joinhavn.io + localhost)")
 
@@ -606,6 +627,21 @@ def _build_result_payload(job_id: str) -> Optional[Dict[str, Any]]:
         payload["image_url"] = f"/static/outputs/{job_id}.png"
     if video_path.exists():
         payload["video_url"] = f"/static/outputs/videos/{job_id}.mp4"
+    try:
+        rows = get_db().execute(
+            "SELECT kind, path FROM artifacts WHERE job_id=? ORDER BY created_at ASC",
+            (job_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        rows = []
+    for row in rows:
+        url = _artifact_url(str(row["path"])) if "_artifact_url" in globals() else None
+        if not url:
+            continue
+        if row["kind"] == "image":
+            payload["image_url"] = url
+        elif row["kind"] == "video":
+            payload["video_url"] = url
     if "image_url" not in payload and "video_url" not in payload:
         return None
     return payload
@@ -745,6 +781,49 @@ def check_join_token() -> bool:
     return True
 
 
+def _request_token() -> str:
+    authorization = request.headers.get("Authorization", "").strip()
+    if authorization.lower().startswith("bearer "):
+        return authorization[7:].strip()
+    return (
+        request.headers.get("X-HavnAI-Token", "").strip()
+        or request.headers.get("X-Join-Token", "").strip()
+        or request.args.get("token", "").strip()
+    )
+
+
+def _authorized(expected: str) -> bool:
+    if not expected:
+        return False
+    return platform_v1.tokens_match(expected, _request_token())
+
+
+def require_owner() -> Optional[Tuple[Any, int]]:
+    if _authorized(OWNER_API_TOKEN):
+        return None
+    return jsonify({"error": "unauthorized", "role": "owner"}), 401
+
+
+def require_node() -> Optional[Tuple[Any, int]]:
+    if _authorized(NODE_API_TOKEN):
+        return None
+    return jsonify({"error": "unauthorized", "role": "node"}), 401
+
+
+def require_admin() -> Optional[Tuple[Any, int]]:
+    if _authorized(ADMIN_API_TOKEN):
+        return None
+    return jsonify({"error": "unauthorized", "role": "admin"}), 401
+
+
+def _disk_has_capacity(path: Path, incoming_bytes: int = 0) -> bool:
+    try:
+        free = shutil.disk_usage(path).free
+    except OSError:
+        return False
+    return free - max(0, incoming_bytes) >= MIN_FREE_DISK_BYTES
+
+
 def rate_limit(key: str, limit: int, per_seconds: int = 60) -> bool:
     now = unix_now()
     window_start = now - per_seconds
@@ -819,7 +898,7 @@ def _download_lora_asset(lora: Dict[str, Any], dest_dir: Path) -> Path:
 
 
 def ensure_directories() -> None:
-    for directory in (STATIC_DIR, LEGACY_STATIC_DIR, MANIFESTS_DIR, LOGS_DIR, OUTPUTS_DIR, BASE_DIR / "db"):
+    for directory in (STATIC_DIR, LEGACY_STATIC_DIR, MANIFESTS_DIR, LOGS_DIR, OUTPUTS_DIR, ASSETS_DIR, DB_PATH.parent):
         directory.mkdir(parents=True, exist_ok=True)
 
 
@@ -839,12 +918,14 @@ def get_db() -> sqlite3.Connection:
         if conn is None:
             conn = sqlite3.connect(DB_PATH, check_same_thread=False)
             conn.row_factory = sqlite3.Row
+            platform_v1.configure_connection(conn)
             setattr(g, "db_conn", conn)
         return conn
     global DB_CONN
     if DB_CONN is None:
         DB_CONN = sqlite3.connect(DB_PATH, check_same_thread=False)
         DB_CONN.row_factory = sqlite3.Row
+        platform_v1.configure_connection(DB_CONN)
     return DB_CONN
 
 @app.teardown_appcontext
@@ -963,7 +1044,7 @@ def init_db() -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_wallet_nonces_used ON wallet_nonces (used_at)"
     )
-    conn.execute("UPDATE jobs SET status='queued', node_id=NULL WHERE status='running'")
+    platform_v1.migrate(conn)
     conn.commit()
 
 
@@ -1037,12 +1118,16 @@ def load_manifest() -> None:
             "task_type": entry.get("task_type", CREATOR_TASK_TYPE),
             "strengths": entry.get("strengths"),
             "weaknesses": entry.get("weaknesses"),
-            # LTX-Video 2.3 model family fields
+            "video_defaults": entry.get("video_defaults", {}),
+            # Model-family fields
             "model_family": entry.get("model_family", ""),
             "model_version": entry.get("model_version", ""),
+            "license_status": entry.get("license_status", "unreviewed"),
             "checkpoint_variant": entry.get("checkpoint_variant", ""),
             "capabilities": entry.get("capabilities", []),
             "available_modes": entry.get("available_modes", []),
+            "default_pipeline_mode": entry.get("default_pipeline_mode", ""),
+            "default_upscaler": entry.get("default_upscaler", ""),
         }
         MANIFEST_MODELS[key] = entry_data
         MODEL_STATS.setdefault(key, {"count": 0.0, "total_time": 0.0})
@@ -1529,7 +1614,7 @@ def get_job_summary(limit: int = 50, offset: int = 0) -> Dict[str, Any]:
         summary_types,
     ).fetchone()[0]
     active = conn.execute(
-        f"SELECT COUNT(*) FROM jobs WHERE status='running' AND UPPER(task_type) IN ({placeholders})",
+        f"SELECT COUNT(*) FROM jobs WHERE status IN ('leased', 'running', 'uploading', 'cancelling') AND UPPER(task_type) IN ({placeholders})",
         summary_types,
     ).fetchone()[0]
     total_distributed = conn.execute("SELECT COALESCE(SUM(reward_hai),0) FROM rewards").fetchone()[0]
@@ -1539,7 +1624,7 @@ def get_job_summary(limit: int = 50, offset: int = 0) -> Dict[str, Any]:
     completed_today = conn.execute(
         f"""
         SELECT COUNT(*) FROM jobs
-        WHERE status IN ('completed', 'success')
+        WHERE status IN ('completed', 'success', 'succeeded')
           AND completed_at IS NOT NULL
           AND completed_at >= ?
           AND UPPER(task_type) IN ({placeholders})
@@ -1925,6 +2010,59 @@ def health() -> Any:
     )
 
 
+@app.route("/metrics")
+def metrics() -> Any:
+    auth_error = require_admin()
+    if auth_error:
+        return auth_error
+    conn = get_db()
+    state_rows = conn.execute(
+        "SELECT status, COUNT(*) AS count FROM jobs GROUP BY status"
+    ).fetchall()
+    artifact_row = conn.execute(
+        "SELECT COUNT(*) AS count, COALESCE(SUM(size_bytes), 0) AS bytes FROM artifacts"
+    ).fetchone()
+    failure_rows = conn.execute(
+        "SELECT COALESCE(NULLIF(error_code, ''), 'uncategorized') AS category, COUNT(*) AS count "
+        "FROM jobs WHERE status='failed' GROUP BY category"
+    ).fetchall()
+    disk = shutil.disk_usage(OUTPUTS_DIR)
+    now = unix_now()
+    with LOCK:
+        online_nodes = sum(
+            1 for info in NODES.values()
+            if now - float(info.get("last_seen_unix") or 0) <= ONLINE_THRESHOLD
+        )
+
+    lines = [
+        "# HELP havnai_jobs Jobs by durable state.",
+        "# TYPE havnai_jobs gauge",
+    ]
+    for row in state_rows:
+        state = platform_v1.canonical_job_state(row["status"])
+        lines.append(f'havnai_jobs{{state="{state}"}} {int(row["count"])}')
+    lines.extend(
+        [
+            "# HELP havnai_nodes_online Nodes with a recent heartbeat.",
+            "# TYPE havnai_nodes_online gauge",
+            f"havnai_nodes_online {online_nodes}",
+            "# HELP havnai_artifacts_total Stored result artifacts.",
+            "# TYPE havnai_artifacts_total gauge",
+            f"havnai_artifacts_total {int(artifact_row['count'])}",
+            "# HELP havnai_artifact_bytes Stored artifact bytes.",
+            "# TYPE havnai_artifact_bytes gauge",
+            f"havnai_artifact_bytes {int(artifact_row['bytes'])}",
+            "# HELP havnai_output_disk_free_bytes Free bytes on the artifact volume.",
+            "# TYPE havnai_output_disk_free_bytes gauge",
+            f"havnai_output_disk_free_bytes {disk.free}",
+        ]
+    )
+    for row in failure_rows:
+        category = re.sub(r"[^a-zA-Z0-9_.-]", "_", str(row["category"]))[:64]
+        lines.append(f'havnai_failures_total{{category="{category}"}} {int(row["count"])}')
+    return Response("\n".join(lines) + "\n", mimetype="text/plain; version=0.0.4")
+
+
 @app.route("/join")
 def join_page() -> Any:
     host = request.host_url.rstrip("/")
@@ -2289,7 +2427,7 @@ def resolve_video_defaults(
 ) -> Tuple[Dict[str, Any], Dict[str, str]]:
     normalized_task = _normalize_task_type(task_type)
     is_animatediff = normalized_task == "ANIMATEDIFF"
-    is_ltx_video = normalized_task == "LTX_VIDEO_GEN" or str((model_cfg or {}).get("pipeline", "")).lower() == "ltx_video"
+    is_ltx_video = normalized_task == "LTX_VIDEO_GEN" or _is_ltx_video_config(model_cfg)
     if is_ltx_video:
         profile_key = "video_ltx_video"
     elif is_animatediff:
@@ -2430,12 +2568,6 @@ _LTX_VIDEO_TIMEOUT_BASELINE_AREA = 768 * 512
 _LTX_VIDEO_TIMEOUT_PER_STEP_FRAME = {
     "distilled_fast": 0.10,
     "one_stage": 0.22,
-    "two_stage": 0.28,
-    "two_stage_hq": 0.40,
-    "ic_lora": 0.24,
-    "keyframe": 0.24,
-    "audio_to_video": 0.24,
-    "retake": 0.22,
 }
 
 
@@ -2447,42 +2579,37 @@ def _resolve_ltx_video_timeout_seconds(
     pipeline_mode: str,
     checkpoint_variant: str,
 ) -> Tuple[int, str]:
+    if str(model_cfg.get("pipeline") or "").lower() == "ltx23_wangp":
+        configured = _coerce_int(
+            payload.get("timeout")
+            or os.getenv("HAVNAI_LTX23_JOB_TIMEOUT")
+            or model_cfg.get("timeout_seconds"),
+            3600,
+        )
+        return min(7200, max(600, configured)), "ltx23_runtime"
+
     env_timeout = _coerce_int(os.getenv("HAVNAI_LTX_VIDEO_JOB_TIMEOUT"), 600)
     if _is_truthy(os.getenv("HAVNAI_LTX_VIDEO_JOB_TIMEOUT_FIXED")):
-        return max(0, env_timeout), "env_fixed"
+        return min(600, max(1, env_timeout)), "env_fixed"
     if env_timeout <= 0:
-        return 0, "env"
+        env_timeout = 600
 
     width = max(256, _coerce_int(resolved_video_defaults.get("width"), 768))
     height = max(256, _coerce_int(resolved_video_defaults.get("height"), 512))
     steps = max(1, _coerce_int(resolved_video_defaults.get("steps"), 50))
     frames = max(1, _coerce_int(resolved_video_defaults.get("frames"), 97))
 
-    normalized_mode = str(pipeline_mode or "two_stage").strip().lower() or "two_stage"
+    normalized_mode = str(pipeline_mode or "distilled_fast").strip().lower() or "distilled_fast"
     normalized_variant = str(checkpoint_variant or model_cfg.get("checkpoint_variant") or "dev").strip().lower() or "dev"
     pixel_ratio = max(0.25, (width * height) / float(_LTX_VIDEO_TIMEOUT_BASELINE_AREA))
     per_step_frame = _LTX_VIDEO_TIMEOUT_PER_STEP_FRAME.get(normalized_mode, 0.24)
     if normalized_variant == "distilled":
         per_step_frame *= 0.75
 
-    raw_upscaler = str(payload.get("upscaler") or "").strip().lower()
-    if raw_upscaler and raw_upscaler not in {"none", "off", "false", "disabled"} and normalized_mode not in {"two_stage", "two_stage_hq"}:
-        per_step_frame *= 1.15
-    if _is_truthy(payload.get("temporal_upscale")) and normalized_mode != "two_stage_hq":
-        per_step_frame *= 1.15
-
     warmup_buffer = 180
-    if normalized_mode in {"two_stage", "audio_to_video", "keyframe", "ic_lora"}:
-        warmup_buffer += 90
-    if normalized_mode == "two_stage_hq":
-        warmup_buffer += 180
-
     estimated_timeout = warmup_buffer + int(steps * frames * pixel_ratio * per_step_frame)
-    max_timeout = _coerce_int(os.getenv("HAVNAI_LTX_VIDEO_JOB_TIMEOUT_MAX"), 7200)
     timeout = max(env_timeout, estimated_timeout)
-    if max_timeout > 0:
-        timeout = min(timeout, max_timeout)
-    return timeout, "adaptive"
+    return min(timeout, 600), "adaptive"
 
 
 def resolve_faceswap_defaults(
@@ -2806,6 +2933,7 @@ def submit_job() -> Any:
     cfg = get_model_config(model_name)
     if not cfg:
         return jsonify({"error": "unknown model"}), 400
+    is_ltx_video = _is_ltx_video_config(cfg)
 
     if weight is None:
         weight = cfg.get("reward_weight", rewards.resolve_weight(model_name, 10.0))
@@ -2820,7 +2948,7 @@ def submit_job() -> Any:
             }
         ), 400
     is_ltx2 = model_name == "ltx2" or pipeline_name == "ltx2"
-    is_ltx_video = pipeline_name == "ltx_video" or str(cfg.get("model_family", "")).lower() == "ltx_video"
+    is_ltx_video = _is_ltx_video_config(cfg)
 
     # Special-case AnimateDiff video jobs with rich structured payload
     is_animatediff = model_name == "animatediff" or pipeline_name == "animatediff"
@@ -2834,7 +2962,22 @@ def submit_job() -> Any:
     )
 
     if is_ltx_video:
-        # LTX-Video 2.3 job — structured payload with pipeline mode, variant, upscaler
+        # Reject controls that neither the legacy runtime nor the WanGP adapter consumes.
+        unsupported = [
+            key
+            for key in (
+                "upscaler",
+                "temporal_upscale",
+                "audio_input",
+                "audio_url",
+                "keyframes",
+                "retake_segments",
+                "ic_lora_path",
+            )
+            if payload.get(key) not in (None, "", False, [], {})
+        ]
+        if unsupported:
+            return jsonify({"error": "unsupported_video_controls", "fields": unsupported}), 400
         prompt_text = enhanced_prompt
         prompt_lower = prompt_text.lower()
         if prompt_text and "best quality" not in prompt_lower and "masterpiece" not in prompt_lower:
@@ -2865,9 +3008,12 @@ def submit_job() -> Any:
         )
         default_pipeline_mode = str(
             cfg.get("default_pipeline_mode")
-            or (cfg.get("available_modes", ["two_stage"])[0] if cfg.get("available_modes") else "two_stage")
+            or (cfg.get("available_modes", ["distilled_fast"])[0] if cfg.get("available_modes") else "distilled_fast")
         )
         pipeline_mode = str(payload.get("pipeline_mode") or default_pipeline_mode)
+        available_modes = {str(value) for value in cfg.get("available_modes", [])}
+        if available_modes and pipeline_mode not in available_modes:
+            return jsonify({"error": "unsupported_pipeline_mode", "available_modes": sorted(available_modes)}), 400
         checkpoint_variant = str(payload.get("checkpoint_variant") or cfg.get("checkpoint_variant") or "dev")
         ltx_video_timeout, ltx_video_timeout_source = _resolve_ltx_video_timeout_seconds(
             cfg,
@@ -2888,36 +3034,16 @@ def submit_job() -> Any:
             "fps": resolved_video_defaults["fps"],
             "timeout": ltx_video_timeout,
             "timeout_source": ltx_video_timeout_source,
-            # LTX-Video 2.3 extended fields
             "pipeline_mode": pipeline_mode,
             "checkpoint_variant": checkpoint_variant,
-            "temporal_upscale": bool(payload.get("temporal_upscale", False)),
-            "model_family": "ltx_video",
-            "model_version": str(cfg.get("model_version", "2.3")),
+            "model_family": str(cfg.get("model_family") or "ltx_video"),
+            "model_version": str(cfg.get("model_version", "0.9.x")),
             "capabilities": cfg.get("capabilities", []),
             "defaults_source": {"video": video_default_sources},
             "defaults_confidence": {"video": _resolve_confidence(video_default_sources)},
         }
-        if "upscaler" in payload:
-            settings["upscaler"] = str(payload.get("upscaler") or "")
-        elif "default_upscaler" in cfg:
-            settings["upscaler"] = str(cfg.get("default_upscaler") or "")
         if init_image:
             settings["init_image"] = init_image
-        # Pass through audio/keyframe/retake if provided
-        audio_input = payload.get("audio_input") or payload.get("audio_url")
-        if audio_input:
-            settings["audio_input"] = audio_input
-        keyframes = payload.get("keyframes")
-        if keyframes:
-            settings["keyframes"] = keyframes
-        retake_segments = payload.get("retake_segments")
-        if retake_segments:
-            settings["retake_segments"] = retake_segments
-        ic_lora = payload.get("ic_lora_path")
-        if ic_lora:
-            settings["ic_lora_path"] = ic_lora
-            settings["ic_lora_strength"] = float(payload.get("ic_lora_strength", 1.0))
         job_data = json.dumps(settings)
         task_type = "LTX_VIDEO_GEN"
     elif is_wan_i2v:
@@ -3272,6 +3398,7 @@ def generate_video_job() -> Any:
     cfg = get_model_config(model_name)
     if not cfg:
         return jsonify({"error": "unknown model"}), 400
+    is_ltx_video = _is_ltx_video_config(cfg)
 
     # Append positive quality suffix if prompt doesn't have quality tokens
     raw_prompt_flag = str(payload.get("raw_prompt", "")).lower() in ("1", "true", "yes")
@@ -3325,6 +3452,24 @@ def generate_video_job() -> Any:
         "defaults_source": {"video": video_default_sources},
         "defaults_confidence": {"video": _resolve_confidence(video_default_sources)},
     }
+    if is_ltx_video:
+        default_pipeline_mode = str(
+            cfg.get("default_pipeline_mode")
+            or (cfg.get("available_modes", ["distilled_fast"])[0] if cfg.get("available_modes") else "distilled_fast")
+        )
+        settings.update({
+            "timeout": _resolve_ltx_video_timeout_seconds(
+                cfg,
+                payload,
+                resolved_video_defaults,
+                pipeline_mode=default_pipeline_mode,
+                checkpoint_variant=str(cfg.get("checkpoint_variant") or "distilled"),
+            )[0],
+            "pipeline_mode": default_pipeline_mode,
+            "checkpoint_variant": str(cfg.get("checkpoint_variant") or "distilled"),
+            "model_family": str(cfg.get("model_family") or "ltx_video"),
+            "model_version": str(cfg.get("model_version") or "0.9.x"),
+        })
     motion_type = payload.get("motion_type")
     if motion_type:
         settings["motion_type"] = motion_type
@@ -3352,7 +3497,7 @@ def generate_video_job() -> Any:
         job_id = job_helpers.enqueue_job(
             wallet,
             selected_model_name,
-            "VIDEO_GEN",
+            capacity_task_type,
             job_data,
             float(weight),
             invite_code,
@@ -3361,18 +3506,18 @@ def generate_video_job() -> Any:
         _create_settlement_ticket_for_submission(
             job_id=job_id,
             wallet=wallet,
-            job_type="VIDEO_GEN",
+            job_type=capacity_task_type,
             model=selected_model_name,
             job_data=job_data,
         )
     except Exception as exc:
         log_event("Settlement ticket creation failed (non-fatal)", job_id=job_id, error=str(exc))
     log_event("Video job queued", wallet=wallet, model=model_name, job_id=job_id)
-    _emit_job_event("job_queued", job_id, wallet, model=model_name, task_type="VIDEO_GEN")
+    _emit_job_event("job_queued", job_id, wallet, model=model_name, task_type=capacity_task_type)
     _emit_job_lifecycle(
         job_id=job_id,
         wallet=wallet,
-        job_type="VIDEO_GEN",
+        job_type=capacity_task_type,
         lifecycle_status="QUEUED",
         settlement_status="queued",
         model=model_name,
@@ -3513,6 +3658,9 @@ def register() -> Any:
         node["pipelines"] = _normalize_string_list(data.get("pipelines", node.get("pipelines", [])), lower=True)
         node["models"] = _normalize_string_list(data.get("models", node.get("models", [])), lower=False)
         node["supports"] = incoming_supports or _normalize_supports(node.get("supports", []))
+        incoming_capabilities = data.get("capabilities")
+        if isinstance(incoming_capabilities, dict):
+            node["capabilities"] = incoming_capabilities
         util = incoming_gpu.get("utilization") if isinstance(incoming_gpu, dict) else data.get("utilization")
         util = float(util or node.get("utilization", 0.0))
         node["utilization"] = util
@@ -3541,6 +3689,10 @@ def register() -> Any:
 @app.route("/register_models", methods=["POST"])
 def register_models() -> Any:
     """No-op endpoint to accept local model manifests from nodes."""
+
+    auth_error = require_node()
+    if auth_error:
+        return auth_error
 
     payload = request.get_json() or {}
     node_id = payload.get("node_id")
@@ -3598,6 +3750,9 @@ def link_wallet() -> Any:
 
 @app.route("/tasks/creator", methods=["GET"])
 def get_creator_tasks() -> Any:
+    auth_error = require_node()
+    if auth_error:
+        return auth_error
     node_id = request.args.get("node_id")
     if not node_id:
         return jsonify({"tasks": []}), 200
@@ -3661,23 +3816,23 @@ def get_creator_tasks() -> Any:
                     prompt_for_node = prompt_text
 
                     # Assign under global lock to avoid multiple nodes claiming the same job
-                    job_helpers.assign_job_to_node(job["id"], node_id)
+                    attempt_id = job_helpers.assign_job_to_node(job["id"], node_id)
                     try:
                         settlement.record_claim(job["id"], node_id)
                     except Exception:
                         pass  # non-fatal — settlement is additive
                     log_event("Job claimed by node", job_id=job["id"], node_id=node_id)
                     job_task_type = (job.get("task_type") or CREATOR_TASK_TYPE).upper()
-                    _emit_job_event("job_running", job["id"], job.get("wallet", ""), node_id=node_id, model=job["model"])
+                    _emit_job_event("job_leased", job["id"], job.get("wallet", ""), node_id=node_id, model=job["model"])
                     _emit_job_lifecycle(
                         job_id=job["id"],
                         wallet=job.get("wallet", ""),
                         job_type=job_task_type,
-                        lifecycle_status="RUNNING",
+                        lifecycle_status="LEASED",
                         settlement_status="claimed",
                         node_id=node_id,
                         model=job["model"],
-                        message="Job running on node",
+                        message="Job leased to node",
                     )
                     reward_weight = float(job["weight"] or cfg.get("reward_weight", rewards.resolve_weight(job["model"], 10.0)))
                     pending_entry = {
@@ -3692,7 +3847,10 @@ def get_creator_tasks() -> Any:
                             "wallet": job["wallet"],
                             "assigned_to": node_id,
                             "job_id": job["id"],
+                            "attempt_id": attempt_id,
+                            "lease_seconds": job_helpers.LEASE_SECONDS,
                             "data": raw_data,
+                            "resolved_spec": job.get("resolved_spec"),
                             "prompt": prompt_for_node,
                             "negative_prompt": negative_prompt,
                             "loras": loras,
@@ -3734,6 +3892,9 @@ def get_creator_tasks() -> Any:
                 "loras": task.get("loras") or [],
                 "queued_at": task.get("queued_at"),
                 "assigned_at": task.get("assigned_at"),
+                "attempt_id": task.get("attempt_id"),
+                "lease_seconds": task.get("lease_seconds", job_helpers.LEASE_SECONDS),
+                "resolved_spec": platform_v1.parse_json_object(task.get("resolved_spec")),
             }
             if task_payload["type"].upper() == CREATOR_TASK_TYPE:
                 # Forward generation overrides for image tasks only.
@@ -3748,7 +3909,11 @@ def get_creator_tasks() -> Any:
                 except Exception:
                     ltx2_settings = {}
                 if isinstance(ltx2_settings, dict):
-                    for key in ("prompt", "negative_prompt", "seed", "steps", "guidance", "width", "height", "frames", "fps", "init_image"):
+                    for key in (
+                        "prompt", "negative_prompt", "seed", "steps", "guidance", "width", "height",
+                        "frames", "fps", "init_image", "source_asset_id", "audio_asset_id", "timeout",
+                        "preset", "aspect_ratio", "delivery_width", "delivery_height", "motion_strength",
+                    ):
                         if key in ltx2_settings and ltx2_settings[key] is not None:
                             task_payload[key] = ltx2_settings[key]
             # If this is an AnimateDiff job, surface rich controls directly on the task payload
@@ -3804,6 +3969,13 @@ def get_creator_tasks() -> Any:
                         "ic_lora_path",
                         "ic_lora_strength",
                         "timeout",
+                        "source_asset_id",
+                        "audio_asset_id",
+                        "preset",
+                        "aspect_ratio",
+                        "delivery_width",
+                        "delivery_height",
+                        "motion_strength",
                     ):
                         if key in ltx_settings and ltx_settings[key] is not None:
                             task_payload[key] = ltx_settings[key]
@@ -3865,6 +4037,9 @@ def _extract_last_frame(video_path: Path, output_path: Path) -> bool:
 
 @app.route("/results", methods=["POST"])
 def submit_results() -> Any:
+    auth_error = require_node()
+    if auth_error:
+        return auth_error
     data = request.get_json() or {}
     node_id = data.get("node_id")
     task_id = data.get("task_id")
@@ -3873,6 +4048,7 @@ def submit_results() -> Any:
     utilization = data.get("utilization")
     image_b64 = data.get("image_b64")
     video_b64 = data.get("video_b64")
+    attempt_id = str(data.get("attempt_id") or "").strip() or None
 
     if not node_id or not task_id:
         return jsonify({"error": "missing node_id or task_id"}), 400
@@ -3909,8 +4085,8 @@ def submit_results() -> Any:
         reward, reward_factors = rewards.compute_reward(model_name, pipeline, metrics, status)
 
         # Ensure job is still owned/running before completing
-        if not job_helpers.complete_job(task_id, node_id, status):
-            if job_helpers.complete_job_if_queued(task_id, node_id, status):
+        if not job_helpers.complete_job(task_id, node_id, status, attempt_id=attempt_id):
+            if not attempt_id and job_helpers.complete_job_if_queued(task_id, node_id, status):
                 log_event(
                     "Accepted late results for queued job",
                     level="warning",
@@ -4036,7 +4212,20 @@ def submit_results() -> Any:
                 payload["reward_status"] = status
                 try:
                     conn = get_db()
-                    conn.execute("UPDATE jobs SET data=? WHERE id=?", (json.dumps(payload), task_id))
+                    final_spec = metrics.get("resolved_render_spec") if isinstance(metrics, dict) else None
+                    error_code = None
+                    if platform_v1.canonical_job_state(status) == "failed":
+                        error_code = platform_v1.failure_category(metrics.get("error") if isinstance(metrics, dict) else status)
+                    conn.execute(
+                        "UPDATE jobs SET data=?, resolved_spec=COALESCE(?, resolved_spec), error_code=?, updated_at=? WHERE id=?",
+                        (
+                            json.dumps(payload),
+                            json.dumps(final_spec) if isinstance(final_spec, dict) else None,
+                            error_code,
+                            unix_now(),
+                            task_id,
+                        ),
+                    )
                     conn.commit()
                 except Exception:
                     conn.rollback()
@@ -4889,6 +5078,444 @@ def stripe_subscription_status() -> Any:
     return jsonify({"wallet": wallet, "subscription": status, "subscriptions_enabled": True})
 
 
+def _artifact_url(path: str) -> Optional[str]:
+    try:
+        resolved = Path(path).resolve()
+        relative = resolved.relative_to(STATIC_DIR.resolve())
+    except (OSError, ValueError):
+        return None
+    return f"/static/{relative.as_posix()}"
+
+
+def _job_artifacts(job_id: str) -> List[Dict[str, Any]]:
+    rows = get_db().execute(
+        "SELECT * FROM artifacts WHERE job_id=? ORDER BY created_at ASC",
+        (job_id,),
+    ).fetchall()
+    artifacts: List[Dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        item["url"] = _artifact_url(str(item.get("path") or ""))
+        item["metadata"] = platform_v1.parse_json_object(item.get("metadata"))
+        item.pop("path", None)
+        artifacts.append(item)
+    return artifacts
+
+
+def _v1_job_payload(job: Dict[str, Any]) -> Dict[str, Any]:
+    settings = platform_v1.parse_json_object(job.get("data"))
+    resolved_spec = platform_v1.parse_json_object(job.get("resolved_spec"))
+    status = platform_v1.canonical_job_state(job.get("status"))
+    return {
+        "id": job.get("id"),
+        "type": settings.get("v1_type") or str(job.get("task_type") or "").lower(),
+        "status": status,
+        "stage": job.get("stage") or status,
+        "progress": float(job.get("progress") or (100 if status in platform_v1.FINAL_JOB_STATES else 0)),
+        "model": job.get("model"),
+        "node_id": job.get("node_id"),
+        "attempt_id": job.get("attempt_id"),
+        "created_at": job.get("timestamp"),
+        "updated_at": job.get("updated_at"),
+        "completed_at": job.get("completed_at"),
+        "error_code": job.get("error_code"),
+        "resolved_spec": resolved_spec,
+        "artifacts": _job_artifacts(str(job.get("id") or "")),
+    }
+
+
+@app.route("/v1/assets", methods=["POST"])
+def v1_create_asset() -> Any:
+    auth_error = require_owner()
+    if auth_error:
+        return auth_error
+    uploaded = request.files.get("file")
+    if uploaded is None or not uploaded.filename:
+        return jsonify({"error": "file_required"}), 400
+    kind = str(request.form.get("kind") or "").strip().lower()
+    content_type = str(uploaded.mimetype or "application/octet-stream").lower()
+    if kind not in {"image", "audio"}:
+        kind = "image" if content_type.startswith("image/") else "audio" if content_type.startswith("audio/") else ""
+    if not kind or not content_type.startswith(f"{kind}/"):
+        return jsonify({"error": "unsupported_asset_type"}), 415
+    if not _disk_has_capacity(ASSETS_DIR):
+        return jsonify({"error": "insufficient_storage"}), 507
+
+    asset_id = platform_v1.new_asset_id()
+    filename = platform_v1.safe_filename(uploaded.filename, f"{kind}.bin")
+    destination = ASSETS_DIR / asset_id / filename
+    try:
+        size_bytes, sha256 = platform_v1.atomic_stream_write(uploaded.stream, destination, ASSET_MAX_BYTES)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 413
+    owner = str(request.form.get("owner") or "owner").strip()[:128] or "owner"
+    now = unix_now()
+    conn = get_db()
+    conn.execute(
+        """
+        INSERT INTO assets (id, owner, kind, filename, content_type, path, size_bytes, sha256, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (asset_id, owner, kind, filename, content_type, str(destination), size_bytes, sha256, now),
+    )
+    conn.commit()
+    return jsonify({
+        "id": asset_id,
+        "kind": kind,
+        "filename": filename,
+        "content_type": content_type,
+        "size_bytes": size_bytes,
+        "sha256": sha256,
+        "content_url": f"/v1/assets/{asset_id}/content",
+        "created_at": now,
+    }), 201
+
+
+@app.route("/v1/assets/<asset_id>/content", methods=["GET"])
+def v1_asset_content(asset_id: str) -> Any:
+    if not (_authorized(OWNER_API_TOKEN) or _authorized(NODE_API_TOKEN)):
+        return jsonify({"error": "unauthorized"}), 401
+    row = get_db().execute("SELECT * FROM assets WHERE id=?", (asset_id,)).fetchone()
+    if not row:
+        return jsonify({"error": "asset_not_found"}), 404
+    path = Path(str(row["path"]))
+    if not path.is_file():
+        return jsonify({"error": "asset_missing"}), 410
+    return send_file(path, mimetype=row["content_type"], download_name=row["filename"], conditional=True)
+
+
+@app.route("/v1/jobs", methods=["GET"])
+def v1_list_jobs() -> Any:
+    auth_error = require_owner()
+    if auth_error:
+        return auth_error
+    job_helpers.recover_expired_leases()
+    try:
+        limit = min(50, max(1, int(request.args.get("limit", "20"))))
+    except ValueError:
+        return jsonify({"error": "invalid_limit"}), 400
+    requested_type = str(request.args.get("type") or "").strip().lower()
+    requested_status = str(request.args.get("status") or "").strip().lower()
+    rows = get_db().execute(
+        "SELECT * FROM jobs ORDER BY COALESCE(updated_at, timestamp) DESC LIMIT ?",
+        (max(limit * 3, limit),),
+    ).fetchall()
+    jobs = []
+    for row in rows:
+        payload = _v1_job_payload(dict(row))
+        if requested_type:
+            raw_task_type = str(row["task_type"] or "").strip().lower()
+            compatible_types = {str(payload["type"]), raw_task_type}
+            if raw_task_type in {"ltx_video_gen", "video_gen", "animatediff"}:
+                compatible_types.add("image_to_video")
+            if requested_type not in compatible_types:
+                continue
+        if requested_status and payload["status"] != requested_status:
+            continue
+        jobs.append(payload)
+        if len(jobs) >= limit:
+            break
+    return jsonify({"jobs": jobs, "count": len(jobs)})
+
+
+@app.route("/v1/jobs", methods=["POST"])
+def v1_create_job() -> Any:
+    auth_error = require_owner()
+    if auth_error:
+        return auth_error
+    payload = request.get_json(silent=True) or {}
+    job_type = str(payload.get("type") or "").strip().lower()
+    if job_type not in {"image", "image_to_video"}:
+        return jsonify({"error": "invalid_job_type"}), 400
+    if job_type == "image_to_video" and not VIDEO_V2_ENABLED:
+        return jsonify({"error": "feature_disabled", "feature": "video_v2"}), 404
+    prompt = str(payload.get("prompt") or "").strip()
+    if not prompt:
+        return jsonify({"error": "missing_prompt"}), 400
+
+    model_name = str(payload.get("model") or ("ltx23_wangp_distilled" if job_type == "image_to_video" else "juggernautXL_ragnarokBy")).strip()
+    refresh_manifest()
+    cfg = get_model_config(model_name.lower())
+    if not cfg:
+        return jsonify({"error": "unknown_model", "model": model_name}), 400
+    selected_model = str(cfg.get("name") or model_name)
+    wallet = str(payload.get("wallet") or "0x0000000000000000000000000000000000000000").lower()
+    if not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid_wallet"}), 400
+
+    settings: Dict[str, Any] = {
+        "v1_type": job_type,
+        "prompt": prompt,
+        "negative_prompt": str(payload.get("negative_prompt") or "").strip(),
+    }
+    source_asset_id = str(payload.get("source_asset_id") or "").strip()
+    audio_asset_id = str(payload.get("audio_asset_id") or "").strip()
+    for asset_id, expected_kind in ((source_asset_id, "image"), (audio_asset_id, "audio")):
+        if not asset_id:
+            continue
+        asset = get_db().execute("SELECT kind FROM assets WHERE id=?", (asset_id,)).fetchone()
+        if not asset or str(asset["kind"]) != expected_kind:
+            return jsonify({"error": "invalid_asset", "asset_id": asset_id, "expected_kind": expected_kind}), 400
+    if job_type == "image_to_video" and not source_asset_id:
+        return jsonify({"error": "source_image_required"}), 400
+
+    if job_type == "image_to_video":
+        try:
+            resolved_spec = platform_v1.resolve_video_spec(
+                payload,
+                model=selected_model,
+                backend=str(payload.get("backend") or "auto"),
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        parameters = dict(resolved_spec["parameters"])
+        settings.update(parameters)
+        settings.update({
+            "source_asset_id": source_asset_id,
+            "audio_asset_id": audio_asset_id or None,
+            "preset": resolved_spec["preset"],
+            "aspect_ratio": resolved_spec["aspect_ratio"],
+            "duration_seconds": resolved_spec["duration_seconds"],
+            "timeout": resolved_spec["timeout_seconds"],
+        })
+        pipeline = str(cfg.get("pipeline") or "").lower()
+        task_type = "LTX_VIDEO_GEN" if _is_ltx_video_config(cfg) else "VIDEO_GEN"
+    else:
+        resolved_defaults, sources = resolve_image_defaults(cfg, payload, RUNTIME_PROFILE)
+        settings.update(resolved_defaults)
+        settings["defaults_source"] = {"image": sources}
+        if payload.get("seed") is not None:
+            settings["seed"] = int(payload["seed"])
+        if payload.get("sampler"):
+            settings["sampler"] = str(payload["sampler"])
+        if isinstance(payload.get("loras"), list):
+            settings["loras"] = payload["loras"]
+        if payload.get("reference_face_url"):
+            settings["reference_face_url"] = str(payload["reference_face_url"])
+        resolved_spec = {
+            "schema_version": 1,
+            "task_type": "image",
+            "model": {"id": selected_model},
+            "engine": {"backend": "diffusers"},
+            "parameters": {key: settings.get(key) for key in ("seed", "steps", "guidance", "width", "height", "sampler") if settings.get(key) is not None},
+        }
+        task_type = CREATOR_TASK_TYPE
+
+    weight = float(cfg.get("reward_weight", rewards.resolve_weight(selected_model, 10.0)))
+    job_id = job_helpers.enqueue_job(wallet, selected_model, task_type, json.dumps(settings), weight)
+    conn = get_db()
+    conn.execute(
+        "UPDATE jobs SET resolved_spec=?, updated_at=? WHERE id=?",
+        (json.dumps(resolved_spec), unix_now(), job_id),
+    )
+    conn.commit()
+    log_event("v1 job queued", job_id=job_id, task_type=task_type, model=selected_model)
+    job = get_job(job_id)
+    return jsonify(_v1_job_payload(job or {"id": job_id, "status": "queued", "model": selected_model})), 202
+
+
+@app.route("/v1/jobs/<job_id>", methods=["GET"])
+def v1_get_job(job_id: str) -> Any:
+    auth_error = require_owner()
+    if auth_error:
+        return auth_error
+    job_helpers.recover_expired_leases()
+    job = get_job(job_id)
+    if not job:
+        return jsonify({"error": "job_not_found"}), 404
+    return jsonify(_v1_job_payload(job))
+
+
+@app.route("/v1/jobs/<job_id>/cancel", methods=["POST"])
+def v1_cancel_job(job_id: str) -> Any:
+    auth_error = require_owner()
+    if auth_error:
+        return auth_error
+    conn = get_db()
+    row = conn.execute("SELECT status, node_id FROM jobs WHERE id=?", (job_id,)).fetchone()
+    if not row:
+        return jsonify({"error": "job_not_found"}), 404
+    status = platform_v1.canonical_job_state(row["status"])
+    if status in platform_v1.FINAL_JOB_STATES:
+        return jsonify({"error": "job_finalized", "status": status}), 409
+    next_status = "cancelling" if row["node_id"] else "cancelled"
+    now = unix_now()
+    conn.execute(
+        """
+        UPDATE jobs
+           SET status=?, stage=?, completed_at=CASE WHEN ?='cancelled' THEN ? ELSE completed_at END,
+               updated_at=?
+         WHERE id=?
+        """,
+        (next_status, next_status, next_status, now, now, job_id),
+    )
+    conn.commit()
+    return jsonify({"id": job_id, "status": next_status}), 202
+
+
+@app.route("/v1/capabilities", methods=["GET"])
+def v1_capabilities() -> Any:
+    auth_error = require_owner()
+    if auth_error:
+        return auth_error
+    now = unix_now()
+    with LOCK:
+        nodes = [
+            {
+                "id": node_id,
+                "online": now - float(info.get("last_seen_unix") or 0) <= ONLINE_THRESHOLD,
+                "version": info.get("version"),
+                "models": info.get("models", []),
+                "pipelines": info.get("pipelines", []),
+                "supports": info.get("supports", []),
+                "capabilities": info.get("capabilities", {}),
+                "gpu": info.get("gpu", {}),
+            }
+            for node_id, info in NODES.items()
+        ]
+    models = []
+    for cfg in MANIFEST_MODELS.values():
+        model_id = str(cfg.get("name") or "")
+        verified_nodes: List[str] = []
+        runtime_capabilities: set[str] = set()
+        runtime_modes: set[str] = set()
+        runtime_versions: set[str] = set()
+        for node in nodes:
+            if not node["online"]:
+                continue
+            advertised = {str(name).lower() for name in node.get("models", [])}
+            if model_id.lower() not in advertised:
+                continue
+            details = node.get("capabilities") or {}
+            if not isinstance(details, dict):
+                continue
+            detail = next(
+                (
+                    value
+                    for name, value in details.items()
+                    if str(name).lower() == model_id.lower() and isinstance(value, dict)
+                ),
+                None,
+            )
+            if not detail or detail.get("files_present") is not True:
+                continue
+            verified_nodes.append(str(node["id"]))
+            runtime_capabilities.update(str(value) for value in detail.get("capabilities", []))
+            runtime_modes.update(str(value) for value in detail.get("available_modes", []))
+            if detail.get("model_version"):
+                runtime_versions.add(str(detail["model_version"]))
+        models.append({
+            "id": model_id,
+            "pipeline": cfg.get("pipeline"),
+            "model_family": cfg.get("model_family"),
+            "model_version": sorted(runtime_versions)[0] if len(runtime_versions) == 1 else cfg.get("model_version"),
+            "available": bool(verified_nodes),
+            "verified_nodes": verified_nodes,
+            "capabilities": sorted(runtime_capabilities),
+            "available_modes": sorted(runtime_modes),
+            "declared_capabilities": cfg.get("capabilities", []),
+            "license_status": cfg.get("license_status", "unreviewed"),
+        })
+    video_available = VIDEO_V2_ENABLED and any(
+        model["available"] and "image_to_video" in model["capabilities"]
+        for model in models
+    )
+    return jsonify({
+        "video_v2_enabled": VIDEO_V2_ENABLED,
+        "video_v2_available": video_available,
+        "nodes": nodes,
+        "models": models,
+        "version": APP_VERSION,
+    })
+
+
+@app.route("/v1/node/jobs/<job_id>/progress", methods=["POST"])
+def v1_node_progress(job_id: str) -> Any:
+    auth_error = require_node()
+    if auth_error:
+        return auth_error
+    payload = request.get_json(silent=True) or {}
+    ok = job_helpers.update_job_progress(
+        job_id,
+        str(payload.get("node_id") or ""),
+        str(payload.get("attempt_id") or ""),
+        progress=float(payload.get("progress") or 0),
+        stage=str(payload.get("stage") or "running"),
+    )
+    if not ok:
+        return jsonify({"error": "lease_conflict"}), 409
+    return jsonify({"ok": True})
+
+
+@app.route("/v1/node/jobs/<job_id>/control", methods=["GET"])
+def v1_node_control(job_id: str) -> Any:
+    auth_error = require_node()
+    if auth_error:
+        return auth_error
+    node_id = str(request.args.get("node_id") or "")
+    attempt_id = str(request.args.get("attempt_id") or "")
+    state = job_helpers.control_state(job_id, node_id, attempt_id)
+    if state is None:
+        return jsonify({"error": "attempt_not_found"}), 404
+    if state in {"leased", "running", "uploading"}:
+        job_helpers.renew_lease(job_id, node_id, attempt_id)
+    return jsonify({"status": platform_v1.canonical_job_state(state), "cancel_requested": state in {"cancelling", "cancelled"}})
+
+
+@app.route("/v1/node/jobs/<job_id>/artifacts", methods=["POST"])
+def v1_node_artifact(job_id: str) -> Any:
+    auth_error = require_node()
+    if auth_error:
+        return auth_error
+    uploaded = request.files.get("file")
+    if uploaded is None or not uploaded.filename:
+        return jsonify({"error": "file_required"}), 400
+    node_id = str(request.form.get("node_id") or "")
+    attempt_id = str(request.form.get("attempt_id") or "")
+    state = job_helpers.control_state(job_id, node_id, attempt_id)
+    if state not in {"leased", "running", "uploading"}:
+        return jsonify({"error": "lease_conflict"}), 409
+    if not _disk_has_capacity(OUTPUTS_DIR):
+        return jsonify({"error": "insufficient_storage"}), 507
+    kind = str(request.form.get("kind") or "artifact").strip().lower()[:32]
+    content_type = str(uploaded.mimetype or "application/octet-stream")
+    extension = Path(uploaded.filename).suffix.lower() or ".bin"
+    if kind == "image":
+        destination = OUTPUTS_DIR / f"{job_id}{extension}"
+    elif kind == "video":
+        destination = OUTPUTS_DIR / "videos" / f"{job_id}{extension}"
+    else:
+        destination = OUTPUTS_DIR / "artifacts" / job_id / platform_v1.safe_filename(uploaded.filename, f"artifact{extension}")
+    try:
+        size_bytes, sha256 = platform_v1.atomic_stream_write(uploaded.stream, destination, ARTIFACT_MAX_BYTES)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 413
+    artifact_id = platform_v1.new_artifact_id()
+    metadata = platform_v1.parse_json_object(request.form.get("metadata"))
+    conn = get_db()
+    conn.execute(
+        """
+        INSERT INTO artifacts (
+            id, job_id, attempt_id, kind, filename, content_type, path,
+            size_bytes, sha256, metadata, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            artifact_id, job_id, attempt_id, kind, destination.name, content_type,
+            str(destination), size_bytes, sha256, json.dumps(metadata), unix_now(),
+        ),
+    )
+    conn.commit()
+    job_helpers.update_job_progress(job_id, node_id, attempt_id, progress=99, stage="uploading")
+    return jsonify({
+        "id": artifact_id,
+        "kind": kind,
+        "url": _artifact_url(str(destination)),
+        "size_bytes": size_bytes,
+        "sha256": sha256,
+    }), 201
+
+
 @app.route("/jobs/recent", methods=["GET"])
 def jobs_recent() -> Any:
     """Return recent creator jobs with reward information.
@@ -4935,6 +5562,8 @@ def job_detail(job_id: str) -> Any:
             "node_id": job.get("node_id"),
             "timestamp": job.get("timestamp"),
             "completed_at": job.get("completed_at"),
+            "progress": job.get("progress"),
+            "stage": job.get("stage"),
             "reward": reward_value,
             "reward_timestamp": reward_ts,
             "reward_factors": reward_factors,
@@ -4982,7 +5611,7 @@ def job_cancel(job_id: str) -> Any:
             }
         )
 
-    if current_status in {"success", "completed", "failed"}:
+    if current_status in {"success", "succeeded", "completed", "failed", "expired"}:
         return jsonify(
             {
                 "error": "job_finalized",
@@ -4992,7 +5621,7 @@ def job_cancel(job_id: str) -> Any:
             }
         ), 409
 
-    if current_status not in {"queued", "running"}:
+    if current_status not in {"queued", "leased", "running", "uploading", "cancelling"}:
         return jsonify(
             {
                 "error": "invalid_job_state",
@@ -5004,8 +5633,8 @@ def job_cancel(job_id: str) -> Any:
 
     now_ts = unix_now()
     cur = conn.execute(
-        "UPDATE jobs SET status='cancelled', completed_at=? WHERE id=? AND status IN ('queued', 'running')",
-        (now_ts, job_id),
+        "UPDATE jobs SET status='cancelled', stage='cancelled', updated_at=?, completed_at=? WHERE id=? AND status IN ('queued', 'leased', 'running', 'uploading', 'cancelling')",
+        (now_ts, now_ts, job_id),
     )
     conn.commit()
     if cur.rowcount != 1:
@@ -5236,7 +5865,7 @@ def models_stats() -> Any:
         f"""
         SELECT COUNT(*) FROM jobs
         WHERE UPPER(task_type) IN ({ph})
-          AND status NOT IN ('queued', 'running')
+          AND status NOT IN ('queued', 'leased', 'running', 'uploading', 'cancelling')
         """,
         all_types,
     ).fetchone()
@@ -5245,7 +5874,7 @@ def models_stats() -> Any:
         f"""
         SELECT COUNT(*) FROM jobs
         WHERE UPPER(task_type) IN ({ph})
-          AND status IN ('completed', 'success')
+          AND status IN ('completed', 'success', 'succeeded')
         """,
         all_types,
     ).fetchone()
@@ -5436,11 +6065,7 @@ def models_list() -> Any:
             defaults_source["face_swap"] = face_swap_sources
             defaults_confidence["face_swap"] = _resolve_confidence(face_swap_sources)
 
-        capacity_task_type = (
-            "LTX_VIDEO_GEN"
-            if pipeline == "ltx_video" or str(model_data.get("model_family", "")).lower() == "ltx_video"
-            else native_task_type
-        )
+        capacity_task_type = "LTX_VIDEO_GEN" if _is_ltx_video_config(model_data) else native_task_type
         online_nodes = _eligible_online_node_count(model_key_norm, capacity_task_type)
         face_swap_online_nodes = (
             _eligible_online_node_count(model_key_norm, "FACE_SWAP")
@@ -5470,9 +6095,10 @@ def models_list() -> Any:
                 "face_swap_defaults": face_swap_defaults,
                 "defaults_source": defaults_source or None,
                 "defaults_confidence": defaults_confidence or None,
-                # LTX-Video 2.3 model family metadata
+                # Model-family metadata
                 "model_family": model_data.get("model_family") or None,
                 "model_version": model_data.get("model_version") or None,
+                "license_status": model_data.get("license_status") or "unreviewed",
                 "checkpoint_variant": model_data.get("checkpoint_variant") or None,
                 "capabilities": model_data.get("capabilities") or None,
                 "available_modes": model_data.get("available_modes") or None,
@@ -6576,8 +7202,9 @@ def admin_reset() -> Any:
 
     If SERVER_JOIN_TOKEN is set, require it via header `X-Join-Token` or `?token=`.
     """
-    if not check_join_token():
-        abort(403)
+    auth_error = require_admin()
+    if auth_error:
+        return auth_error
 
     _reset_db_and_memory()
 
@@ -6595,8 +7222,9 @@ if RESET_ON_STARTUP:
 
 @app.route("/logs", methods=["GET"])
 def logs_endpoint() -> Any:
-    if not check_join_token():
-        abort(403)
+    auth_error = require_admin()
+    if auth_error:
+        return auth_error
     with LOCK:
         entries = list(EVENT_LOGS)[-50:]
     return jsonify({"logs": entries})

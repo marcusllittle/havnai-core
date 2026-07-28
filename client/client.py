@@ -688,6 +688,23 @@ _MODEL_HASH_CACHE_PATH = HAVNAI_HOME / "model_hashes.json"
 _MODEL_HASH_LOCK = threading.Lock()
 
 
+def _get_cached_model_sha256(path: Path) -> Optional[str]:
+    """Return a current cached model hash without reading the model file."""
+    stat = path.stat()
+    cache_key = str(path.resolve())
+    fingerprint = f"{stat.st_size}:{stat.st_mtime_ns}"
+    with _MODEL_HASH_LOCK:
+        try:
+            cache = json.loads(_MODEL_HASH_CACHE_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        cached = cache.get(cache_key) if isinstance(cache, dict) else None
+        if not isinstance(cached, dict) or cached.get("fingerprint") != fingerprint:
+            return None
+        value = str(cached.get("sha256") or "")
+        return value or None
+
+
 def _cached_model_sha256(path: Path) -> str:
     """Hash large model files once per size/mtime and persist the result."""
     stat = path.stat()
@@ -2574,14 +2591,17 @@ def execute_task(task: Dict[str, Any]) -> None:
                 resolved_model_path = model_path or (_resolve_family_model_path(entry) if entry else None)
                 if resolved_model_path and resolved_model_path.is_file():
                     model_spec["path"] = str(resolved_model_path)
-                    model_spec["sha256"] = _cached_model_sha256(resolved_model_path)
+                    cached_hash = _get_cached_model_sha256(resolved_model_path)
+                    if cached_hash:
+                        model_spec["sha256"] = cached_hash
                 vae_path_raw = str(getattr(entry, "vae_path", "") or "") if entry else ""
                 if vae_path_raw:
                     vae_path = Path(vae_path_raw).expanduser()
-                    model_spec["vae"] = {
-                        "path": str(vae_path),
-                        "sha256": _cached_model_sha256(vae_path) if vae_path.is_file() else None,
-                    }
+                    vae_spec = {"path": str(vae_path)}
+                    cached_vae_hash = _get_cached_model_sha256(vae_path) if vae_path.is_file() else None
+                    if cached_vae_hash:
+                        vae_spec["sha256"] = cached_vae_hash
+                    model_spec["vae"] = vae_spec
                 resolved_spec["model"] = model_spec
                 resolved_spec["loras"] = metrics.get("loras", [])
                 parameters = dict(resolved_spec.get("parameters") or {})

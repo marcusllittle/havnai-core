@@ -3101,15 +3101,17 @@ def _acquire_base_image_pipeline(
             _IMAGE_PIPELINE_CACHE[cache_key] = cached_pipe
             return cached_pipe, True, 0
 
-    pipe, load_ms = _construct_base_image_pipeline(entry, model_path, pipeline_name, dtype, is_xl, device)
     evicted: List[Any] = []
     with _IMAGE_PIPELINE_CACHE_LOCK:
-        _IMAGE_PIPELINE_CACHE[cache_key] = pipe
-        while len(_IMAGE_PIPELINE_CACHE) > IMAGE_PIPELINE_CACHE_SIZE:
+        while len(_IMAGE_PIPELINE_CACHE) >= IMAGE_PIPELINE_CACHE_SIZE:
             _, old_pipe = _IMAGE_PIPELINE_CACHE.popitem(last=False)
             evicted.append(old_pipe)
     for old_pipe in evicted:
         _release_image_pipeline(old_pipe)
+
+    pipe, load_ms = _construct_base_image_pipeline(entry, model_path, pipeline_name, dtype, is_xl, device)
+    with _IMAGE_PIPELINE_CACHE_LOCK:
+        _IMAGE_PIPELINE_CACHE[cache_key] = pipe
     return pipe, False, load_ms
 
 

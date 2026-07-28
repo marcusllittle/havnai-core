@@ -55,16 +55,25 @@ def compute_reward(
         else:
             compute_cost_factor = 1.0
 
-        # Runtime factor from actual runtime vs baseline
+        # Reward useful generation time, not checkpoint loading or artifact
+        # publication. Older nodes only report inference_time_ms, so retain it
+        # as a compatibility fallback.
         baseline_runtime = float(REWARD_CONFIG.get("baseline_runtime", 8.0)) or 8.0
         runtime_sec = 0.0
-        inf_ms = metrics.get("inference_time_ms")
-        if isinstance(inf_ms, (int, float)) and inf_ms > 0:
-            runtime_sec = float(inf_ms) / 1000.0
+        runtime_source = "minimum"
+        generation_ms = metrics.get("generation_ms")
+        inference_ms = metrics.get("inference_time_ms")
+        if isinstance(generation_ms, (int, float)) and generation_ms > 0:
+            runtime_sec = float(generation_ms) / 1000.0
+            runtime_source = "generation_ms"
+        elif isinstance(inference_ms, (int, float)) and inference_ms > 0:
+            runtime_sec = float(inference_ms) / 1000.0
+            runtime_source = "inference_time_ms"
         else:
             dur = metrics.get("duration")
             if isinstance(dur, (int, float)) and dur > 0:
                 runtime_sec = float(dur)
+                runtime_source = "duration"
         runtime_sec = max(0.0, runtime_sec)
         runtime_factor = max(1.0, runtime_sec / baseline_runtime) if baseline_runtime > 0 else 1.0
 
@@ -82,6 +91,7 @@ def compute_reward(
             "runtime_factor": runtime_factor,
             "success_factor": success_factor,
             "runtime_seconds": runtime_sec,
+            "runtime_source": runtime_source,
             "model_weight": model_weight,
             "pipeline": pipeline_norm,
             # TODO: future quality verification boost
@@ -97,6 +107,7 @@ def compute_reward(
             "runtime_factor": 1.0,
             "success_factor": 0.0,
             "runtime_seconds": 0.0,
+            "runtime_source": "error",
             "error": str(exc),
         }
 

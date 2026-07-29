@@ -413,6 +413,31 @@ class PlatformApiContractTests(unittest.TestCase):
         self.assertEqual(control.status_code, 200)
         self.assertTrue(control.get_json()["cancel_requested"])
 
+    def test_video_last_frame_is_extracted_on_coordinator(self) -> None:
+        videos_dir = app_module.OUTPUTS_DIR / "videos"
+        videos_dir.mkdir(parents=True, exist_ok=True)
+        video_path = videos_dir / "job-video123.mp4"
+        video_path.write_bytes(b"video")
+
+        def write_frame(_source: Path, destination: Path) -> bool:
+            destination.write_bytes(b"png")
+            return True
+
+        with patch.object(app_module, "_extract_last_frame", side_effect=write_frame) as extract:
+            response = self.client.post("/videos/job-video123/last-frame")
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(
+            response.get_json()["image_url"],
+            "/static/outputs/videos/job-video123_last.png",
+        )
+        extract.assert_called_once_with(video_path, videos_dir / "job-video123_last.png")
+
+    def test_video_last_frame_rejects_missing_video(self) -> None:
+        response = self.client.post("/videos/job-missing/last-frame")
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.get_json()["error"], "video_not_found")
+
 
 if __name__ == "__main__":
     unittest.main()

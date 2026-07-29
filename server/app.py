@@ -7306,6 +7306,26 @@ def stitch_videos() -> Any:
     return jsonify({"video_url": f"/static/outputs/videos/{output_name}"}), 200
 
 
+@app.route("/videos/<job_id>/last-frame", methods=["POST"])
+def extract_video_last_frame(job_id: str) -> Any:
+    if not JOB_ID_REGEX.match(job_id):
+        return jsonify({"error": "invalid_job_id"}), 400
+
+    videos_dir = OUTPUTS_DIR / "videos"
+    video_path = videos_dir / f"{job_id}.mp4"
+    if not video_path.exists():
+        return jsonify({"error": "video_not_found", "job_id": job_id}), 404
+
+    output_path = videos_dir / f"{job_id}_last.png"
+    if not output_path.exists() or output_path.stat().st_mtime < video_path.stat().st_mtime:
+        if not _extract_last_frame(video_path, output_path):
+            return jsonify({"error": "last_frame_extract_failed", "job_id": job_id}), 500
+
+    return jsonify(
+        {"image_url": f"/static/outputs/videos/{output_path.name}", "job_id": job_id}
+    ), 200
+
+
 @app.route("/nodes", methods=["GET"])
 def nodes_endpoint() -> Any:
     with LOCK:

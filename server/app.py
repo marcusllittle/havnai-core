@@ -48,6 +48,7 @@ import workflows
 import gallery
 import astra_rewards
 import astra_gen
+import job_history
 import platform_v1
 
 try:
@@ -725,6 +726,9 @@ def _inject_module_dependencies() -> None:
     # Astra Rewards module
     astra_rewards.get_db = get_db  # type: ignore[attr-defined]
     astra_rewards.log_event = log_event  # type: ignore[attr-defined]
+
+    # Per-wallet job history (Library / Collection)
+    job_history.get_db = get_db  # type: ignore[attr-defined]
 
     # Astra generative rewards module
     astra_gen.get_db = get_db  # type: ignore[attr-defined]
@@ -5547,6 +5551,29 @@ def jobs_recent() -> Any:
     offset = max(0, _coerce_int(request.args.get("offset"), 0))
     summary = get_job_summary(limit=limit, offset=offset)
     return jsonify({"jobs": summary.get("feed", []), "summary": summary, "limit": limit, "offset": offset})
+
+
+@app.route("/jobs/mine", methods=["GET"])
+def jobs_mine() -> Any:
+    """Return a single wallet's own job history, newest first.
+
+    The Library/Collection page used to be backed only by browser
+    localStorage, which meant a cleared browser, a private window, or a
+    second device showed an empty Collection, and generation 201 silently
+    evicted the oldest entry. The jobs table has always had the wallet on
+    every row; this exposes it so the client has a durable source of truth
+    to merge its local list against.
+
+    Query params:
+        limit  – max jobs to return (default 100, max 500)
+        offset – number of jobs to skip (default 0)
+    """
+    wallet = request.args.get("wallet", "").strip()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    limit = _coerce_int(request.args.get("limit"), job_history.DEFAULT_LIMIT)
+    offset = _coerce_int(request.args.get("offset"), 0)
+    return jsonify(job_history.get_wallet_jobs(wallet, limit=limit, offset=offset))
 
 
 @app.route("/jobs/<job_id>", methods=["GET"])

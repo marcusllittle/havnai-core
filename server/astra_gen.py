@@ -292,6 +292,44 @@ def request_reward_image(
     return {"ok": True, "job_id": job_id, "status": "queued"}
 
 
+def get_recent_creations(
+    attach_fn: Callable[[Dict[str, Any]], Dict[str, Any]],
+    limit: int = 12,
+) -> Dict[str, Any]:
+    """Latest completed reward images across all players, for the public
+    'recent Astra creations' strip on joinhavn.io. Wallets are truncated —
+    this is a showcase, not an account view."""
+    db = get_db()
+    rows = db.execute(
+        """SELECT r.run_id, r.job_id, r.wallet, r.pilot_id, r.outfit_id,
+                  r.map_id, r.grade, r.created_at
+           FROM astra_reward_images r
+           JOIN jobs j ON j.id = r.job_id
+           WHERE j.status IN ('completed', 'done')
+           ORDER BY r.created_at DESC
+           LIMIT ?""",
+        (limit,),
+    ).fetchall()
+
+    creations: List[Dict[str, Any]] = []
+    for row in rows:
+        wallet = str(row["wallet"])
+        record: Dict[str, Any] = {
+            "job_id": row["job_id"],
+            "pilot_id": row["pilot_id"],
+            "outfit_id": row["outfit_id"],
+            "map_id": row["map_id"],
+            "grade": row["grade"],
+            "created_at": row["created_at"],
+            "pilot_short": f"{wallet[:6]}…{wallet[-4:]}",
+        }
+        record = attach_fn(record)
+        if record.get("image_url") or record.get("preview_url"):
+            creations.append(record)
+
+    return {"creations": creations}
+
+
 def get_gallery(
     wallet: str,
     attach_fn: Callable[[Dict[str, Any]], Dict[str, Any]],

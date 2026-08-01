@@ -214,6 +214,31 @@ class GalleryTests(AstraGenTestCase):
         gallery = astra_gen.get_gallery(OTHER_WALLET, lambda r: r)
         self.assertEqual(gallery["images"], [])
 
+    def test_recent_creations_only_completed_and_truncates_wallet(self) -> None:
+        for i, status in enumerate(["queued", "completed"]):
+            run_id = f"astra_rc{i}"
+            self._insert_run(run_id=run_id)
+            result = self._request(run_id=run_id)
+            self.conn.execute("UPDATE jobs SET status=? WHERE id=?", (status, result["job_id"]))
+        self.conn.commit()
+
+        recent = astra_gen.get_recent_creations(
+            lambda r: {**r, "image_url": f"/x/{r['job_id']}.png"}
+        )
+        self.assertEqual(len(recent["creations"]), 1)
+        entry = recent["creations"][0]
+        self.assertNotIn("wallet", entry)
+        self.assertIn("…", entry["pilot_short"])
+        self.assertIn("image_url", entry)
+
+    def test_recent_creations_drop_entries_without_urls(self) -> None:
+        self._insert_run(run_id="astra_nourl")
+        result = self._request(run_id="astra_nourl")
+        self.conn.execute("UPDATE jobs SET status='completed' WHERE id=?", (result["job_id"],))
+        self.conn.commit()
+        recent = astra_gen.get_recent_creations(lambda r: r)  # resolver adds nothing
+        self.assertEqual(recent["creations"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

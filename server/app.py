@@ -133,6 +133,10 @@ INVITE_CONFIG_PATH = Path(
 )
 INVITE_GATING = os.getenv("HAVNAI_INVITE_GATING", "").strip().lower() in {"1", "true", "yes"}
 CREDITS_ENABLED = os.getenv("HAVNAI_CREDITS_ENABLED", "").strip().lower() in {"1", "true", "yes"}
+# Shared-credit spending from the Astra game client. Defaults off: the endpoint
+# authorizes by bearer session token, and any deployment still running the old
+# unauthenticated client must opt in explicitly.
+ASTRA_SPEND_ENABLED = os.getenv("HAVNAI_ASTRA_SPEND_ENABLED", "").strip().lower() in {"1", "true", "yes"}
 WALLET_NONCE_PURPOSE_CONVERT = "convert_credits_to_hai"
 WALLET_NONCE_PURPOSE_GALLERY_PURCHASE = "gallery_purchase"
 WALLET_NONCE_PURPOSE_GALLERY_LIST = "gallery_list"
@@ -140,6 +144,7 @@ WALLET_NONCE_PURPOSE_GALLERY_RELIST = "gallery_relist"
 WALLET_NONCE_PURPOSE_GALLERY_DELIST = "gallery_delist"
 WALLET_NONCE_PURPOSE_IDENTITY_ANCHOR_CREATE = "identity_anchor_create"
 WALLET_NONCE_PURPOSE_IDENTITY_ANCHOR_DELETE = "identity_anchor_delete"
+WALLET_NONCE_PURPOSE_ASTRA_SESSION = "astra_session"
 WALLET_NONCE_ALLOWED_PURPOSES = {
     WALLET_NONCE_PURPOSE_CONVERT,
     WALLET_NONCE_PURPOSE_GALLERY_PURCHASE,
@@ -148,7 +153,11 @@ WALLET_NONCE_ALLOWED_PURPOSES = {
     WALLET_NONCE_PURPOSE_GALLERY_DELIST,
     WALLET_NONCE_PURPOSE_IDENTITY_ANCHOR_CREATE,
     WALLET_NONCE_PURPOSE_IDENTITY_ANCHOR_DELETE,
+    WALLET_NONCE_PURPOSE_ASTRA_SESSION,
 }
+ASTRA_SESSION_TTL_SECONDS = max(
+    300, int(os.getenv("HAVNAI_ASTRA_SESSION_TTL_SECONDS", "86400"))
+)
 WALLET_NONCE_TTL_SECONDS = max(60, int(os.getenv("HAVNAI_WALLET_NONCE_TTL_SECONDS", "300")))
 
 SUPPORTED_TASK_TYPES = {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP", "LTX_VIDEO_GEN"}
@@ -4685,7 +4694,11 @@ def wallet_nonce() -> Any:
             }
         ), 400
 
-    amount, amount_error = _parse_positive_amount(data.get("amount"))
+    raw_amount = data.get("amount")
+    if purpose == WALLET_NONCE_PURPOSE_ASTRA_SESSION and raw_amount is None:
+        # A session proves ownership; there is no value being authorized.
+        raw_amount = 1.0
+    amount, amount_error = _parse_positive_amount(raw_amount)
     if amount_error:
         return amount_error
     assert amount is not None
@@ -6434,10 +6447,22 @@ def credit_ledger() -> Any:
 # ---------------------------------------------------------------------------
 
 
-@app.route("/astra/reward", methods=["POST"])
-def astra_reward() -> Any:
-    """Submit a game run and receive bounded credit reward."""
-    if not rate_limit(f"astra-reward:{request.remote_addr}", limit=30):
+def _resolve_astra_session_wallet() -> Optional[str]:
+    """Resolve the wallet from an Astra bearer session token.
+
+    The wallet is never read from the request body for authorized actions --
+    that is what let any caller spend from any address.
+    """
+    header = request.headers.get("Authorization", "")
+    if not header.lower().startswith("bearer "):
+        return None
+    return astra_rewards.resolve_session(header[7:].strip())
+
+
+@app.route("/astra/session", methods=["POST"])
+def astra_session() -> Any:
+    """Exchange a signed wallet nonce for a short-lived Astra session token."""
+    if not rate_limit(f"astra-session:{request.remote_addr}", limit=30):
         return jsonify({"error": "rate limit"}), 429
 
     data = request.get_json(silent=True) or {}
@@ -6445,13 +6470,62 @@ def astra_reward() -> Any:
     if not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid wallet"}), 400
 
+    nonce = str(data.get("nonce", "")).strip()
+    signature = str(data.get("signature", "")).strip()
+    if not nonce or not signature:
+        return jsonify({"error": "missing_signature", "message": "nonce and signature required"}), 400
+
+    ok, failure = _verify_wallet_signature(
+        wallet,
+        nonce,
+        signature,
+        allowed_purposes={WALLET_NONCE_PURPOSE_ASTRA_SESSION},
+        log_label="Astra session",
+    )
+    if not ok:
+        return failure
+
+    session = astra_rewards.create_session(wallet, ASTRA_SESSION_TTL_SECONDS)
+    return jsonify({"wallet": wallet, **session})
+
+
+@app.route("/astra/run/start", methods=["POST"])
+def astra_run_start() -> Any:
+    """Open a run and return a single-use token that /astra/reward requires."""
+    if not rate_limit(f"astra-run-start:{request.remote_addr}", limit=60):
+        return jsonify({"error": "rate limit"}), 429
+
+    wallet = _resolve_astra_session_wallet()
+    if not wallet:
+        return jsonify({"error": "unauthorized", "detail": "astra session required"}), 401
+
+    if not rate_limit(f"astra-run-start:wallet:{wallet}", limit=20):
+        return jsonify({"error": "rate limit", "detail": "per-wallet limit exceeded"}), 429
+
+    data = request.get_json(silent=True) or {}
+    map_id = str(data.get("map_id", "")).strip() or "unknown"
+    return jsonify(astra_rewards.start_run(wallet, map_id))
+
+
+@app.route("/astra/reward", methods=["POST"])
+def astra_reward() -> Any:
+    """Submit a game run and receive bounded credit reward."""
+    if not rate_limit(f"astra-reward:{request.remote_addr}", limit=30):
+        return jsonify({"error": "rate limit"}), 429
+
+    wallet = _resolve_astra_session_wallet()
+    if not wallet:
+        return jsonify({"error": "unauthorized", "detail": "astra session required"}), 401
+
     if not rate_limit(f"astra-reward:wallet:{wallet}", limit=10):
         return jsonify({"error": "rate limit", "detail": "per-wallet limit exceeded"}), 429
 
+    data = request.get_json(silent=True) or {}
     score = _coerce_int(data.get("score"), 0)
     grade = str(data.get("grade", "")).strip() or "?"
     duration_s = _clamp_float(data.get("duration_s"), 0.0, 0.0, 7200.0)
     map_id = str(data.get("map_id", "")).strip() or "unknown"
+    run_token = str(data.get("run_token", "")).strip()
 
     result = astra_rewards.submit_reward(
         wallet=wallet,
@@ -6461,6 +6535,7 @@ def astra_reward() -> Any:
         map_id=map_id,
         deposit_fn=credits.deposit_credits,
         ledger_fn=settlement._record_ledger,
+        run_token=run_token,
     )
 
     status_code = 200 if result.get("ok") else 422
@@ -6470,26 +6545,33 @@ def astra_reward() -> Any:
 @app.route("/astra/spend", methods=["POST"])
 def astra_spend() -> Any:
     """Deduct shared credits for a gacha action."""
+    if not ASTRA_SPEND_ENABLED:
+        return jsonify({"error": "astra spend disabled"}), 503
+
     if not rate_limit(f"astra-spend:{request.remote_addr}", limit=30):
         return jsonify({"error": "rate limit"}), 429
 
-    data = request.get_json(silent=True) or {}
-    wallet = (data.get("wallet") or "").strip().lower()
-    if not wallet or not WALLET_REGEX.match(wallet):
-        return jsonify({"error": "invalid wallet"}), 400
+    wallet = _resolve_astra_session_wallet()
+    if not wallet:
+        return jsonify({"error": "unauthorized", "detail": "astra session required"}), 401
 
     if not rate_limit(f"astra-spend:wallet:{wallet}", limit=20):
         return jsonify({"error": "rate limit", "detail": "per-wallet limit exceeded"}), 429
 
+    data = request.get_json(silent=True) or {}
     action = str(data.get("action", "")).strip()
     if not action:
         return jsonify({"error": "missing action"}), 400
+
+    idempotency_key = str(data.get("idempotency_key", "")).strip() or None
 
     result = astra_rewards.process_spend(
         wallet=wallet,
         action=action,
         deduct_fn=credits.deduct_credits,
         ledger_fn=settlement._record_ledger,
+        idempotency_key=idempotency_key,
+        balance_fn=credits.get_credit_balance,
     )
 
     status_code = 200 if result.get("ok") else 422

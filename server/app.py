@@ -47,6 +47,7 @@ import validators
 import workflows
 import gallery
 import astra_rewards
+import astra_gen
 import platform_v1
 
 try:
@@ -725,6 +726,10 @@ def _inject_module_dependencies() -> None:
     astra_rewards.get_db = get_db  # type: ignore[attr-defined]
     astra_rewards.log_event = log_event  # type: ignore[attr-defined]
 
+    # Astra generative rewards module
+    astra_gen.get_db = get_db  # type: ignore[attr-defined]
+    astra_gen.log_event = log_event  # type: ignore[attr-defined]
+
     # Settlement module
     settlement.get_db = get_db  # type: ignore[attr-defined]
     settlement.log_event = log_event  # type: ignore[attr-defined]
@@ -1071,6 +1076,7 @@ validators.init_validator_tables(get_db())
 workflows.init_workflow_tables(get_db())
 gallery.init_gallery_tables(get_db())
 astra_rewards.init_astra_tables(get_db())
+astra_gen.init_astra_gen_tables(get_db())
 
 # Optional: clear database and in-memory state on startup for a fresh dashboard
 if RESET_ON_STARTUP:
@@ -6594,41 +6600,92 @@ def astra_stats() -> Any:
     return jsonify(astra_rewards.get_player_stats(wallet))
 
 
+def _select_astra_gen_model() -> Optional[str]:
+    """Pick a render model for Astra reward images.
+
+    Env override first, then the pack's preferred models, then any creator
+    model — always requiring online node capacity. Read-only against the
+    same manifest state /submit-job uses; nothing in that path is touched.
+    """
+    override = os.getenv("HAVNAI_ASTRA_GEN_MODEL", "").strip().lower()
+    refresh_manifest()
+
+    def _usable(key: str) -> bool:
+        meta = MANIFEST_MODELS.get(key)
+        if not meta:
+            return False
+        task = str(meta.get("task_type") or CREATOR_TASK_TYPE).upper()
+        if task != CREATOR_TASK_TYPE:
+            return False
+        return _eligible_online_node_count(key, CREATOR_TASK_TYPE) > 0
+
+    if override and _usable(override):
+        return str(MANIFEST_MODELS[override].get("name") or override)
+    for key in astra_gen.PREFERRED_MODELS:
+        if _usable(key):
+            return str(MANIFEST_MODELS[key].get("name") or key)
+    for key, meta in MANIFEST_MODELS.items():
+        if _usable(key):
+            return str(meta.get("name") or key)
+    return None
+
+
 @app.route("/astra/generate-reward", methods=["POST"])
 def astra_generate_reward() -> Any:
-    """Generate a reward image for Astra Valkyries game context."""
+    """Queue a personalized reward image for a completed Astra run.
+
+    The client sends IDs only; the prompt is composed server-side from
+    locked templates in astra_gen.py. One image per run (run_id is the
+    primary key), free-launch caps enforced per wallet and globally.
+    """
+    if not rate_limit(f"astra-gen:{request.remote_addr}", limit=20):
+        return jsonify({"error": "rate limit"}), 429
+
+    wallet = _resolve_astra_session_wallet()
+    if not wallet:
+        return jsonify({"error": "unauthorized", "detail": "astra session required"}), 401
+
+    if not rate_limit(f"astra-gen:wallet:{wallet}", limit=10):
+        return jsonify({"error": "rate limit", "detail": "per-wallet limit exceeded"}), 429
+
     data = request.get_json(silent=True) or {}
-    wallet = (data.get("wallet") or "").strip().lower()
-    pilot_id = (data.get("pilotId") or "").strip()
-    context = (data.get("context") or "").strip()
+    run_id = str(data.get("run_id", "")).strip()
+    pilot_id = str(data.get("pilot_id", "")).strip()
+    outfit_id = str(data.get("outfit_id", "")).strip()
+    map_id = str(data.get("map_id", "")).strip()
+    if not run_id or not pilot_id or not outfit_id or not map_id:
+        return jsonify({"error": "missing_fields", "detail": "run_id, pilot_id, outfit_id, map_id required"}), 400
 
-    if not wallet or not WALLET_REGEX.match(wallet):
-        return jsonify({"error": "Missing or invalid wallet"}), 400
-    if not pilot_id:
-        return jsonify({"error": "Missing pilotId"}), 400
+    result = astra_gen.request_reward_image(
+        wallet=wallet,
+        run_id=run_id,
+        pilot_id=pilot_id,
+        outfit_id=outfit_id,
+        map_id=map_id,
+        enqueue_fn=job_helpers.enqueue_job,
+        ticket_fn=lambda **kw: _create_settlement_ticket_for_submission(**kw),
+        safety_fn=safety.check_safety,
+        select_model_fn=_select_astra_gen_model,
+        job_payload_fn=json.dumps,
+    )
 
-    # Placeholder: return a placeholder image URL
-    # In production, this calls the image generation pipeline
-    return jsonify({
-        "imageUrl": f"/static/rewards/placeholder_{pilot_id}.png",
-        "pilotId": pilot_id,
-        "context": context,
-    })
+    if result.get("ok"):
+        return jsonify(result), 200
+    reason = result.get("reason")
+    if reason == "run_wallet_mismatch":
+        return jsonify(result), 403
+    return jsonify(result), 422
 
 
 @app.route("/astra/gallery", methods=["GET"])
 def astra_gallery() -> Any:
-    """Fetch player's earned game reward images."""
+    """Player's generated reward images with job status and result URLs."""
     wallet = (request.args.get("wallet") or "").strip().lower()
-
     if not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "Missing or invalid wallet"}), 400
 
-    # Placeholder: return empty gallery
-    # In production, this queries the database for earned images
-    return jsonify({
-        "images": []
-    })
+    limit = _clamp(_coerce_int(request.args.get("limit"), 50), 1, 100)
+    return jsonify(astra_gen.get_gallery(wallet, gallery._attach_result_urls, limit))
 
 
 # ---------------------------------------------------------------------------

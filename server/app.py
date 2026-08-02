@@ -6688,6 +6688,16 @@ def astra_gallery() -> Any:
     return jsonify(astra_gen.get_gallery(wallet, gallery._attach_result_urls, limit))
 
 
+@app.route("/astra/recent", methods=["GET"])
+def astra_recent() -> Any:
+    """Public strip of the latest completed Astra reward images, for the
+    joinhavn.io showcase. Wallets are truncated server-side."""
+    if not rate_limit(f"astra-recent:{request.remote_addr}", limit=60):
+        return jsonify({"error": "rate limit"}), 429
+    limit = _clamp(_coerce_int(request.args.get("limit"), 12), 1, 24)
+    return jsonify(astra_gen.get_recent_creations(gallery._attach_result_urls, limit))
+
+
 # ---------------------------------------------------------------------------
 # Analytics endpoints
 # ---------------------------------------------------------------------------

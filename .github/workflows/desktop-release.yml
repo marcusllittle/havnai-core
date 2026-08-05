@@ -88,6 +88,7 @@ jobs:
       # still succeeds and produces unsigned installers; add the secrets later
       # and the same workflow starts signing with no further changes.
       - name: Build installers
+        shell: bash
         working-directory: desktop
         env:
           # macOS signing + notarization
@@ -100,7 +101,18 @@ jobs:
           # Windows signing
           TAURI_WINDOWS_SIGNING_certificate: ${{ secrets.WINDOWS_CERTIFICATE }}
           TAURI_WINDOWS_SIGNING_certificate_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        run: cargo tauri build
+        run: |
+          # An absent GitHub secret arrives as an empty string, not as an unset
+          # variable, and Tauri treats a defined-but-empty signing variable as
+          # "signing requested" - then fails importing an empty certificate.
+          # Drop the empties so an unsigned build genuinely stays unsigned.
+          for var in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
+                     APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID \
+                     TAURI_WINDOWS_SIGNING_certificate \
+                     TAURI_WINDOWS_SIGNING_certificate_PASSWORD; do
+            if [ -z "${!var:-}" ]; then unset "$var"; fi
+          done
+          cargo tauri build
 
       - name: Collect installers
         shell: bash

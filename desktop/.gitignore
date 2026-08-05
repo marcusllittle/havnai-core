@@ -1,0 +1,8 @@
+# Rust build output (multi-gigabyte; never commit)
+src-tauri/target/
+
+# Bundled installers produced by `cargo tauri build`
+src-tauri/gen/
+
+node_modules/
+dist/

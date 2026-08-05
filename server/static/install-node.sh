@@ -3,312 +3,390 @@ set -euo pipefail
 
 # ---------------------------------------------------------------------------
 # HavnAI node installer
+#
+# Installs the complete node runtime: interpreter deps, every runtime module
+# (image, face swap and video), model weights, and a supervised service.
+#
+# The install is staged. The new runtime is unpacked beside the live one and
+# only swapped in once it verifies, so a failed or interrupted install leaves
+# the previous working node untouched.
+#
+#   curl -fsSL https://api.joinhavn.io/installers/install-node.sh | bash -s -- \
+#       --server https://api.joinhavn.io --token <TOKEN> --wallet 0x...
 # ---------------------------------------------------------------------------
 
-SERVER_URL=""
+SERVER_URL="https://api.joinhavn.io"
 JOIN_TOKEN=""
 WALLET=""
-CREATOR_MODE="false"
 NODE_NAME="$(hostname)"
+CREATOR_MODE=""
+HAVNAI_HOME="${HAVNAI_HOME:-$HOME/.havnai}"
+AUTO_START="false"
+SKIP_MODELS="false"
+SKIP_DEPS="false"
+PYTHON_BIN=""
 
 print_usage() {
-  cat <<USAGE
-Usage: bash install-node.sh [--server URL] [--token TOKEN] [--wallet 0x...] [--creator]
+  cat <<'USAGE'
+Usage: install-node.sh [options]
 
-Options:
-  --server   Base URL of the HavnAI coordinator (default: https://api.joinhavn.io)
-  --token    Optional join token required by the coordinator
-  --wallet   Optional wallet address to pre-populate ~/.havnai/.env
-  --creator  Enable creator mode (set CREATOR_MODE=true)
+  --server URL     Coordinator base URL (default: https://api.joinhavn.io)
+  --token TOKEN    Join token issued by the coordinator
+  --wallet 0x...   EVM wallet address credited for completed work
+  --name NAME      Node name (default: hostname)
+  --home DIR       Install location (default: ~/.havnai)
+  --python BIN     Python interpreter to build the venv with
+  --creator        Force creator mode on (default: auto-detect from GPU)
+  --no-creator     Force creator mode off (worker only)
+  --start          Enable and start the service when the install finishes
+  --skip-models    Install the runtime but do not download model weights
+  --skip-deps      Reuse the existing venv without reinstalling packages
+  -h, --help       Show this message
 USAGE
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --server)
-      SERVER_URL="$2"
-      shift 2
-      ;;
-    --token)
-      JOIN_TOKEN="$2"
-      shift 2
-      ;;
-    --wallet)
-      WALLET="$2"
-      shift 2
-      ;;
-    --creator)
-      CREATOR_MODE="true"
-      shift
-      ;;
-    -h|--help)
-      print_usage
-      exit 0
-      ;;
-    *)
-      echo "Unknown option: $1" >&2
-      print_usage
-      exit 1
-      ;;
+    --server)      SERVER_URL="$2"; shift 2 ;;
+    --token)       JOIN_TOKEN="$2"; shift 2 ;;
+    --wallet)      WALLET="$2"; shift 2 ;;
+    --name)        NODE_NAME="$2"; shift 2 ;;
+    --home)        HAVNAI_HOME="$2"; shift 2 ;;
+    --python)      PYTHON_BIN="$2"; shift 2 ;;
+    --creator)     CREATOR_MODE="true"; shift ;;
+    --no-creator)  CREATOR_MODE="false"; shift ;;
+    --start)       AUTO_START="true"; shift ;;
+    --skip-models) SKIP_MODELS="true"; shift ;;
+    --skip-deps)   SKIP_DEPS="true"; shift ;;
+    -h|--help)     print_usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; print_usage; exit 1 ;;
   esac
 done
 
-if [[ -z "$SERVER_URL" ]]; then
-  SERVER_URL="https://api.joinhavn.io"
-  echo "[WARN] --server not provided, defaulting to $SERVER_URL"
-fi
+SERVER_URL="${SERVER_URL%/}"
 
-HAVNAI_HOME="${HOME}/.havnai"
 VENV_PATH="$HAVNAI_HOME/venv"
 BIN_DIR="$HAVNAI_HOME/bin"
-CLIENT_PATH="$HAVNAI_HOME/havnai_client.py"
-REQUIREMENTS_PATH="$HAVNAI_HOME/requirements-node.txt"
+RUNTIME_DIR="$HAVNAI_HOME/current"
+STAGING_DIR="$HAVNAI_HOME/.staging"
+ENV_FILE="$HAVNAI_HOME/.env"
 SERVICE_PATH="$HOME/.config/systemd/user/havnai-node.service"
 LAUNCHD_PATH="$HOME/Library/LaunchAgents/com.havnai.node.plist"
-DOWNLOAD_CACHE_DIR="$HAVNAI_HOME/downloads"
 
-mkdir -p "$HAVNAI_HOME" "$HAVNAI_HOME/models" "$HAVNAI_HOME/models/creator" "$HAVNAI_HOME/logs" "$DOWNLOAD_CACHE_DIR" "$BIN_DIR"
+TOTAL_STEPS=8
+STEP=0
 
-# Detect platform
+step() {
+  STEP=$((STEP + 1))
+  printf '\n\033[36m[%d/%d]\033[0m %s\n' "$STEP" "$TOTAL_STEPS" "$1"
+}
+info()  { printf '      %s\n' "$1"; }
+warn()  { printf '\033[33m      warning: %s\033[0m\n' "$1"; }
+fail()  { printf '\033[31m      error: %s\033[0m\n' "$1" >&2; exit 1; }
+
+cleanup() { rm -rf "$STAGING_DIR"; }
+trap cleanup EXIT
+
+mkdir -p "$HAVNAI_HOME" "$BIN_DIR" "$HAVNAI_HOME/logs" "$HAVNAI_HOME/models/creator" \
+         "$HAVNAI_HOME/outputs" "$HAVNAI_HOME/loras"
+
+# ---------------------------------------------------------------------------
+step "Checking prerequisites"
+# ---------------------------------------------------------------------------
+
 OS_NAME="$(uname -s)"
-PACKAGE_MANAGER=""
-INSTALL_PYTHON=""
 
-if [[ "$OS_NAME" == "Linux" ]]; then
-  if [[ -f /etc/os-release ]]; then
+command -v curl >/dev/null 2>&1 || fail "curl is required but not installed."
+command -v tar  >/dev/null 2>&1 || fail "tar is required but not installed."
+
+if [[ -z "$PYTHON_BIN" ]]; then
+  for candidate in python3.12 python3.11 python3.10 python3; do
+    if command -v "$candidate" >/dev/null 2>&1; then PYTHON_BIN="$candidate"; break; fi
+  done
+fi
+
+if [[ -z "$PYTHON_BIN" ]]; then
+  if [[ "$OS_NAME" == "Linux" && -f /etc/os-release ]]; then
     . /etc/os-release
-    case "$ID" in
+    case "${ID:-}" in
       ubuntu|debian)
-        PACKAGE_MANAGER="apt-get"
-        INSTALL_PYTHON="sudo apt-get update && sudo apt-get install -y python3 python3-venv python3-pip curl"
-        ;;
+        info "installing python3 via apt-get"
+        sudo apt-get update && sudo apt-get install -y python3 python3-venv python3-pip curl ;;
       rhel|centos|fedora|rocky|almalinux)
-        PACKAGE_MANAGER="dnf"
-        INSTALL_PYTHON="sudo dnf install -y python3 python3-venv python3-pip curl"
-        ;;
+        info "installing python3 via dnf"
+        sudo dnf install -y python3 python3-pip curl ;;
+      *) fail "python3 not found; install Python 3.10+ and re-run." ;;
     esac
-  fi
-elif [[ "$OS_NAME" == "Darwin" ]]; then
-  PACKAGE_MANAGER="brew"
-  INSTALL_PYTHON="brew install python"
-fi
-
-if ! command -v python3 >/dev/null 2>&1; then
-  if [[ -n "$INSTALL_PYTHON" ]]; then
-    echo "[INFO] Installing python3 and dependencies..."
-    eval "$INSTALL_PYTHON"
+    PYTHON_BIN="python3"
+  elif [[ "$OS_NAME" == "Darwin" ]]; then
+    command -v brew >/dev/null 2>&1 || fail "python3 not found; install Homebrew or Python 3.10+."
+    info "installing python via brew"
+    brew install python
+    PYTHON_BIN="python3"
   else
-    echo "[ERROR] python3 not found and automatic installation unsupported on this platform" >&2
-    exit 1
+    fail "python3 not found and automatic installation is unsupported here."
   fi
 fi
 
-# Create virtualenv and install requirements
-python3 -m venv "$VENV_PATH"
-source "$VENV_PATH/bin/activate"
-pip install --upgrade pip
-curl -fsSL "$SERVER_URL/client/requirements" -o "$REQUIREMENTS_PATH"
-pip install --no-cache-dir -r "$REQUIREMENTS_PATH"
-
-# Download client modules + version
-curl -fsSL "$SERVER_URL/client/download" -o "$CLIENT_PATH"
-curl -fsSL "$SERVER_URL/client/registry.py" -o "$HAVNAI_HOME/registry.py"
-chmod +x "$CLIENT_PATH"
-curl -fsSL "$SERVER_URL/client/version" -o "$HAVNAI_HOME/VERSION"
-
-# GPU detection to enable creator mode automatically (portable, no nested heredoc in if)
-echo "[INFO] Checking for GPU support..."
-GPU_AVAILABLE="false"
-if command -v nvidia-smi >/dev/null 2>&1; then
-  GPU_AVAILABLE="true"
-else
-  if python3 - <<'PY' 2>/dev/null | grep -q "True"; then GPU_AVAILABLE="true"; fi
-import sys
-try:
-    import torch
-    print(torch.cuda.is_available())
-except Exception:
-    print(False)
-PY
+PY_VERSION="$("$PYTHON_BIN" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] >= (3, 10) else 1)'; then
+  fail "Python $PY_VERSION is too old; 3.10 or newer is required."
 fi
-if [[ "$GPU_AVAILABLE" == "true" ]]; then
-  echo "[INFO] GPU detected — enabling creator mode."
-  CREATOR_MODE="true"
-else
-  echo "[INFO] No GPU detected — joining as worker only."
-fi
+info "python $PY_VERSION at $(command -v "$PYTHON_BIN")"
 
-# Write .env
-ENV_FILE="$HAVNAI_HOME/.env"
-if [[ ! -f "$ENV_FILE" ]]; then
-  cat <<ENVEOF > "$ENV_FILE"
-SERVER_URL=$SERVER_URL
-WALLET=${WALLET:-0xYOUR_WALLET_ADDRESS}
-CREATOR_MODE=$CREATOR_MODE
-NODE_NAME=$NODE_NAME
-JOIN_TOKEN=$JOIN_TOKEN
-ENVEOF
-else
-  tmp="$ENV_FILE.tmp"
-  grep -v '^SERVER_URL=' "$ENV_FILE" | grep -v '^JOIN_TOKEN=' | grep -v '^CREATOR_MODE=' | grep -v '^NODE_NAME=' > "$tmp" || true
-  echo "SERVER_URL=$SERVER_URL" >> "$tmp"
-  echo "JOIN_TOKEN=$JOIN_TOKEN" >> "$tmp"
-  echo "CREATOR_MODE=$CREATOR_MODE" >> "$tmp"
-  echo "NODE_NAME=$NODE_NAME" >> "$tmp"
-  if [[ -n "$WALLET" ]]; then
-    grep -v '^WALLET=' "$tmp" > "$tmp.2" || true
-    mv "$tmp.2" "$tmp"
-    echo "WALLET=$WALLET" >> "$tmp"
+if [[ -z "$CREATOR_MODE" ]]; then
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    CREATOR_MODE="true"
+    info "GPU detected - enabling creator mode"
+  else
+    CREATOR_MODE="false"
+    warn "no NVIDIA GPU detected - joining as a worker (no creator jobs)"
   fi
-  mv "$tmp" "$ENV_FILE"
 fi
 
-# Ensure CREATOR_MODE key is up to date (idempotent refresh)
-sed -i '/^CREATOR_MODE=/d' "$ENV_FILE" 2>/dev/null || true
-echo "CREATOR_MODE=$CREATOR_MODE" >> "$ENV_FILE"
+# ---------------------------------------------------------------------------
+step "Downloading node runtime"
+# ---------------------------------------------------------------------------
 
-# Runner script
+rm -rf "$STAGING_DIR"
+mkdir -p "$STAGING_DIR"
+BUNDLE_TGZ="$STAGING_DIR/runtime.tar.gz"
+
+if ! curl -fsSL --retry 3 --retry-delay 2 "$SERVER_URL/client/bundle.tar.gz" -o "$BUNDLE_TGZ"; then
+  fail "could not download the runtime bundle from $SERVER_URL/client/bundle.tar.gz"
+fi
+
+BUNDLE_BYTES="$(wc -c < "$BUNDLE_TGZ" | tr -d ' ')"
+[[ "$BUNDLE_BYTES" -gt 1024 ]] || fail "runtime bundle looks truncated ($BUNDLE_BYTES bytes)."
+info "runtime bundle: $BUNDLE_BYTES bytes"
+
+mkdir -p "$STAGING_DIR/runtime"
+tar -xzf "$BUNDLE_TGZ" -C "$STAGING_DIR/runtime" || fail "runtime bundle could not be extracted."
+
+# The bundle is only useful if it carries every capability's modules. Verify
+# before we replace a working install with it.
+for required in \
+  "client/client.py" \
+  "client/pipeline_stable_diffusion_xl_instantid.py" \
+  "client/ip_adapter/resampler.py" \
+  "engines/ltx_video/runner.py" \
+  "engines/animatediff/animatediff_runner.py"; do
+  [[ -f "$STAGING_DIR/runtime/$required" ]] || fail "runtime bundle is incomplete (missing $required)."
+done
+info "runtime verified: $(find "$STAGING_DIR/runtime" -name '*.py' | wc -l | tr -d ' ') modules"
+
+curl -fsSL "$SERVER_URL/client/version" -o "$STAGING_DIR/VERSION" 2>/dev/null || echo "unknown" > "$STAGING_DIR/VERSION"
+
+# ---------------------------------------------------------------------------
+step "Installing Python environment"
+# ---------------------------------------------------------------------------
+
+if [[ ! -d "$VENV_PATH" ]]; then
+  "$PYTHON_BIN" -m venv "$VENV_PATH" || fail "could not create the virtualenv at $VENV_PATH"
+  info "created virtualenv"
+else
+  info "reusing virtualenv at $VENV_PATH"
+fi
+
+VENV_PY="$VENV_PATH/bin/python"
+[[ -x "$VENV_PY" ]] || fail "virtualenv is broken; remove $VENV_PATH and re-run."
+
+if [[ "$SKIP_DEPS" == "true" ]]; then
+  info "skipping dependency install (--skip-deps)"
+else
+  "$VENV_PY" -m pip install --upgrade pip wheel >/dev/null 2>&1 || warn "pip self-upgrade failed; continuing"
+  REQ_FILE="$STAGING_DIR/runtime/client/requirements-node.txt"
+  [[ -f "$REQ_FILE" ]] || fail "requirements file missing from the runtime bundle."
+  info "installing dependencies (this can take several minutes)"
+  "$VENV_PY" -m pip install --no-cache-dir -r "$REQ_FILE" || fail "dependency installation failed."
+fi
+
+# ---------------------------------------------------------------------------
+step "Activating runtime"
+# ---------------------------------------------------------------------------
+
+# Swap the verified runtime into place, keeping one generation for rollback.
+if [[ -d "$RUNTIME_DIR" ]]; then
+  rm -rf "$HAVNAI_HOME/previous"
+  mv "$RUNTIME_DIR" "$HAVNAI_HOME/previous"
+fi
+mv "$STAGING_DIR/runtime" "$RUNTIME_DIR"
+mv "$STAGING_DIR/VERSION" "$HAVNAI_HOME/VERSION" 2>/dev/null || true
+info "runtime installed at $RUNTIME_DIR"
+
+# Legacy layout: older services launch ~/.havnai/havnai_client.py directly.
+ln -sf "$RUNTIME_DIR/client/client.py" "$HAVNAI_HOME/havnai_client.py"
+
+# ---------------------------------------------------------------------------
+step "Writing configuration"
+# ---------------------------------------------------------------------------
+
+write_env_key() {
+  local key="$1" value="$2"
+  if [[ -f "$ENV_FILE" ]] && grep -q "^${key}=" "$ENV_FILE"; then
+    local tmp="$ENV_FILE.tmp"
+    grep -v "^${key}=" "$ENV_FILE" > "$tmp" || true
+    mv "$tmp" "$ENV_FILE"
+  fi
+  echo "${key}=${value}" >> "$ENV_FILE"
+}
+
+touch "$ENV_FILE"
+chmod 600 "$ENV_FILE"
+
+write_env_key "SERVER_URL"      "$SERVER_URL"
+write_env_key "HAVNAI_SERVER_URL" "$SERVER_URL"
+write_env_key "NODE_NAME"       "$NODE_NAME"
+write_env_key "CREATOR_MODE"    "$CREATOR_MODE"
+write_env_key "HAVNAI_HOME"     "$HAVNAI_HOME"
+write_env_key "HAVNAI_OUTPUTS_DIR" "$HAVNAI_HOME/outputs"
+[[ -n "$JOIN_TOKEN" ]] && write_env_key "JOIN_TOKEN" "$JOIN_TOKEN"
+[[ -n "$JOIN_TOKEN" ]] && write_env_key "HAVNAI_NODE_TOKEN" "$JOIN_TOKEN"
+
+if [[ -n "$WALLET" ]]; then
+  write_env_key "WALLET" "$WALLET"
+elif ! grep -q "^WALLET=" "$ENV_FILE" 2>/dev/null; then
+  write_env_key "WALLET" "0xYOUR_WALLET_ADDRESS"
+  warn "no wallet set - edit WALLET in $ENV_FILE to get credited for work"
+fi
+
+info "configuration written to $ENV_FILE"
+
+# Wrapper: runs the node from the runtime root so `-m client.client` resolves.
 NODE_RUNNER="$BIN_DIR/havnai-node"
-cat <<'RUNNER' > "$NODE_RUNNER"
+cat > "$NODE_RUNNER" <<RUNNER
 #!/usr/bin/env bash
-set -e
-export HAVNAI_HOME="$HOME/.havnai"
-source "$HAVNAI_HOME/venv/bin/activate"
-python "$HAVNAI_HOME/havnai_client.py"
+set -euo pipefail
+export HAVNAI_HOME="$HAVNAI_HOME"
+set -a
+[ -f "$ENV_FILE" ] && . "$ENV_FILE"
+set +a
+cd "$RUNTIME_DIR"
+exec "$VENV_PY" -m client.client "\$@"
 RUNNER
 chmod +x "$NODE_RUNNER"
 
-# Systemd unit (Linux)
+# Companion commands so operators can diagnose without remembering paths.
+for tool in doctor:client.doctor fetch-models:client.fetch_models; do
+  name="${tool%%:*}"; module="${tool#*:}"
+  cat > "$BIN_DIR/havnai-$name" <<TOOL
+#!/usr/bin/env bash
+set -euo pipefail
+export HAVNAI_HOME="$HAVNAI_HOME"
+set -a
+[ -f "$ENV_FILE" ] && . "$ENV_FILE"
+set +a
+cd "$RUNTIME_DIR"
+exec "$VENV_PY" -m $module "\$@"
+TOOL
+  chmod +x "$BIN_DIR/havnai-$name"
+done
+info "commands installed: havnai-node, havnai-doctor, havnai-fetch-models"
+
+# ---------------------------------------------------------------------------
+step "Fetching model weights"
+# ---------------------------------------------------------------------------
+
+if [[ "$SKIP_MODELS" == "true" ]]; then
+  info "skipped (--skip-models); run 'havnai-fetch-models' later"
+elif [[ "$CREATOR_MODE" != "true" ]]; then
+  info "worker mode - no model weights required"
+else
+  if ! "$BIN_DIR/havnai-fetch-models" --face-assets; then
+    warn "some models could not be downloaded; run 'havnai-fetch-models' to retry"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+step "Installing service"
+# ---------------------------------------------------------------------------
+
 if [[ "$OS_NAME" == "Linux" ]]; then
   mkdir -p "$(dirname "$SERVICE_PATH")"
-  cat <<SERVICE > "$SERVICE_PATH"
+  cat > "$SERVICE_PATH" <<SERVICE
 [Unit]
-Description=HavnAI Node
+Description=HavnAI GPU Node Agent
 After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-Environment=HAVNAI_HOME=%h/.havnai
-EnvironmentFile=%h/.havnai/.env
-ExecStart=%h/.havnai/bin/havnai-node
-Restart=always
+WorkingDirectory=$RUNTIME_DIR
+EnvironmentFile=$ENV_FILE
+ExecStart=$NODE_RUNNER
+Restart=on-failure
 RestartSec=5
+TimeoutStopSec=45
+KillMode=mixed
+LimitNOFILE=65536
 
 [Install]
 WantedBy=default.target
 SERVICE
-  ENABLE_CMD="systemctl --user daemon-reload && systemctl --user enable --now havnai-node"
+  systemctl --user daemon-reload >/dev/null 2>&1 || warn "systemctl --user unavailable; start the node manually"
+  START_CMD="systemctl --user start havnai-node"
   STATUS_CMD="journalctl --user -u havnai-node -f"
+  if [[ "$AUTO_START" == "true" ]]; then
+    systemctl --user enable --now havnai-node >/dev/null 2>&1 && info "service started" \
+      || warn "could not start the service automatically"
+  else
+    info "service installed (not started)"
+  fi
 else
-  # launchd (macOS)
   mkdir -p "$(dirname "$LAUNCHD_PATH")"
-  cat <<PLIST > "$LAUNCHD_PATH"
+  cat > "$LAUNCHD_PATH" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key>
-  <string>com.havnai.node</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>$NODE_RUNNER</string>
-  </array>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>HAVNAI_HOME</key>
-    <string>$HAVNAI_HOME</string>
-  </dict>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-  <key>StandardOutPath</key>
-  <string>$HAVNAI_HOME/logs/launchd.log</string>
-  <key>StandardErrorPath</key>
-  <string>$HAVNAI_HOME/logs/launchd.err</string>
+  <key>Label</key><string>com.havnai.node</string>
+  <key>ProgramArguments</key><array><string>$NODE_RUNNER</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>$HAVNAI_HOME/logs/launchd.log</string>
+  <key>StandardErrorPath</key><string>$HAVNAI_HOME/logs/launchd.err</string>
 </dict>
 </plist>
 PLIST
-  ENABLE_CMD="launchctl load -w $LAUNCHD_PATH"
-  STATUS_CMD="log stream --predicate 'process == \"havnai-node\"'"
-fi
-
-deactivate || true
-
-# Download all manifest creator models on GPU nodes
-if [[ "$CREATOR_MODE" == "true" ]]; then
-  echo "[INFO] Ensuring creator manifest models exist locally..."
-  mkdir -p "$HAVNAI_HOME/models/creator"
-  manifest_json=""
-  if command -v curl >/dev/null 2>&1; then
-    manifest_json=$(curl -fsSL "$SERVER_URL/models/list" || true)
-  fi
-  if [[ -z "$manifest_json" ]]; then
-    echo "[WARN] Unable to fetch manifest; skipping auto-copy."
+  START_CMD="launchctl load -w $LAUNCHD_PATH"
+  STATUS_CMD="tail -f $HAVNAI_HOME/logs/launchd.log"
+  if [[ "$AUTO_START" == "true" ]]; then
+    launchctl load -w "$LAUNCHD_PATH" >/dev/null 2>&1 && info "service started" \
+      || warn "could not load the launch agent automatically"
   else
-    mapfile -t MODEL_MAP < <(printf '%s\n' "$manifest_json" | python3 <<'PY' 2>/dev/null
-import json,sys
-try:
-    data=json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
-for entry in data.get("models", []):
-    name=(entry.get("name") or "").strip()
-    path=(entry.get("path") or "").strip()
-    if name and path:
-        print(f"{name}|{path}")
-PY
-)
-    for pair in "${MODEL_MAP[@]}"; do
-      name=${pair%%|*}
-      path=${pair#*|}
-      [[ -z "$name" || -z "$path" ]] && continue
-      local_path="$HAVNAI_HOME/models/creator/${name}.safetensors"
-      if [[ -f "$local_path" ]]; then
-        echo "[INFO] $name already present."
-        continue
-      fi
-      if [[ -f "$path" ]]; then
-        if command -v rsync >/dev/null 2>&1; then
-          echo "[INFO] Copying $name from $path"
-          rsync -av "$path" "$local_path" || echo "[WARN] Failed to copy $name"
-        else
-          cp "$path" "$local_path" || echo "[WARN] Failed to copy $name"
-        fi
-      else
-        echo "[WARN] Source not found for $name ($path); please copy manually."
-      fi
-    done
+    info "launch agent installed (not started)"
   fi
 fi
 
-AUTO_START="false"
-for arg in "$@"; do
-  if [[ "$arg" == "--start" ]]; then AUTO_START="true"; fi
-done
+# ---------------------------------------------------------------------------
+step "Verifying install"
+# ---------------------------------------------------------------------------
 
-# Optionally start the service automatically if requested
-if [[ "$OS_NAME" == "Linux" && "$AUTO_START" == "true" ]]; then
-  systemctl --user daemon-reload || true
-  systemctl --user enable --now havnai-node || true
-fi
+set +e
+"$BIN_DIR/havnai-doctor"
+DOCTOR_STATUS=$?
+set -e
 
 cat <<SUMMARY
 
 HavnAI node installed at $HAVNAI_HOME
 
-Safe connect options:
-- Start via systemd (Linux):
-    systemctl --user start havnai-node
-- Or run directly (any OS):
-    source "$VENV_PATH/bin/activate" && python "$CLIENT_PATH"
-
-To disconnect manually:
-    curl -X POST "$SERVER_URL/disconnect" -H 'Content-Type: application/json' -d '{"node_id":"$NODE_NAME"}'
-
-To tail logs (Linux systemd):
-    $STATUS_CMD
-
-Creator mode: set CREATOR_MODE=true in $ENV_FILE and place models in $HAVNAI_HOME/models/creator
+  Start the node      $START_CMD
+  Watch the logs      $STATUS_CMD
+  Re-check health     $BIN_DIR/havnai-doctor
+  Download models     $BIN_DIR/havnai-fetch-models
+  Configuration       $ENV_FILE
 
 SUMMARY
+
+if [[ $DOCTOR_STATUS -ne 0 ]]; then
+  cat <<'WARNING'
+The preflight check reported blocking issues (listed above). Resolve them and
+re-run havnai-doctor before starting the node, or it will accept jobs it cannot
+complete.
+
+WARNING
+  exit 1
+fi
+
+echo "Preflight passed. Your node is ready to serve jobs."

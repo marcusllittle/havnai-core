@@ -17,6 +17,7 @@ except Exception:  # pragma: no cover
         path: str
         pipeline: str
         type: str
+        source: Dict[str, object] = field(default_factory=dict)
         tags: List[str] = field(default_factory=list)
         reward_weight: float = 0.0
         task_type: str = "IMAGE_GEN"
@@ -134,6 +135,8 @@ class ModelRegistry:
                 # Coordinator /models/list currently does not expose artifact paths.
                 # Keep path optional here; node runtime resolves local files by model name.
                 filtered["path"] = str(filtered.get("path") or "").strip()
+                source = filtered.get("source")
+                filtered["source"] = source if isinstance(source, dict) else {}
                 if "reward_weight" not in filtered and "weight" in model:
                     try:
                         filtered["reward_weight"] = float(model.get("weight"))  # type: ignore[arg-type]

@@ -21,7 +21,11 @@
       "guidance": 6.0,
       "width": 832,
       "height": 1216,
-      "negative_prompt_default": "extra fingers, extra hands, extra arms, twisted wrists, deformed hands, dislocated joints, malformed feet, backward feet, duplicate face, background ghosts, extra people, bad anatomy, low quality, blurry"
+      "negative_prompt_default": "extra fingers, extra hands, extra arms, twisted wrists, deformed hands, dislocated joints, malformed feet, backward feet, duplicate face, background ghosts, extra people, bad anatomy, low quality, blurry",
+      "source": {
+        "kind": "coordinator",
+        "filename": "juggernautXL_ragnarokBy.safetensors"
+      }
     },
     {
       "name": "epicrealismXL_vxviiCrystalclear",
@@ -43,7 +47,11 @@
       "guidance": 6.0,
       "width": 832,
       "height": 1216,
-      "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, action wrist hyperflex, prop-hand glow fusion, twisted ankles, malformed feet, duplicate people, background ghosts, clothing merging, bad anatomy, low quality, blurry"
+      "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, action wrist hyperflex, prop-hand glow fusion, twisted ankles, malformed feet, duplicate people, background ghosts, clothing merging, bad anatomy, low quality, blurry",
+      "source": {
+        "kind": "coordinator",
+        "filename": "epicrealismXL_vxviiCrystalclear.safetensors"
+      }
     },
     {
       "name": "babesByStableYogiPony_xlV4",
@@ -64,7 +72,11 @@
       "guidance": 6.0,
       "width": 768,
       "height": 1152,
-      "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, action wrist hyperflex, prop-hand glow fusion, twisted ankles, malformed feet, duplicate people, background ghosts, clothing merging, bad anatomy, low quality, blurry"
+      "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, action wrist hyperflex, prop-hand glow fusion, twisted ankles, malformed feet, duplicate people, background ghosts, clothing merging, bad anatomy, low quality, blurry",
+      "source": {
+        "kind": "coordinator",
+        "filename": "babesByStableYogiPony_xlV4.safetensors"
+      }
     },
     {
       "name": "epicrealismXL_purefix",
@@ -85,7 +97,11 @@
       "guidance": 6.0,
       "width": 768,
       "height": 1152,
-      "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, action wrist hyperflex, prop-hand glow fusion, twisted ankles, malformed feet, duplicate people, background ghosts, clothing merging, bad anatomy, low quality, blurry"
+      "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, action wrist hyperflex, prop-hand glow fusion, twisted ankles, malformed feet, duplicate people, background ghosts, clothing merging, bad anatomy, low quality, blurry",
+      "source": {
+        "kind": "coordinator",
+        "filename": "epicrealismXL_purefix.safetensors"
+      }
     },
     {
       "name": "perfectdeliberate_v60",
@@ -106,7 +122,11 @@
       "guidance": 6.0,
       "width": 768,
       "height": 1152,
-      "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, action wrist hyperflex, prop-hand glow fusion, twisted ankles, malformed feet, duplicate people, background ghosts, clothing merging, bad anatomy, low quality, blurry"
+      "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, action wrist hyperflex, prop-hand glow fusion, twisted ankles, malformed feet, duplicate people, background ghosts, clothing merging, bad anatomy, low quality, blurry",
+      "source": {
+        "kind": "coordinator",
+        "filename": "perfectdeliberate_v60.safetensors"
+      }
     },
     {
       "name": "zavychromaxl_v100",
@@ -127,7 +147,11 @@
       "guidance": 6.0,
       "width": 768,
       "height": 1152,
-      "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, action wrist hyperflex, prop-hand glow fusion, twisted ankles, malformed feet, duplicate people, background ghosts, clothing merging, bad anatomy, low quality, blurry"
+      "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, action wrist hyperflex, prop-hand glow fusion, twisted ankles, malformed feet, duplicate people, background ghosts, clothing merging, bad anatomy, low quality, blurry",
+      "source": {
+        "kind": "coordinator",
+        "filename": "zavychromaxl_v100.safetensors"
+      }
     },
     {
       "name": "perfectdeliberate_v5SD15",
@@ -150,7 +174,11 @@
       "guidance": 7.5,
       "width": 672,
       "height": 1344,
-      "negative_prompt_default": "duplicate face, multiple faces, extra hands, extra fingers, deformed hands, merged limbs, bad anatomy, mangled"
+      "negative_prompt_default": "duplicate face, multiple faces, extra hands, extra fingers, deformed hands, merged limbs, bad anatomy, mangled",
+      "source": {
+        "kind": "coordinator",
+        "filename": "perfectdeliberate_v5SD15.safetensors"
+      }
     },
     {
       "name": "divineelegancemix_V10",
@@ -173,7 +201,11 @@
       "guidance": 6.3,
       "width": 576,
       "height": 768,
-      "negative_prompt_default": "duplicate face, multiple faces, extra hands, extra fingers, deformed hands, merged limbs, bad anatomy, mangled"
+      "negative_prompt_default": "duplicate face, multiple faces, extra hands, extra fingers, deformed hands, merged limbs, bad anatomy, mangled",
+      "source": {
+        "kind": "coordinator",
+        "filename": "divineelegancemix_V10.safetensors"
+      }
     },
     {
       "name": "uberRealisticPornMerge_v23Final",
@@ -196,7 +228,11 @@
       "guidance": 7.5,
       "width": 672,
       "height": 1344,
-      "negative_prompt_default": "extra limbs, bad hands, missing hands, cropped hands, deformed hands, extra fingers, bad anatomy, overexposed skin, artifacts"
+      "negative_prompt_default": "extra limbs, bad hands, missing hands, cropped hands, deformed hands, extra fingers, bad anatomy, overexposed skin, artifacts",
+      "source": {
+        "kind": "coordinator",
+        "filename": "uberRealisticPornMerge_v23Final.safetensors"
+      }
     },
     {
       "name": "triomerge_v10",
@@ -222,7 +258,11 @@
       "guidance": 6.5,
       "width": 576,
       "height": 768,
-      "negative_prompt_default": "duplicate, cloned face, multiple heads, two heads, extra heads, duplicate face, multiple faces, deformed, bad anatomy, distorted face, asymmetry, out of frame, cropped head, extra limbs, merged limbs, fused fingers, bad hands, low quality, blurry"
+      "negative_prompt_default": "duplicate, cloned face, multiple heads, two heads, extra heads, duplicate face, multiple faces, deformed, bad anatomy, distorted face, asymmetry, out of frame, cropped head, extra limbs, merged limbs, fused fingers, bad hands, low quality, blurry",
+      "source": {
+        "kind": "coordinator",
+        "filename": "triomerge_v10.safetensors"
+      }
     },
     {
       "name": "unstablePornhwa_beta",
@@ -249,7 +289,11 @@
       "guidance": 7.5,
       "width": 672,
       "height": 1344,
-      "negative_prompt_default": "duplicate, cloned face, multiple heads, two heads, extra heads, duplicate face, multiple faces, deformed, bad anatomy, distorted face, asymmetry, extra limbs, bad hands, fused fingers, low quality, blurry, text, watermark, signature"
+      "negative_prompt_default": "duplicate, cloned face, multiple heads, two heads, extra heads, duplicate face, multiple faces, deformed, bad anatomy, distorted face, asymmetry, extra limbs, bad hands, fused fingers, low quality, blurry, text, watermark, signature",
+      "source": {
+        "kind": "coordinator",
+        "filename": "unstablePornhwa_beta.safetensors"
+      }
     },
     {
       "name": "disneyPixarCartoon_v10",
@@ -278,7 +322,11 @@
       "guidance": 6.5,
       "width": 576,
       "height": 768,
-      "negative_prompt_default": "duplicate head, floating hair, disembodied parts, extra limbs, extra fingers, bad hands, bad anatomy, deformed, blurry, low quality, realistic, photo, text, watermark, signature, ugly, poorly drawn face"
+      "negative_prompt_default": "duplicate head, floating hair, disembodied parts, extra limbs, extra fingers, bad hands, bad anatomy, deformed, blurry, low quality, realistic, photo, text, watermark, signature, ugly, poorly drawn face",
+      "source": {
+        "kind": "coordinator",
+        "filename": "disneyPixarCartoon_v10.safetensors"
+      }
     },
     {
       "name": "kizukiAnimeHentai_animeHentaiV4",
@@ -312,7 +360,11 @@
       "height": 1344,
       "negative_prompt_default": "extra limbs, extra fingers, fused fingers, bad hands, mutated hands, bad anatomy, distorted face, deformed, blurry, low quality, realistic, photo, duplicate, cloned face, multiple heads, text, watermark, signature, ugly, poorly drawn",
       "negative_prompt_multi_girl": "merged bodies, fused bodies, body fusion, conjoined, shared torso, merged breasts, malformed chest, extra torso, cloned body, duplicate body, merged limbs, fused torso, siamese twins, extra breasts, malformed anatomy, body overlap",
-      "notes": "Use 'negative_prompt_default' for solo (1girl) scenes \u2014 gives clean, perfect results. Append or replace with 'negative_prompt_multi_girl' terms when generating 2girls, yuri, couples, or any scene with physical contact to prevent merging/fusion artifacts."
+      "notes": "Use 'negative_prompt_default' for solo (1girl) scenes \u2014 gives clean, perfect results. Append or replace with 'negative_prompt_multi_girl' terms when generating 2girls, yuri, couples, or any scene with physical contact to prevent merging/fusion artifacts.",
+      "source": {
+        "kind": "coordinator",
+        "filename": "kizukiAnimeHentai_animeHentaiV4.safetensors"
+      }
     },
     {
       "name": "aMixIllustrious_aMix",
@@ -332,7 +384,11 @@
       "steps": 28,
       "guidance": 6.0,
       "width": 768,
-      "height": 1152
+      "height": 1152,
+      "source": {
+        "kind": "coordinator",
+        "filename": "aMixIllustrious_aMix.safetensors"
+      }
     },
     {
       "name": "cyberrealisticPony_v160",
@@ -352,7 +408,11 @@
       "steps": 28,
       "guidance": 6.0,
       "width": 768,
-      "height": 1152
+      "height": 1152,
+      "source": {
+        "kind": "coordinator",
+        "filename": "cyberrealisticPony_v160.safetensors"
+      }
     },
     {
       "name": "ikastrious_v220",
@@ -374,7 +434,11 @@
       "guidance": 6.0,
       "width": 768,
       "height": 1152,
-      "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, malformed feet, duplicate people, bad anatomy, low quality, blurry"
+      "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, malformed feet, duplicate people, bad anatomy, low quality, blurry",
+      "source": {
+        "kind": "coordinator",
+        "filename": "ikastrious_v220.safetensors"
+      }
     },
     {
       "name": "ponyDiffusionV6XL_v615",
@@ -397,7 +461,11 @@
       "guidance": 6.3,
       "width": 576,
       "height": 768,
-      "negative_prompt_default": "extra limbs, bad hands, bad anatomy, distorted face"
+      "negative_prompt_default": "extra limbs, bad hands, bad anatomy, distorted face",
+      "source": {
+        "kind": "coordinator",
+        "filename": "ponyDiffusionV6XL_v615.safetensors"
+      }
     },
     {
       "name": "realisticVisionV60B1_v51HyperVAE",
@@ -420,7 +488,11 @@
       "guidance": 6.3,
       "width": 576,
       "height": 768,
-      "negative_prompt_default": "extra limbs, bad hands, bad anatomy, distorted face"
+      "negative_prompt_default": "extra limbs, bad hands, bad anatomy, distorted face",
+      "source": {
+        "kind": "coordinator",
+        "filename": "realisticVisionV60B1_v51HyperVAE.safetensors"
+      }
     },
     {
       "name": "lyriel_v16",
@@ -443,7 +515,11 @@
       "guidance": 6.3,
       "width": 576,
       "height": 768,
-      "negative_prompt_default": "extra limbs, bad hands, bad anatomy, distorted face"
+      "negative_prompt_default": "extra limbs, bad hands, bad anatomy, distorted face",
+      "source": {
+        "kind": "coordinator",
+        "filename": "lyriel_v16.safetensors"
+      }
     },
     {
       "name": "ltx2",
@@ -456,7 +532,11 @@
         "latte"
       ],
       "task_type": "VIDEO_GEN",
-      "reward_weight": 20.0
+      "reward_weight": 20.0,
+      "source": {
+        "kind": "coordinator",
+        "filename": "Latte-1"
+      }
     },
     {
       "name": "copaxTimeless_xplus2BNSFW1",
@@ -481,7 +561,11 @@
       "guidance": 3.5,
       "width": 896,
       "height": 1152,
-      "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, deformed hands, merged limbs, duplicate face, multiple faces, bad anatomy, low quality, blurry, text, watermark, signature"
+      "negative_prompt_default": "extra fingers, extra hands, extra arms, fused fingers, fused limbs, twisted wrists, deformed hands, merged limbs, duplicate face, multiple faces, bad anatomy, low quality, blurry, text, watermark, signature",
+      "source": {
+        "kind": "coordinator",
+        "filename": "copaxTimeless_xplus2BNSFW1.safetensors"
+      }
     },
     {
       "name": "animatediff",
@@ -494,7 +578,11 @@
         "sd15"
       ],
       "task_type": "ANIMATEDIFF",
-      "reward_weight": 15.0
+      "reward_weight": 15.0,
+      "source": {
+        "kind": "coordinator",
+        "filename": "realisticVisionV60B1_v51HyperVAE.safetensors"
+      }
     },
     {
       "name": "ltx23_wangp_distilled",
@@ -536,7 +624,13 @@
         "distilled_1_1"
       ],
       "strengths": "Current LTX-2.3 22B distilled image-to-video through the verified WanGP runtime, with native sound and strong first-frame preservation.",
-      "weaknesses": "Cold model startup can take 20 minutes on the RTX 3060 node; one video job runs at a time."
+      "weaknesses": "Cold model startup can take 20 minutes on the RTX 3060 node; one video job runs at a time.",
+      "source": {
+        "kind": "operator",
+        "filename": "ltx-2.3-22b-distilled-1.1_diffusion_model_quanto_bf16_int8.safetensors",
+        "license": "research / owner only",
+        "notes": "Obtain from the Wan2GP project and place in your Wan2GP ckpts directory. Not redistributed by the coordinator."
+      }
     },
     {
       "name": "ltx_video_dev",
@@ -575,7 +669,14 @@
         "one_stage"
       ],
       "strengths": "LTX-Video 0.9.5 2B checkpoint with text-to-video and first-frame image-to-video support.",
-      "weaknesses": "Slower than the distilled 0.9.8 checkpoint; synchronized audio, retakes, keyframes, and model-native upscaling are not implemented."
+      "weaknesses": "Slower than the distilled 0.9.8 checkpoint; synchronized audio, retakes, keyframes, and model-native upscaling are not implemented.",
+      "source": {
+        "kind": "hf",
+        "repo_id": "Lightricks/LTX-Video",
+        "filename": "ltx-video-2b-v0.9.5.safetensors",
+        "revision": "main",
+        "license": "LTX-Video (Lightricks) \u2014 see upstream repo"
+      }
     },
     {
       "name": "ltx_video_distilled",
@@ -615,7 +716,14 @@
         "distilled_fast"
       ],
       "strengths": "Fast inference (8 steps vs 50) with good quality trade-off. Lower VRAM requirements than dev checkpoint.",
-      "weaknesses": "Slightly lower quality than dev. Does not support all pipeline modes (keyframe, audio, retake)."
+      "weaknesses": "Slightly lower quality than dev. Does not support all pipeline modes (keyframe, audio, retake).",
+      "source": {
+        "kind": "hf",
+        "repo_id": "Lightricks/LTX-Video",
+        "filename": "ltxv-2b-0.9.8-distilled.safetensors",
+        "revision": "main",
+        "license": "LTX-Video (Lightricks) \u2014 see upstream repo"
+      }
     }
   ]
 }

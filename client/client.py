@@ -145,12 +145,20 @@ MODEL_SEARCH_DIR_CANDIDATES = [
     "/mnt/d/havnai-storage/models/creator",
 ]
 
-# When running from the havnai-core repo, ensure sibling packages (engines/*)
-# are importable even if current working directory is elsewhere.
+# Make the node runtime importable regardless of how it was started.
+#
+# Two launch modes have to work identically:
+#   python client/client.py      → sys.path[0] is client/, repo root is missing
+#   python -m client.client      → sys.path[0] is the repo root, client/ is missing
+#
+# The video engines live at the repo root (engines/*) while the InstantID
+# pipelines are imported by bare name from client/, so both directories have to
+# be on the path or one capability silently loses its imports.
 CLIENT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = CLIENT_DIR.parent
-if (REPO_ROOT / "engines").exists() and str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+for _import_root in (REPO_ROOT, CLIENT_DIR):
+    if _import_root.exists() and str(_import_root) not in sys.path:
+        sys.path.insert(0, str(_import_root))
 
 HAVNAI_HOME.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)

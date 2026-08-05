@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>HavnAI Node</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="mark" aria-hidden="true"></span>
+        <div>
+          <h1>HavnAI Node</h1>
+          <p id="install-path" class="muted">Locating install…</p>
+        </div>
+      </div>
+      <div class="status-cluster">
+        <span id="node-status" class="pill pill-unknown">unknown</span>
+        <button id="btn-start" class="btn btn-primary" disabled>Start node</button>
+        <button id="btn-stop" class="btn" disabled>Stop</button>
+      </div>
+    </header>
+
+    <nav class="tabs" role="tablist">
+      <button class="tab is-active" data-tab="health" role="tab">Health</button>
+      <button class="tab" data-tab="setup" role="tab">Setup</button>
+      <button class="tab" data-tab="models" role="tab">Models</button>
+      <button class="tab" data-tab="logs" role="tab">Activity</button>
+    </nav>
+
+    <main>
+      <!-- Health ---------------------------------------------------------->
+      <section id="panel-health" class="panel is-active" role="tabpanel">
+        <div class="panel-head">
+          <div>
+            <h2>Preflight</h2>
+            <p class="muted">
+              What this machine can actually serve. A capability is only offered to the
+              network once everything gating it passes.
+            </p>
+          </div>
+          <button id="btn-doctor" class="btn">Re-run checks</button>
+        </div>
+
+        <div id="capability-grid" class="capability-grid"></div>
+        <div id="doctor-results" class="checks">
+          <p class="muted">Running diagnostics…</p>
+        </div>
+      </section>
+
+      <!-- Setup ----------------------------------------------------------->
+      <section id="panel-setup" class="panel" role="tabpanel">
+        <div class="panel-head">
+          <div>
+            <h2>Configuration</h2>
+            <p class="muted">Saved to the node's <code>.env</code>. Restart the node to apply.</p>
+          </div>
+        </div>
+
+        <form id="config-form" class="form">
+          <label>
+            <span>Coordinator URL</span>
+            <input id="cfg-server" type="text" placeholder="https://api.joinhavn.io" />
+          </label>
+          <label>
+            <span>Join token</span>
+            <input id="cfg-token" type="password" placeholder="issued by the grid operator" />
+            <small class="muted">Stored owner-readable only, in the node's .env file.</small>
+          </label>
+          <label>
+            <span>Wallet address</span>
+            <input id="cfg-wallet" type="text" placeholder="0x…" />
+            <small class="muted">Completed work is credited here.</small>
+          </label>
+          <label>
+            <span>Node name</span>
+            <input id="cfg-name" type="text" placeholder="hostname" />
+          </label>
+          <label class="checkbox">
+            <input id="cfg-creator" type="checkbox" checked />
+            <span>Creator mode — serve image, face swap and video jobs (requires a GPU)</span>
+          </label>
+
+          <div class="actions">
+            <button type="submit" class="btn btn-primary">Save configuration</button>
+            <button type="button" id="btn-install" class="btn">Install / repair runtime</button>
+            <label class="checkbox inline">
+              <input id="install-skip-models" type="checkbox" />
+              <span>Skip model download</span>
+            </label>
+          </div>
+        </form>
+
+        <div class="console-wrap">
+          <div class="console-head">
+            <h3>Installer output</h3>
+            <button id="btn-clear-install" class="btn btn-small">Clear</button>
+          </div>
+          <pre id="install-console" class="console">Idle. Use “Install / repair runtime” to (re)build this node.</pre>
+        </div>
+      </section>
+
+      <!-- Models ---------------------------------------------------------->
+      <section id="panel-models" class="panel" role="tabpanel">
+        <div class="panel-head">
+          <div>
+            <h2>Model weights</h2>
+            <p class="muted">
+              Open-license weights come from Hugging Face; restricted ones stream from the
+              coordinator. Transfers resume where they left off.
+            </p>
+          </div>
+          <div class="panel-actions">
+            <button id="btn-plan" class="btn">Refresh plan</button>
+            <button id="btn-fetch" class="btn btn-primary">Download missing</button>
+          </div>
+        </div>
+
+        <label class="checkbox">
+          <input id="fetch-face-assets" type="checkbox" checked />
+          <span>Include face swap assets (InstantID adapter + antelopev2)</span>
+        </label>
+
+        <div id="model-list" class="model-list">
+          <p class="muted">Loading download plan…</p>
+        </div>
+      </section>
+
+      <!-- Logs ------------------------------------------------------------>
+      <section id="panel-logs" class="panel" role="tabpanel">
+        <div class="panel-head">
+          <div>
+            <h2>Activity</h2>
+            <p class="muted">Recent entries from the node log.</p>
+          </div>
+          <div class="panel-actions">
+            <label class="checkbox inline">
+              <input id="logs-auto" type="checkbox" checked />
+              <span>Auto-refresh</span>
+            </label>
+            <button id="btn-logs" class="btn">Refresh</button>
+          </div>
+        </div>
+        <pre id="log-console" class="console">Loading…</pre>
+      </section>
+    </main>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+    <script src="main.js"></script>
+  </body>
+</html>

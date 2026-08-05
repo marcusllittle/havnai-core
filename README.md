@@ -4,6 +4,11 @@
 
 Coordinator for the HavnAI network: weighted model routing, dynamic $HAI rewards, and GPU node orchestration.
 
+> **Want to run a node?** [`docs/RUN_A_NODE.md`](docs/RUN_A_NODE.md) is the complete
+> operator guide: install, verify, model weights, troubleshooting, and how to add a
+> model to the manifest. There is also a [desktop app](desktop/README.md) for
+> operators who would rather not use a terminal.
+
 ---
 
 ## Overview

@@ -16,6 +16,7 @@ rebuild on every request while iterating locally.
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import io
 import os
@@ -136,10 +137,12 @@ def build_bundle(base_dir: Path) -> Tuple[bytes, str]:
     if not files:
         raise BundleError("no runtime files were collected for the node bundle")
 
-    buffer = io.BytesIO()
-    # mtime=0 keeps the archive byte-identical between builds of identical
-    # sources, so the digest only moves when the code actually changes.
-    with tarfile.open(fileobj=buffer, mode="w:gz", compresslevel=6) as archive:
+    # Build the tar uncompressed first, then gzip it with a pinned mtime.
+    # tarfile's "w:gz" mode stamps the current time into the gzip header, which
+    # would change the digest on every build and make every install look like
+    # an upgrade. Zeroing the member mtimes alone is not enough.
+    tar_buffer = io.BytesIO()
+    with tarfile.open(fileobj=tar_buffer, mode="w") as archive:
         packaged: set[str] = set()
 
         for source, relative in files:
@@ -166,7 +169,13 @@ def build_bundle(base_dir: Path) -> Tuple[bytes, str]:
             archive.addfile(info, io.BytesIO(payload))
             packaged.add(init_name)
 
-    payload = buffer.getvalue()
+    gz_buffer = io.BytesIO()
+    with gzip.GzipFile(
+        fileobj=gz_buffer, mode="wb", compresslevel=6, mtime=0
+    ) as compressor:
+        compressor.write(tar_buffer.getvalue())
+
+    payload = gz_buffer.getvalue()
     return payload, hashlib.sha256(payload).hexdigest()
 
 

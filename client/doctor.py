@@ -232,7 +232,8 @@ def check_dependencies(report: Report) -> None:
                     detail=f"missing: {', '.join(missing)}",
                     remedy=(
                         "Reinstall dependencies: "
-                        "~/.havnai/venv/bin/pip install -r ~/.havnai/requirements-node.txt"
+                        "~/.havnai/venv/bin/pip install -r "
+                        "~/.havnai/current/client/requirements-node.txt"
                     ),
                 )
             )

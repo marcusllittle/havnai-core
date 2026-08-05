@@ -177,6 +177,46 @@ fn write_env_file(config: &NodeConfig) -> Result<(), String> {
     Ok(())
 }
 
+/// Environment variables an AppImage runtime rewrites to point inside its own
+/// bundle. Inherited by a child process they are actively harmful: a spawned
+/// `python3` picks up the AppImage's `PYTHONHOME` and dies with
+/// "No module named 'encodings'" before it runs a line of our code.
+const APPIMAGE_HIJACKED_VARS: &[&str] = &[
+    "PYTHONHOME",
+    "PYTHONPATH",
+    "LD_LIBRARY_PATH",
+    "LD_PRELOAD",
+    "PERLLIB",
+    "XDG_DATA_DIRS",
+    "GSETTINGS_SCHEMA_DIR",
+    "GI_TYPELIB_PATH",
+    "GST_PLUGIN_SYSTEM_PATH",
+    "GST_PLUGIN_SYSTEM_PATH_1_0",
+    "QT_PLUGIN_PATH",
+];
+
+/// Undo the AppImage runtime's environment rewriting for a child process.
+///
+/// AppRun saves whatever it overrode as `<VAR>_ORIG`, so restore from that when
+/// present and otherwise drop the variable entirely. Outside an AppImage this
+/// is a no-op, because none of these carry an `_ORIG` twin and the originals
+/// are inherited unchanged.
+fn restore_host_environment(command: &mut Command) {
+    if std::env::var_os("APPDIR").is_none() {
+        return;
+    }
+    for name in APPIMAGE_HIJACKED_VARS {
+        match std::env::var_os(format!("{name}_ORIG")) {
+            Some(original) => {
+                command.env(name, original);
+            }
+            None => {
+                command.env_remove(name);
+            }
+        }
+    }
+}
+
 /// Build the environment a node subprocess should inherit.
 fn node_env() -> HashMap<String, String> {
     let mut env = parse_env_file(&env_file());
@@ -198,6 +238,7 @@ fn node_env() -> HashMap<String, String> {
 fn run_capture(program: &str, args: &[&str], cwd: Option<PathBuf>) -> CommandOutput {
     let mut command = Command::new(program);
     command.args(args);
+    restore_host_environment(&mut command);
     for (key, value) in node_env() {
         command.env(key, value);
     }
@@ -267,6 +308,7 @@ fn run_streaming(
         .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    restore_host_environment(&mut command);
     for (key, value) in node_env() {
         command.env(key, value);
     }
@@ -601,6 +643,54 @@ mod tests {
         // argument and inject a second command into the installer line.
         assert_eq!(shell_quote("a'b"), r"'a'\''b'");
         assert_eq!(shell_quote("'; rm -rf /; '"), r"''\''; rm -rf /; '\'''");
+    }
+
+    #[test]
+    fn appimage_hijacked_python_vars_do_not_reach_children() {
+        // Simulates the AppImage runtime: APPDIR set, PYTHONHOME pointing into
+        // the bundle, and an _ORIG twin holding the host's real value.
+        unsafe {
+            std::env::set_var("APPDIR", "/tmp/appimage_extracted_test");
+            std::env::set_var("PYTHONHOME", "/tmp/appimage_extracted_test/usr");
+            std::env::set_var("LD_LIBRARY_PATH", "/tmp/appimage_extracted_test/usr/lib");
+            std::env::set_var("LD_LIBRARY_PATH_ORIG", "/usr/lib/host");
+        }
+
+        let mut command = Command::new("python3");
+        restore_host_environment(&mut command);
+
+        // PYTHONHOME has no _ORIG twin, so it must be dropped outright;
+        // LD_LIBRARY_PATH must be restored to the host value, not the bundle's.
+        let overrides: Vec<(String, Option<String>)> = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().to_string(),
+                    value.map(|v| v.to_string_lossy().to_string()),
+                )
+            })
+            .collect();
+
+        let python_home = overrides.iter().find(|(key, _)| key == "PYTHONHOME");
+        assert_eq!(
+            python_home.map(|(_, value)| value.clone()),
+            Some(None),
+            "PYTHONHOME must be removed for child processes"
+        );
+
+        let ld_path = overrides.iter().find(|(key, _)| key == "LD_LIBRARY_PATH");
+        assert_eq!(
+            ld_path.and_then(|(_, value)| value.clone()),
+            Some("/usr/lib/host".to_string()),
+            "LD_LIBRARY_PATH must be restored from its _ORIG twin"
+        );
+
+        unsafe {
+            std::env::remove_var("APPDIR");
+            std::env::remove_var("PYTHONHOME");
+            std::env::remove_var("LD_LIBRARY_PATH");
+            std::env::remove_var("LD_LIBRARY_PATH_ORIG");
+        }
     }
 
     #[test]

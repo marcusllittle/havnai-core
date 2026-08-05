@@ -17,9 +17,14 @@ SHA-256. A model is only rewritten to an ``hf`` source when the bytes are
 identical, and the digest is recorded in the manifest so nodes verify what they
 downloaded. Anything unmatched is left exactly as it was.
 
-    python scripts/match_hf_sources.py                 # report only
-    python scripts/match_hf_sources.py --apply         # rewrite the manifest
-    python scripts/match_hf_sources.py --only NAME ... # restrict to some models
+    python scripts/match_hf_sources.py                    # report only
+    python scripts/match_hf_sources.py --pipelines sdxl   # skip pipelines you do not serve
+    python scripts/match_hf_sources.py --apply            # rewrite the manifest
+    python scripts/match_hf_sources.py --only NAME ...    # restrict to some models
+
+Hashing dominates the runtime, so filter before you run: --pipelines skips
+non-matching models without reading them. Hashes are cached against size and
+mtime, so interrupting and re-running never repeats work.
 """
 
 from __future__ import annotations
@@ -209,6 +214,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--apply", action="store_true", help="write the manifest (default: report only)")
     parser.add_argument("--only", nargs="*", help="restrict to these model names")
+    parser.add_argument(
+        "--pipelines",
+        nargs="*",
+        help="restrict to these pipelines (e.g. sdxl), skipping the rest entirely",
+    )
     parser.add_argument("--quiet", action="store_true", help="suppress hashing progress")
     args = parser.parse_args()
 
@@ -217,6 +227,7 @@ def main() -> int:
     cache = load_cache()
 
     wanted = {n.lower() for n in (args.only or [])}
+    pipelines = {p.lower() for p in (args.pipelines or [])}
     matched: List[Tuple[str, Dict[str, Any]]] = []
     unmatched: List[Tuple[str, str]] = []
 
@@ -226,6 +237,10 @@ def main() -> int:
         if source.get("kind") != "coordinator":
             continue
         if wanted and name.lower() not in wanted:
+            continue
+        # Filter before hashing: reading a 7 GB checkpoint we do not serve is
+        # the most expensive thing this script can do for no reason.
+        if pipelines and str(entry.get("pipeline", "")).lower() not in pipelines:
             continue
 
         path = Path(str(entry.get("path", "")))

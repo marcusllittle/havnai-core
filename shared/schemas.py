@@ -39,6 +39,34 @@ class JobSpec:
 
 
 @dataclass
+class ModelSource:
+    """Describes where a node can obtain a model artifact.
+
+    ``kind`` selects the delivery route:
+
+    ``hf``
+        Public weights pulled from the Hugging Face CDN via ``huggingface-hub``.
+        Requires ``repo_id`` and ``filename``.
+    ``coordinator``
+        Weights we host ourselves because they cannot be redistributed
+        publicly. Served by ``/models/download/<name>`` behind the join token.
+    ``operator``
+        The node operator supplies the file themselves; we only tell them the
+        filename to drop into the creator models directory.
+    """
+
+    kind: str = "operator"
+    repo_id: str = ""
+    filename: str = ""
+    revision: str = "main"
+    sha256: str = ""
+    size_bytes: int = 0
+    license: str = ""
+    # Human-readable pointer shown to operators when ``kind`` is ``operator``.
+    notes: str = ""
+
+
+@dataclass
 class ModelEntry:
     """Describes a model artifact available to the network."""
 
@@ -46,6 +74,9 @@ class ModelEntry:
     path: str
     pipeline: str
     type: str
+    # Delivery descriptor consumed by the node-side downloader. Kept as a plain
+    # dict on the wire so older nodes ignore it instead of failing to parse.
+    source: Dict[str, Any] = field(default_factory=dict)
     tags: List[str] = field(default_factory=list)
     reward_weight: float = 0.0
     task_type: str = "IMAGE_GEN"

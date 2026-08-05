@@ -6,6 +6,7 @@ try:
 except ImportError:
     pass
 
+import io
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -48,6 +49,7 @@ import workflows
 import gallery
 import astra_rewards
 import astra_gen
+import node_bundle
 import job_history
 import platform_v1
 
@@ -82,6 +84,11 @@ DB_PATH = Path(os.getenv("HAVNAI_DB_PATH", BASE_DIR / "db" / "ledger.db"))
 CLIENT_PATH = BASE_DIR / "client" / "client.py"
 CLIENT_REGISTRY = BASE_DIR / "client" / "registry.py"
 CLIENT_REQUIREMENTS = BASE_DIR / "client" / "requirements-node.txt"
+# Weights we host ourselves because they cannot be redistributed publicly.
+# Models whose manifest source is ``hf`` never touch this directory.
+MODEL_STORAGE_DIR = Path(
+    os.getenv("HAVNAI_MODEL_STORAGE_DIR", "/mnt/d/havnai-storage/models/creator")
+)
 VERSION_FILE = BASE_DIR / "VERSION"
 LORA_STORAGE_DIR = Path(os.getenv("HAVNAI_LORA_STORAGE_DIR", "/mnt/d/havnai-storage/models/loras"))
 
@@ -92,6 +99,9 @@ SUPPORTED_LORA_EXTS = {".safetensors", ".ckpt", ".pt", ".bin"}
 # Ensure local packages (e.g., havnai.*) are importable when running server/app.py directly
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
+
+# Built lazily on first request and rebuilt only when the runtime sources change.
+NODE_BUNDLE_CACHE = node_bundle.BundleCache(BASE_DIR, enabled=node_bundle.cache_enabled())
 
 from common.prompt_enhancers import (
     ANTI_OVERLAY_NEGATIVE,
@@ -1147,6 +1157,8 @@ def load_manifest() -> None:
             "available_modes": entry.get("available_modes", []),
             "default_pipeline_mode": entry.get("default_pipeline_mode", ""),
             "default_upscaler": entry.get("default_upscaler", ""),
+            # How nodes obtain the weights; see _public_model_source().
+            "source": entry.get("source") if isinstance(entry.get("source"), dict) else {},
         }
         MANIFEST_MODELS[key] = entry_data
         MODEL_STATS.setdefault(key, {"count": 0.0, "total_time": 0.0})
@@ -2194,6 +2206,45 @@ def client_requirements() -> Any:
 @app.route("/client/version")
 def client_version() -> Any:
     return APP_VERSION, 200, {"Content-Type": "text/plain"}
+
+
+@app.route("/client/bundle.tar.gz")
+def client_bundle() -> Any:
+    """Serve the complete node runtime as one archive.
+
+    Nodes need far more than client.py: the InstantID pipelines and ip_adapter
+    package for face swap, and the engines package for video. Shipping them
+    individually is how installs ended up partial, so they travel together.
+    """
+
+    try:
+        payload, digest = NODE_BUNDLE_CACHE.get()
+    except node_bundle.BundleError as exc:
+        LOGGER.error("node bundle build failed: %s", exc)
+        return jsonify({"error": "bundle unavailable", "detail": str(exc)}), 503
+
+    response = send_file(
+        io.BytesIO(payload),
+        mimetype="application/gzip",
+        as_attachment=True,
+        download_name="havnai-node-runtime.tar.gz",
+    )
+    response.headers["X-Havnai-Bundle-Sha256"] = digest
+    response.headers["X-Havnai-Client-Version"] = APP_VERSION
+    response.headers["ETag"] = f'"{digest}"'
+    return response
+
+
+@app.route("/client/bundle/manifest")
+def client_bundle_manifest() -> Any:
+    """Per-file digests so a node can verify or repair its runtime."""
+
+    try:
+        manifest = node_bundle.bundle_manifest(BASE_DIR)
+    except node_bundle.BundleError as exc:
+        return jsonify({"error": "bundle unavailable", "detail": str(exc)}), 503
+    manifest["client_version"] = APP_VERSION
+    return jsonify(manifest)
 
 
 @app.route("/favicon.ico")
@@ -6027,6 +6078,124 @@ def _lora_matches_pipeline(lora: Dict[str, Any], target_pipeline: str) -> bool:
     return True
 
 
+def _public_model_source(model_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Project a manifest entry's source block into its public form.
+
+    Manifest entries carry an absolute ``path`` on coordinator storage. That is
+    an internal detail and must never reach a node, so self-hosted models are
+    advertised only as ``kind: coordinator`` and fetched by name through
+    ``/models/download/<name>``.
+    """
+
+    raw = model_data.get("source")
+    raw = raw if isinstance(raw, dict) else {}
+    kind = str(raw.get("kind") or "").strip().lower()
+
+    if not kind:
+        # No explicit source: infer one. Anything sitting on coordinator
+        # storage can be served by us; everything else is operator-supplied.
+        kind = "coordinator" if str(model_data.get("path") or "").strip() else "operator"
+
+    name = str(model_data.get("name") or "").strip()
+    filename = str(raw.get("filename") or "").strip()
+    if not filename:
+        stored = str(model_data.get("path") or "").strip()
+        filename = Path(stored).name if stored else f"{name}.safetensors"
+
+    source: Dict[str, Any] = {
+        "kind": kind,
+        "filename": filename,
+        "sha256": str(raw.get("sha256") or "").strip().lower(),
+        "size_bytes": int(raw.get("size_bytes") or 0),
+        "license": str(raw.get("license") or "").strip(),
+    }
+
+    if kind == "hf":
+        source["repo_id"] = str(raw.get("repo_id") or "").strip()
+        source["revision"] = str(raw.get("revision") or "main").strip() or "main"
+    elif kind == "operator":
+        source["notes"] = str(raw.get("notes") or "").strip()
+
+    return source
+
+
+def _resolve_hosted_model(model_name: str) -> Optional[Path]:
+    """Locate a self-hosted artifact, refusing anything outside our storage."""
+
+    refresh_manifest()
+    with LOCK:
+        entry = MANIFEST_MODELS.get(model_name.lower())
+    if not entry:
+        return None
+
+    source = _public_model_source(entry)
+    if source.get("kind") != "coordinator":
+        return None
+
+    stored = str(entry.get("path") or "").strip()
+    candidates: List[Path] = []
+    if stored:
+        candidates.append(Path(stored))
+    candidates.append(MODEL_STORAGE_DIR / str(source.get("filename") or ""))
+
+    storage_root = MODEL_STORAGE_DIR.resolve()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if not resolved.is_file():
+            continue
+        # A manifest path outside our storage root is a misconfiguration, not
+        # something to serve blindly.
+        if resolved == storage_root or storage_root in resolved.parents:
+            return resolved
+        LOGGER.warning(
+            "model %s resolves outside HAVNAI_MODEL_STORAGE_DIR (%s); refusing to serve",
+            model_name,
+            resolved,
+        )
+    return None
+
+
+@app.route("/models/download/<path:model_name>", methods=["GET"])
+def models_download(model_name: str) -> Any:
+    """Stream a self-hosted model artifact to an authenticated node.
+
+    Supports HTTP Range so an interrupted multi-gigabyte transfer resumes
+    instead of restarting.
+    """
+
+    unauthorized = require_node()
+    if unauthorized is not None:
+        return unauthorized
+
+    artifact = _resolve_hosted_model(model_name)
+    if artifact is None:
+        return (
+            jsonify(
+                {
+                    "error": "model artifact not available",
+                    "detail": (
+                        "This model is not hosted by the coordinator. Check /models/list "
+                        "for its source: it may come from Hugging Face or be operator-supplied."
+                    ),
+                }
+            ),
+            404,
+        )
+
+    response = send_file(
+        artifact,
+        mimetype="application/octet-stream",
+        as_attachment=True,
+        download_name=artifact.name,
+        conditional=True,  # enables Range handling for resumable downloads
+    )
+    response.headers["Accept-Ranges"] = "bytes"
+    return response
+
+
 @app.route("/models/list", methods=["GET"])
 def models_list() -> Any:
     """
@@ -6150,6 +6319,9 @@ def models_list() -> Any:
                 "available_modes": model_data.get("available_modes") or None,
                 "default_pipeline_mode": model_data.get("default_pipeline_mode") or None,
                 "default_upscaler": model_data.get("default_upscaler") if "default_upscaler" in model_data else None,
+                # Delivery descriptor: tells a node how to obtain the weights.
+                # Never exposes our local filesystem paths.
+                "source": _public_model_source(model_data),
             }
         )
 

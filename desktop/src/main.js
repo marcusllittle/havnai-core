@@ -88,7 +88,11 @@ async function refreshInstallState() {
     } else if (state.has_venv || state.has_runtime) {
       path.textContent = `${state.havnai_home} · incomplete install`;
     } else {
-      path.textContent = `No node installed — use Setup to install one`;
+      path.textContent = `No node installed — open Setup and click Install node`;
+    }
+    if (state.platform === "windows") {
+      $("setup-intro").textContent =
+        "Enter the coordinator details, then install. On Windows, the app downloads the runtime, prepares Python, and creates Start / Stop controls automatically.";
     }
     return state;
   } catch (err) {
@@ -308,7 +312,7 @@ $("btn-install").addEventListener("click", async () => {
     appendConsole($("install-console"), String(err), true);
     toast(String(err), true);
     button.disabled = false;
-    button.textContent = "Install / repair runtime";
+    button.textContent = "Install node";
   }
 });
 
@@ -325,7 +329,7 @@ listen("install-output-done", async (event) => {
     !success
   );
   $("btn-install").disabled = false;
-  $("btn-install").textContent = "Install / repair runtime";
+  $("btn-install").textContent = "Install node";
   toast(success ? "Install complete." : "Install finished with issues — see output.", !success);
   await refreshInstallState();
   await runDoctor();

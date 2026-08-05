@@ -53,8 +53,26 @@
       <section id="panel-setup" class="panel" role="tabpanel">
         <div class="panel-head">
           <div>
-            <h2>Configuration</h2>
-            <p class="muted">Saved to the node's <code>.env</code>. Restart the node to apply.</p>
+            <h2>Install your node</h2>
+            <p id="setup-intro" class="muted">
+              Enter the coordinator details, then install. The app downloads the runtime,
+              prepares Python, checks the machine, and sets up Start / Stop controls.
+            </p>
+          </div>
+        </div>
+
+        <div class="setup-flow" aria-label="Install steps">
+          <div class="flow-step">
+            <span>1</span>
+            <strong>Connect</strong>
+          </div>
+          <div class="flow-step">
+            <span>2</span>
+            <strong>Install</strong>
+          </div>
+          <div class="flow-step">
+            <span>3</span>
+            <strong>Start</strong>
           </div>
         </div>
 
@@ -83,8 +101,8 @@
           </label>
 
           <div class="actions">
-            <button type="submit" class="btn btn-primary">Save configuration</button>
-            <button type="button" id="btn-install" class="btn">Install / repair runtime</button>
+            <button type="submit" class="btn">Save details</button>
+            <button type="button" id="btn-install" class="btn btn-primary">Install node</button>
             <label class="checkbox inline">
               <input id="install-skip-models" type="checkbox" />
               <span>Skip model download</span>
@@ -94,10 +112,10 @@
 
         <div class="console-wrap">
           <div class="console-head">
-            <h3>Installer output</h3>
+            <h3>Install progress</h3>
             <button id="btn-clear-install" class="btn btn-small">Clear</button>
           </div>
-          <pre id="install-console" class="console">Idle. Use “Install / repair runtime” to (re)build this node.</pre>
+          <pre id="install-console" class="console">Ready. Click Install node to set up this machine.</pre>
         </div>
       </section>
 

@@ -14,7 +14,7 @@ different answers about the same machine.
 | Tab | Purpose |
 | --- | --- |
 | **Health** | Runs `client.doctor --json` and shows, per capability (image, face swap, video), whether the node can serve it and exactly what is blocking it. |
-| **Setup** | Edits the node's `.env` and runs the installer, streaming its output live. |
+| **Setup** | Edits the node's `.env` and installs or repairs the runtime, streaming progress live. On Windows this is a native app-driven install under `%USERPROFILE%\.havnai`; on Linux/macOS it runs the coordinator shell installer. |
 | **Models** | Shows the download plan and fetches missing weights with per-model progress. Distinguishes Hugging Face, coordinator-hosted and operator-supplied models. |
 | **Activity** | Tails the node log. |
 
@@ -64,10 +64,24 @@ whose stdout and stderr are streamed to the UI as `install-output` and
 `models-output` events, so the window never freezes and the operator can see
 progress as it happens.
 
+## Windows operator flow
+
+The Windows app is intended for non-technical operators:
+
+1. Install Python 3.10+ from python.org and enable **Add python.exe to PATH**.
+2. Open HavnAI Node.
+3. Enter the coordinator URL, join token, wallet and node name.
+4. Click **Install node**.
+5. When preflight passes, click **Start node**.
+
+The app creates `%USERPROFILE%\.havnai`, downloads the runtime bundle from
+`/client/bundle.tar.gz`, creates the Python virtual environment, installs node
+dependencies, writes `.env`, and creates `.cmd` launchers for the node, doctor
+and model fetcher.
+
 ## Notes
 
 - The app never invents state. If no node is installed, Health says so and
   points at the Setup tab rather than reporting a false diagnosis.
 - The join token is written to `~/.havnai/.env` with `0600` permissions.
-- Automated install is not supported on Windows; operators there should use
-  WSL2. The app detects this and says so instead of failing obscurely.
+- Windows installs are native and do not require WSL2.

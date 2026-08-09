@@ -100,6 +100,36 @@ class ImagePipelineCacheTests(unittest.TestCase):
         self.assertEqual(load2, 0)
         self.assertEqual(build_calls["count"], 1)
 
+    def test_acquire_pipeline_releases_old_model_before_building_next(self) -> None:
+        entry = SimpleNamespace(name="m2")
+        model_a = Path("/tmp/model-a.safetensors")
+        model_b = Path("/tmp/model-b.safetensors")
+        old_pipe = _FakePipe()
+        new_pipe = _FakePipe()
+        events = []
+        old_key = client_module._image_pipeline_cache_key(model_a, "sdxl", "cpu", "float16")
+        with client_module._IMAGE_PIPELINE_CACHE_LOCK:
+            client_module._IMAGE_PIPELINE_CACHE[old_key] = old_pipe
+
+        def _release(pipe):
+            events.append(("release", pipe))
+
+        def _build(*args, **kwargs):
+            events.append(("build", None))
+            return new_pipe, 42
+
+        with patch.object(client_module, "_release_image_pipeline", side_effect=_release), patch.object(
+            client_module, "_construct_base_image_pipeline", side_effect=_build
+        ):
+            pipe, cache_hit, load_ms = client_module._acquire_base_image_pipeline(
+                entry, model_b, "sdxl", "float16", True, "cpu"
+            )
+
+        self.assertEqual(events, [("release", old_pipe), ("build", None)])
+        self.assertIs(pipe, new_pipe)
+        self.assertFalse(cache_hit)
+        self.assertEqual(load_ms, 42)
+
     def test_lora_run_uses_transient_pipeline_and_does_not_use_cache_path(self) -> None:
         entry = SimpleNamespace(name="m2", pipeline="sd15")
         model_path = Path("/tmp/model-b.safetensors")

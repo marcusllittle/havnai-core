@@ -1,0 +1,38 @@
+version: "3.9"
+
+services:
+  havnai-core:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://havnai:${POSTGRES_PASSWORD:-changeme}@postgres:5432/havnai
+    volumes:
+      - ./server/manifests:/app/server/manifests
+      - ./static/outputs:/app/static/outputs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: havnai
+      POSTGRES_USER: havnai
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U havnai"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

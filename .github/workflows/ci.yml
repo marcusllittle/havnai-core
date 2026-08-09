@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r server/requirements.txt
+
+      - name: Syntax check all server modules
+        run: |
+          python -m py_compile server/app.py
+          python -m py_compile server/analytics.py
+          python -m py_compile server/astra_rewards.py
+          python -m py_compile server/blockchain.py
+          python -m py_compile server/credits.py
+          python -m py_compile server/db.py
+          python -m py_compile server/gallery.py
+          python -m py_compile server/hai_funding.py
+          python -m py_compile server/identity_anchors.py
+          python -m py_compile server/invite.py
+          python -m py_compile server/job_helpers.py
+          python -m py_compile server/rate_limiter.py
+          python -m py_compile server/alerting.py
+          python -m py_compile server/stale_job_recovery.py
+          python -m py_compile server/rewards.py
+          python -m py_compile server/safety.py
+          python -m py_compile server/settlement.py
+          python -m py_compile server/sse.py
+          python -m py_compile server/stripe_payments.py
+          python -m py_compile server/validators.py
+          python -m py_compile server/workflows.py
+
+      - name: Run tests
+        run: python -m pytest tests/ -v --tb=short
+        env:
+          PYTHONPATH: ${{ github.workspace }}

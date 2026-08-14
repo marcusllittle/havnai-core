@@ -6,3 +6,4 @@ tmp_gpu/
 server/logs/
 db/
 .venv/
+nodes.demo.json

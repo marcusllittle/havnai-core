@@ -23,9 +23,13 @@ Usage::
     # start over
     python scripts/seed_demo.py --reset --serve
 
-Point the coordinator at the same database when you boot it::
+Point the coordinator at the seeded database and node registry when you boot it::
 
-    HAVNAI_DB_PATH=db/demo.db SERVER_PORT=5001 python app.py
+    cd server
+    HAVNAI_DB_PATH=../db/demo.db HAVNAI_NODES_PATH=../nodes.demo.json \
+        SERVER_PORT=5001 python app.py
+
+Both of those paths are gitignored, so a demo never dirties the working tree.
 """
 
 from __future__ import annotations
@@ -51,7 +55,11 @@ import astra_rewards  # noqa: E402
 DEFAULT_DB = REPO_ROOT / "db" / "demo.db"
 LEDGER_DB = REPO_ROOT / "db" / "ledger.db"
 MANIFEST = SERVER_DIR / "manifests" / "registry.json"
-NODES_FILE = REPO_ROOT / "nodes.json"
+
+# Deliberately NOT nodes.json: that file is tracked, and demo node state has no
+# business landing in a commit. The coordinator reads HAVNAI_NODES_PATH, so the
+# demo gets its own registry and the real one is never touched.
+DEFAULT_NODES_FILE = REPO_ROOT / "nodes.demo.json"
 
 # Mirrors REWARD_CONFIG in server/app.py. Kept as env-overridable so a demo
 # can be tuned the same way production is.
@@ -256,7 +264,7 @@ def seed_astra_runs(conn: sqlite3.Connection, rng: random.Random, count: int, wi
     return {"runs": count, "credits": round(total, 2)}
 
 
-def seed(db_path: Path, job_count: int, hours: float, seed_value: int) -> Dict[str, Any]:
+def seed(db_path: Path, job_count: int, hours: float, seed_value: int, nodes_file: Path) -> Dict[str, Any]:
     """Write a day of completed work and its rewards into ``db_path``."""
     rng = random.Random(seed_value)
     catalog = load_manifest_weights()
@@ -351,7 +359,7 @@ def seed(db_path: Path, job_count: int, hours: float, seed_value: int) -> Dict[s
     conn.commit()
     conn.close()
 
-    write_nodes_file(per_node, rng, now)
+    write_nodes_file(per_node, rng, now, nodes_file)
 
     top_model = max(per_model.items(), key=lambda kv: kv[1])[0] if per_model else None
     return {
@@ -366,9 +374,9 @@ def seed(db_path: Path, job_count: int, hours: float, seed_value: int) -> Dict[s
     }
 
 
-def write_nodes_file(per_node: Dict[str, Dict[str, float]], rng: random.Random, now: float) -> None:
-    """Rewrite nodes.json so the dashboard's per-node HAI column agrees with the
-    ledger.
+def write_nodes_file(per_node: Dict[str, Dict[str, float]], rng: random.Random, now: float, nodes_file: Path) -> None:
+    """Write the demo node registry so the dashboard's per-node HAI column agrees
+    with the ledger.
 
     The coordinator only credits ``NODES[id]["rewards"]`` when a result arrives
     over ``/results``, and the seeder writes history straight to SQLite. Without
@@ -404,7 +412,7 @@ def write_nodes_file(per_node: Dict[str, Dict[str, float]], rng: random.Random, 
             "start_time": now - 86_400,
             "last_seen": stamp,
         }
-    NODES_FILE.write_text(json.dumps(payload, indent=2))
+    nodes_file.write_text(json.dumps(payload, indent=2))
 
 
 def heartbeat(server: str, interval: float) -> None:
@@ -450,6 +458,11 @@ def heartbeat(server: str, interval: float) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--db", default=str(DEFAULT_DB), help="database to seed (default: db/demo.db)")
+    parser.add_argument(
+        "--nodes-file",
+        default=str(DEFAULT_NODES_FILE),
+        help="node registry to write (default: nodes.demo.json; point the coordinator at it with HAVNAI_NODES_PATH)",
+    )
     parser.add_argument("--jobs", type=int, default=340, help="how many jobs of history to write")
     parser.add_argument("--hours", type=float, default=24.0, help="spread history over this many hours")
     parser.add_argument("--seed", type=int, default=7, help="RNG seed; keeps runs reproducible")
@@ -476,8 +489,10 @@ def main() -> int:
             db_path.unlink()
             print(f"removed {db_path}")
 
-        summary = seed(db_path, args.jobs, args.hours, args.seed)
+        nodes_file = Path(args.nodes_file).resolve()
+        summary = seed(db_path, args.jobs, args.hours, args.seed, nodes_file)
         print(f"seeded {db_path}")
+        print(f"  nodes       {nodes_file.name}")
         print(f"  jobs        {summary['jobs']} ({summary['succeeded']} ok / {summary['failed']} failed)")
         print(f"  success     {summary['success_rate']}%")
         print(f"  distributed {summary['total_hai']} HAI")
@@ -485,7 +500,8 @@ def main() -> int:
         print(f"  astra runs  {summary['astra_runs']} ({summary['astra_credits']} credits paid)")
         print()
         print("boot the coordinator against it:")
-        print(f"  cd server && HAVNAI_DB_PATH={db_path} SERVER_PORT=5001 python app.py")
+        print(f"  cd server && HAVNAI_DB_PATH={db_path} \\")
+        print(f"    HAVNAI_NODES_PATH={nodes_file} SERVER_PORT=5001 python app.py")
         print()
 
     if args.serve:

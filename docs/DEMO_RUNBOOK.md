@@ -23,7 +23,8 @@ python3 -m venv .venv && .venv/bin/pip install -r server/requirements.txt
 .venv/bin/python scripts/seed_demo.py --reset --db db/demo.db
 
 cd server
-HAVNAI_DB_PATH=../db/demo.db SERVER_PORT=5001 ../.venv/bin/python app.py
+HAVNAI_DB_PATH=../db/demo.db HAVNAI_NODES_PATH=../nodes.demo.json \
+  SERVER_PORT=5001 ../.venv/bin/python app.py
 ```
 
 Two things that will bite you if you improvise:
@@ -33,10 +34,10 @@ Two things that will bite you if you improvise:
 - **Seed while the server is stopped.** `--reset` deletes the database file;
   doing that under a live server leaves it holding a dead handle and every
   endpoint returns 500.
-- **The seeder rewrites `nodes.json`**, which is tracked in git. That is
-  deliberate — it is how the dashboard's per-node HAI column gets populated —
-  but run `git checkout nodes.json` before you commit anything after the talk,
-  so demo node state does not land in the repo.
+- **Pass `HAVNAI_NODES_PATH`.** The seeder writes its node registry to
+  `nodes.demo.json` and the coordinator defaults to the tracked `nodes.json`, so
+  without this the dashboard's per-node HAI column reads zero. Both demo files
+  are gitignored, so nothing you run here dirties the working tree.
 
 ### Terminal 2 — hold the nodes online
 

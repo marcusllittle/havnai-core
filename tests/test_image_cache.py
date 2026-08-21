@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import sys
+import tempfile
 import threading
 import unittest
 from pathlib import Path
@@ -279,9 +280,9 @@ class ImagePipelineCacheTests(unittest.TestCase):
         entry = SimpleNamespace(name="m-inpaint", pipeline="sdxl")
         model_path = Path("/tmp/model-inpaint.safetensors")
         fake_pipe = _FakePipe()
-        source = client_module.Image.new("RGB", (64, 64), color=(80, 90, 100))
-        mask = client_module.Image.new("RGB", (64, 64), color="black")
-        client_module.ImageDraw.Draw(mask).rectangle((0, 0, 31, 63), fill="white")
+        source = client_module.Image.new("RGB", (256, 256), color=(80, 90, 100))
+        mask = client_module.Image.new("RGB", (256, 256), color="black")
+        client_module.ImageDraw.Draw(mask).rectangle((0, 0, 127, 255), fill="white")
         source_encoded = io.BytesIO()
         mask_encoded = io.BytesIO()
         source.save(source_encoded, format="PNG")
@@ -292,12 +293,19 @@ class ImagePipelineCacheTests(unittest.TestCase):
 
         def _capture_output(image, *_args, **_kwargs):
             saved["image"] = image.copy()
+            saved["save_kwargs"] = _kwargs
 
         with patch.object(client_module, "read_gpu_stats", return_value={"utilization": 0}), patch.object(
             client_module, "_resolve_image_runtime", return_value=("cpu", "float32", True, "sdxl")
         ), patch.object(
             client_module, "_acquire_base_image_pipeline", return_value=(fake_pipe, True, 0)
-        ) as acquire_mock, patch.object(client_module, "_save_output_image", side_effect=_capture_output):
+        ) as acquire_mock, patch.object(
+            client_module, "_is_havnai_output_reference", return_value=True
+        ), patch.object(
+            client_module,
+            "_restore_existing_output_watermark",
+            side_effect=lambda image, _source: (image, True),
+        ), patch.object(client_module, "_save_output_image", side_effect=_capture_output):
             metrics, _, _ = client_module.run_image_generation(
                 task_id="job-inpaint",
                 entry=entry,
@@ -319,6 +327,8 @@ class ImagePipelineCacheTests(unittest.TestCase):
         self.assertTrue(metrics["image_to_image_used"])
         self.assertTrue(metrics["inpainting_used"])
         self.assertEqual(metrics["mask_feather_pixels"], 10)
+        self.assertTrue(metrics["existing_watermark_preserved"])
+        self.assertFalse(saved["save_kwargs"]["apply_watermark"])
         acquire_mock.assert_called_once_with(
             entry, model_path, "sdxl", "float32", True, "cpu", "inpaint"
         )
@@ -332,6 +342,71 @@ class ImagePipelineCacheTests(unittest.TestCase):
         boundary_pixel = saved["image"].getpixel((128, 128))
         self.assertNotEqual(boundary_pixel, (10, 20, 30))
         self.assertNotEqual(boundary_pixel, (80, 90, 100))
+
+    def test_havnai_output_reference_recognition_is_narrow(self) -> None:
+        self.assertTrue(
+            client_module._is_havnai_output_reference("/static/outputs/job-abc123.png")
+        )
+        self.assertTrue(
+            client_module._is_havnai_output_reference(
+                "https://api.joinhavn.io/static/outputs/job-abc123.png"
+            )
+        )
+        self.assertFalse(
+            client_module._is_havnai_output_reference(
+                "/static/outputs/originals/job-abc123.png"
+            )
+        )
+        self.assertFalse(client_module._is_havnai_output_reference("data:image/png;base64,abc"))
+
+    def test_save_output_image_skips_only_requested_watermark_overlay(self) -> None:
+        source = client_module.Image.new("RGB", (32, 32), color=(20, 40, 60))
+        stamped = client_module.Image.new("RGB", (32, 32), color=(200, 210, 220))
+        with tempfile.TemporaryDirectory() as tmp_dir, patch.object(
+            client_module,
+            "_apply_output_watermark",
+            return_value=stamped,
+        ) as watermark_mock:
+            output_dir = Path(tmp_dir)
+            normal_path = output_dir / "normal.png"
+            preserved_path = output_dir / "preserved.png"
+
+            client_module._save_output_image(source, normal_path, task_id="normal")
+            client_module._save_output_image(
+                source,
+                preserved_path,
+                task_id="preserved",
+                apply_watermark=False,
+            )
+
+            watermark_mock.assert_called_once()
+            self.assertEqual(
+                client_module.Image.open(normal_path).convert("RGB").getpixel((0, 0)),
+                (200, 210, 220),
+            )
+            self.assertEqual(
+                client_module.Image.open(preserved_path).convert("RGB").getpixel((0, 0)),
+                (20, 40, 60),
+            )
+
+    def test_existing_watermark_region_is_restored_from_source(self) -> None:
+        generated = client_module.Image.new("RGB", (32, 32), color=(200, 10, 20))
+        source = client_module.Image.new("RGB", (32, 32), color=(10, 200, 20))
+        watermark = client_module.Image.new("RGBA", (8, 8), color=(255, 255, 255, 255))
+
+        with patch.object(
+            client_module,
+            "_scaled_output_watermark",
+            return_value=(watermark, (24, 24, 32, 32)),
+        ):
+            restored, preserved = client_module._restore_existing_output_watermark(
+                generated,
+                source,
+            )
+
+        self.assertTrue(preserved)
+        self.assertEqual(restored.getpixel((0, 0)), (200, 10, 20))
+        self.assertEqual(restored.getpixel((28, 28)), (10, 200, 20))
 
     def test_reference_output_size_tracks_portrait_source_ratio(self) -> None:
         width, height = client_module._reference_output_size((768, 1344), (768, 768))

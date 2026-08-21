@@ -454,23 +454,57 @@ def _apply_text_watermark(image: Any) -> Any:
     return Image.alpha_composite(base, overlay).convert(image.mode if image.mode != "RGBA" else "RGBA")
 
 
+def _scaled_output_watermark(image: Any) -> Optional[Tuple[Any, Tuple[int, int, int, int]]]:
+    if Image is None or not WATERMARK_ENABLED:
+        return None
+    watermark = _load_watermark_image()
+    if watermark is None:
+        return None
+
+    max_width = max(WATERMARK_MIN_WIDTH, int(image.width * WATERMARK_MAX_WIDTH_PCT))
+    scale = max_width / max(1, watermark.width)
+    target_height = max(1, int(watermark.height * scale))
+    watermark = watermark.resize((max_width, target_height), Image.LANCZOS)
+    margin = max(12, int(min(image.size) * WATERMARK_MARGIN_PCT))
+    x = max(margin, image.width - watermark.width - margin)
+    y = max(margin, image.height - watermark.height - margin)
+    return watermark, (x, y, x + watermark.width, y + watermark.height)
+
+
+def _is_havnai_output_reference(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text or text.startswith("data:"):
+        return False
+    parsed = urllib.parse.urlparse(text)
+    path = urllib.parse.unquote(parsed.path or text).replace("\\", "/")
+    return bool(
+        re.search(
+            r"(?:^|/)static/outputs/(?!originals/|videos/)[^/]+\.png$",
+            path,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _restore_existing_output_watermark(image: Any, source: Any) -> Tuple[Any, bool]:
+    prepared = _scaled_output_watermark(source)
+    if prepared is None or image.size != source.size:
+        return image, False
+    _, bounds = prepared
+    restored = image.copy()
+    restored.paste(source.crop(bounds), bounds)
+    return restored, True
+
+
 def _apply_output_watermark(image: Any, task_id: str = "") -> Any:
     if Image is None or not WATERMARK_ENABLED:
         return image
     try:
         base = image.convert("RGBA")
-        watermark = _load_watermark_image()
-        if watermark is None:
+        prepared = _scaled_output_watermark(base)
+        if prepared is None:
             return _apply_text_watermark(image)
-
-        max_width = max(WATERMARK_MIN_WIDTH, int(base.width * WATERMARK_MAX_WIDTH_PCT))
-        scale = max_width / max(1, watermark.width)
-        target_height = max(1, int(watermark.height * scale))
-        watermark = watermark.resize((max_width, target_height), Image.LANCZOS)
-
-        margin = max(12, int(min(base.size) * WATERMARK_MARGIN_PCT))
-        x = max(margin, base.width - watermark.width - margin)
-        y = max(margin, base.height - watermark.height - margin)
+        watermark, (x, y, _, _) = prepared
 
         overlay = Image.new("RGBA", base.size, (255, 255, 255, 0))
         overlay.alpha_composite(watermark, (x, y))
@@ -480,7 +514,12 @@ def _apply_output_watermark(image: Any, task_id: str = "") -> Any:
         return image
 
 
-def _save_output_image(image: Any, output_path: Path, task_id: str = "") -> None:
+def _save_output_image(
+    image: Any,
+    output_path: Path,
+    task_id: str = "",
+    apply_watermark: bool = True,
+) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     # Save the original (unwatermarked) copy for owner downloads
     original_dir = output_path.parent / "originals"
@@ -490,7 +529,7 @@ def _save_output_image(image: Any, output_path: Path, task_id: str = "") -> None
     except Exception as exc:
         log(f"Failed to save original copy: {exc}", prefix="⚠️", task_id=task_id)
     # Save the watermarked version as the default output
-    final_image = _apply_output_watermark(image, task_id=task_id)
+    final_image = _apply_output_watermark(image, task_id=task_id) if apply_watermark else image
     final_image.save(output_path)
 
 
@@ -3545,6 +3584,7 @@ def run_image_generation(
     image_to_image_used = False
     inpainting_used = False
     mask_feather_pixels = 0
+    existing_watermark_preserved = False
     init_image_raw: Optional[str] = None
     inpaint_mask_raw: Optional[str] = None
     img2img_strength = 0.30
@@ -3851,7 +3891,21 @@ def run_image_generation(
                             init_pil.convert("RGB"),
                             composite_mask,
                         )
-                    _save_output_image(img, output_path, task_id=task_id)
+                        if (
+                            preserve_reference_aspect
+                            and reference_source_size == init_pil.size
+                            and _is_havnai_output_reference(init_image_raw)
+                        ):
+                            img, existing_watermark_preserved = _restore_existing_output_watermark(
+                                img,
+                                init_pil,
+                            )
+                    _save_output_image(
+                        img,
+                        output_path,
+                        task_id=task_id,
+                        apply_watermark=not existing_watermark_preserved,
+                    )
                     if return_b64:
                         with output_path.open("rb") as fh:
                             image_b64 = base64.b64encode(fh.read()).decode("utf-8")
@@ -3903,6 +3957,7 @@ def run_image_generation(
         "image_to_image_used": image_to_image_used,
         "inpainting_used": inpainting_used,
         "mask_feather_pixels": mask_feather_pixels if inpainting_used else None,
+        "existing_watermark_preserved": existing_watermark_preserved,
         "img2img_strength": img2img_strength if use_img2img else None,
         "preserve_reference_aspect": preserve_reference_aspect if use_img2img else None,
         "seed": resolved_seed,

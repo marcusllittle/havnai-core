@@ -115,6 +115,7 @@ def test_ltx23_manifest_advertises_expected_workflows() -> None:
 
     assert [item["id"] for item in workflows] == [
         "faithful_i2v",
+        "faithful_portrait_i2v",
         "balanced_i2v",
         "portrait_i2v",
         "dynamic_i2v",
@@ -123,3 +124,21 @@ def test_ltx23_manifest_advertises_expected_workflows() -> None:
     assert workflows[0]["label"] == "Maximum fidelity"
     assert workflows[0]["settings"]["strength"] == 0.98
     assert workflows[0]["settings"]["lora_strength"] == 0.35
+    portrait_fidelity = workflows[1]
+    assert portrait_fidelity["settings"]["width"] == 704
+    assert portrait_fidelity["settings"]["height"] == 1280
+    assert portrait_fidelity["settings"]["strength"] == 0.98
+    assert portrait_fidelity["settings"]["lora_strength"] == 0.35
+
+    payload, selected = video_workflows.apply_video_workflow(
+        model,
+        {
+            "workflow_id": "faithful_portrait_i2v",
+            "init_image": "source-image",
+        },
+    )
+    assert selected and selected["id"] == "faithful_portrait_i2v"
+    assert payload["width"] == 704
+    assert payload["height"] == 1280
+    assert payload["strength"] == 0.98
+    assert payload["lora_strength"] == 0.35

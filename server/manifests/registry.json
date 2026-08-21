@@ -642,6 +642,22 @@
           }
         },
         {
+          "id": "faithful_portrait_i2v",
+          "label": "Maximum fidelity - Portrait",
+          "description": "Preserves portrait-oriented sources with minimal redraw and controlled motion.",
+          "requires_init_image": true,
+          "settings": {
+            "steps": 8,
+            "guidance": 1.0,
+            "width": 704,
+            "height": 1280,
+            "frames": 97,
+            "fps": 24,
+            "strength": 0.98,
+            "lora_strength": 0.35
+          }
+        },
+        {
           "id": "balanced_i2v",
           "label": "Balanced motion",
           "description": "Balances source consistency with more visible body and camera motion.",

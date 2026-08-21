@@ -11,6 +11,7 @@ from engines.wangp.runner import (
     _ingredients_lora_ready,
     _resolve_ltx23_lora,
     _resolve_prompt_enhancer,
+    advertised_capabilities,
 )
 from engines.wangp.worker import (
     CONTINUATION_INSTRUCTION,
@@ -53,6 +54,18 @@ def test_ingredients_lora_probe_requires_exact_runtime_file(tmp_path: Path) -> N
     lora_path.touch()
 
     assert _ingredients_lora_ready(tmp_path)
+
+
+def test_runtime_advertises_ingredients_only_when_file_is_present(tmp_path: Path) -> None:
+    declared = ["image_to_video", "ingredients_reference_sheet"]
+
+    assert advertised_capabilities(declared, root=tmp_path) == ["image_to_video"]
+
+    lora_path = tmp_path / "loras" / "ltx2" / INGREDIENTS_LORA_FILENAME
+    lora_path.parent.mkdir(parents=True)
+    lora_path.touch()
+
+    assert advertised_capabilities(declared, root=tmp_path) == declared
 
 
 def test_workflow_strength_overrides_environment_default(

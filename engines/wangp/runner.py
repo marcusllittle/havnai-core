@@ -11,7 +11,7 @@ import subprocess
 import time
 import urllib.parse
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 
 DEFAULT_WANGP_ROOT = Path.home() / ".havnai" / "tools" / "Wan2GP"
@@ -85,6 +85,18 @@ def _resolve_prompt_enhancer(value: Any, *, has_source: bool) -> str:
 
 def _ingredients_lora_ready(root: Path) -> bool:
     return (root / "loras" / "ltx2" / INGREDIENTS_LORA_FILENAME).is_file()
+
+
+def advertised_capabilities(
+    declared: Iterable[str], *, root: Optional[Path] = None
+) -> List[str]:
+    runtime_root = root or _wangp_root()
+    return [
+        str(capability)
+        for capability in declared
+        if str(capability) != "ingredients_reference_sheet"
+        or _ingredients_lora_ready(runtime_root)
+    ]
 
 
 def runtime_probe() -> Tuple[bool, str]:

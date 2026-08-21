@@ -1058,6 +1058,18 @@ def discover_capabilities() -> Dict[str, Any]:
             except Exception as exc:
                 entry_capabilities = []
                 details.setdefault(name, {})["probe_error"] = str(exc)
+        elif pipeline == "ltx23_wangp":
+            try:
+                from engines.wangp.runner import advertised_capabilities  # type: ignore
+
+                entry_capabilities = advertised_capabilities(entry_capabilities)
+            except Exception as exc:
+                entry_capabilities = [
+                    value
+                    for value in entry_capabilities
+                    if value != "ingredients_reference_sheet"
+                ]
+                details.setdefault(name, {})["probe_error"] = str(exc)
         details[name] = {
             **details.get(name, {}),
             "pipeline": pipeline or "sd15",

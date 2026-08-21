@@ -92,6 +92,51 @@ class JobHelperSupportMappingTests(unittest.TestCase):
         job = job_helpers.fetch_next_job_for_node("node-a")
         self.assertIsNone(job)
 
+    def test_reference_sheet_job_requires_ingredients_capability(self) -> None:
+        now = time.time()
+        self.conn.execute(
+            """
+            INSERT INTO jobs (id, wallet, model, data, task_type, weight, status, node_id, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, 'queued', NULL, ?)
+            """,
+            (
+                "job-reference",
+                VALID_WALLET,
+                LTX23_MODEL,
+                json.dumps({"reference_image": "data:image/png;base64,reference"}),
+                "LTX_VIDEO_GEN",
+                35.0,
+                now,
+            ),
+        )
+        self.conn.commit()
+
+        job_helpers.get_db = lambda: self.conn
+        job_helpers.get_model_config = lambda model_name: (
+            {"pipeline": "ltx23_wangp"} if model_name == LTX23_MODEL else None
+        )
+        node = {
+            "role": "creator",
+            "supports": ["ltx_video"],
+            "models": [LTX23_MODEL],
+            "pipelines": ["ltx23_wangp"],
+            "capabilities": {
+                LTX23_MODEL: {
+                    "files_present": True,
+                    "capabilities": ["image_to_video"],
+                }
+            },
+        }
+        job_helpers.NODES = {"node-a": node}
+
+        self.assertIsNone(job_helpers.fetch_next_job_for_node("node-a"))
+
+        node["capabilities"][LTX23_MODEL]["capabilities"].append(
+            "ingredients_reference_sheet"
+        )
+        job = job_helpers.fetch_next_job_for_node("node-a")
+        self.assertEqual(job["id"], "job-reference")
+
 
 class CoordinatorCapacityEndpointTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -254,7 +299,7 @@ class VideoWorkflowRequirementEndpointTests(unittest.TestCase):
             app_module, "refresh_manifest", return_value=None
         ), patch.object(
             app_module, "_eligible_online_node_count", return_value=1
-        ), patch.object(
+        ) as eligible_nodes, patch.object(
             app_module.credits, "check_and_deduct_credits", return_value=None
         ), patch.object(
             app_module.job_helpers, "enqueue_job", return_value="job-prompt-enhancer"
@@ -268,6 +313,7 @@ class VideoWorkflowRequirementEndpointTests(unittest.TestCase):
             for endpoint in ("/submit-job", "/generate-video"):
                 with self.subTest(endpoint=endpoint):
                     enqueue_job.reset_mock()
+                    eligible_nodes.reset_mock()
                     response = self.client.post(
                         endpoint,
                         json={
@@ -290,6 +336,10 @@ class VideoWorkflowRequirementEndpointTests(unittest.TestCase):
                         "data:image/png;base64,reference",
                     )
                     self.assertTrue(settings["continuation"])
+                    self.assertEqual(
+                        eligible_nodes.call_args.kwargs["required_capabilities"],
+                        {"ingredients_reference_sheet"},
+                    )
 
     def test_video_submission_endpoints_reject_reference_for_other_ltx_pipelines(
         self,

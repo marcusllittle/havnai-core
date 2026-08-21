@@ -173,7 +173,10 @@ class PlatformApiContractTests(unittest.TestCase):
                     "model_family": "ltx23_wangp",
                     "model_version": "2.3-distilled-1.1",
                     "license_status": "research_owner_only",
-                    "capabilities": ["image_to_video"],
+                    "capabilities": [
+                        "image_to_video",
+                        "ingredients_reference_sheet",
+                    ],
                 },
             }
         )
@@ -227,7 +230,10 @@ class PlatformApiContractTests(unittest.TestCase):
                     "files_present": True,
                     "pipeline": "ltx23_wangp",
                     "model_version": "2.3-distilled-1.1",
-                    "capabilities": ["image_to_video"],
+                    "capabilities": [
+                        "image_to_video",
+                        "ingredients_reference_sheet",
+                    ],
                     "available_modes": ["distilled"],
                 },
             },
@@ -269,7 +275,35 @@ class PlatformApiContractTests(unittest.TestCase):
         self.assertTrue(payload["video_v2_available"])
         self.assertTrue(video["available"])
         self.assertEqual(video["verified_nodes"], ["node-test"])
-        self.assertEqual(video["capabilities"], ["image_to_video"])
+        self.assertEqual(
+            video["capabilities"],
+            ["image_to_video", "ingredients_reference_sheet"],
+        )
+
+    def test_reference_capacity_requires_runtime_capability(self) -> None:
+        self._register_node()
+        required = {"ingredients_reference_sheet"}
+
+        self.assertEqual(
+            app_module._eligible_online_node_count(
+                VIDEO_MODEL,
+                "LTX_VIDEO_GEN",
+                required_capabilities=required,
+            ),
+            1,
+        )
+
+        app_module.NODES["node-test"]["capabilities"][VIDEO_MODEL][
+            "capabilities"
+        ].remove("ingredients_reference_sheet")
+        self.assertEqual(
+            app_module._eligible_online_node_count(
+                VIDEO_MODEL,
+                "LTX_VIDEO_GEN",
+                required_capabilities=required,
+            ),
+            0,
+        )
 
     def test_video_job_list_includes_legacy_video_jobs(self) -> None:
         with app_module.app.app_context():

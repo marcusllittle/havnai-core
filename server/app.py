@@ -1916,6 +1916,7 @@ def _node_can_run_task(
     model_cfg: Dict[str, Any],
     task_type: str,
     now: Optional[float] = None,
+    required_capabilities: Optional[set[str]] = None,
 ) -> bool:
     if node.get("role", "worker") != "creator":
         return False
@@ -1936,10 +1937,20 @@ def _node_can_run_task(
     if node_pipelines and required_pipeline not in node_pipelines:
         return False
 
+    if not job_helpers.node_supports_model_capabilities(
+        node, model_name, required_capabilities or set()
+    ):
+        return False
+
     return True
 
 
-def _eligible_online_node_ids(model_name: str, task_type: str) -> List[str]:
+def _eligible_online_node_ids(
+    model_name: str,
+    task_type: str,
+    *,
+    required_capabilities: Optional[set[str]] = None,
+) -> List[str]:
     normalized_model = str(model_name or "").lower()
     cfg = get_model_config(normalized_model)
     if not cfg:
@@ -1949,13 +1960,31 @@ def _eligible_online_node_ids(model_name: str, task_type: str) -> List[str]:
         nodes_snapshot = list(NODES.items())
     eligible: List[str] = []
     for node_id, node in nodes_snapshot:
-        if _node_can_run_task(node, normalized_model, cfg, task_type, now=now):
+        if _node_can_run_task(
+            node,
+            normalized_model,
+            cfg,
+            task_type,
+            now=now,
+            required_capabilities=required_capabilities,
+        ):
             eligible.append(node_id)
     return eligible
 
 
-def _eligible_online_node_count(model_name: str, task_type: str) -> int:
-    return len(_eligible_online_node_ids(model_name, task_type))
+def _eligible_online_node_count(
+    model_name: str,
+    task_type: str,
+    *,
+    required_capabilities: Optional[set[str]] = None,
+) -> int:
+    return len(
+        _eligible_online_node_ids(
+            model_name,
+            task_type,
+            required_capabilities=required_capabilities,
+        )
+    )
 
 
 def _no_capacity_response(model_name: str, task_type: str, message: Optional[str] = None) -> Any:
@@ -3503,13 +3532,20 @@ def submit_job() -> Any:
     selected_model_name = str(cfg.get("name") or model_name).strip()
     selected_model_key = selected_model_name.lower()
     capacity_task_type = "FACE_SWAP" if task_type == CREATOR_TASK_TYPE and reference_face_url else task_type
-    if _eligible_online_node_count(selected_model_key, capacity_task_type) <= 0:
+    required_capabilities = job_helpers.required_model_capabilities(job_data)
+    if _eligible_online_node_count(
+        selected_model_key,
+        capacity_task_type,
+        required_capabilities=required_capabilities,
+    ) <= 0:
         return _no_capacity_response(
             selected_model_key,
             task_type,
             message=(
                 "No compatible reference-face node capacity is available right now."
                 if task_type == CREATOR_TASK_TYPE and reference_face_url
+                else "No online LTX 2.3 creator has the Ingredients reference-sheet runtime installed."
+                if "ingredients_reference_sheet" in required_capabilities
                 else None
             ),
         )
@@ -3713,8 +3749,21 @@ def generate_video_job() -> Any:
     selected_model_name = str(cfg.get("name") or model_name).strip()
     selected_model_key = selected_model_name.lower()
     capacity_task_type = "LTX_VIDEO_GEN" if is_ltx_video else "VIDEO_GEN"
-    if _eligible_online_node_count(selected_model_key, capacity_task_type) <= 0:
-        return _no_capacity_response(selected_model_key, capacity_task_type)
+    required_capabilities = job_helpers.required_model_capabilities(job_data)
+    if _eligible_online_node_count(
+        selected_model_key,
+        capacity_task_type,
+        required_capabilities=required_capabilities,
+    ) <= 0:
+        return _no_capacity_response(
+            selected_model_key,
+            capacity_task_type,
+            message=(
+                "No online LTX 2.3 creator has the Ingredients reference-sheet runtime installed."
+                if "ingredients_reference_sheet" in required_capabilities
+                else None
+            ),
+        )
 
     # Credit gate — only active when HAVNAI_CREDITS_ENABLED=true
     credit_err = credits.check_and_deduct_credits(wallet, selected_model_name, capacity_task_type)

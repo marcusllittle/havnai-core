@@ -7,7 +7,7 @@ import os
 import sqlite3
 import time
 import uuid
-from typing import Any, Dict, Optional, TYPE_CHECKING
+from typing import Any, Dict, Iterable, Optional, Set, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from typing import Callable
@@ -31,6 +31,55 @@ def _image_job_requires_reference_face(raw_data: Any) -> bool:
         return False
     value = parsed.get("reference_face_url")
     return isinstance(value, str) and bool(value.strip())
+
+
+def required_model_capabilities(raw_data: Any) -> Set[str]:
+    if isinstance(raw_data, dict):
+        parsed = raw_data
+    elif isinstance(raw_data, str) and raw_data.strip():
+        try:
+            parsed = json.loads(raw_data)
+        except Exception:
+            return set()
+    else:
+        return set()
+    if not isinstance(parsed, dict):
+        return set()
+    reference_image = (
+        parsed.get("reference_image")
+        or parsed.get("reference_image_url")
+        or parsed.get("reference_image_b64")
+    )
+    return {"ingredients_reference_sheet"} if reference_image else set()
+
+
+def node_supports_model_capabilities(
+    node: Dict[str, Any], model_name: str, required: Iterable[str]
+) -> bool:
+    required_set = {
+        str(value).strip().lower() for value in required if str(value).strip()
+    }
+    if not required_set:
+        return True
+    details = node.get("capabilities")
+    if not isinstance(details, dict):
+        return False
+    model_detail = next(
+        (
+            value
+            for name, value in details.items()
+            if str(name).lower() == str(model_name).lower() and isinstance(value, dict)
+        ),
+        None,
+    )
+    if not model_detail:
+        return False
+    available = {
+        str(value).strip().lower()
+        for value in (model_detail.get("capabilities") or [])
+        if str(value).strip()
+    }
+    return required_set.issubset(available)
 
 
 def enqueue_job(
@@ -97,6 +146,11 @@ def fetch_next_job_for_node(node_id: str) -> Optional[Dict[str, Any]]:
         required_pipeline = (cfg.get("pipeline") or "sd15").lower()
         node_pipelines = {p.lower() for p in node.get("pipelines", []) if isinstance(p, str)}
         if node_pipelines and required_pipeline not in node_pipelines:
+            continue
+        required_capabilities = required_model_capabilities(row["data"])
+        if not node_supports_model_capabilities(
+            node, model_name, required_capabilities
+        ):
             continue
         return dict(row)
     return None

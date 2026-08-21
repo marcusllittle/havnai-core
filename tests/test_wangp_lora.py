@@ -70,7 +70,12 @@ def test_prompt_enhancer_requires_supported_mode_and_source() -> None:
 def test_prompt_enhancer_uses_isolated_automatic_config(tmp_path: Path) -> None:
     root = tmp_path / "Wan2GP"
     root.mkdir()
-    source_config = {"enhancer_enabled": 3, "enhancer_mode": 1, "profile": 4}
+    source_config = {
+        "enhancer_enabled": 3,
+        "enhancer_mode": 1,
+        "profile": 4,
+        "prompt_enhancer_randomize_seed": True,
+    }
     (root / "wgp_config.json").write_text(json.dumps(source_config))
 
     mode, config_path = _prepare_prompt_enhancer_config(root, tmp_path / "job", "ti")
@@ -80,6 +85,7 @@ def test_prompt_enhancer_uses_isolated_automatic_config(tmp_path: Path) -> None:
     generated = json.loads(config_path.read_text())
     assert generated["enhancer_mode"] == 0
     assert generated["enhancer_enabled"] == 3
+    assert generated["prompt_enhancer_randomize_seed"] is False
     assert json.loads((root / "wgp_config.json").read_text()) == source_config
 
 

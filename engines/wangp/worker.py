@@ -63,6 +63,7 @@ def _prepare_prompt_enhancer_config(
         raise RuntimeError("WanGP prompt enhancer is not enabled")
 
     config["enhancer_mode"] = 0
+    config["prompt_enhancer_randomize_seed"] = False
     config_dir = work_dir / "wangp-config"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "wgp_config.json"

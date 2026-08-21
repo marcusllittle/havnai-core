@@ -11,6 +11,7 @@ from engines.wangp.runner import (
     _resolve_prompt_enhancer,
 )
 from engines.wangp.worker import (
+    CONTINUATION_INSTRUCTION,
     SOURCE_PRESERVATION_INSTRUCTION,
     _apply_lora_settings,
     _prepare_prompt_enhancer_config,
@@ -110,6 +111,17 @@ def test_image_aware_prompt_enhancer_receives_source_preservation_instruction() 
     assert prepared.endswith(SOURCE_PRESERVATION_INSTRUCTION)
     assert "one continuous, chronological shot" in prepared
     assert "visible features spatially and anatomically consistent" in prepared
+
+
+def test_continuation_prompt_advances_without_restarting_action() -> None:
+    prepared = _prompt_with_source_preservation(
+        "She continues turning.", "TI", True, continuation=True
+    )
+
+    assert SOURCE_PRESERVATION_INSTRUCTION in prepared
+    assert prepared.endswith(CONTINUATION_INSTRUCTION)
+    assert "do not restart or repeat" in prepared
+    assert "across the clip boundary" in prepared
 
 
 @pytest.mark.parametrize(

@@ -338,6 +338,7 @@ class PlatformApiContractTests(unittest.TestCase):
             "workflow_id": "faithful_i2v",
             "lora_strength": 0.35,
             "prompt_enhancer": "TI",
+            "continuation": True,
         }
         with app_module.app.app_context():
             job_id = job_helpers.enqueue_job(
@@ -353,6 +354,7 @@ class PlatformApiContractTests(unittest.TestCase):
         self.assertEqual(task["workflow_id"], "faithful_i2v")
         self.assertEqual(task["lora_strength"], 0.35)
         self.assertEqual(task["prompt_enhancer"], "TI")
+        self.assertTrue(task["continuation"])
 
     def test_lease_upload_completion_and_stale_attempt_rejection(self) -> None:
         job_id = self._create_image_job()

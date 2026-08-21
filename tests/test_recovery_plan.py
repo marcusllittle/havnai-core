@@ -276,6 +276,7 @@ class VideoWorkflowRequirementEndpointTests(unittest.TestCase):
                             "prompt": "preserve the source",
                             "workflow_id": "faithful_i2v",
                             "init_image": "data:image/png;base64,source",
+                            "continuation": True,
                         },
                     )
 
@@ -283,6 +284,7 @@ class VideoWorkflowRequirementEndpointTests(unittest.TestCase):
                     settings = json.loads(enqueue_job.call_args.args[3])
                     self.assertEqual(settings["workflow_id"], "faithful_i2v")
                     self.assertEqual(settings["prompt_enhancer"], "TI")
+                    self.assertTrue(settings["continuation"])
 
 
 class ExplicitLoraPolicyTests(unittest.TestCase):

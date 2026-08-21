@@ -3170,6 +3170,8 @@ def submit_job() -> Any:
             )
             if prompt_enhancer:
                 settings["prompt_enhancer"] = prompt_enhancer
+        if init_image and _is_truthy(payload.get("continuation")):
+            settings["continuation"] = True
         strength = _try_parse_float(payload.get("strength"))
         if strength is not None:
             settings["strength"] = max(0.1, min(1.0, strength))
@@ -3666,6 +3668,8 @@ def generate_video_job() -> Any:
     init_image = payload.get("init_image")
     if init_image:
         settings["init_image"] = init_image
+        if _is_truthy(payload.get("continuation")):
+            settings["continuation"] = True
     strength = _try_parse_float(payload.get("strength"))
     if strength is not None:
         settings["strength"] = max(0.1, min(1.0, strength))
@@ -4184,6 +4188,7 @@ def get_creator_tasks() -> Any:
                         "workflow_id",
                         "lora_strength",
                         "prompt_enhancer",
+                        "continuation",
                         "pipeline_mode",
                         "checkpoint_variant",
                         "upscaler",

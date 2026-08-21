@@ -23,6 +23,12 @@ SOURCE_PRESERVATION_INSTRUCTION = (
     "anatomically consistent; do not introduce cuts, morphing, duplication, disappearance, or "
     "unrequested objects. Do not assert details for surfaces hidden in the source image."
 )
+CONTINUATION_INSTRUCTION = (
+    "Continue directly from the supplied frame as the next uninterrupted moment of the same "
+    "shot. Advance the action from its current state; do not restart or repeat an action that "
+    "has already occurred. Preserve movement direction, pose continuity, subject placement, "
+    "camera, lighting, environment, and appearance across the clip boundary."
+)
 
 
 def _atomic_json(path: Path, payload: Dict[str, Any]) -> None:
@@ -53,15 +59,21 @@ def _apply_lora_settings(settings: Dict[str, Any], request: Dict[str, Any]) -> N
 
 
 def _prompt_with_source_preservation(
-    prompt: Any, enhancer_mode: str, has_source: bool
+    prompt: Any,
+    enhancer_mode: str,
+    has_source: bool,
+    continuation: bool = False,
 ) -> str:
     text = str(prompt or "").strip()
     if not has_source or "I" not in enhancer_mode:
         return text
+    instruction = SOURCE_PRESERVATION_INSTRUCTION
+    if continuation:
+        instruction = f"{instruction} {CONTINUATION_INSTRUCTION}"
     return (
-        f"{text}\n@ {SOURCE_PRESERVATION_INSTRUCTION}"
+        f"{text}\n@ {instruction}"
         if text
-        else SOURCE_PRESERVATION_INSTRUCTION
+        else instruction
     )
 
 
@@ -110,7 +122,10 @@ def main() -> int:
         root, status_path.parent, request.get("prompt_enhancer")
     )
     generation_prompt = _prompt_with_source_preservation(
-        request.get("prompt"), prompt_enhancer, bool(source_image)
+        request.get("prompt"),
+        prompt_enhancer,
+        bool(source_image),
+        bool(request.get("continuation")),
     )
 
     sys.path.insert(0, str(root))

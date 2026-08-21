@@ -3812,6 +3812,8 @@ def run_image_generation(
                         generation_kwargs["strength"] = img2img_strength
                         if inpaint_mask is not None:
                             generation_kwargs["mask_image"] = inpaint_mask
+                            generation_kwargs["height"] = img_h
+                            generation_kwargs["width"] = img_w
                         progress_steps = max(1, int(steps * img2img_strength))
                     else:
                         generation_kwargs["height"] = img_h

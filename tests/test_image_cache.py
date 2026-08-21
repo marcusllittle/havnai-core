@@ -324,6 +324,8 @@ class ImagePipelineCacheTests(unittest.TestCase):
         _, kwargs = fake_pipe.calls[0]
         self.assertEqual(kwargs["mask_image"].mode, "L")
         self.assertEqual(kwargs["mask_image"].size, (256, 256))
+        self.assertEqual(kwargs["height"], 256)
+        self.assertEqual(kwargs["width"], 256)
         self.assertEqual(saved["image"].getpixel((32, 128)), (10, 20, 30))
         self.assertEqual(saved["image"].getpixel((224, 128)), (80, 90, 100))
 

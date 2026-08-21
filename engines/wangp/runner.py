@@ -16,6 +16,8 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 DEFAULT_WANGP_ROOT = Path.home() / ".havnai" / "tools" / "Wan2GP"
 MODEL_FILENAME = "ltx-2.3-22b-distilled-1.1_diffusion_model_quanto_bf16_int8.safetensors"
+DEFAULT_LTX23_LORA_FILENAME = "LTX2.3_reasoning_Sulphur-2_I2V_V4.safetensors"
+DEFAULT_LTX23_LORA_STRENGTH = 0.6
 REQUIRED_CHECKPOINTS = (
     MODEL_FILENAME,
     "ltx-2.3-22b_audio_vae.safetensors",
@@ -39,6 +41,29 @@ def _wangp_root() -> Path:
 def _wangp_python(root: Path) -> Path:
     configured = os.getenv("HAVNAI_WANGP_PYTHON", "").strip()
     return Path(configured).expanduser() if configured else root / ".venv" / "bin" / "python"
+
+
+def _resolve_ltx23_lora(root: Path) -> Optional[Tuple[str, float]]:
+    enabled = os.getenv("HAVNAI_LTX23_LORA_ENABLED", "1").strip().lower()
+    if enabled in {"0", "false", "no", "off"}:
+        return None
+
+    filename = os.getenv("HAVNAI_LTX23_LORA", DEFAULT_LTX23_LORA_FILENAME).strip()
+    if not filename:
+        return None
+    if Path(filename).name != filename:
+        raise ValueError("HAVNAI_LTX23_LORA must be a filename in WanGP's loras/ltx2 directory")
+    if not (root / "loras" / "ltx2" / filename).is_file():
+        return None
+
+    raw_strength = os.getenv(
+        "HAVNAI_LTX23_LORA_STRENGTH", str(DEFAULT_LTX23_LORA_STRENGTH)
+    )
+    try:
+        strength = float(raw_strength)
+    except ValueError as exc:
+        raise ValueError("HAVNAI_LTX23_LORA_STRENGTH must be a number") from exc
+    return filename, max(0.0, min(2.0, strength))
 
 
 def runtime_probe() -> Tuple[bool, str]:
@@ -224,6 +249,8 @@ def run_wangp_ltx23(
     if source_strength_raw is None:
         source_strength_raw = 1.0
 
+    lora = _resolve_ltx23_lora(root)
+
     request_payload = {
         "wangp_root": str(root),
         "output_dir": str(worker_output_dir),
@@ -242,6 +269,8 @@ def run_wangp_ltx23(
         "duration_seconds": round((frames - 1) / fps, 3),
         "source_strength": max(0.1, min(1.0, float(source_strength_raw))),
         "seed": seed,
+        "activated_loras": [lora[0]] if lora else [],
+        "loras_multipliers": str(lora[1]) if lora else "",
     }
     work_dir.mkdir(parents=True, exist_ok=True)
     worker_output_dir.mkdir(parents=True, exist_ok=True)
@@ -253,7 +282,8 @@ def run_wangp_ltx23(
     last_status = ""
     last_progress = 5.0
     cancel_event = task.get("_cancel_event")
-    log_fn(f"Starting WanGP LTX-2.3 worker ({frames} frames at {fps}fps, {resolution})")
+    lora_log = f", LoRA {lora[0]} at {lora[1]:g}" if lora else ", no LoRA"
+    log_fn(f"Starting WanGP LTX-2.3 worker ({frames} frames at {fps}fps, {resolution}{lora_log})")
     if progress_fn:
         progress_fn(last_progress, "loading_video_model")
 
@@ -337,6 +367,9 @@ def run_wangp_ltx23(
         "native_audio": bool(stream_info.get("native_audio")),
         "workflow_id": str(task.get("workflow_id") or "") or None,
         "source_strength": request_payload["source_strength"],
+        "lora_applied": bool(lora),
+        "lora_name": lora[0] if lora else None,
+        "lora_strength": lora[1] if lora else None,
         "inference_time_ms": elapsed_ms,
         "generation_ms": elapsed_ms,
         "resolved_prompt": request_payload["prompt"],

@@ -32,6 +32,16 @@ def _handle_signal(_signum: int, _frame: Any) -> None:
             pass
 
 
+def _apply_lora_settings(settings: Dict[str, Any], request: Dict[str, Any]) -> None:
+    activated = request.get("activated_loras")
+    if not isinstance(activated, list) or not activated:
+        settings["activated_loras"] = []
+        settings["loras_multipliers"] = ""
+        return
+    settings["activated_loras"] = [str(value) for value in activated if str(value).strip()]
+    settings["loras_multipliers"] = str(request.get("loras_multipliers") or "")
+
+
 def main() -> int:
     global ACTIVE_JOB
     if len(sys.argv) != 2:
@@ -72,6 +82,7 @@ def main() -> int:
             "seed": int(request["seed"]),
         }
     )
+    _apply_lora_settings(settings, request)
     source_image = str(request.get("source_image") or "").strip()
     if source_image:
         settings.update(

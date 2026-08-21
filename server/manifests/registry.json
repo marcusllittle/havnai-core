@@ -679,7 +679,7 @@
         {
           "id": "balanced_i2v",
           "label": "Balanced motion",
-          "description": "Balances source consistency with more visible body and camera motion.",
+          "description": "Sequences controlled motion while keeping the source strongly anchored.",
           "requires_init_image": true,
           "settings": {
             "steps": 10,
@@ -688,15 +688,15 @@
             "height": 704,
             "frames": 97,
             "fps": 24,
-            "strength": 0.85,
-            "lora_strength": 0.8,
-            "prompt_enhancer": "TI"
+            "strength": 0.9,
+            "lora_strength": 0.9,
+            "prompt_enhancer": "TI1"
           }
         },
         {
           "id": "portrait_i2v",
           "label": "Portrait motion",
-          "description": "Uses a vertical frame for portrait-oriented source images.",
+          "description": "Sequences controlled motion from a portrait-oriented source.",
           "requires_init_image": true,
           "settings": {
             "steps": 10,
@@ -705,15 +705,15 @@
             "height": 1280,
             "frames": 97,
             "fps": 24,
-            "strength": 0.85,
-            "lora_strength": 0.8,
-            "prompt_enhancer": "TI"
+            "strength": 0.9,
+            "lora_strength": 0.9,
+            "prompt_enhancer": "TI1"
           }
         },
         {
           "id": "square_i2v",
           "label": "Square motion",
-          "description": "Balances source consistency and motion in a square frame.",
+          "description": "Sequences controlled motion from a square or near-square source.",
           "requires_init_image": true,
           "settings": {
             "steps": 10,
@@ -722,15 +722,15 @@
             "height": 960,
             "frames": 97,
             "fps": 24,
-            "strength": 0.85,
-            "lora_strength": 0.8,
-            "prompt_enhancer": "TI"
+            "strength": 0.9,
+            "lora_strength": 0.9,
+            "prompt_enhancer": "TI1"
           }
         },
         {
           "id": "dynamic_i2v",
           "label": "Dynamic motion",
-          "description": "Allows stronger movement while retaining the source as the first-frame anchor.",
+          "description": "Uses stronger reasoning for deliberate motion without weakening the source anchor.",
           "requires_init_image": true,
           "settings": {
             "steps": 10,
@@ -739,9 +739,9 @@
             "height": 704,
             "frames": 97,
             "fps": 24,
-            "strength": 0.65,
-            "lora_strength": 0.8,
-            "prompt_enhancer": "TI"
+            "strength": 0.85,
+            "lora_strength": 1.0,
+            "prompt_enhancer": "TI1"
           }
         }
       ],

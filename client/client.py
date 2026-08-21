@@ -110,10 +110,11 @@ except ImportError:  # pragma: no cover
     _DPMSolver = None  # type: ignore
     _AutoencoderKL = None  # type: ignore
 try:
-    from PIL import Image, ImageDraw, ImageFont, ImageOps  # type: ignore
+    from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps  # type: ignore
 except Exception:  # pragma: no cover
     Image = None  # type: ignore
     ImageDraw = None  # type: ignore
+    ImageFilter = None  # type: ignore
     ImageFont = None  # type: ignore
     ImageOps = None  # type: ignore
 try:
@@ -3543,6 +3544,7 @@ def run_image_generation(
     use_img2img = False
     image_to_image_used = False
     inpainting_used = False
+    mask_feather_pixels = 0
     init_image_raw: Optional[str] = None
     inpaint_mask_raw: Optional[str] = None
     img2img_strength = 0.30
@@ -3835,7 +3837,20 @@ def run_image_generation(
                     log(f"Generated in {generation_ms}ms", prefix="✅")
                     img = result.images[0]
                     if inpaint_mask is not None and init_pil is not None:
-                        img = Image.composite(img.convert("RGB"), init_pil.convert("RGB"), inpaint_mask)
+                        composite_mask = inpaint_mask
+                        if ImageFilter is not None:
+                            mask_feather_pixels = max(
+                                4,
+                                min(40, int(round(min(inpaint_mask.size) * 0.04))),
+                            )
+                            composite_mask = inpaint_mask.filter(
+                                ImageFilter.GaussianBlur(mask_feather_pixels)
+                            )
+                        img = Image.composite(
+                            img.convert("RGB"),
+                            init_pil.convert("RGB"),
+                            composite_mask,
+                        )
                     _save_output_image(img, output_path, task_id=task_id)
                     if return_b64:
                         with output_path.open("rb") as fh:
@@ -3887,6 +3902,7 @@ def run_image_generation(
         "reference_face_used": bool(reference_face_used),
         "image_to_image_used": image_to_image_used,
         "inpainting_used": inpainting_used,
+        "mask_feather_pixels": mask_feather_pixels if inpainting_used else None,
         "img2img_strength": img2img_strength if use_img2img else None,
         "preserve_reference_aspect": preserve_reference_aspect if use_img2img else None,
         "seed": resolved_seed,

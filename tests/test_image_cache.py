@@ -318,6 +318,7 @@ class ImagePipelineCacheTests(unittest.TestCase):
         self.assertEqual(metrics["status"], "success")
         self.assertTrue(metrics["image_to_image_used"])
         self.assertTrue(metrics["inpainting_used"])
+        self.assertEqual(metrics["mask_feather_pixels"], 10)
         acquire_mock.assert_called_once_with(
             entry, model_path, "sdxl", "float32", True, "cpu", "inpaint"
         )
@@ -328,6 +329,9 @@ class ImagePipelineCacheTests(unittest.TestCase):
         self.assertEqual(kwargs["width"], 256)
         self.assertEqual(saved["image"].getpixel((32, 128)), (10, 20, 30))
         self.assertEqual(saved["image"].getpixel((224, 128)), (80, 90, 100))
+        boundary_pixel = saved["image"].getpixel((128, 128))
+        self.assertNotEqual(boundary_pixel, (10, 20, 30))
+        self.assertNotEqual(boundary_pixel, (80, 90, 100))
 
     def test_reference_output_size_tracks_portrait_source_ratio(self) -> None:
         width, height = client_module._reference_output_size((768, 1344), (768, 768))

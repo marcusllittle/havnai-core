@@ -282,6 +282,7 @@ class ExplicitLoraPolicyTests(unittest.TestCase):
         payload = json.loads(captured["data"])
         self.assertEqual(payload["init_image"], "data:image/png;base64,abc")
         self.assertEqual(payload["img2img_strength"], 0.95)
+        self.assertTrue(payload["preserve_reference_aspect"])
 
 
 class CreditsFallbackCostTests(unittest.TestCase):

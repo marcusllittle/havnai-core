@@ -95,11 +95,12 @@ except ImportError:  # pragma: no cover
     _DPMSolver = None  # type: ignore
     _AutoencoderKL = None  # type: ignore
 try:
-    from PIL import Image, ImageDraw, ImageFont  # type: ignore
+    from PIL import Image, ImageDraw, ImageFont, ImageOps  # type: ignore
 except Exception:  # pragma: no cover
     Image = None  # type: ignore
     ImageDraw = None  # type: ignore
     ImageFont = None  # type: ignore
+    ImageOps = None  # type: ignore
 try:
     import cv2  # type: ignore
 except Exception:  # pragma: no cover
@@ -1657,6 +1658,51 @@ def load_image_source(value: Any, target_size: Optional[Tuple[int, int]] = None)
     return img
 
 
+def _reference_output_size(
+    source_size: Tuple[int, int],
+    target_size: Tuple[int, int],
+) -> Tuple[int, int]:
+    source_width, source_height = source_size
+    target_width, target_height = target_size
+    if source_width <= 0 or source_height <= 0:
+        return target_size
+
+    target_area = max(256 * 256, target_width * target_height)
+    source_ratio = source_width / source_height
+    width = math.sqrt(target_area * source_ratio)
+    height = width / source_ratio
+
+    if width < 256:
+        scale = 256 / width
+        width *= scale
+        height *= scale
+    if height < 256:
+        scale = 256 / height
+        width *= scale
+        height *= scale
+    if width > 1536 or height > 1536:
+        scale = min(1536 / width, 1536 / height)
+        width *= scale
+        height *= scale
+
+    rounded_width = max(256, min(1536, int(round(width / 64)) * 64))
+    rounded_height = max(256, min(1536, int(round(height / 64)) * 64))
+    return rounded_width, rounded_height
+
+
+def _prepare_img2img_reference(
+    image: "Image.Image",
+    target_size: Tuple[int, int],
+    preserve_source_aspect: bool,
+) -> Tuple["Image.Image", str]:
+    if preserve_source_aspect:
+        prepared_size = _reference_output_size(image.size, target_size)
+        return image.resize(prepared_size, resample=Image.LANCZOS), "source_aspect"
+    if ImageOps is not None:
+        return ImageOps.fit(image, target_size, method=Image.LANCZOS), "center_crop"
+    return image.resize(target_size, resample=Image.LANCZOS), "resize"
+
+
 def get_face_analysis() -> "FaceAnalysis":
     global _FACE_ANALYSIS
     if _FACE_ANALYSIS is not None:
@@ -2551,6 +2597,7 @@ def execute_task(task: Dict[str, Any]) -> None:
                     "reference_face_url",
                     "init_image",
                     "img2img_strength",
+                    "preserve_reference_aspect",
                 ):
                     value = task.get(key)
                     if value is None or value == "":
@@ -3406,8 +3453,12 @@ def run_image_generation(
     width = IMAGE_WIDTH
     height = IMAGE_HEIGHT
     use_img2img = False
+    image_to_image_used = False
     init_image_raw: Optional[str] = None
     img2img_strength = 0.30
+    preserve_reference_aspect = True
+    reference_source_size: Optional[Tuple[int, int]] = None
+    reference_preparation: Optional[str] = None
     reference_face_url = ""
     reference_face_used = False
     reference_face_pipeline: Optional[str] = None
@@ -3434,6 +3485,11 @@ def run_image_generation(
             img2img_strength = float(job_settings.get("img2img_strength", 0.30) or 0.30)
         except (TypeError, ValueError):
             img2img_strength = 0.30
+        preserve_raw = job_settings.get("preserve_reference_aspect", True)
+        if isinstance(preserve_raw, str):
+            preserve_reference_aspect = preserve_raw.strip().lower() not in {"0", "false", "no", "off"}
+        else:
+            preserve_reference_aspect = bool(preserve_raw)
     img2img_strength = max(0.05, min(0.95, img2img_strength))
 
     try:
@@ -3571,13 +3627,23 @@ def run_image_generation(
             else:
                 init_pil = None
                 if use_img2img and init_image_raw:
-                    init_pil, init_error = load_image_source_with_error(
-                        init_image_raw,
-                        (img_w, img_h),
-                    )
+                    init_pil, init_error = load_image_source_with_error(init_image_raw)
                     if init_pil is None:
                         raise RuntimeError(f"Failed to load image-to-image reference: {init_error}")
-                    log(f"Init image loaded for img2img (strength={img2img_strength})", prefix="🖼️")
+                    reference_source_size = init_pil.size
+                    init_pil, reference_preparation = _prepare_img2img_reference(
+                        init_pil,
+                        (img_w, img_h),
+                        preserve_reference_aspect,
+                    )
+                    img_w, img_h = init_pil.size
+                    resolved_width = img_w
+                    resolved_height = img_h
+                    log(
+                        f"Init image prepared for img2img ({reference_source_size[0]}x{reference_source_size[1]}"
+                        f" -> {img_w}x{img_h}, {reference_preparation}, strength={img2img_strength})",
+                        prefix="🖼️",
+                    )
 
                 pipe_mode = "img2img" if init_pil is not None else "txt2img"
                 log(f"Preparing {pipe_mode} pipeline…", prefix="ℹ️", device=device)
@@ -3619,6 +3685,7 @@ def run_image_generation(
                         generation_kwargs["width"] = img_w
                     with torch.inference_mode():
                         result = pipe(pos_text, **generation_kwargs)
+                    image_to_image_used = init_pil is not None
                     generation_ms = int((time.time() - gen_t0) * 1000)
                     log(f"Generated in {generation_ms}ms", prefix="✅")
                     img = result.images[0]
@@ -3671,8 +3738,9 @@ def run_image_generation(
         "lora_load_ms": int(lora_load_ms),
         "generation_ms": int(generation_ms),
         "reference_face_used": bool(reference_face_used),
-        "image_to_image_used": bool(use_img2img and status == "success"),
+        "image_to_image_used": image_to_image_used,
         "img2img_strength": img2img_strength if use_img2img else None,
+        "preserve_reference_aspect": preserve_reference_aspect if use_img2img else None,
         "seed": resolved_seed,
         "steps": resolved_steps,
         "guidance": resolved_guidance,
@@ -3684,6 +3752,11 @@ def run_image_generation(
     }
     if reference_face_pipeline:
         metrics["reference_face_pipeline"] = reference_face_pipeline
+    if reference_source_size:
+        metrics["reference_source_width"] = reference_source_size[0]
+        metrics["reference_source_height"] = reference_source_size[1]
+    if reference_preparation:
+        metrics["reference_preparation"] = reference_preparation
     if loaded_loras:
         metrics["loras"] = loaded_loras
     if status != "success":

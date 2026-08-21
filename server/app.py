@@ -3362,6 +3362,12 @@ def submit_job() -> Any:
                 0.05,
                 min(0.95, img2img_strength if img2img_strength is not None else 0.30),
             )
+            preserve_reference_aspect = payload.get("preserve_reference_aspect")
+            job_settings["preserve_reference_aspect"] = (
+                True
+                if preserve_reference_aspect is None
+                else _is_truthy(preserve_reference_aspect)
+            )
         job_settings.update(resolved_image_defaults)
         job_settings["defaults_source"] = {"image": image_default_sources}
         job_settings["defaults_confidence"] = {"image": _resolve_confidence(image_default_sources)}
@@ -3920,6 +3926,7 @@ def get_creator_tasks() -> Any:
                             "reference_face_url",
                             "init_image",
                             "img2img_strength",
+                            "preserve_reference_aspect",
                         ):
                             if key not in parsed:
                                 continue
@@ -3936,6 +3943,8 @@ def get_creator_tasks() -> Any:
                                     image_overrides[key] = float(value)
                                 except (TypeError, ValueError):
                                     continue
+                            elif key == "preserve_reference_aspect":
+                                image_overrides[key] = _is_truthy(value)
                             elif key == "sampler":
                                 value_str = str(value).strip()
                                 if value_str:
@@ -4040,6 +4049,7 @@ def get_creator_tasks() -> Any:
                     "reference_face_url",
                     "init_image",
                     "img2img_strength",
+                    "preserve_reference_aspect",
                 ):
                     if key in task and task[key] is not None:
                         task_payload[key] = task[key]

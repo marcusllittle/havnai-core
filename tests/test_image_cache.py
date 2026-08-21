@@ -177,14 +177,37 @@ class ImagePipelineCacheTests(unittest.TestCase):
         self.assertEqual(metrics["status"], "success")
         self.assertTrue(metrics["image_to_image_used"])
         self.assertEqual(metrics["img2img_strength"], 0.2)
+        self.assertTrue(metrics["preserve_reference_aspect"])
+        self.assertEqual(metrics["reference_preparation"], "source_aspect")
+        self.assertEqual(metrics["reference_source_width"], 80)
+        self.assertEqual(metrics["reference_source_height"], 48)
+        self.assertEqual(metrics["width"], 448)
+        self.assertEqual(metrics["height"], 256)
         acquire_mock.assert_called_once_with(
             entry, model_path, "sdxl", "float32", True, "cpu", "img2img"
         )
         _, kwargs = fake_pipe.calls[0]
         self.assertEqual(kwargs["strength"], 0.2)
-        self.assertEqual(kwargs["image"].size, (256, 256))
+        self.assertEqual(kwargs["image"].size, (448, 256))
         self.assertNotIn("height", kwargs)
         self.assertNotIn("width", kwargs)
+
+    def test_img2img_explicit_size_center_crops_without_stretching(self) -> None:
+        source = client_module.Image.new("RGB", (1200, 600), color=(30, 60, 90))
+
+        prepared, mode = client_module._prepare_img2img_reference(
+            source,
+            (768, 768),
+            preserve_source_aspect=False,
+        )
+
+        self.assertEqual(prepared.size, (768, 768))
+        self.assertEqual(mode, "center_crop")
+
+    def test_reference_output_size_tracks_portrait_source_ratio(self) -> None:
+        width, height = client_module._reference_output_size((768, 1344), (768, 768))
+
+        self.assertEqual((width, height), (576, 1024))
 
     def test_txt2img_does_not_receive_img2img_arguments(self) -> None:
         entry = SimpleNamespace(name="m4", pipeline="sdxl")

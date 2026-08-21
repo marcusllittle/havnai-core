@@ -335,6 +335,8 @@ def run_wangp_ltx23(
         "width": stream_info.get("width") or width,
         "height": stream_info.get("height") or height,
         "native_audio": bool(stream_info.get("native_audio")),
+        "workflow_id": str(task.get("workflow_id") or "") or None,
+        "source_strength": request_payload["source_strength"],
         "inference_time_ms": elapsed_ms,
         "generation_ms": elapsed_ms,
         "resolved_prompt": request_payload["prompt"],

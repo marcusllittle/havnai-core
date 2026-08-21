@@ -623,6 +623,69 @@
       "available_modes": [
         "distilled_1_1"
       ],
+      "video_workflows": [
+        {
+          "id": "faithful_i2v",
+          "label": "Source fidelity",
+          "description": "Preserves the source composition and identity with controlled motion.",
+          "default": true,
+          "requires_init_image": true,
+          "settings": {
+            "steps": 8,
+            "guidance": 1.0,
+            "width": 1280,
+            "height": 704,
+            "frames": 97,
+            "fps": 24,
+            "strength": 0.95
+          }
+        },
+        {
+          "id": "balanced_i2v",
+          "label": "Balanced motion",
+          "description": "Balances source consistency with more visible body and camera motion.",
+          "requires_init_image": true,
+          "settings": {
+            "steps": 8,
+            "guidance": 1.0,
+            "width": 1280,
+            "height": 704,
+            "frames": 97,
+            "fps": 24,
+            "strength": 0.8
+          }
+        },
+        {
+          "id": "portrait_i2v",
+          "label": "Portrait motion",
+          "description": "Uses a vertical frame for portrait-oriented source images.",
+          "requires_init_image": true,
+          "settings": {
+            "steps": 8,
+            "guidance": 1.0,
+            "width": 704,
+            "height": 1280,
+            "frames": 97,
+            "fps": 24,
+            "strength": 0.85
+          }
+        },
+        {
+          "id": "dynamic_i2v",
+          "label": "Dynamic motion",
+          "description": "Allows stronger movement while retaining the source as the first-frame anchor.",
+          "requires_init_image": true,
+          "settings": {
+            "steps": 8,
+            "guidance": 1.0,
+            "width": 1280,
+            "height": 704,
+            "frames": 97,
+            "fps": 24,
+            "strength": 0.65
+          }
+        }
+      ],
       "strengths": "Current LTX-2.3 22B distilled image-to-video through the verified WanGP runtime, with native sound and strong first-frame preservation.",
       "weaknesses": "Cold model startup can take 20 minutes on the RTX 3060 node; one video job runs at a time.",
       "source": {

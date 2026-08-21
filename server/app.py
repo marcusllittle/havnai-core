@@ -52,6 +52,7 @@ import astra_gen
 import node_bundle
 import job_history
 import platform_v1
+import video_workflows
 
 try:
     from eth_account import Account  # type: ignore
@@ -3031,6 +3032,13 @@ def submit_job() -> Any:
         or pipeline_name in {"wan_i2v", "wan-i2v", "wan22_i2v", "wan2.2-i2v"}
     )
 
+    selected_video_workflow: Optional[Dict[str, Any]] = None
+    if is_ltx_video or is_wan_i2v or is_animatediff:
+        try:
+            payload, selected_video_workflow = video_workflows.apply_video_workflow(cfg, payload)
+        except video_workflows.VideoWorkflowError as exc:
+            return jsonify({"error": "unknown_video_workflow", "message": str(exc)}), 400
+
     if is_ltx_video:
         # Reject controls that neither the legacy runtime nor the WanGP adapter consumes.
         unsupported = [
@@ -3112,6 +3120,11 @@ def submit_job() -> Any:
             "defaults_source": {"video": video_default_sources},
             "defaults_confidence": {"video": _resolve_confidence(video_default_sources)},
         }
+        if selected_video_workflow:
+            settings["workflow_id"] = selected_video_workflow["id"]
+        strength = _try_parse_float(payload.get("strength"))
+        if strength is not None:
+            settings["strength"] = max(0.1, min(1.0, strength))
         if init_image:
             settings["init_image"] = init_image
         job_data = json.dumps(settings)
@@ -3469,6 +3482,10 @@ def generate_video_job() -> Any:
     if not cfg:
         return jsonify({"error": "unknown model"}), 400
     is_ltx_video = _is_ltx_video_config(cfg)
+    try:
+        payload, selected_video_workflow = video_workflows.apply_video_workflow(cfg, payload)
+    except video_workflows.VideoWorkflowError as exc:
+        return jsonify({"error": "unknown_video_workflow", "message": str(exc)}), 400
 
     # Append positive quality suffix if prompt doesn't have quality tokens
     raw_prompt_flag = str(payload.get("raw_prompt", "")).lower() in ("1", "true", "yes")
@@ -3522,6 +3539,8 @@ def generate_video_job() -> Any:
         "defaults_source": {"video": video_default_sources},
         "defaults_confidence": {"video": _resolve_confidence(video_default_sources)},
     }
+    if selected_video_workflow:
+        settings["workflow_id"] = selected_video_workflow["id"]
     if is_ltx_video:
         default_pipeline_mode = str(
             cfg.get("default_pipeline_mode")
@@ -3549,6 +3568,9 @@ def generate_video_job() -> Any:
     init_image = payload.get("init_image")
     if init_image:
         settings["init_image"] = init_image
+    strength = _try_parse_float(payload.get("strength"))
+    if strength is not None:
+        settings["strength"] = max(0.1, min(1.0, strength))
 
     job_data = json.dumps(settings)
 
@@ -6317,6 +6339,7 @@ def models_list() -> Any:
                 "checkpoint_variant": model_data.get("checkpoint_variant") or None,
                 "capabilities": model_data.get("capabilities") or None,
                 "available_modes": model_data.get("available_modes") or None,
+                "video_workflows": video_workflows.public_video_workflows(model_data) or None,
                 "default_pipeline_mode": model_data.get("default_pipeline_mode") or None,
                 "default_upscaler": model_data.get("default_upscaler") if "default_upscaler" in model_data else None,
                 # Delivery descriptor: tells a node how to obtain the weights.

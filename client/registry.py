@@ -37,6 +37,7 @@ except Exception:  # pragma: no cover
         available_modes: List[str] = field(default_factory=list)
         default_pipeline_mode: str = ""
         default_upscaler: str = ""
+        video_workflows: List[Dict[str, object]] = field(default_factory=list)
 
     @dataclass
     class Manifest:  # type: ignore

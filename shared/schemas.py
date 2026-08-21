@@ -97,6 +97,7 @@ class ModelEntry:
     available_modes: List[str] = field(default_factory=list)
     default_pipeline_mode: str = ""
     default_upscaler: str = ""
+    video_workflows: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass

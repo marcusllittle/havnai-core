@@ -17,7 +17,7 @@ MODEL = {
     "video_workflows": [
         {
             "id": "faithful_i2v",
-            "label": "Source fidelity",
+            "label": "Maximum fidelity",
             "default": True,
             "requires_init_image": True,
             "settings": {
@@ -26,6 +26,7 @@ MODEL = {
                 "frames": 97,
                 "fps": 24,
                 "strength": 0.95,
+                "lora_strength": 0.35,
                 "prompt": "must not be exposed or applied",
             },
         }
@@ -39,7 +40,7 @@ def test_public_workflows_only_expose_supported_settings() -> None:
     assert workflows == [
         {
             "id": "faithful_i2v",
-            "label": "Source fidelity",
+            "label": "Maximum fidelity",
             "default": True,
             "requires_init_image": True,
             "settings": {
@@ -48,6 +49,7 @@ def test_public_workflows_only_expose_supported_settings() -> None:
                 "frames": 97,
                 "fps": 24,
                 "strength": 0.95,
+                "lora_strength": 0.35,
             },
         }
     ]
@@ -62,6 +64,7 @@ def test_explicit_request_values_override_workflow_defaults() -> None:
     assert selected and selected["id"] == "faithful_i2v"
     assert payload["frames"] == 121
     assert payload["strength"] == 0.95
+    assert payload["lora_strength"] == 0.35
     assert payload["prompt"] == "user prompt"
 
 
@@ -82,4 +85,6 @@ def test_ltx23_manifest_advertises_expected_workflows() -> None:
         "dynamic_i2v",
     ]
     assert workflows[0]["default"] is True
-    assert workflows[0]["settings"]["strength"] == 0.95
+    assert workflows[0]["label"] == "Maximum fidelity"
+    assert workflows[0]["settings"]["strength"] == 0.98
+    assert workflows[0]["settings"]["lora_strength"] == 0.35

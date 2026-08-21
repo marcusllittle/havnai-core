@@ -626,8 +626,8 @@
       "video_workflows": [
         {
           "id": "faithful_i2v",
-          "label": "Source fidelity",
-          "description": "Preserves the source composition and identity with controlled motion.",
+          "label": "Maximum fidelity",
+          "description": "Minimizes source redraw while retaining controlled motion.",
           "default": true,
           "requires_init_image": true,
           "settings": {
@@ -637,7 +637,8 @@
             "height": 704,
             "frames": 97,
             "fps": 24,
-            "strength": 0.95
+            "strength": 0.98,
+            "lora_strength": 0.35
           }
         },
         {

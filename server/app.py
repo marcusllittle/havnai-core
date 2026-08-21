@@ -3125,6 +3125,9 @@ def submit_job() -> Any:
         strength = _try_parse_float(payload.get("strength"))
         if strength is not None:
             settings["strength"] = max(0.1, min(1.0, strength))
+        lora_strength = _try_parse_float(payload.get("lora_strength"))
+        if pipeline_name == "ltx23_wangp" and lora_strength is not None:
+            settings["lora_strength"] = max(0.0, min(2.0, lora_strength))
         if init_image:
             settings["init_image"] = init_image
         job_data = json.dumps(settings)
@@ -3571,6 +3574,12 @@ def generate_video_job() -> Any:
     strength = _try_parse_float(payload.get("strength"))
     if strength is not None:
         settings["strength"] = max(0.1, min(1.0, strength))
+    lora_strength = _try_parse_float(payload.get("lora_strength"))
+    if (
+        str(cfg.get("pipeline") or "").lower() == "ltx23_wangp"
+        and lora_strength is not None
+    ):
+        settings["lora_strength"] = max(0.0, min(2.0, lora_strength))
 
     job_data = json.dumps(settings)
 

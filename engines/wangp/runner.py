@@ -43,7 +43,9 @@ def _wangp_python(root: Path) -> Path:
     return Path(configured).expanduser() if configured else root / ".venv" / "bin" / "python"
 
 
-def _resolve_ltx23_lora(root: Path) -> Optional[Tuple[str, float]]:
+def _resolve_ltx23_lora(
+    root: Path, requested_strength: Any = None
+) -> Optional[Tuple[str, float]]:
     enabled = os.getenv("HAVNAI_LTX23_LORA_ENABLED", "1").strip().lower()
     if enabled in {"0", "false", "no", "off"}:
         return None
@@ -56,13 +58,15 @@ def _resolve_ltx23_lora(root: Path) -> Optional[Tuple[str, float]]:
     if not (root / "loras" / "ltx2" / filename).is_file():
         return None
 
-    raw_strength = os.getenv(
-        "HAVNAI_LTX23_LORA_STRENGTH", str(DEFAULT_LTX23_LORA_STRENGTH)
-    )
+    raw_strength = requested_strength
+    if raw_strength is None:
+        raw_strength = os.getenv(
+            "HAVNAI_LTX23_LORA_STRENGTH", str(DEFAULT_LTX23_LORA_STRENGTH)
+        )
     try:
         strength = float(raw_strength)
-    except ValueError as exc:
-        raise ValueError("HAVNAI_LTX23_LORA_STRENGTH must be a number") from exc
+    except (TypeError, ValueError) as exc:
+        raise ValueError("LTX 2.3 LoRA strength must be a number") from exc
     return filename, max(0.0, min(2.0, strength))
 
 
@@ -249,7 +253,7 @@ def run_wangp_ltx23(
     if source_strength_raw is None:
         source_strength_raw = 1.0
 
-    lora = _resolve_ltx23_lora(root)
+    lora = _resolve_ltx23_lora(root, task.get("lora_strength"))
 
     request_payload = {
         "wangp_root": str(root),

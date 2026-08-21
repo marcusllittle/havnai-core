@@ -7,7 +7,16 @@ from typing import Any, Dict, List, Optional, Tuple
 
 
 _WORKFLOW_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
-_NUMERIC_SETTINGS = {"steps", "guidance", "width", "height", "frames", "fps", "strength"}
+_NUMERIC_SETTINGS = {
+    "steps",
+    "guidance",
+    "width",
+    "height",
+    "frames",
+    "fps",
+    "strength",
+    "lora_strength",
+}
 _STRING_SETTINGS = {"pipeline_mode", "checkpoint_variant"}
 
 

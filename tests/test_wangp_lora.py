@@ -30,6 +30,20 @@ def test_missing_or_disabled_lora_is_not_applied(tmp_path: Path, monkeypatch: py
     assert _resolve_ltx23_lora(tmp_path) is None
 
 
+def test_workflow_strength_overrides_environment_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lora_path = tmp_path / "loras" / "ltx2" / DEFAULT_LTX23_LORA_FILENAME
+    lora_path.parent.mkdir(parents=True)
+    lora_path.touch()
+    monkeypatch.setenv("HAVNAI_LTX23_LORA_STRENGTH", "0.9")
+
+    assert _resolve_ltx23_lora(tmp_path, 0.35) == (
+        DEFAULT_LTX23_LORA_FILENAME,
+        0.35,
+    )
+
+
 def test_rejects_lora_path_outside_wangp_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

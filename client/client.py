@@ -56,13 +56,25 @@ try:
     except Exception:  # pragma: no cover
         _AutoPipe = None  # type: ignore
     try:
+        from diffusers import AutoPipelineForImage2Image as _AutoImg2ImgPipe  # type: ignore
+    except Exception:  # pragma: no cover
+        _AutoImg2ImgPipe = None  # type: ignore
+    try:
         from diffusers import StableDiffusionPipeline as _SDPipe  # type: ignore
     except Exception:  # pragma: no cover
         _SDPipe = None  # type: ignore
     try:
+        from diffusers import StableDiffusionImg2ImgPipeline as _SDImg2ImgPipe  # type: ignore
+    except Exception:  # pragma: no cover
+        _SDImg2ImgPipe = None  # type: ignore
+    try:
         from diffusers import StableDiffusionXLPipeline as _SDXLPipe  # type: ignore
     except Exception:  # pragma: no cover
         _SDXLPipe = None  # type: ignore
+    try:
+        from diffusers import StableDiffusionXLImg2ImgPipeline as _SDXLImg2ImgPipe  # type: ignore
+    except Exception:  # pragma: no cover
+        _SDXLImg2ImgPipe = None  # type: ignore
     try:
         from diffusers import DPMSolverMultistepScheduler as _DPMSolver  # type: ignore
     except Exception:  # pragma: no cover
@@ -74,8 +86,11 @@ try:
 except ImportError:  # pragma: no cover
     diffusers = None
     _AutoPipe = None  # type: ignore
+    _AutoImg2ImgPipe = None  # type: ignore
     _SDPipe = None  # type: ignore
+    _SDImg2ImgPipe = None  # type: ignore
     _SDXLPipe = None  # type: ignore
+    _SDXLImg2ImgPipe = None  # type: ignore
     _LattePipe = None  # type: ignore
     _DPMSolver = None  # type: ignore
     _AutoencoderKL = None  # type: ignore
@@ -2526,7 +2541,17 @@ def execute_task(task: Dict[str, Any]) -> None:
                 log(f"Failed to parse job settings: {exc}", prefix="⚠️", task_id=task_id)
             # Merge coordinator-sent overrides even when prompt is plain text.
             if isinstance(task, dict):
-                for key in ("steps", "guidance", "width", "height", "sampler", "seed", "reference_face_url"):
+                for key in (
+                    "steps",
+                    "guidance",
+                    "width",
+                    "height",
+                    "sampler",
+                    "seed",
+                    "reference_face_url",
+                    "init_image",
+                    "img2img_strength",
+                ):
                     value = task.get(key)
                     if value is None or value == "":
                         continue
@@ -2967,13 +2992,19 @@ def _resolve_image_runtime(entry: ModelEntry) -> Tuple[str, Any, bool, str]:
     return device, dtype, is_xl, pipeline_name
 
 
-def _image_pipeline_cache_key(model_path: Path, pipeline_name: str, device: str, dtype: Any) -> str:
+def _image_pipeline_cache_key(
+    model_path: Path,
+    pipeline_name: str,
+    device: str,
+    dtype: Any,
+    mode: str = "txt2img",
+) -> str:
     try:
         model_ref = str(model_path.resolve())
     except Exception:
         model_ref = str(model_path)
     dtype_ref = str(dtype)
-    return f"{model_ref}|{pipeline_name}|{device}|{dtype_ref}"
+    return f"{model_ref}|{pipeline_name}|{device}|{dtype_ref}|{mode}"
 
 
 def _release_image_pipeline(pipe: Any) -> None:
@@ -3057,25 +3088,30 @@ def _construct_base_image_pipeline(
     dtype: Any,
     is_xl: bool,
     device: str,
+    mode: str = "txt2img",
 ) -> Tuple[Any, int]:
     load_t0 = time.time()
     pipe = None
+    use_img2img = mode == "img2img"
     if pipeline_name in {"sdxl"}:
-        if _SDXLPipe is not None:
+        pipeline_cls = _SDXLImg2ImgPipe if use_img2img else _SDXLPipe
+        if pipeline_cls is not None:
             try:
-                pipe = _SDXLPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
+                pipe = pipeline_cls.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
             except Exception as exc:
-                log(f"StableDiffusionXLPipeline load failed: {exc}", prefix="⚠️")
-        auto_from_single = getattr(_AutoPipe, "from_single_file", None) if _AutoPipe is not None else None
+                log(f"SDXL {mode} pipeline load failed: {exc}", prefix="⚠️")
+        auto_cls = _AutoImg2ImgPipe if use_img2img else _AutoPipe
+        auto_from_single = getattr(auto_cls, "from_single_file", None) if auto_cls is not None else None
         if pipe is None and callable(auto_from_single):
             try:
                 pipe = auto_from_single(str(model_path), torch_dtype=dtype, safety_checker=None)
             except Exception as exc:
-                log(f"AutoPipeline load failed: {exc}", prefix="⚠️")
-    if pipe is None and _SDPipe is not None:
-        pipe = _SDPipe.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
+                log(f"AutoPipeline {mode} load failed: {exc}", prefix="⚠️")
+    fallback_cls = _SDImg2ImgPipe if use_img2img else _SDPipe
+    if pipe is None and fallback_cls is not None:
+        pipe = fallback_cls.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
     if pipe is None:
-        raise RuntimeError("Failed to construct a text2image pipeline for model.")
+        raise RuntimeError(f"Failed to construct a {mode} pipeline for model.")
     if getattr(entry, "vae_path", "") and pipeline_name != "sdxl":
         vae_path = Path(str(getattr(entry, "vae_path", ""))).expanduser()
         if vae_path.exists() and _AutoencoderKL is not None:
@@ -3097,19 +3133,24 @@ def _acquire_base_image_pipeline(
     dtype: Any,
     is_xl: bool,
     device: str,
+    mode: str = "txt2img",
 ) -> Tuple[Any, bool, int]:
     if IMAGE_PIPELINE_CACHE_SIZE <= 0:
-        pipe, load_ms = _construct_base_image_pipeline(entry, model_path, pipeline_name, dtype, is_xl, device)
+        pipe, load_ms = _construct_base_image_pipeline(
+            entry, model_path, pipeline_name, dtype, is_xl, device, mode
+        )
         return pipe, False, load_ms
 
-    cache_key = _image_pipeline_cache_key(model_path, pipeline_name, device, dtype)
+    cache_key = _image_pipeline_cache_key(model_path, pipeline_name, device, dtype, mode)
     with _IMAGE_PIPELINE_CACHE_LOCK:
         cached_pipe = _IMAGE_PIPELINE_CACHE.pop(cache_key, None)
         if cached_pipe is not None:
             _IMAGE_PIPELINE_CACHE[cache_key] = cached_pipe
             return cached_pipe, True, 0
 
-    pipe, load_ms = _construct_base_image_pipeline(entry, model_path, pipeline_name, dtype, is_xl, device)
+    pipe, load_ms = _construct_base_image_pipeline(
+        entry, model_path, pipeline_name, dtype, is_xl, device, mode
+    )
     evicted: List[Any] = []
     with _IMAGE_PIPELINE_CACHE_LOCK:
         _IMAGE_PIPELINE_CACHE[cache_key] = pipe
@@ -3366,7 +3407,7 @@ def run_image_generation(
     height = IMAGE_HEIGHT
     use_img2img = False
     init_image_raw: Optional[str] = None
-    img2img_strength = 0.75
+    img2img_strength = 0.30
     reference_face_url = ""
     reference_face_used = False
     reference_face_pipeline: Optional[str] = None
@@ -3390,9 +3431,10 @@ def run_image_generation(
         reference_face_url = str(job_settings.get("reference_face_url") or "").strip()
         use_img2img = bool(init_image_raw)
         try:
-            img2img_strength = float(job_settings.get("img2img_strength", 0.75) or 0.75)
+            img2img_strength = float(job_settings.get("img2img_strength", 0.30) or 0.30)
         except (TypeError, ValueError):
-            img2img_strength = 0.75
+            img2img_strength = 0.30
+    img2img_strength = max(0.05, min(0.95, img2img_strength))
 
     try:
         if reference_face_url and (FAST_PREVIEW or torch is None or diffusers is None):
@@ -3529,27 +3571,13 @@ def run_image_generation(
             else:
                 init_pil = None
                 if use_img2img and init_image_raw:
-                    try:
-                        from PIL import Image as _PILImage
-                        if init_image_raw.startswith("data:"):
-                            b64_part = init_image_raw.split(",", 1)[-1]
-                            img_bytes = base64.b64decode(b64_part)
-                            init_pil = _PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
-                        elif init_image_raw.startswith(("http://", "https://", "/")):
-                            img_resp = requests.get(init_image_raw, timeout=30)
-                            img_resp.raise_for_status()
-                            init_pil = _PILImage.open(io.BytesIO(img_resp.content)).convert("RGB")
-                        elif os.path.isfile(init_image_raw):
-                            init_pil = _PILImage.open(init_image_raw).convert("RGB")
-                        else:
-                            img_bytes = base64.b64decode(init_image_raw)
-                            init_pil = _PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
-                        if init_pil:
-                            init_pil = init_pil.resize((width, height))
-                            log(f"Init image loaded for img2img (strength={img2img_strength})", prefix="🖼️")
-                    except Exception as exc:
-                        log(f"Failed to load init image, falling back to txt2img: {exc}", prefix="⚠️")
-                        init_pil = None
+                    init_pil, init_error = load_image_source_with_error(
+                        init_image_raw,
+                        (img_w, img_h),
+                    )
+                    if init_pil is None:
+                        raise RuntimeError(f"Failed to load image-to-image reference: {init_error}")
+                    log(f"Init image loaded for img2img (strength={img2img_strength})", prefix="🖼️")
 
                 pipe_mode = "img2img" if init_pil is not None else "txt2img"
                 log(f"Preparing {pipe_mode} pipeline…", prefix="ℹ️", device=device)
@@ -3558,11 +3586,11 @@ def run_image_generation(
                 try:
                     if transient_pipeline:
                         pipe, pipeline_load_ms = _construct_base_image_pipeline(
-                            entry, model_path, pipeline_name, dtype, is_xl, device
+                            entry, model_path, pipeline_name, dtype, is_xl, device, pipe_mode
                         )
                     else:
                         pipe, pipeline_cache_hit, pipeline_load_ms = _acquire_base_image_pipeline(
-                            entry, model_path, pipeline_name, dtype, is_xl, device
+                            entry, model_path, pipeline_name, dtype, is_xl, device, pipe_mode
                         )
                     if not pipeline_cache_hit:
                         log(f"Pipeline ready in {pipeline_load_ms}ms", prefix="✅")
@@ -3576,17 +3604,21 @@ def run_image_generation(
                     _apply_image_sampler(pipe, sampler)
 
                     gen_t0 = time.time()
+                    generation_kwargs: Dict[str, Any] = {
+                        "negative_prompt": neg_text or None,
+                        "num_inference_steps": steps,
+                        "guidance_scale": guidance,
+                        "generator": generator,
+                        **_pipeline_cancel_kwargs(pipe, cancel_event),
+                    }
+                    if init_pil is not None:
+                        generation_kwargs["image"] = init_pil
+                        generation_kwargs["strength"] = img2img_strength
+                    else:
+                        generation_kwargs["height"] = img_h
+                        generation_kwargs["width"] = img_w
                     with torch.inference_mode():
-                        result = pipe(
-                            pos_text,
-                            negative_prompt=neg_text or None,
-                            num_inference_steps=steps,
-                            guidance_scale=guidance,
-                            generator=generator,
-                            height=img_h,
-                            width=img_w,
-                            **_pipeline_cancel_kwargs(pipe, cancel_event),
-                        )
+                        result = pipe(pos_text, **generation_kwargs)
                     generation_ms = int((time.time() - gen_t0) * 1000)
                     log(f"Generated in {generation_ms}ms", prefix="✅")
                     img = result.images[0]
@@ -3639,6 +3671,8 @@ def run_image_generation(
         "lora_load_ms": int(lora_load_ms),
         "generation_ms": int(generation_ms),
         "reference_face_used": bool(reference_face_used),
+        "image_to_image_used": bool(use_img2img and status == "success"),
+        "img2img_strength": img2img_strength if use_img2img else None,
         "seed": resolved_seed,
         "steps": resolved_steps,
         "guidance": resolved_guidance,

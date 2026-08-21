@@ -251,6 +251,38 @@ class ExplicitLoraPolicyTests(unittest.TestCase):
         self.assertNotIn("auto_anatomy", payload)
         self.assertNotIn("loras", payload)
 
+    def test_submit_job_persists_img2img_reference_and_clamps_strength(self) -> None:
+        captured: dict = {}
+
+        def _capture_enqueue(wallet, model, task_type, data, weight, invite_code=None):
+            captured["data"] = data
+            return "job-img2img"
+
+        with patch.object(app_module, "rate_limit", return_value=True), patch.object(
+            app_module.invite, "enforce_invite_limits", return_value=(None, None)
+        ), patch.object(app_module.safety, "check_safety", return_value=None), patch.object(
+            app_module.credits, "check_and_deduct_credits", return_value=None
+        ), patch.object(
+            app_module, "refresh_manifest", return_value=None
+        ), patch.object(
+            app_module.job_helpers, "enqueue_job", side_effect=_capture_enqueue
+        ):
+            resp = self.client.post(
+                "/submit-job",
+                json={
+                    "wallet": VALID_WALLET,
+                    "model": SDXL_MODEL,
+                    "prompt": "preserve composition",
+                    "init_image": "data:image/png;base64,abc",
+                    "img2img_strength": 5,
+                },
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        payload = json.loads(captured["data"])
+        self.assertEqual(payload["init_image"], "data:image/png;base64,abc")
+        self.assertEqual(payload["img2img_strength"], 0.95)
+
 
 class CreditsFallbackCostTests(unittest.TestCase):
     def test_animatediff_task_fallback_uses_animatediff_default(self) -> None:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import io
 import sys
 import unittest
 from pathlib import Path
@@ -50,7 +52,11 @@ class _FakeTorch:
 
 
 class _FakePipe:
+    def __init__(self) -> None:
+        self.calls = []
+
     def __call__(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
         image = client_module.Image.new("RGB", (64, 64), color=(10, 20, 30))
         return SimpleNamespace(images=[image])
 
@@ -137,6 +143,79 @@ class ImagePipelineCacheTests(unittest.TestCase):
         construct_mock.assert_called_once()
         acquire_mock.assert_not_called()
         release_mock.assert_called_once_with(fake_pipe)
+
+    def test_img2img_passes_reference_image_and_preservation_strength(self) -> None:
+        entry = SimpleNamespace(name="m3", pipeline="sdxl")
+        model_path = Path("/tmp/model-c.safetensors")
+        fake_pipe = _FakePipe()
+        source = client_module.Image.new("RGB", (80, 48), color=(90, 40, 20))
+        encoded = io.BytesIO()
+        source.save(encoded, format="PNG")
+        source_data = "data:image/png;base64," + base64.b64encode(encoded.getvalue()).decode("ascii")
+
+        with patch.object(client_module, "read_gpu_stats", return_value={"utilization": 0}), patch.object(
+            client_module, "_resolve_image_runtime", return_value=("cpu", "float32", True, "sdxl")
+        ), patch.object(
+            client_module, "_acquire_base_image_pipeline", return_value=(fake_pipe, True, 0)
+        ) as acquire_mock:
+            metrics, _, _ = client_module.run_image_generation(
+                task_id="job-img2img",
+                entry=entry,
+                model_path=model_path,
+                reward_weight=1.0,
+                prompt="preserve the composition",
+                negative_prompt="",
+                job_settings={
+                    "init_image": source_data,
+                    "img2img_strength": 0.2,
+                    "width": 64,
+                    "height": 64,
+                    "_return_b64": False,
+                },
+            )
+
+        self.assertEqual(metrics["status"], "success")
+        self.assertTrue(metrics["image_to_image_used"])
+        self.assertEqual(metrics["img2img_strength"], 0.2)
+        acquire_mock.assert_called_once_with(
+            entry, model_path, "sdxl", "float32", True, "cpu", "img2img"
+        )
+        _, kwargs = fake_pipe.calls[0]
+        self.assertEqual(kwargs["strength"], 0.2)
+        self.assertEqual(kwargs["image"].size, (256, 256))
+        self.assertNotIn("height", kwargs)
+        self.assertNotIn("width", kwargs)
+
+    def test_txt2img_does_not_receive_img2img_arguments(self) -> None:
+        entry = SimpleNamespace(name="m4", pipeline="sdxl")
+        model_path = Path("/tmp/model-d.safetensors")
+        fake_pipe = _FakePipe()
+
+        with patch.object(client_module, "read_gpu_stats", return_value={"utilization": 0}), patch.object(
+            client_module, "_resolve_image_runtime", return_value=("cpu", "float32", True, "sdxl")
+        ), patch.object(
+            client_module, "_acquire_base_image_pipeline", return_value=(fake_pipe, True, 0)
+        ) as acquire_mock:
+            metrics, _, _ = client_module.run_image_generation(
+                task_id="job-txt2img",
+                entry=entry,
+                model_path=model_path,
+                reward_weight=1.0,
+                prompt="new composition",
+                negative_prompt="",
+                job_settings={"_return_b64": False},
+            )
+
+        self.assertEqual(metrics["status"], "success")
+        self.assertFalse(metrics["image_to_image_used"])
+        acquire_mock.assert_called_once_with(
+            entry, model_path, "sdxl", "float32", True, "cpu", "txt2img"
+        )
+        _, kwargs = fake_pipe.calls[0]
+        self.assertNotIn("image", kwargs)
+        self.assertNotIn("strength", kwargs)
+        self.assertEqual(kwargs["height"], client_module.IMAGE_HEIGHT)
+        self.assertEqual(kwargs["width"], client_module.IMAGE_WIDTH)
 
 
 if __name__ == "__main__":

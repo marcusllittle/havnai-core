@@ -3275,6 +3275,19 @@ def submit_job() -> Any:
         task_type = "ANIMATEDIFF"
     else:
         prompt_text = enhanced_prompt
+        init_image = (
+            payload.get("init_image")
+            or payload.get("init_image_url")
+            or payload.get("init_image_b64")
+            or None
+        )
+        if init_image and reference_face_url:
+            return jsonify(
+                {
+                    "error": "incompatible_image_references",
+                    "message": "Reference face and image-to-image reference cannot be combined.",
+                }
+            ), 400
         if hardcore_prompt and HARDCORE_POSITIVE_SUFFIX.lower() not in prompt_text.lower():
             prompt_text = f"{prompt_text}, {HARDCORE_POSITIVE_SUFFIX}" if prompt_text else HARDCORE_POSITIVE_SUFFIX
         _positive_suffix = get_positive_suffix(cfg, prompt=prompt_text)
@@ -3342,6 +3355,13 @@ def submit_job() -> Any:
         )
         if reference_face_url:
             job_settings["reference_face_url"] = reference_face_url
+        if init_image:
+            job_settings["init_image"] = init_image
+            img2img_strength = _try_parse_float(payload.get("img2img_strength"))
+            job_settings["img2img_strength"] = max(
+                0.05,
+                min(0.95, img2img_strength if img2img_strength is not None else 0.30),
+            )
         job_settings.update(resolved_image_defaults)
         job_settings["defaults_source"] = {"image": image_default_sources}
         job_settings["defaults_confidence"] = {"image": _resolve_confidence(image_default_sources)}
@@ -3890,7 +3910,17 @@ def get_creator_tasks() -> Any:
                         if isinstance(parsed_loras, list):
                             loras = [item for item in parsed_loras if item]
                         # Forward per-image overrides stored in job settings.
-                        for key in ("steps", "guidance", "width", "height", "sampler", "seed", "reference_face_url"):
+                        for key in (
+                            "steps",
+                            "guidance",
+                            "width",
+                            "height",
+                            "sampler",
+                            "seed",
+                            "reference_face_url",
+                            "init_image",
+                            "img2img_strength",
+                        ):
                             if key not in parsed:
                                 continue
                             value = parsed.get(key)
@@ -3901,7 +3931,7 @@ def get_creator_tasks() -> Any:
                                     image_overrides[key] = int(value)
                                 except (TypeError, ValueError):
                                     continue
-                            elif key == "guidance":
+                            elif key in {"guidance", "img2img_strength"}:
                                 try:
                                     image_overrides[key] = float(value)
                                 except (TypeError, ValueError):
@@ -3910,7 +3940,7 @@ def get_creator_tasks() -> Any:
                                 value_str = str(value).strip()
                                 if value_str:
                                     image_overrides[key] = value_str
-                            elif key == "reference_face_url":
+                            elif key in {"reference_face_url", "init_image"}:
                                 value_str = str(value).strip()
                                 if value_str:
                                     image_overrides[key] = value_str
@@ -4000,7 +4030,17 @@ def get_creator_tasks() -> Any:
             }
             if task_payload["type"].upper() == CREATOR_TASK_TYPE:
                 # Forward generation overrides for image tasks only.
-                for key in ("steps", "guidance", "width", "height", "sampler", "seed", "reference_face_url"):
+                for key in (
+                    "steps",
+                    "guidance",
+                    "width",
+                    "height",
+                    "sampler",
+                    "seed",
+                    "reference_face_url",
+                    "init_image",
+                    "img2img_strength",
+                ):
                     if key in task and task[key] is not None:
                         task_payload[key] = task[key]
             # If this is a WAN I2V video job, attempt to expose structured settings to the node

@@ -186,6 +186,80 @@ class SettlementConvergenceTests(unittest.TestCase):
         self.assertEqual(model_metadata.get("tier"), "A")
         self.assertEqual(float(model_metadata.get("reward_weight")), 10.0)
 
+    def test_job_detail_redacts_input_assets_without_mutating_worker_payload(
+        self,
+    ) -> None:
+        image_marker = "data:image/png;base64," + ("SOURCE" * 20000)
+        mask_marker = "data:image/png;base64," + ("MASK" * 20000)
+        with self._submission_patch_stack():
+            submit_resp = self.client.post(
+                "/submit-job",
+                json={
+                    "wallet": VALID_WALLET,
+                    "model": IMAGE_MODEL,
+                    "prompt": "private source check",
+                    "init_image": image_marker,
+                    "inpaint_mask": mask_marker,
+                },
+            )
+        self.assertEqual(submit_resp.status_code, 200)
+        job_id = submit_resp.get_json()["job_id"]
+
+        stored_payload = json.loads(app_module.get_job(job_id)["data"])
+        self.assertEqual(stored_payload["init_image"], image_marker)
+        self.assertEqual(stored_payload["inpaint_mask"], mask_marker)
+
+        detail_resp = self.client.get(f"/jobs/{job_id}")
+        self.assertEqual(detail_resp.status_code, 200)
+        body = detail_resp.get_json()
+        self.assertEqual(body["data"]["prompt"].split(",", 1)[0], "private source check")
+        self.assertNotIn("init_image", body["data"])
+        self.assertNotIn("inpaint_mask", body["data"])
+        self.assertEqual(
+            body["input_assets"],
+            {"init_image": True, "inpaint_mask": True},
+        )
+        self.assertNotIn("SOURCE", detail_resp.get_data(as_text=True))
+        self.assertNotIn("MASK", detail_resp.get_data(as_text=True))
+        self.assertLess(len(detail_resp.data), 10_000)
+
+    def test_public_job_data_redacts_every_input_asset_alias(self) -> None:
+        asset_fields = {
+            "init_image": "init_image",
+            "init_image_url": "init_image",
+            "init_image_b64": "init_image",
+            "inpaint_mask": "inpaint_mask",
+            "mask_image": "inpaint_mask",
+            "mask_image_b64": "inpaint_mask",
+            "base_image_url": "base_image",
+            "reference_face_url": "reference_face",
+            "face_source_url": "reference_face",
+            "pose_image": "pose_image",
+            "pose_image_b64": "pose_image",
+            "pose_image_path": "pose_image",
+            "source_image": "source_image",
+            "source_image_url": "source_image",
+            "source_image_b64": "source_image",
+            "source_asset_id": "source_image",
+            "audio_input": "audio",
+            "audio_url": "audio",
+            "audio_b64": "audio",
+            "audio_asset_id": "audio",
+        }
+        payload = {
+            "prompt": "keep me",
+            **{field: f"secret-{field}" for field in asset_fields},
+        }
+
+        public_payload, input_assets = app_module._public_job_data(payload)
+
+        self.assertEqual(public_payload, {"prompt": "keep me"})
+        self.assertEqual(
+            input_assets,
+            {asset_kind: True for asset_kind in asset_fields.values()},
+        )
+        self.assertEqual(payload["init_image"], "secret-init_image")
+
     def test_models_list_prefers_reward_weight_for_tier(self) -> None:
         manifest_path = Path(self._tmpdir.name) / "manifest_test.json"
         manifest_payload = {

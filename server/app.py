@@ -1774,6 +1774,48 @@ def _safe_parse_json_dict(raw: Any) -> Dict[str, Any]:
     return {}
 
 
+_PUBLIC_JOB_INPUT_ASSET_FIELDS = {
+    "init_image": "init_image",
+    "init_image_url": "init_image",
+    "init_image_b64": "init_image",
+    "inpaint_mask": "inpaint_mask",
+    "mask_image": "inpaint_mask",
+    "mask_image_b64": "inpaint_mask",
+    "base_image_url": "base_image",
+    "reference_face_url": "reference_face",
+    "face_source_url": "reference_face",
+    "pose_image": "pose_image",
+    "pose_image_b64": "pose_image",
+    "pose_image_path": "pose_image",
+    "source_image": "source_image",
+    "source_image_url": "source_image",
+    "source_image_b64": "source_image",
+    "source_asset_id": "source_image",
+    "audio_input": "audio",
+    "audio_url": "audio",
+    "audio_b64": "audio",
+    "audio_asset_id": "audio",
+}
+
+
+def _public_job_data(
+    payload: Dict[str, Any],
+) -> Tuple[Dict[str, Any], Dict[str, bool]]:
+    """Remove private/heavy input assets while retaining useful job settings."""
+    public_payload = dict(payload)
+    input_assets: Dict[str, bool] = {}
+    for field, asset_kind in _PUBLIC_JOB_INPUT_ASSET_FIELDS.items():
+        value = public_payload.pop(field, None)
+        if value is None or value is False or value == 0:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        if isinstance(value, (list, dict)) and not value:
+            continue
+        input_assets[asset_kind] = True
+    return public_payload, input_assets
+
+
 def _build_canonical_model_metadata(
     model_name: str,
     job_type: str,
@@ -5745,6 +5787,9 @@ def job_detail(job_id: str) -> Any:
     except Exception:
         payload = {}
     reward_factors = payload.get("reward_factors") if isinstance(payload, dict) else None
+    public_payload, input_assets = _public_job_data(
+        payload if isinstance(payload, dict) else {}
+    )
     model_metadata = _canonical_metadata_for_job(job_id)
 
     return jsonify(
@@ -5764,7 +5809,8 @@ def job_detail(job_id: str) -> Any:
             "reward_timestamp": reward_ts,
             "reward_factors": reward_factors,
             "model_metadata": model_metadata,
-            "data": payload,
+            "input_assets": input_assets,
+            "data": public_payload,
         }
     )
 

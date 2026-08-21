@@ -254,12 +254,45 @@ WAN_I2V_DEFAULTS: Dict[str, Any] = {
 
 
 def load_version() -> str:
+    explicit_version = os.environ.get("HAVNAI_CLIENT_VERSION", "").strip()
+    if explicit_version:
+        return explicit_version
+
+    source_root_value = os.environ.get("HAVNAI_SOURCE_ROOT", "").strip()
+    if source_root_value:
+        source_root = Path(source_root_value).expanduser()
+        try:
+            revision = (
+                subprocess.check_output(
+                    ["git", "rev-parse", "--short", "HEAD"],
+                    cwd=source_root,
+                    stderr=subprocess.DEVNULL,
+                )
+                .decode()
+                .strip()
+            )
+            if revision:
+                return revision
+        except Exception:
+            pass
+        source_version = source_root / "VERSION"
+        if source_version.is_file():
+            version = source_version.read_text().strip()
+            if version:
+                return version
+
     for path in VERSION_SEARCH_PATHS:
-        if path.exists():
-            return path.read_text().strip()
+        if path.is_file():
+            version = path.read_text().strip()
+            if version:
+                return version
     try:
         return (
-            subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], cwd=Path(__file__).resolve().parent)
+            subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=Path(__file__).resolve().parent,
+                stderr=subprocess.DEVNULL,
+            )
             .decode()
             .strip()
         )

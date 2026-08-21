@@ -1585,7 +1585,9 @@ def _describe_image_source(value: Any) -> str:
 
 
 def load_image_source_with_error(
-    value: Any, target_size: Optional[Tuple[int, int]] = None
+    value: Any,
+    target_size: Optional[Tuple[int, int]] = None,
+    base_url: Optional[str] = None,
 ) -> Tuple[Optional["Image.Image"], Optional[str]]:
     if Image is None:
         return None, "PIL is not available"
@@ -1597,9 +1599,16 @@ def load_image_source_with_error(
     if not text:
         return None, "image source is empty"
     img = None
-    if text.startswith("http://") or text.startswith("https://"):
+    relative_url = False
+    if text.startswith("/") and base_url:
         try:
-            resp = requests.get(text, timeout=30, headers={"User-Agent": "HavnAI/1.0"})
+            relative_url = not Path(text).expanduser().exists()
+        except OSError:
+            relative_url = True
+    if text.startswith("http://") or text.startswith("https://") or relative_url:
+        resolved_url = urllib.parse.urljoin(f"{base_url.rstrip('/')}/", text) if relative_url else text
+        try:
+            resp = requests.get(resolved_url, timeout=30, headers={"User-Agent": "HavnAI/1.0"})
             resp.raise_for_status()
             img = Image.open(io.BytesIO(resp.content))
         except Exception as exc:
@@ -3583,7 +3592,10 @@ def run_image_generation(
                     resolved_prompt, resolved_negative_prompt = pos_text, neg_text
                     _apply_image_sampler(pipe, sampler)
 
-                    reference_image, reference_error = load_image_source_with_error(reference_face_url)
+                    reference_image, reference_error = load_image_source_with_error(
+                        reference_face_url,
+                        base_url=SERVER_BASE,
+                    )
                     if reference_image is None:
                         raise RuntimeError(
                             f"Failed to load reference face image: {reference_error or 'unknown error'}"
@@ -3627,7 +3639,10 @@ def run_image_generation(
             else:
                 init_pil = None
                 if use_img2img and init_image_raw:
-                    init_pil, init_error = load_image_source_with_error(init_image_raw)
+                    init_pil, init_error = load_image_source_with_error(
+                        init_image_raw,
+                        base_url=SERVER_BASE,
+                    )
                     if init_pil is None:
                         raise RuntimeError(f"Failed to load image-to-image reference: {init_error}")
                     reference_source_size = init_pil.size

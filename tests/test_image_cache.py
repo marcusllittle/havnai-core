@@ -106,6 +106,29 @@ class ImagePipelineCacheTests(unittest.TestCase):
         self.assertEqual(load2, 0)
         self.assertEqual(build_calls["count"], 1)
 
+    def test_relative_image_source_uses_coordinator_base_url(self) -> None:
+        source = client_module.Image.new("RGB", (32, 24), color=(15, 25, 35))
+        encoded = io.BytesIO()
+        source.save(encoded, format="PNG")
+        response = SimpleNamespace(
+            content=encoded.getvalue(),
+            raise_for_status=lambda: None,
+        )
+
+        with patch.object(client_module.requests, "get", return_value=response) as get_mock:
+            loaded, error = client_module.load_image_source_with_error(
+                "/static/outputs/job-refine.png",
+                base_url="http://192.168.4.105:5001",
+            )
+
+        self.assertIsNone(error)
+        self.assertEqual(loaded.size, (32, 24))
+        get_mock.assert_called_once_with(
+            "http://192.168.4.105:5001/static/outputs/job-refine.png",
+            timeout=30,
+            headers={"User-Agent": "HavnAI/1.0"},
+        )
+
     def test_lora_run_uses_transient_pipeline_and_does_not_use_cache_path(self) -> None:
         entry = SimpleNamespace(name="m2", pipeline="sd15")
         model_path = Path("/tmp/model-b.safetensors")

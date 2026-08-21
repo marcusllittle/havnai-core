@@ -58,7 +58,12 @@ def test_public_workflows_only_expose_supported_settings() -> None:
 def test_explicit_request_values_override_workflow_defaults() -> None:
     payload, selected = video_workflows.apply_video_workflow(
         MODEL,
-        {"workflow_id": "faithful_i2v", "frames": 121, "prompt": "user prompt"},
+        {
+            "workflow_id": "faithful_i2v",
+            "frames": 121,
+            "prompt": "user prompt",
+            "init_image": "data:image/png;base64,source",
+        },
     )
 
     assert selected and selected["id"] == "faithful_i2v"
@@ -71,6 +76,36 @@ def test_explicit_request_values_override_workflow_defaults() -> None:
 def test_unknown_workflow_is_rejected() -> None:
     with pytest.raises(video_workflows.VideoWorkflowError):
         video_workflows.apply_video_workflow(MODEL, {"workflow_id": "missing"})
+
+
+def test_workflow_requiring_init_image_rejects_missing_source() -> None:
+    with pytest.raises(video_workflows.VideoWorkflowRequirementError) as error:
+        video_workflows.apply_video_workflow(
+            MODEL,
+            {"workflow_id": "faithful_i2v", "prompt": "user prompt"},
+        )
+
+    assert error.value.code == "workflow_init_image_required"
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_workflow_requiring_init_image_rejects_blank_source(value: str) -> None:
+    with pytest.raises(video_workflows.VideoWorkflowRequirementError):
+        video_workflows.apply_video_workflow(
+            MODEL,
+            {"workflow_id": "faithful_i2v", "init_image": value},
+        )
+
+
+@pytest.mark.parametrize("field", ["init_image", "init_image_url", "init_image_b64"])
+def test_workflow_accepts_every_init_image_alias(field: str) -> None:
+    payload, selected = video_workflows.apply_video_workflow(
+        MODEL,
+        {"workflow_id": "faithful_i2v", field: "source-image"},
+    )
+
+    assert selected and selected["id"] == "faithful_i2v"
+    assert payload[field] == "source-image"
 
 
 def test_ltx23_manifest_advertises_expected_workflows() -> None:

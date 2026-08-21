@@ -3080,7 +3080,7 @@ def submit_job() -> Any:
         try:
             payload, selected_video_workflow = video_workflows.apply_video_workflow(cfg, payload)
         except video_workflows.VideoWorkflowError as exc:
-            return jsonify({"error": "unknown_video_workflow", "message": str(exc)}), 400
+            return jsonify({"error": exc.code, "message": str(exc)}), 400
 
     if is_ltx_video:
         # Reject controls that neither the legacy runtime nor the WanGP adapter consumes.
@@ -3572,7 +3572,7 @@ def generate_video_job() -> Any:
     try:
         payload, selected_video_workflow = video_workflows.apply_video_workflow(cfg, payload)
     except video_workflows.VideoWorkflowError as exc:
-        return jsonify({"error": "unknown_video_workflow", "message": str(exc)}), 400
+        return jsonify({"error": exc.code, "message": str(exc)}), 400
 
     # Append positive quality suffix if prompt doesn't have quality tokens
     raw_prompt_flag = str(payload.get("raw_prompt", "")).lower() in ("1", "true", "yes")

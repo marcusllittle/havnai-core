@@ -23,6 +23,14 @@ _STRING_SETTINGS = {"pipeline_mode", "checkpoint_variant"}
 class VideoWorkflowError(ValueError):
     """Raised when a requested workflow is not advertised by the model."""
 
+    code = "unknown_video_workflow"
+
+
+class VideoWorkflowRequirementError(VideoWorkflowError):
+    """Raised when a workflow-specific input requirement is not met."""
+
+    code = "workflow_init_image_required"
+
 
 def public_video_workflows(model_cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Return the validated, frontend-safe workflows from a model manifest entry."""
@@ -82,6 +90,16 @@ def apply_video_workflow(
     if workflow is None:
         raise VideoWorkflowError(f"Unknown video workflow '{workflow_id}' for this model")
 
+    init_image_fields = ("init_image", "init_image_url", "init_image_b64")
+    has_init_image = any(
+        isinstance(payload.get(key), str) and bool(payload[key].strip())
+        for key in init_image_fields
+    )
+    if workflow.get("requires_init_image") is True and not has_init_image:
+        raise VideoWorkflowRequirementError(
+            f"Video workflow '{workflow_id}' requires an init image"
+        )
+
     merged = dict(workflow.get("settings") or {})
     merged.update(payload)
     merged["workflow_id"] = workflow_id
@@ -90,6 +108,7 @@ def apply_video_workflow(
 
 __all__ = [
     "VideoWorkflowError",
+    "VideoWorkflowRequirementError",
     "apply_video_workflow",
     "public_video_workflows",
 ]

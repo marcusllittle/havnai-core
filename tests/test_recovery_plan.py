@@ -31,6 +31,7 @@ import job_helpers
 VALID_WALLET = "0x1111111111111111111111111111111111111111"
 SDXL_MODEL = "epicrealismxl_vxviicrystalclear"
 LTX2_MODEL = "ltx2"
+LTX23_MODEL = "ltx23_wangp_distilled"
 
 
 class JobHelperSupportMappingTests(unittest.TestCase):
@@ -187,6 +188,60 @@ class CoordinatorCapacityEndpointTests(unittest.TestCase):
         self.assertEqual(body.get("error"), "no_capacity")
         self.assertEqual(body.get("task_type"), "FACE_SWAP")
         self.assertEqual(body.get("model"), SDXL_MODEL)
+
+
+class VideoWorkflowRequirementEndpointTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.client = app_module.app.test_client()
+        self._manifest_backup = copy.deepcopy(app_module.MANIFEST_MODELS)
+        app_module.MANIFEST_MODELS.clear()
+        app_module.MANIFEST_MODELS[LTX23_MODEL] = {
+            "name": LTX23_MODEL,
+            "pipeline": "ltx23_wangp",
+            "task_type": "LTX_VIDEO_GEN",
+            "model_family": "ltx23_wangp",
+            "reward_weight": 35.0,
+            "video_workflows": [
+                {
+                    "id": "faithful_i2v",
+                    "label": "Maximum fidelity",
+                    "requires_init_image": True,
+                    "settings": {"strength": 0.98},
+                }
+            ],
+        }
+
+    def tearDown(self) -> None:
+        app_module.MANIFEST_MODELS.clear()
+        app_module.MANIFEST_MODELS.update(self._manifest_backup)
+
+    def test_video_submission_endpoints_reject_workflow_without_init_image(
+        self,
+    ) -> None:
+        with patch.object(app_module, "rate_limit", return_value=True), patch.object(
+            app_module.invite, "enforce_invite_limits", return_value=(None, None)
+        ), patch.object(
+            app_module.safety, "check_safety", return_value=None
+        ), patch.object(
+            app_module, "refresh_manifest", return_value=None
+        ):
+            for endpoint in ("/submit-job", "/generate-video"):
+                with self.subTest(endpoint=endpoint):
+                    response = self.client.post(
+                        endpoint,
+                        json={
+                            "wallet": VALID_WALLET,
+                            "model": LTX23_MODEL,
+                            "prompt": "preserve the source",
+                            "workflow_id": "faithful_i2v",
+                        },
+                    )
+
+                    self.assertEqual(response.status_code, 400)
+                    self.assertEqual(
+                        response.get_json()["error"],
+                        "workflow_init_image_required",
+                    )
 
 
 class ExplicitLoraPolicyTests(unittest.TestCase):

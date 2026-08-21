@@ -1156,6 +1156,7 @@ def load_manifest() -> None:
             "checkpoint_variant": entry.get("checkpoint_variant", ""),
             "capabilities": entry.get("capabilities", []),
             "available_modes": entry.get("available_modes", []),
+            "video_workflows": entry.get("video_workflows", []),
             "default_pipeline_mode": entry.get("default_pipeline_mode", ""),
             "default_upscaler": entry.get("default_upscaler", ""),
             # How nodes obtain the weights; see _public_model_source().

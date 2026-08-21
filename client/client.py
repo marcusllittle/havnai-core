@@ -23,7 +23,7 @@ import urllib.parse
 from pathlib import Path
 import atexit
 import signal
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import base64
 from collections import OrderedDict
 
@@ -2618,6 +2618,11 @@ def execute_task(task: Dict[str, Any]) -> None:
                 job_settings = {}
             job_settings["_cancel_event"] = cancel_event
             job_settings["_return_b64"] = not bool(task.get("attempt_id"))
+            job_settings["_progress_fn"] = lambda progress, stage: _report_task_progress(
+                task,
+                progress,
+                stage,
+            )
 
             metrics, util, image_b64 = run_image_generation(
                 task_id,
@@ -3254,17 +3259,49 @@ def _apply_image_sampler(pipe: Any, sampler: Optional[str]) -> None:
         log(f"Sampler switch failed: {exc}", prefix="⚠️", sampler=sampler)
 
 
-def _pipeline_cancel_kwargs(pipe: Any, cancel_event: Optional[threading.Event]) -> Dict[str, Any]:
-    if cancel_event is None:
+def _pipeline_cancel_kwargs(
+    pipe: Any,
+    cancel_event: Optional[threading.Event],
+    progress_fn: Optional[Callable[[float, str], Any]] = None,
+    total_steps: int = 0,
+    stage: str = "generating",
+) -> Dict[str, Any]:
+    if cancel_event is None and progress_fn is None:
         return {}
     try:
         parameters = inspect.signature(pipe.__call__).parameters
     except Exception:
         return {}
 
+    last_progress_bucket = {"value": -1}
+
     def check_cancel(*args: Any, **kwargs: Any) -> Any:
-        if cancel_event.is_set():
+        if cancel_event is not None and cancel_event.is_set():
             raise TaskCancelled("cancelled_by_user")
+        step_index: Optional[int] = None
+        if "step_index" in kwargs:
+            try:
+                step_index = int(kwargs["step_index"])
+            except (TypeError, ValueError):
+                step_index = None
+        elif args:
+            candidate = args[-3] if len(args) >= 4 and isinstance(args[-1], dict) else args[0]
+            try:
+                step_index = int(candidate)
+            except (TypeError, ValueError):
+                step_index = None
+        if progress_fn is not None and step_index is not None and total_steps > 0:
+            raw_progress = 10.0 + (max(0, step_index) + 1) / total_steps * 80.0
+            progress_bucket = min(90, max(10, int(raw_progress // 5) * 5))
+            if progress_bucket > last_progress_bucket["value"]:
+                last_progress_bucket["value"] = progress_bucket
+                try:
+                    progress_fn(progress_bucket, stage)
+                except Exception:
+                    pass
+        callback_kwargs = kwargs.get("callback_kwargs")
+        if isinstance(callback_kwargs, dict):
+            return callback_kwargs
         if kwargs:
             return kwargs
         if args and isinstance(args[-1], dict):
@@ -3480,6 +3517,7 @@ def run_image_generation(
     resolved_prompt = prompt
     resolved_negative_prompt = negative_prompt
     cancel_event = job_settings.get("_cancel_event") if isinstance(job_settings, dict) else None
+    progress_fn = job_settings.get("_progress_fn") if isinstance(job_settings, dict) else None
     return_b64 = bool(job_settings.get("_return_b64", True)) if isinstance(job_settings, dict) else True
     if job_settings and isinstance(job_settings, dict):
         try:
@@ -3562,6 +3600,8 @@ def run_image_generation(
                 reference_face_used = True
                 reference_face_pipeline = "instantid"
                 log("Preparing reference-face pipeline…", prefix="ℹ️", device=device)
+                if callable(progress_fn):
+                    progress_fn(5, "loading_image_model")
                 transient_pipeline = bool(lora_entries)
                 pipe: Optional[Any] = None
                 try:
@@ -3624,7 +3664,13 @@ def run_image_generation(
                             image_embeds=face_embedding,
                             controlnet_conditioning_scale=0.8,
                             ip_adapter_scale=0.8,
-                            **_pipeline_cancel_kwargs(pipe, cancel_event),
+                            **_pipeline_cancel_kwargs(
+                                pipe,
+                                cancel_event,
+                                progress_fn if callable(progress_fn) else None,
+                                steps,
+                                "generating_image",
+                            ),
                         )
                     generation_ms = int((time.time() - gen_t0) * 1000)
                     log(f"Generated in {generation_ms}ms", prefix="✅")
@@ -3662,6 +3708,8 @@ def run_image_generation(
 
                 pipe_mode = "img2img" if init_pil is not None else "txt2img"
                 log(f"Preparing {pipe_mode} pipeline…", prefix="ℹ️", device=device)
+                if callable(progress_fn):
+                    progress_fn(5, "loading_image_model")
                 transient_pipeline = bool(lora_entries) or IMAGE_PIPELINE_CACHE_SIZE <= 0
                 pipe: Optional[Any] = None
                 try:
@@ -3690,14 +3738,24 @@ def run_image_generation(
                         "num_inference_steps": steps,
                         "guidance_scale": guidance,
                         "generator": generator,
-                        **_pipeline_cancel_kwargs(pipe, cancel_event),
                     }
+                    progress_steps = steps
                     if init_pil is not None:
                         generation_kwargs["image"] = init_pil
                         generation_kwargs["strength"] = img2img_strength
+                        progress_steps = max(1, int(steps * img2img_strength))
                     else:
                         generation_kwargs["height"] = img_h
                         generation_kwargs["width"] = img_w
+                    generation_kwargs.update(
+                        _pipeline_cancel_kwargs(
+                            pipe,
+                            cancel_event,
+                            progress_fn if callable(progress_fn) else None,
+                            progress_steps,
+                            "generating_image",
+                        )
+                    )
                     with torch.inference_mode():
                         result = pipe(pos_text, **generation_kwargs)
                     image_to_image_used = init_pil is not None

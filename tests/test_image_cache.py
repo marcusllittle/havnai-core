@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import sys
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -55,10 +56,21 @@ class _FakePipe:
     def __init__(self) -> None:
         self.calls = []
 
-    def __call__(self, *args, **kwargs):
+    def __call__(self, *args, callback_on_step_end=None, **kwargs):
+        if callback_on_step_end is not None:
+            total_steps = int(kwargs.get("num_inference_steps") or 1)
+            if kwargs.get("image") is not None:
+                total_steps = max(1, int(total_steps * float(kwargs.get("strength") or 1.0)))
+            for step_index in range(total_steps):
+                callback_on_step_end(self, step_index, 0, {"latents": "state"})
         self.calls.append((args, kwargs))
         image = client_module.Image.new("RGB", (64, 64), color=(10, 20, 30))
         return SimpleNamespace(images=[image])
+
+
+class _ModernCallbackPipe:
+    def __call__(self, prompt=None, callback_on_step_end=None):
+        return None
 
 
 class ImagePipelineCacheTests(unittest.TestCase):
@@ -105,6 +117,36 @@ class ImagePipelineCacheTests(unittest.TestCase):
         self.assertTrue(hit2)
         self.assertEqual(load2, 0)
         self.assertEqual(build_calls["count"], 1)
+
+    def test_diffusers_callback_reports_throttled_step_progress(self) -> None:
+        reports = []
+        callback_kwargs = client_module._pipeline_cancel_kwargs(
+            _ModernCallbackPipe(),
+            threading.Event(),
+            lambda progress, stage: reports.append((progress, stage)),
+            total_steps=10,
+            stage="generating_image",
+        )
+        callback = callback_kwargs["callback_on_step_end"]
+        pipeline_state = {"latents": "state"}
+
+        self.assertIs(callback(_ModernCallbackPipe(), 4, 0, pipeline_state), pipeline_state)
+        callback(_ModernCallbackPipe(), 4, 0, pipeline_state)
+        callback(_ModernCallbackPipe(), 9, 0, pipeline_state)
+
+        self.assertEqual(reports, [(50, "generating_image"), (90, "generating_image")])
+
+    def test_diffusers_callback_keeps_cancellation_behavior(self) -> None:
+        cancel_event = threading.Event()
+        cancel_event.set()
+        callback = client_module._pipeline_cancel_kwargs(
+            _ModernCallbackPipe(),
+            cancel_event,
+            total_steps=10,
+        )["callback_on_step_end"]
+
+        with self.assertRaises(client_module.TaskCancelled):
+            callback(_ModernCallbackPipe(), 0, 0, {"latents": "state"})
 
     def test_relative_image_source_uses_coordinator_base_url(self) -> None:
         source = client_module.Image.new("RGB", (32, 24), color=(15, 25, 35))
@@ -171,6 +213,7 @@ class ImagePipelineCacheTests(unittest.TestCase):
         entry = SimpleNamespace(name="m3", pipeline="sdxl")
         model_path = Path("/tmp/model-c.safetensors")
         fake_pipe = _FakePipe()
+        reported_progress = []
         source = client_module.Image.new("RGB", (80, 48), color=(90, 40, 20))
         encoded = io.BytesIO()
         source.save(encoded, format="PNG")
@@ -194,6 +237,7 @@ class ImagePipelineCacheTests(unittest.TestCase):
                     "width": 64,
                     "height": 64,
                     "_return_b64": False,
+                    "_progress_fn": lambda progress, stage: reported_progress.append((progress, stage)),
                 },
             )
 
@@ -206,6 +250,8 @@ class ImagePipelineCacheTests(unittest.TestCase):
         self.assertEqual(metrics["reference_source_height"], 48)
         self.assertEqual(metrics["width"], 448)
         self.assertEqual(metrics["height"], 256)
+        self.assertEqual(reported_progress[0], (5, "loading_image_model"))
+        self.assertEqual(reported_progress[-1], (90, "generating_image"))
         acquire_mock.assert_called_once_with(
             entry, model_path, "sdxl", "float32", True, "cpu", "img2img"
         )

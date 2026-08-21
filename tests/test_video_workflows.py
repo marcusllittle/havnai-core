@@ -130,6 +130,7 @@ def test_ltx23_manifest_advertises_expected_workflows() -> None:
     model = next(item for item in manifest["models"] if item["name"] == "ltx23_wangp_distilled")
     workflows = video_workflows.public_video_workflows(model)
 
+    assert model["video_defaults"]["steps"] == 10
     assert [item["id"] for item in workflows] == [
         "faithful_i2v",
         "faithful_portrait_i2v",
@@ -139,15 +140,27 @@ def test_ltx23_manifest_advertises_expected_workflows() -> None:
     ]
     assert workflows[0]["default"] is True
     assert workflows[0]["label"] == "Maximum fidelity"
+    assert workflows[0]["settings"]["steps"] == 10
     assert workflows[0]["settings"]["strength"] == 0.98
-    assert workflows[0]["settings"]["lora_strength"] == 0.35
+    assert workflows[0]["settings"]["lora_strength"] == 0.7
     assert workflows[0]["settings"]["prompt_enhancer"] == "TI"
     portrait_fidelity = workflows[1]
     assert portrait_fidelity["settings"]["width"] == 704
     assert portrait_fidelity["settings"]["height"] == 1280
+    assert portrait_fidelity["settings"]["steps"] == 10
     assert portrait_fidelity["settings"]["strength"] == 0.98
-    assert portrait_fidelity["settings"]["lora_strength"] == 0.35
+    assert portrait_fidelity["settings"]["lora_strength"] == 0.7
     assert portrait_fidelity["settings"]["prompt_enhancer"] == "TI"
+    expected_motion_strengths = {
+        "balanced_i2v": 0.85,
+        "portrait_i2v": 0.85,
+        "dynamic_i2v": 0.65,
+    }
+    for motion_workflow in workflows[2:]:
+        assert motion_workflow["settings"]["steps"] == 10
+        assert motion_workflow["settings"]["strength"] == expected_motion_strengths[motion_workflow["id"]]
+        assert motion_workflow["settings"]["lora_strength"] == 0.8
+        assert motion_workflow["settings"]["prompt_enhancer"] == "TI"
 
     payload, selected = video_workflows.apply_video_workflow(
         model,
@@ -160,5 +173,5 @@ def test_ltx23_manifest_advertises_expected_workflows() -> None:
     assert payload["width"] == 704
     assert payload["height"] == 1280
     assert payload["strength"] == 0.98
-    assert payload["lora_strength"] == 0.35
+    assert payload["lora_strength"] == 0.7
     assert payload["prompt_enhancer"] == "TI"

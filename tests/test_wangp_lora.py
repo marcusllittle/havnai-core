@@ -21,7 +21,7 @@ def test_resolves_installed_default_lora(tmp_path: Path, monkeypatch: pytest.Mon
     monkeypatch.delenv("HAVNAI_LTX23_LORA_STRENGTH", raising=False)
     monkeypatch.delenv("HAVNAI_LTX23_LORA_ENABLED", raising=False)
 
-    assert _resolve_ltx23_lora(tmp_path) == (DEFAULT_LTX23_LORA_FILENAME, 0.6)
+    assert _resolve_ltx23_lora(tmp_path) == (DEFAULT_LTX23_LORA_FILENAME, 0.8)
 
 
 def test_missing_or_disabled_lora_is_not_applied(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

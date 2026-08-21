@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 DEFAULT_WANGP_ROOT = Path.home() / ".havnai" / "tools" / "Wan2GP"
 MODEL_FILENAME = "ltx-2.3-22b-distilled-1.1_diffusion_model_quanto_bf16_int8.safetensors"
 DEFAULT_LTX23_LORA_FILENAME = "LTX2.3_reasoning_Sulphur-2_I2V_V4.safetensors"
-DEFAULT_LTX23_LORA_STRENGTH = 0.6
+DEFAULT_LTX23_LORA_STRENGTH = 0.8
 REQUIRED_CHECKPOINTS = (
     MODEL_FILENAME,
     "ltx-2.3-22b_audio_vae.safetensors",

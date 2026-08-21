@@ -608,7 +608,7 @@
       "default_upscaler": "spatial_x2_1_1",
       "timeout_seconds": 3600,
       "video_defaults": {
-        "steps": 8,
+        "steps": 10,
         "guidance": 1.0,
         "width": 1280,
         "height": 704,
@@ -631,14 +631,14 @@
           "default": true,
           "requires_init_image": true,
           "settings": {
-            "steps": 8,
+            "steps": 10,
             "guidance": 1.0,
             "width": 1280,
             "height": 704,
             "frames": 97,
             "fps": 24,
             "strength": 0.98,
-            "lora_strength": 0.35,
+            "lora_strength": 0.7,
             "prompt_enhancer": "TI"
           }
         },
@@ -648,14 +648,14 @@
           "description": "Preserves portrait-oriented sources with minimal redraw and controlled motion.",
           "requires_init_image": true,
           "settings": {
-            "steps": 8,
+            "steps": 10,
             "guidance": 1.0,
             "width": 704,
             "height": 1280,
             "frames": 97,
             "fps": 24,
             "strength": 0.98,
-            "lora_strength": 0.35,
+            "lora_strength": 0.7,
             "prompt_enhancer": "TI"
           }
         },
@@ -665,13 +665,15 @@
           "description": "Balances source consistency with more visible body and camera motion.",
           "requires_init_image": true,
           "settings": {
-            "steps": 8,
+            "steps": 10,
             "guidance": 1.0,
             "width": 1280,
             "height": 704,
             "frames": 97,
             "fps": 24,
-            "strength": 0.8
+            "strength": 0.85,
+            "lora_strength": 0.8,
+            "prompt_enhancer": "TI"
           }
         },
         {
@@ -680,13 +682,15 @@
           "description": "Uses a vertical frame for portrait-oriented source images.",
           "requires_init_image": true,
           "settings": {
-            "steps": 8,
+            "steps": 10,
             "guidance": 1.0,
             "width": 704,
             "height": 1280,
             "frames": 97,
             "fps": 24,
-            "strength": 0.85
+            "strength": 0.85,
+            "lora_strength": 0.8,
+            "prompt_enhancer": "TI"
           }
         },
         {
@@ -695,13 +699,15 @@
           "description": "Allows stronger movement while retaining the source as the first-frame anchor.",
           "requires_init_image": true,
           "settings": {
-            "steps": 8,
+            "steps": 10,
             "guidance": 1.0,
             "width": 1280,
             "height": 704,
             "frames": 97,
             "fps": 24,
-            "strength": 0.65
+            "strength": 0.65,
+            "lora_strength": 0.8,
+            "prompt_enhancer": "TI"
           }
         }
       ],

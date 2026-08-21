@@ -660,6 +660,23 @@
           }
         },
         {
+          "id": "faithful_square_i2v",
+          "label": "Maximum fidelity - Square",
+          "description": "Preserves square and near-square sources without forcing a wide or tall frame.",
+          "requires_init_image": true,
+          "settings": {
+            "steps": 10,
+            "guidance": 1.0,
+            "width": 960,
+            "height": 960,
+            "frames": 97,
+            "fps": 24,
+            "strength": 0.98,
+            "lora_strength": 0.7,
+            "prompt_enhancer": "TI"
+          }
+        },
+        {
           "id": "balanced_i2v",
           "label": "Balanced motion",
           "description": "Balances source consistency with more visible body and camera motion.",
@@ -686,6 +703,23 @@
             "guidance": 1.0,
             "width": 704,
             "height": 1280,
+            "frames": 97,
+            "fps": 24,
+            "strength": 0.85,
+            "lora_strength": 0.8,
+            "prompt_enhancer": "TI"
+          }
+        },
+        {
+          "id": "square_i2v",
+          "label": "Square motion",
+          "description": "Balances source consistency and motion in a square frame.",
+          "requires_init_image": true,
+          "settings": {
+            "steps": 10,
+            "guidance": 1.0,
+            "width": 960,
+            "height": 960,
             "frames": 97,
             "fps": 24,
             "strength": 0.85,

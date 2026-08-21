@@ -134,8 +134,10 @@ def test_ltx23_manifest_advertises_expected_workflows() -> None:
     assert [item["id"] for item in workflows] == [
         "faithful_i2v",
         "faithful_portrait_i2v",
+        "faithful_square_i2v",
         "balanced_i2v",
         "portrait_i2v",
+        "square_i2v",
         "dynamic_i2v",
     ]
     assert workflows[0]["default"] is True
@@ -151,12 +153,20 @@ def test_ltx23_manifest_advertises_expected_workflows() -> None:
     assert portrait_fidelity["settings"]["strength"] == 0.98
     assert portrait_fidelity["settings"]["lora_strength"] == 0.7
     assert portrait_fidelity["settings"]["prompt_enhancer"] == "TI"
+    square_fidelity = workflows[2]
+    assert square_fidelity["settings"]["width"] == 960
+    assert square_fidelity["settings"]["height"] == 960
+    assert square_fidelity["settings"]["steps"] == 10
+    assert square_fidelity["settings"]["strength"] == 0.98
+    assert square_fidelity["settings"]["lora_strength"] == 0.7
+    assert square_fidelity["settings"]["prompt_enhancer"] == "TI"
     expected_motion_strengths = {
         "balanced_i2v": 0.85,
         "portrait_i2v": 0.85,
+        "square_i2v": 0.85,
         "dynamic_i2v": 0.65,
     }
-    for motion_workflow in workflows[2:]:
+    for motion_workflow in workflows[3:]:
         assert motion_workflow["settings"]["steps"] == 10
         assert motion_workflow["settings"]["strength"] == expected_motion_strengths[motion_workflow["id"]]
         assert motion_workflow["settings"]["lora_strength"] == 0.8

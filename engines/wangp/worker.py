@@ -14,6 +14,15 @@ from typing import Any, Dict, Optional
 ACTIVE_JOB: Any = None
 CANCEL_REQUESTED = False
 SUPPORTED_PROMPT_ENHANCERS = frozenset({"T", "TI", "T1", "TI1"})
+SOURCE_PRESERVATION_INSTRUCTION = (
+    "Treat the supplied image as the source of truth for every visible detail. "
+    "Preserve subject count, identity, facial structure, body proportions, visible anatomy, "
+    "skin details, hair, clothing, accessories, environment, lighting, framing, and camera "
+    "orientation unless the requested action explicitly changes one. Describe one continuous, "
+    "chronological shot with only the requested motion. Keep visible features spatially and "
+    "anatomically consistent; do not introduce cuts, morphing, duplication, disappearance, or "
+    "unrequested objects. Do not assert details for surfaces hidden in the source image."
+)
 
 
 def _atomic_json(path: Path, payload: Dict[str, Any]) -> None:
@@ -41,6 +50,19 @@ def _apply_lora_settings(settings: Dict[str, Any], request: Dict[str, Any]) -> N
         return
     settings["activated_loras"] = [str(value) for value in activated if str(value).strip()]
     settings["loras_multipliers"] = str(request.get("loras_multipliers") or "")
+
+
+def _prompt_with_source_preservation(
+    prompt: Any, enhancer_mode: str, has_source: bool
+) -> str:
+    text = str(prompt or "").strip()
+    if not has_source or "I" not in enhancer_mode:
+        return text
+    return (
+        f"{text}\n@ {SOURCE_PRESERVATION_INSTRUCTION}"
+        if text
+        else SOURCE_PRESERVATION_INSTRUCTION
+    )
 
 
 def _prepare_prompt_enhancer_config(
@@ -83,8 +105,12 @@ def main() -> int:
     result_path = Path(request["result_path"])
     output_path = Path(request["output_path"])
     output_dir = Path(request["output_dir"])
+    source_image = str(request.get("source_image") or "").strip()
     prompt_enhancer, config_path = _prepare_prompt_enhancer_config(
         root, status_path.parent, request.get("prompt_enhancer")
+    )
+    generation_prompt = _prompt_with_source_preservation(
+        request.get("prompt"), prompt_enhancer, bool(source_image)
     )
 
     sys.path.insert(0, str(root))
@@ -105,7 +131,7 @@ def main() -> int:
     settings.update(
         {
             "model_type": str(request["model_type"]),
-            "prompt": str(request["prompt"]),
+            "prompt": generation_prompt,
             "negative_prompt": str(request.get("negative_prompt") or ""),
             "resolution": str(request["resolution"]),
             "num_inference_steps": int(request["steps"]),
@@ -118,7 +144,6 @@ def main() -> int:
         }
     )
     _apply_lora_settings(settings, request)
-    source_image = str(request.get("source_image") or "").strip()
     if source_image:
         settings.update(
             {

@@ -10,7 +10,12 @@ from engines.wangp.runner import (
     _resolve_ltx23_lora,
     _resolve_prompt_enhancer,
 )
-from engines.wangp.worker import _apply_lora_settings, _prepare_prompt_enhancer_config
+from engines.wangp.worker import (
+    SOURCE_PRESERVATION_INSTRUCTION,
+    _apply_lora_settings,
+    _prepare_prompt_enhancer_config,
+    _prompt_with_source_preservation,
+)
 
 
 def test_resolves_installed_default_lora(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -96,6 +101,28 @@ def test_prompt_enhancer_rejects_disabled_runtime(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="not enabled"):
         _prepare_prompt_enhancer_config(root, tmp_path / "job", "TI")
+
+
+def test_image_aware_prompt_enhancer_receives_source_preservation_instruction() -> None:
+    prepared = _prompt_with_source_preservation("She turns slowly.", "TI", True)
+
+    assert prepared.startswith("She turns slowly.\n@ ")
+    assert prepared.endswith(SOURCE_PRESERVATION_INSTRUCTION)
+    assert "one continuous, chronological shot" in prepared
+    assert "visible features spatially and anatomically consistent" in prepared
+
+
+@pytest.mark.parametrize(
+    ("mode", "has_source"),
+    [("T", True), ("TI", False), ("", True)],
+)
+def test_source_preservation_instruction_requires_image_aware_enhancement(
+    mode: str, has_source: bool
+) -> None:
+    assert (
+        _prompt_with_source_preservation("Original prompt", mode, has_source)
+        == "Original prompt"
+    )
 
 
 def test_worker_applies_lora_filename_and_multiplier() -> None:

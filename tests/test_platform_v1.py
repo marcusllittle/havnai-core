@@ -10,6 +10,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import sys
@@ -462,6 +463,76 @@ class PlatformApiContractTests(unittest.TestCase):
         response = self.client.post("/videos/job-missing/last-frame")
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.get_json()["error"], "video_not_found")
+
+    def test_video_stitch_falls_back_to_normalized_mp4(self) -> None:
+        videos_dir = app_module.OUTPUTS_DIR / "videos"
+        videos_dir.mkdir(parents=True, exist_ok=True)
+        for job_id in ("job-clip-one", "job-clip-two"):
+            (videos_dir / f"{job_id}.mp4").write_bytes(b"video")
+
+        commands = []
+
+        def run_ffmpeg(command, **_kwargs):
+            commands.append(command)
+            if len(commands) == 1:
+                return SimpleNamespace(returncode=1, stderr="copy mismatch")
+            Path(command[-1]).write_bytes(b"stitched")
+            return SimpleNamespace(returncode=0, stderr="")
+
+        with patch.object(app_module.shutil, "which", return_value="/usr/bin/ffmpeg"), patch.object(
+            app_module.subprocess, "run", side_effect=run_ffmpeg
+        ):
+            response = self.client.post(
+                "/videos/stitch",
+                json={"job_ids": ["job-clip-one", "job-clip-two"]},
+            )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(response.get_json()["stitch_mode"], "normalized")
+        self.assertEqual(len(commands), 2)
+        self.assertIn("copy", commands[0])
+        self.assertIn("libx264", commands[1])
+        output_path = app_module.STATIC_DIR / response.get_json()[
+            "video_url"
+        ].removeprefix("/static/")
+        self.assertTrue(output_path.is_file())
+
+    def test_video_stitch_rejects_success_without_output_file(self) -> None:
+        videos_dir = app_module.OUTPUTS_DIR / "videos"
+        videos_dir.mkdir(parents=True, exist_ok=True)
+        for job_id in ("job-clip-one", "job-clip-two"):
+            (videos_dir / f"{job_id}.mp4").write_bytes(b"video")
+
+        result = SimpleNamespace(returncode=0, stderr="")
+        with patch.object(app_module.shutil, "which", return_value="/usr/bin/ffmpeg"), patch.object(
+            app_module.subprocess, "run", return_value=result
+        ) as run:
+            response = self.client.post(
+                "/videos/stitch",
+                json={"job_ids": ["job-clip-one", "job-clip-two"]},
+            )
+
+        self.assertEqual(response.status_code, 500, response.get_json())
+        self.assertEqual(response.get_json()["error"], "ffmpeg_failed")
+        self.assertEqual(run.call_count, 2)
+
+    def test_video_stitch_returns_json_when_ffmpeg_cannot_start(self) -> None:
+        videos_dir = app_module.OUTPUTS_DIR / "videos"
+        videos_dir.mkdir(parents=True, exist_ok=True)
+        for job_id in ("job-clip-one", "job-clip-two"):
+            (videos_dir / f"{job_id}.mp4").write_bytes(b"video")
+
+        with patch.object(app_module.shutil, "which", return_value="/usr/bin/ffmpeg"), patch.object(
+            app_module.subprocess, "run", side_effect=OSError("ffmpeg unavailable")
+        ):
+            response = self.client.post(
+                "/videos/stitch",
+                json={"job_ids": ["job-clip-one", "job-clip-two"]},
+            )
+
+        self.assertEqual(response.status_code, 500, response.get_json())
+        self.assertEqual(response.content_type, "application/json")
+        self.assertEqual(response.get_json()["error"], "ffmpeg_failed")
 
 
 if __name__ == "__main__":

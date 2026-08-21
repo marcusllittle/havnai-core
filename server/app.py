@@ -7771,7 +7771,8 @@ def stitch_videos() -> Any:
     job_ids = payload.get("job_ids")
     if not isinstance(job_ids, list) or not job_ids:
         return jsonify({"error": "job_ids_required"}), 400
-    if shutil.which("ffmpeg") is None:
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
         return jsonify({"error": "ffmpeg_missing"}), 400
 
     videos_dir = OUTPUTS_DIR / "videos"
@@ -7785,8 +7786,13 @@ def stitch_videos() -> Any:
             return jsonify({"error": "video_not_found", "job_id": raw_id}), 404
         input_paths.append(path)
 
-    output_name = str(payload.get("output_name") or f"stitched_{int(time.time())}.mp4")
+    output_name = str(
+        payload.get("output_name")
+        or f"stitched_{int(time.time())}_{uuid.uuid4().hex[:8]}.mp4"
+    )
     output_name = Path(output_name).name
+    if not output_name.lower().endswith(".mp4"):
+        output_name = f"{Path(output_name).stem or 'stitched'}.mp4"
     output_path = videos_dir / output_name
 
     concat_path = videos_dir / f"concat_{uuid.uuid4().hex}.txt"
@@ -7794,29 +7800,103 @@ def stitch_videos() -> Any:
         with concat_path.open("w", encoding="utf-8") as handle:
             for path in input_paths:
                 handle.write(f"file '{path.as_posix()}'\n")
-        cmd = [
-            "ffmpeg",
+        copy_cmd = [
+            ffmpeg,
             "-y",
+            "-fflags",
+            "+genpts",
             "-f",
             "concat",
             "-safe",
             "0",
             "-i",
             str(concat_path),
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a?",
             "-c",
             "copy",
+            "-avoid_negative_ts",
+            "make_zero",
+            "-movflags",
+            "+faststart",
             str(output_path),
         ]
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-        if proc.returncode != 0:
-            return jsonify({"error": "ffmpeg_failed", "detail": proc.stderr.strip()}), 500
+        try:
+            copy_proc = subprocess.run(copy_cmd, capture_output=True, text=True)
+            stitch_mode = "copy"
+            if (
+                copy_proc.returncode != 0
+                or not output_path.is_file()
+                or output_path.stat().st_size == 0
+            ):
+                output_path.unlink(missing_ok=True)
+                normalized_cmd = [
+                    ffmpeg,
+                    "-y",
+                    "-fflags",
+                    "+genpts",
+                    "-f",
+                    "concat",
+                    "-safe",
+                    "0",
+                    "-i",
+                    str(concat_path),
+                    "-map",
+                    "0:v:0",
+                    "-map",
+                    "0:a?",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "medium",
+                    "-crf",
+                    "18",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "192k",
+                    "-ar",
+                    "48000",
+                    "-avoid_negative_ts",
+                    "make_zero",
+                    "-movflags",
+                    "+faststart",
+                    str(output_path),
+                ]
+                normalized_proc = subprocess.run(
+                    normalized_cmd, capture_output=True, text=True
+                )
+                stitch_mode = "normalized"
+                if (
+                    normalized_proc.returncode != 0
+                    or not output_path.is_file()
+                    or output_path.stat().st_size == 0
+                ):
+                    detail = (
+                        normalized_proc.stderr
+                        or copy_proc.stderr
+                        or "ffmpeg did not produce an output file"
+                    ).strip()[:2000]
+                    return jsonify({"error": "ffmpeg_failed", "detail": detail}), 500
+        except OSError as exc:
+            output_path.unlink(missing_ok=True)
+            return jsonify({"error": "ffmpeg_failed", "detail": str(exc)[:2000]}), 500
     finally:
         try:
             concat_path.unlink()
         except Exception:
             pass
 
-    return jsonify({"video_url": f"/static/outputs/videos/{output_name}"}), 200
+    return jsonify(
+        {
+            "video_url": f"/static/outputs/videos/{output_name}",
+            "stitch_mode": stitch_mode,
+        }
+    ), 200
 
 
 @app.route("/videos/<job_id>/last-frame", methods=["POST"])

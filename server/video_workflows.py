@@ -18,6 +18,7 @@ _NUMERIC_SETTINGS = {
     "lora_strength",
 }
 _STRING_SETTINGS = {"pipeline_mode", "checkpoint_variant"}
+_PROMPT_ENHANCER_MODES = {"T", "TI", "T1", "TI1"}
 
 
 class VideoWorkflowError(ValueError):
@@ -30,6 +31,24 @@ class VideoWorkflowRequirementError(VideoWorkflowError):
     """Raised when a workflow-specific input requirement is not met."""
 
     code = "workflow_init_image_required"
+
+
+class VideoWorkflowSettingError(VideoWorkflowError):
+    """Raised when a workflow setting is not supported by the runtime contract."""
+
+    code = "invalid_video_workflow_setting"
+
+
+def normalize_prompt_enhancer(value: Any) -> str:
+    """Return a WanGP LTX prompt-enhancer mode or reject an unsafe value."""
+    mode = str(value or "").strip().upper()
+    if not mode:
+        return ""
+    if mode not in _PROMPT_ENHANCER_MODES:
+        raise VideoWorkflowSettingError(
+            f"Unsupported LTX prompt enhancer mode '{mode}'"
+        )
+    return mode
 
 
 def public_video_workflows(model_cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -58,6 +77,14 @@ def public_video_workflows(model_cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                 value = raw_settings.get(key)
                 if isinstance(value, str) and value.strip():
                     settings[key] = value.strip()
+            try:
+                prompt_enhancer = normalize_prompt_enhancer(
+                    raw_settings.get("prompt_enhancer")
+                )
+            except VideoWorkflowSettingError:
+                prompt_enhancer = ""
+            if prompt_enhancer:
+                settings["prompt_enhancer"] = prompt_enhancer
 
         workflow: Dict[str, Any] = {
             "id": workflow_id,
@@ -102,6 +129,10 @@ def apply_video_workflow(
 
     merged = dict(workflow.get("settings") or {})
     merged.update(payload)
+    if "prompt_enhancer" in merged:
+        merged["prompt_enhancer"] = normalize_prompt_enhancer(
+            merged.get("prompt_enhancer")
+        )
     merged["workflow_id"] = workflow_id
     return merged, workflow
 
@@ -109,6 +140,8 @@ def apply_video_workflow(
 __all__ = [
     "VideoWorkflowError",
     "VideoWorkflowRequirementError",
+    "VideoWorkflowSettingError",
     "apply_video_workflow",
+    "normalize_prompt_enhancer",
     "public_video_workflows",
 ]

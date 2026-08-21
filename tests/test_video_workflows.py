@@ -27,6 +27,7 @@ MODEL = {
                 "fps": 24,
                 "strength": 0.95,
                 "lora_strength": 0.35,
+                "prompt_enhancer": "ti",
                 "prompt": "must not be exposed or applied",
             },
         }
@@ -50,6 +51,7 @@ def test_public_workflows_only_expose_supported_settings() -> None:
                 "fps": 24,
                 "strength": 0.95,
                 "lora_strength": 0.35,
+                "prompt_enhancer": "TI",
             },
         }
     ]
@@ -70,12 +72,27 @@ def test_explicit_request_values_override_workflow_defaults() -> None:
     assert payload["frames"] == 121
     assert payload["strength"] == 0.95
     assert payload["lora_strength"] == 0.35
+    assert payload["prompt_enhancer"] == "TI"
     assert payload["prompt"] == "user prompt"
 
 
 def test_unknown_workflow_is_rejected() -> None:
     with pytest.raises(video_workflows.VideoWorkflowError):
         video_workflows.apply_video_workflow(MODEL, {"workflow_id": "missing"})
+
+
+def test_invalid_prompt_enhancer_override_is_rejected() -> None:
+    with pytest.raises(video_workflows.VideoWorkflowSettingError) as error:
+        video_workflows.apply_video_workflow(
+            MODEL,
+            {
+                "workflow_id": "faithful_i2v",
+                "init_image": "source-image",
+                "prompt_enhancer": "shell command",
+            },
+        )
+
+    assert error.value.code == "invalid_video_workflow_setting"
 
 
 def test_workflow_requiring_init_image_rejects_missing_source() -> None:
@@ -124,11 +141,13 @@ def test_ltx23_manifest_advertises_expected_workflows() -> None:
     assert workflows[0]["label"] == "Maximum fidelity"
     assert workflows[0]["settings"]["strength"] == 0.98
     assert workflows[0]["settings"]["lora_strength"] == 0.35
+    assert workflows[0]["settings"]["prompt_enhancer"] == "TI"
     portrait_fidelity = workflows[1]
     assert portrait_fidelity["settings"]["width"] == 704
     assert portrait_fidelity["settings"]["height"] == 1280
     assert portrait_fidelity["settings"]["strength"] == 0.98
     assert portrait_fidelity["settings"]["lora_strength"] == 0.35
+    assert portrait_fidelity["settings"]["prompt_enhancer"] == "TI"
 
     payload, selected = video_workflows.apply_video_workflow(
         model,
@@ -142,3 +161,4 @@ def test_ltx23_manifest_advertises_expected_workflows() -> None:
     assert payload["height"] == 1280
     assert payload["strength"] == 0.98
     assert payload["lora_strength"] == 0.35
+    assert payload["prompt_enhancer"] == "TI"

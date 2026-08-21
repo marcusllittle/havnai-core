@@ -331,6 +331,29 @@ class PlatformApiContractTests(unittest.TestCase):
         self.assertEqual(task["timeout"], 3600)
         self.assertEqual(task["source_asset_id"], asset_id)
 
+    def test_ltx_workflow_controls_reach_creator_task(self) -> None:
+        settings = {
+            "prompt": "preserve the source",
+            "init_image": "/source.png",
+            "workflow_id": "faithful_i2v",
+            "lora_strength": 0.35,
+            "prompt_enhancer": "TI",
+        }
+        with app_module.app.app_context():
+            job_id = job_helpers.enqueue_job(
+                WALLET,
+                VIDEO_MODEL,
+                "LTX_VIDEO_GEN",
+                json.dumps(settings),
+                1.0,
+            )
+
+        task = self._claim(job_id)
+
+        self.assertEqual(task["workflow_id"], "faithful_i2v")
+        self.assertEqual(task["lora_strength"], 0.35)
+        self.assertEqual(task["prompt_enhancer"], "TI")
+
     def test_lease_upload_completion_and_stale_attempt_rejection(self) -> None:
         job_id = self._create_image_job()
         task = self._claim(job_id)

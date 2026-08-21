@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
-from engines.wangp.runner import DEFAULT_LTX23_LORA_FILENAME, _resolve_ltx23_lora
-from engines.wangp.worker import _apply_lora_settings
+from engines.wangp.runner import (
+    DEFAULT_LTX23_LORA_FILENAME,
+    _resolve_ltx23_lora,
+    _resolve_prompt_enhancer,
+)
+from engines.wangp.worker import _apply_lora_settings, _prepare_prompt_enhancer_config
 
 
 def test_resolves_installed_default_lora(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -51,6 +56,40 @@ def test_rejects_lora_path_outside_wangp_directory(
 
     with pytest.raises(ValueError, match="must be a filename"):
         _resolve_ltx23_lora(tmp_path)
+
+
+def test_prompt_enhancer_requires_supported_mode_and_source() -> None:
+    assert _resolve_prompt_enhancer("ti", has_source=True) == "TI"
+    assert _resolve_prompt_enhancer(None, has_source=False) == ""
+    with pytest.raises(ValueError, match="requires an init image"):
+        _resolve_prompt_enhancer("TI", has_source=False)
+    with pytest.raises(ValueError, match="Unsupported"):
+        _resolve_prompt_enhancer("TIM", has_source=True)
+
+
+def test_prompt_enhancer_uses_isolated_automatic_config(tmp_path: Path) -> None:
+    root = tmp_path / "Wan2GP"
+    root.mkdir()
+    source_config = {"enhancer_enabled": 3, "enhancer_mode": 1, "profile": 4}
+    (root / "wgp_config.json").write_text(json.dumps(source_config))
+
+    mode, config_path = _prepare_prompt_enhancer_config(root, tmp_path / "job", "ti")
+
+    assert mode == "TI"
+    assert config_path is not None
+    generated = json.loads(config_path.read_text())
+    assert generated["enhancer_mode"] == 0
+    assert generated["enhancer_enabled"] == 3
+    assert json.loads((root / "wgp_config.json").read_text()) == source_config
+
+
+def test_prompt_enhancer_rejects_disabled_runtime(tmp_path: Path) -> None:
+    root = tmp_path / "Wan2GP"
+    root.mkdir()
+    (root / "wgp_config.json").write_text(json.dumps({"enhancer_enabled": 0}))
+
+    with pytest.raises(RuntimeError, match="not enabled"):
+        _prepare_prompt_enhancer_config(root, tmp_path / "job", "TI")
 
 
 def test_worker_applies_lora_filename_and_multiplier() -> None:

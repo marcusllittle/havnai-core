@@ -3165,6 +3165,11 @@ def submit_job() -> Any:
         }
         if selected_video_workflow:
             settings["workflow_id"] = selected_video_workflow["id"]
+            prompt_enhancer = video_workflows.normalize_prompt_enhancer(
+                payload.get("prompt_enhancer")
+            )
+            if prompt_enhancer:
+                settings["prompt_enhancer"] = prompt_enhancer
         strength = _try_parse_float(payload.get("strength"))
         if strength is not None:
             settings["strength"] = max(0.1, min(1.0, strength))
@@ -3629,6 +3634,12 @@ def generate_video_job() -> Any:
     if selected_video_workflow:
         settings["workflow_id"] = selected_video_workflow["id"]
     if is_ltx_video:
+        if selected_video_workflow:
+            prompt_enhancer = video_workflows.normalize_prompt_enhancer(
+                payload.get("prompt_enhancer")
+            )
+            if prompt_enhancer:
+                settings["prompt_enhancer"] = prompt_enhancer
         default_pipeline_mode = str(
             cfg.get("default_pipeline_mode")
             or (cfg.get("available_modes", ["distilled_fast"])[0] if cfg.get("available_modes") else "distilled_fast")
@@ -4170,6 +4181,9 @@ def get_creator_tasks() -> Any:
                         "fps",
                         "init_image",
                         "strength",
+                        "workflow_id",
+                        "lora_strength",
+                        "prompt_enhancer",
                         "pipeline_mode",
                         "checkpoint_variant",
                         "upscaler",

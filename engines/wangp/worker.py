@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional
 
 ACTIVE_JOB: Any = None
 CANCEL_REQUESTED = False
+SUPPORTED_PROMPT_ENHANCERS = frozenset({"T", "TI", "T1", "TI1"})
 
 
 def _atomic_json(path: Path, payload: Dict[str, Any]) -> None:
@@ -42,6 +43,35 @@ def _apply_lora_settings(settings: Dict[str, Any], request: Dict[str, Any]) -> N
     settings["loras_multipliers"] = str(request.get("loras_multipliers") or "")
 
 
+def _prepare_prompt_enhancer_config(
+    root: Path, work_dir: Path, requested_mode: Any
+) -> tuple[str, Optional[Path]]:
+    mode = str(requested_mode or "").strip().upper()
+    if not mode:
+        return "", None
+    if mode not in SUPPORTED_PROMPT_ENHANCERS:
+        raise ValueError(f"Unsupported WanGP prompt enhancer mode: {mode}")
+
+    source = root / "wgp_config.json"
+    try:
+        config = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Unable to read WanGP config: {source}") from exc
+    if not isinstance(config, dict):
+        raise RuntimeError(f"WanGP config is not a JSON object: {source}")
+    if int(config.get("enhancer_enabled") or 0) <= 0:
+        raise RuntimeError("WanGP prompt enhancer is not enabled")
+
+    config["enhancer_mode"] = 0
+    config_dir = work_dir / "wangp-config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "wgp_config.json"
+    config_path.write_text(
+        json.dumps(config, ensure_ascii=True, indent=2) + "\n", encoding="utf-8"
+    )
+    return mode, config_path
+
+
 def main() -> int:
     global ACTIVE_JOB
     if len(sys.argv) != 2:
@@ -52,6 +82,9 @@ def main() -> int:
     result_path = Path(request["result_path"])
     output_path = Path(request["output_path"])
     output_dir = Path(request["output_dir"])
+    prompt_enhancer, config_path = _prepare_prompt_enhancer_config(
+        root, status_path.parent, request.get("prompt_enhancer")
+    )
 
     sys.path.insert(0, str(root))
     from shared.api import init
@@ -62,6 +95,7 @@ def main() -> int:
 
     session = init(
         root=root,
+        config_path=config_path,
         output_dir=output_dir,
         console_output=False,
         console_isatty=False,
@@ -78,7 +112,7 @@ def main() -> int:
             "video_length": int(request["frames"]),
             "duration_seconds": float(request["duration_seconds"]),
             "force_fps": int(request["fps"]),
-            "prompt_enhancer": "",
+            "prompt_enhancer": prompt_enhancer,
             "seed": int(request["seed"]),
         }
     )

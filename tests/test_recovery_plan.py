@@ -206,7 +206,7 @@ class VideoWorkflowRequirementEndpointTests(unittest.TestCase):
                     "id": "faithful_i2v",
                     "label": "Maximum fidelity",
                     "requires_init_image": True,
-                    "settings": {"strength": 0.98},
+                    "settings": {"strength": 0.98, "prompt_enhancer": "TI"},
                 }
             ],
         }
@@ -242,6 +242,47 @@ class VideoWorkflowRequirementEndpointTests(unittest.TestCase):
                         response.get_json()["error"],
                         "workflow_init_image_required",
                     )
+
+    def test_video_submission_endpoints_persist_workflow_prompt_enhancer(
+        self,
+    ) -> None:
+        with patch.object(app_module, "rate_limit", return_value=True), patch.object(
+            app_module.invite, "enforce_invite_limits", return_value=(None, None)
+        ), patch.object(
+            app_module.safety, "check_safety", return_value=None
+        ), patch.object(
+            app_module, "refresh_manifest", return_value=None
+        ), patch.object(
+            app_module, "_eligible_online_node_count", return_value=1
+        ), patch.object(
+            app_module.credits, "check_and_deduct_credits", return_value=None
+        ), patch.object(
+            app_module.job_helpers, "enqueue_job", return_value="job-prompt-enhancer"
+        ) as enqueue_job, patch.object(
+            app_module, "_create_settlement_ticket_for_submission"
+        ), patch.object(
+            app_module, "_emit_job_event"
+        ), patch.object(
+            app_module, "_emit_job_lifecycle"
+        ):
+            for endpoint in ("/submit-job", "/generate-video"):
+                with self.subTest(endpoint=endpoint):
+                    enqueue_job.reset_mock()
+                    response = self.client.post(
+                        endpoint,
+                        json={
+                            "wallet": VALID_WALLET,
+                            "model": LTX23_MODEL,
+                            "prompt": "preserve the source",
+                            "workflow_id": "faithful_i2v",
+                            "init_image": "data:image/png;base64,source",
+                        },
+                    )
+
+                    self.assertEqual(response.status_code, 200, response.get_json())
+                    settings = json.loads(enqueue_job.call_args.args[3])
+                    self.assertEqual(settings["workflow_id"], "faithful_i2v")
+                    self.assertEqual(settings["prompt_enhancer"], "TI")
 
 
 class ExplicitLoraPolicyTests(unittest.TestCase):

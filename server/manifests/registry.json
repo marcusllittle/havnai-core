@@ -638,7 +638,8 @@
             "frames": 97,
             "fps": 24,
             "strength": 0.98,
-            "lora_strength": 0.35
+            "lora_strength": 0.35,
+            "prompt_enhancer": "TI"
           }
         },
         {
@@ -654,7 +655,8 @@
             "frames": 97,
             "fps": 24,
             "strength": 0.98,
-            "lora_strength": 0.35
+            "lora_strength": 0.35,
+            "prompt_enhancer": "TI"
           }
         },
         {

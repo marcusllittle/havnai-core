@@ -32,6 +32,7 @@ GEMMA_FILENAME = (
     "gemma-3-12b-it-qat-q4_0-unquantized_quanto_bf16_int8.safetensors"
 )
 MAX_SOURCE_BYTES = 50 * 1024 * 1024
+SUPPORTED_PROMPT_ENHANCERS = frozenset({"T", "TI", "T1", "TI1"})
 
 
 def _wangp_root() -> Path:
@@ -68,6 +69,17 @@ def _resolve_ltx23_lora(
     except (TypeError, ValueError) as exc:
         raise ValueError("LTX 2.3 LoRA strength must be a number") from exc
     return filename, max(0.0, min(2.0, strength))
+
+
+def _resolve_prompt_enhancer(value: Any, *, has_source: bool) -> str:
+    mode = str(value or "").strip().upper()
+    if not mode:
+        return ""
+    if mode not in SUPPORTED_PROMPT_ENHANCERS:
+        raise ValueError(f"Unsupported WanGP prompt enhancer mode: {mode}")
+    if "I" in mode and not has_source:
+        raise ValueError(f"WanGP prompt enhancer mode {mode} requires an init image")
+    return mode
 
 
 def runtime_probe() -> Tuple[bool, str]:
@@ -254,6 +266,9 @@ def run_wangp_ltx23(
         source_strength_raw = 1.0
 
     lora = _resolve_ltx23_lora(root, task.get("lora_strength"))
+    prompt_enhancer = _resolve_prompt_enhancer(
+        task.get("prompt_enhancer"), has_source=source_path is not None
+    )
 
     request_payload = {
         "wangp_root": str(root),
@@ -272,6 +287,7 @@ def run_wangp_ltx23(
         "fps": fps,
         "duration_seconds": round((frames - 1) / fps, 3),
         "source_strength": max(0.1, min(1.0, float(source_strength_raw))),
+        "prompt_enhancer": prompt_enhancer,
         "seed": seed,
         "activated_loras": [lora[0]] if lora else [],
         "loras_multipliers": str(lora[1]) if lora else "",
@@ -371,6 +387,7 @@ def run_wangp_ltx23(
         "native_audio": bool(stream_info.get("native_audio")),
         "workflow_id": str(task.get("workflow_id") or "") or None,
         "source_strength": request_payload["source_strength"],
+        "prompt_enhancer": request_payload["prompt_enhancer"] or None,
         "lora_applied": bool(lora),
         "lora_name": lora[0] if lora else None,
         "lora_strength": lora[1] if lora else None,

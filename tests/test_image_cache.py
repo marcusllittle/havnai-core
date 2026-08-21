@@ -121,6 +121,22 @@ class ImagePipelineCacheTests(unittest.TestCase):
         self.assertEqual(load2, 0)
         self.assertEqual(build_calls["count"], 1)
 
+    def test_drain_image_pipeline_cache_releases_every_pipeline(self) -> None:
+        pipelines = [_FakePipe(), _FakePipe()]
+        with client_module._IMAGE_PIPELINE_CACHE_LOCK:
+            client_module._IMAGE_PIPELINE_CACHE["one"] = pipelines[0]
+            client_module._IMAGE_PIPELINE_CACHE["two"] = pipelines[1]
+
+        with patch.object(client_module, "_release_image_pipeline") as release:
+            released = client_module._drain_image_pipeline_cache()
+
+        self.assertEqual(released, 2)
+        self.assertEqual(release.call_count, 2)
+        release.assert_any_call(pipelines[0])
+        release.assert_any_call(pipelines[1])
+        with client_module._IMAGE_PIPELINE_CACHE_LOCK:
+            self.assertEqual(client_module._IMAGE_PIPELINE_CACHE, {})
+
     def test_diffusers_callback_reports_throttled_step_progress(self) -> None:
         reports = []
         callback_kwargs = client_module._pipeline_cancel_kwargs(

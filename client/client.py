@@ -2156,6 +2156,13 @@ def _run_ltx_video_task(
         task_payload["reward_weight"] = reward_weight
         task_payload["_server_base"] = SERVER_BASE
         task_payload.setdefault("seed", random.randint(0, 2**31 - 1))
+        released_pipelines = _drain_image_pipeline_cache()
+        if released_pipelines:
+            log(
+                f"Released {released_pipelines} cached image pipeline(s) before WanGP",
+                prefix="ℹ️",
+                task_id=task_id,
+            )
         try:
             metrics, util, video_path = run_wangp_ltx23(
                 task_payload,
@@ -3181,6 +3188,15 @@ def _release_image_pipeline(pipe: Any) -> None:
             torch.cuda.empty_cache()
         except Exception:
             pass
+
+
+def _drain_image_pipeline_cache() -> int:
+    with _IMAGE_PIPELINE_CACHE_LOCK:
+        cached_pipelines = list(_IMAGE_PIPELINE_CACHE.values())
+        _IMAGE_PIPELINE_CACHE.clear()
+    for pipe in cached_pipelines:
+        _release_image_pipeline(pipe)
+    return len(cached_pipelines)
 
 
 def _configure_image_pipeline(pipe: Any, entry: ModelEntry, is_xl: bool, device: str) -> Any:

@@ -130,6 +130,7 @@ def test_ltx23_manifest_advertises_expected_workflows() -> None:
     model = next(item for item in manifest["models"] if item["name"] == "ltx23_wangp_distilled")
     workflows = video_workflows.public_video_workflows(model)
 
+    assert "ingredients_reference_sheet" in model["capabilities"]
     assert model["video_defaults"]["steps"] == 10
     assert [item["id"] for item in workflows] == [
         "faithful_i2v",

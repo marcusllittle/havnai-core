@@ -1778,6 +1778,9 @@ _PUBLIC_JOB_INPUT_ASSET_FIELDS = {
     "init_image": "init_image",
     "init_image_url": "init_image",
     "init_image_b64": "init_image",
+    "reference_image": "reference_image",
+    "reference_image_url": "reference_image",
+    "reference_image_b64": "reference_image",
     "inpaint_mask": "inpaint_mask",
     "mask_image": "inpaint_mask",
     "mask_image_b64": "inpaint_mask",
@@ -3083,6 +3086,12 @@ def submit_job() -> Any:
             return jsonify({"error": exc.code, "message": str(exc)}), 400
 
     if is_ltx_video:
+        reference_image = (
+            payload.get("reference_image")
+            or payload.get("reference_image_url")
+            or payload.get("reference_image_b64")
+            or None
+        )
         # Reject controls that neither the legacy runtime nor the WanGP adapter consumes.
         unsupported = [
             key
@@ -3097,6 +3106,8 @@ def submit_job() -> Any:
             )
             if payload.get(key) not in (None, "", False, [], {})
         ]
+        if reference_image and pipeline_name != "ltx23_wangp":
+            unsupported.append("reference_image")
         if unsupported:
             return jsonify({"error": "unsupported_video_controls", "fields": unsupported}), 400
         prompt_text = enhanced_prompt
@@ -3180,6 +3191,8 @@ def submit_job() -> Any:
             settings["lora_strength"] = max(0.0, min(2.0, lora_strength))
         if init_image:
             settings["init_image"] = init_image
+        if reference_image:
+            settings["reference_image"] = reference_image
         job_data = json.dumps(settings)
         task_type = "LTX_VIDEO_GEN"
     elif is_wan_i2v:
@@ -3659,6 +3672,21 @@ def generate_video_job() -> Any:
             "model_family": str(cfg.get("model_family") or "ltx_video"),
             "model_version": str(cfg.get("model_version") or "0.9.x"),
         })
+        reference_image = (
+            payload.get("reference_image")
+            or payload.get("reference_image_url")
+            or payload.get("reference_image_b64")
+            or None
+        )
+        if reference_image:
+            if str(cfg.get("pipeline") or "").lower() != "ltx23_wangp":
+                return jsonify(
+                    {
+                        "error": "unsupported_video_controls",
+                        "fields": ["reference_image"],
+                    }
+                ), 400
+            settings["reference_image"] = reference_image
     motion_type = payload.get("motion_type")
     if motion_type:
         settings["motion_type"] = motion_type
@@ -4184,6 +4212,7 @@ def get_creator_tasks() -> Any:
                         "frames",
                         "fps",
                         "init_image",
+                        "reference_image",
                         "strength",
                         "workflow_id",
                         "lora_strength",

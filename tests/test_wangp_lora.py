@@ -7,13 +7,17 @@ import pytest
 
 from engines.wangp.runner import (
     DEFAULT_LTX23_LORA_FILENAME,
+    INGREDIENTS_LORA_FILENAME,
+    _ingredients_lora_ready,
     _resolve_ltx23_lora,
     _resolve_prompt_enhancer,
 )
 from engines.wangp.worker import (
     CONTINUATION_INSTRUCTION,
+    REFERENCE_SHEET_INSTRUCTION,
     SOURCE_PRESERVATION_INSTRUCTION,
     _apply_lora_settings,
+    _apply_reference_sheet_settings,
     _prepare_prompt_enhancer_config,
     _prompt_with_source_preservation,
 )
@@ -39,6 +43,16 @@ def test_missing_or_disabled_lora_is_not_applied(tmp_path: Path, monkeypatch: py
     lora_path.touch()
     monkeypatch.setenv("HAVNAI_LTX23_LORA_ENABLED", "false")
     assert _resolve_ltx23_lora(tmp_path) is None
+
+
+def test_ingredients_lora_probe_requires_exact_runtime_file(tmp_path: Path) -> None:
+    assert not _ingredients_lora_ready(tmp_path)
+
+    lora_path = tmp_path / "loras" / "ltx2" / INGREDIENTS_LORA_FILENAME
+    lora_path.parent.mkdir(parents=True)
+    lora_path.touch()
+
+    assert _ingredients_lora_ready(tmp_path)
 
 
 def test_workflow_strength_overrides_environment_default(
@@ -124,6 +138,17 @@ def test_continuation_prompt_advances_without_restarting_action() -> None:
     assert "across the clip boundary" in prepared
 
 
+def test_reference_sheet_prompt_keeps_start_image_authoritative() -> None:
+    prepared = _prompt_with_source_preservation(
+        "She turns slowly.", "TI1", True, has_reference=True
+    )
+
+    assert SOURCE_PRESERVATION_INSTRUCTION in prepared
+    assert REFERENCE_SHEET_INSTRUCTION in prepared
+    assert "start image as the source of truth" in prepared
+    assert "Do not copy the sheet's layout" in prepared
+
+
 @pytest.mark.parametrize(
     ("mode", "has_source"),
     [("T", True), ("TI", False), ("", True)],
@@ -150,3 +175,13 @@ def test_worker_applies_lora_filename_and_multiplier() -> None:
 
     assert settings["activated_loras"] == [DEFAULT_LTX23_LORA_FILENAME]
     assert settings["loras_multipliers"] == "0.6"
+
+
+def test_worker_applies_single_ingredients_reference_sheet() -> None:
+    settings = {"video_prompt_type": "", "image_refs": []}
+
+    _apply_reference_sheet_settings(settings, "/tmp/reference.png")
+
+    assert settings["video_prompt_type"] == "I"
+    assert settings["image_refs"] == ["/tmp/reference.png"]
+    assert settings["remove_background_images_ref"] == 0

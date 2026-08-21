@@ -18,6 +18,7 @@ DEFAULT_WANGP_ROOT = Path.home() / ".havnai" / "tools" / "Wan2GP"
 MODEL_FILENAME = "ltx-2.3-22b-distilled-1.1_diffusion_model_quanto_bf16_int8.safetensors"
 DEFAULT_LTX23_LORA_FILENAME = "LTX2.3_reasoning_Sulphur-2_I2V_V4.safetensors"
 DEFAULT_LTX23_LORA_STRENGTH = 0.8
+INGREDIENTS_LORA_FILENAME = "ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors"
 REQUIRED_CHECKPOINTS = (
     MODEL_FILENAME,
     "ltx-2.3-22b_audio_vae.safetensors",
@@ -80,6 +81,10 @@ def _resolve_prompt_enhancer(value: Any, *, has_source: bool) -> str:
     if "I" in mode and not has_source:
         raise ValueError(f"WanGP prompt enhancer mode {mode} requires an init image")
     return mode
+
+
+def _ingredients_lora_ready(root: Path) -> bool:
+    return (root / "loras" / "ltx2" / INGREDIENTS_LORA_FILENAME).is_file()
 
 
 def runtime_probe() -> Tuple[bool, str]:
@@ -243,6 +248,16 @@ def run_wangp_ltx23(
         work_dir / "source.png",
         str(task.get("_server_base") or ""),
     )
+    reference_value = task.get("reference_image")
+    if reference_value and not _ingredients_lora_ready(root):
+        raise RuntimeError(
+            f"LTX-2.3 Ingredients reference LoRA is missing: {INGREDIENTS_LORA_FILENAME}"
+        )
+    reference_path = _materialize_source(
+        reference_value,
+        work_dir / "reference.png",
+        str(task.get("_server_base") or ""),
+    )
 
     fps = max(8, min(30, int(task.get("fps") or 24)))
     requested_frames = max(9, min(257, int(task.get("frames") or 97)))
@@ -280,6 +295,7 @@ def run_wangp_ltx23(
         "prompt": str(task.get("prompt") or "").strip(),
         "negative_prompt": str(task.get("negative_prompt") or "").strip(),
         "source_image": str(source_path) if source_path else None,
+        "reference_image": str(reference_path) if reference_path else None,
         "resolution": resolution,
         "steps": max(1, min(16, int(task.get("steps") or 8))),
         "guidance": max(0.0, min(10.0, float(task.get("guidance") or 1.0))),
@@ -390,6 +406,7 @@ def run_wangp_ltx23(
         "source_strength": request_payload["source_strength"],
         "prompt_enhancer": request_payload["prompt_enhancer"] or None,
         "continuation": request_payload["continuation"],
+        "reference_sheet_applied": reference_path is not None,
         "lora_applied": bool(lora),
         "lora_name": lora[0] if lora else None,
         "lora_strength": lora[1] if lora else None,

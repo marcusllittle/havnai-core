@@ -29,6 +29,12 @@ CONTINUATION_INSTRUCTION = (
     "has already occurred. Preserve movement direction, pose continuity, subject placement, "
     "camera, lighting, environment, and appearance across the clip boundary."
 )
+REFERENCE_SHEET_INSTRUCTION = (
+    "Use the supplied reference sheet only to resolve visible identity and appearance details "
+    "that the start image does not show. Keep the start image as the source of truth for pose, "
+    "composition, subject placement, camera, lighting, and environment. Do not copy the sheet's "
+    "layout, dividers, background, text, or unrelated items into the video."
+)
 
 
 def _atomic_json(path: Path, payload: Dict[str, Any]) -> None:
@@ -58,16 +64,29 @@ def _apply_lora_settings(settings: Dict[str, Any], request: Dict[str, Any]) -> N
     settings["loras_multipliers"] = str(request.get("loras_multipliers") or "")
 
 
+def _apply_reference_sheet_settings(
+    settings: Dict[str, Any], reference_image: str
+) -> None:
+    if not reference_image:
+        return
+    settings["video_prompt_type"] = "I"
+    settings["image_refs"] = [reference_image]
+    settings["remove_background_images_ref"] = 0
+
+
 def _prompt_with_source_preservation(
     prompt: Any,
     enhancer_mode: str,
     has_source: bool,
     continuation: bool = False,
+    has_reference: bool = False,
 ) -> str:
     text = str(prompt or "").strip()
     if not has_source or "I" not in enhancer_mode:
         return text
     instruction = SOURCE_PRESERVATION_INSTRUCTION
+    if has_reference:
+        instruction = f"{instruction} {REFERENCE_SHEET_INSTRUCTION}"
     if continuation:
         instruction = f"{instruction} {CONTINUATION_INSTRUCTION}"
     return (
@@ -118,6 +137,7 @@ def main() -> int:
     output_path = Path(request["output_path"])
     output_dir = Path(request["output_dir"])
     source_image = str(request.get("source_image") or "").strip()
+    reference_image = str(request.get("reference_image") or "").strip()
     prompt_enhancer, config_path = _prepare_prompt_enhancer_config(
         root, status_path.parent, request.get("prompt_enhancer")
     )
@@ -126,6 +146,7 @@ def main() -> int:
         prompt_enhancer,
         bool(source_image),
         bool(request.get("continuation")),
+        bool(reference_image),
     )
 
     sys.path.insert(0, str(root))
@@ -159,6 +180,7 @@ def main() -> int:
         }
     )
     _apply_lora_settings(settings, request)
+    _apply_reference_sheet_settings(settings, reference_image)
     if source_image:
         settings.update(
             {

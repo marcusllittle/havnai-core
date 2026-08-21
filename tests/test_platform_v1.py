@@ -336,6 +336,7 @@ class PlatformApiContractTests(unittest.TestCase):
         settings = {
             "prompt": "preserve the source",
             "init_image": "/source.png",
+            "reference_image": "/reference-sheet.png",
             "workflow_id": "faithful_i2v",
             "lora_strength": 0.35,
             "prompt_enhancer": "TI",
@@ -353,6 +354,7 @@ class PlatformApiContractTests(unittest.TestCase):
         task = self._claim(job_id)
 
         self.assertEqual(task["workflow_id"], "faithful_i2v")
+        self.assertEqual(task["reference_image"], "/reference-sheet.png")
         self.assertEqual(task["lora_strength"], 0.35)
         self.assertEqual(task["prompt_enhancer"], "TI")
         self.assertTrue(task["continuation"])

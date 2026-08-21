@@ -276,6 +276,7 @@ class VideoWorkflowRequirementEndpointTests(unittest.TestCase):
                             "prompt": "preserve the source",
                             "workflow_id": "faithful_i2v",
                             "init_image": "data:image/png;base64,source",
+                            "reference_image": "data:image/png;base64,reference",
                             "continuation": True,
                         },
                     )
@@ -284,7 +285,48 @@ class VideoWorkflowRequirementEndpointTests(unittest.TestCase):
                     settings = json.loads(enqueue_job.call_args.args[3])
                     self.assertEqual(settings["workflow_id"], "faithful_i2v")
                     self.assertEqual(settings["prompt_enhancer"], "TI")
+                    self.assertEqual(
+                        settings["reference_image"],
+                        "data:image/png;base64,reference",
+                    )
                     self.assertTrue(settings["continuation"])
+
+    def test_video_submission_endpoints_reject_reference_for_other_ltx_pipelines(
+        self,
+    ) -> None:
+        model = app_module.MANIFEST_MODELS[LTX23_MODEL]
+        model["pipeline"] = "ltx_video"
+        model["model_family"] = "ltx_video"
+
+        with patch.object(app_module, "rate_limit", return_value=True), patch.object(
+            app_module.invite, "enforce_invite_limits", return_value=(None, None)
+        ), patch.object(
+            app_module.safety, "check_safety", return_value=None
+        ), patch.object(
+            app_module, "refresh_manifest", return_value=None
+        ):
+            for endpoint in ("/submit-job", "/generate-video"):
+                with self.subTest(endpoint=endpoint):
+                    response = self.client.post(
+                        endpoint,
+                        json={
+                            "wallet": VALID_WALLET,
+                            "model": LTX23_MODEL,
+                            "prompt": "preserve the source",
+                            "workflow_id": "faithful_i2v",
+                            "init_image": "data:image/png;base64,source",
+                            "reference_image": "data:image/png;base64,reference",
+                        },
+                    )
+
+                    self.assertEqual(response.status_code, 400, response.get_json())
+                    self.assertEqual(
+                        response.get_json(),
+                        {
+                            "error": "unsupported_video_controls",
+                            "fields": ["reference_image"],
+                        },
+                    )
 
 
 class ExplicitLoraPolicyTests(unittest.TestCase):

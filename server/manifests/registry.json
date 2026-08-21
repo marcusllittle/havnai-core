@@ -618,7 +618,8 @@
       "capabilities": [
         "image_to_video",
         "native_audio",
-        "distilled_inference"
+        "distilled_inference",
+        "ingredients_reference_sheet"
       ],
       "available_modes": [
         "distilled_1_1"

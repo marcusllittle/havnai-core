@@ -60,6 +60,10 @@ try:
     except Exception:  # pragma: no cover
         _AutoImg2ImgPipe = None  # type: ignore
     try:
+        from diffusers import AutoPipelineForInpainting as _AutoInpaintPipe  # type: ignore
+    except Exception:  # pragma: no cover
+        _AutoInpaintPipe = None  # type: ignore
+    try:
         from diffusers import StableDiffusionPipeline as _SDPipe  # type: ignore
     except Exception:  # pragma: no cover
         _SDPipe = None  # type: ignore
@@ -68,6 +72,10 @@ try:
     except Exception:  # pragma: no cover
         _SDImg2ImgPipe = None  # type: ignore
     try:
+        from diffusers import StableDiffusionInpaintPipeline as _SDInpaintPipe  # type: ignore
+    except Exception:  # pragma: no cover
+        _SDInpaintPipe = None  # type: ignore
+    try:
         from diffusers import StableDiffusionXLPipeline as _SDXLPipe  # type: ignore
     except Exception:  # pragma: no cover
         _SDXLPipe = None  # type: ignore
@@ -75,6 +83,10 @@ try:
         from diffusers import StableDiffusionXLImg2ImgPipeline as _SDXLImg2ImgPipe  # type: ignore
     except Exception:  # pragma: no cover
         _SDXLImg2ImgPipe = None  # type: ignore
+    try:
+        from diffusers import StableDiffusionXLInpaintPipeline as _SDXLInpaintPipe  # type: ignore
+    except Exception:  # pragma: no cover
+        _SDXLInpaintPipe = None  # type: ignore
     try:
         from diffusers import DPMSolverMultistepScheduler as _DPMSolver  # type: ignore
     except Exception:  # pragma: no cover
@@ -87,10 +99,13 @@ except ImportError:  # pragma: no cover
     diffusers = None
     _AutoPipe = None  # type: ignore
     _AutoImg2ImgPipe = None  # type: ignore
+    _AutoInpaintPipe = None  # type: ignore
     _SDPipe = None  # type: ignore
     _SDImg2ImgPipe = None  # type: ignore
+    _SDInpaintPipe = None  # type: ignore
     _SDXLPipe = None  # type: ignore
     _SDXLImg2ImgPipe = None  # type: ignore
+    _SDXLInpaintPipe = None  # type: ignore
     _LattePipe = None  # type: ignore
     _DPMSolver = None  # type: ignore
     _AutoencoderKL = None  # type: ignore
@@ -1712,6 +1727,22 @@ def _prepare_img2img_reference(
     return image.resize(target_size, resample=Image.LANCZOS), "resize"
 
 
+def _prepare_inpaint_mask(
+    mask: "Image.Image",
+    source_size: Tuple[int, int],
+    target_size: Tuple[int, int],
+    preserve_source_aspect: bool,
+) -> "Image.Image":
+    mask = mask.convert("L")
+    if mask.size != source_size:
+        mask = mask.resize(source_size, resample=Image.LANCZOS)
+    if preserve_source_aspect:
+        return mask.resize(target_size, resample=Image.LANCZOS)
+    if ImageOps is not None:
+        return ImageOps.fit(mask, target_size, method=Image.LANCZOS)
+    return mask.resize(target_size, resample=Image.LANCZOS)
+
+
 def get_face_analysis() -> "FaceAnalysis":
     global _FACE_ANALYSIS
     if _FACE_ANALYSIS is not None:
@@ -2605,6 +2636,7 @@ def execute_task(task: Dict[str, Any]) -> None:
                     "seed",
                     "reference_face_url",
                     "init_image",
+                    "inpaint_mask",
                     "img2img_strength",
                     "preserve_reference_aspect",
                 ):
@@ -3154,21 +3186,31 @@ def _construct_base_image_pipeline(
     load_t0 = time.time()
     pipe = None
     use_img2img = mode == "img2img"
+    use_inpaint = mode == "inpaint"
     if pipeline_name in {"sdxl"}:
-        pipeline_cls = _SDXLImg2ImgPipe if use_img2img else _SDXLPipe
+        if use_inpaint:
+            pipeline_cls = _SDXLInpaintPipe
+        else:
+            pipeline_cls = _SDXLImg2ImgPipe if use_img2img else _SDXLPipe
         if pipeline_cls is not None:
             try:
                 pipe = pipeline_cls.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
             except Exception as exc:
                 log(f"SDXL {mode} pipeline load failed: {exc}", prefix="⚠️")
-        auto_cls = _AutoImg2ImgPipe if use_img2img else _AutoPipe
+        if use_inpaint:
+            auto_cls = _AutoInpaintPipe
+        else:
+            auto_cls = _AutoImg2ImgPipe if use_img2img else _AutoPipe
         auto_from_single = getattr(auto_cls, "from_single_file", None) if auto_cls is not None else None
         if pipe is None and callable(auto_from_single):
             try:
                 pipe = auto_from_single(str(model_path), torch_dtype=dtype, safety_checker=None)
             except Exception as exc:
                 log(f"AutoPipeline {mode} load failed: {exc}", prefix="⚠️")
-    fallback_cls = _SDImg2ImgPipe if use_img2img else _SDPipe
+    if use_inpaint:
+        fallback_cls = _SDInpaintPipe
+    else:
+        fallback_cls = _SDImg2ImgPipe if use_img2img else _SDPipe
     if pipe is None and fallback_cls is not None:
         pipe = fallback_cls.from_single_file(str(model_path), torch_dtype=dtype, safety_checker=None)
     if pipe is None:
@@ -3500,7 +3542,9 @@ def run_image_generation(
     height = IMAGE_HEIGHT
     use_img2img = False
     image_to_image_used = False
+    inpainting_used = False
     init_image_raw: Optional[str] = None
+    inpaint_mask_raw: Optional[str] = None
     img2img_strength = 0.30
     preserve_reference_aspect = True
     reference_source_size: Optional[Tuple[int, int]] = None
@@ -3526,6 +3570,7 @@ def run_image_generation(
         except (TypeError, ValueError):
             pass
         init_image_raw = job_settings.get("init_image") or job_settings.get("init_image_url")
+        inpaint_mask_raw = job_settings.get("inpaint_mask") or job_settings.get("mask_image")
         reference_face_url = str(job_settings.get("reference_face_url") or "").strip()
         use_img2img = bool(init_image_raw)
         try:
@@ -3540,6 +3585,8 @@ def run_image_generation(
     img2img_strength = max(0.05, min(0.95, img2img_strength))
 
     try:
+        if inpaint_mask_raw and not use_img2img:
+            raise RuntimeError("Inpainting requires an image-to-image reference")
         if reference_face_url and (FAST_PREVIEW or torch is None or diffusers is None):
             raise RuntimeError("Reference face requires the full diffusers runtime and cannot run in fast preview mode")
         if reference_face_url and (Image is None or np is None or cv2 is None or FaceAnalysis is None):
@@ -3684,6 +3731,7 @@ def run_image_generation(
                         _release_image_pipeline(pipe)
             else:
                 init_pil = None
+                inpaint_mask = None
                 if use_img2img and init_image_raw:
                     init_pil, init_error = load_image_source_with_error(
                         init_image_raw,
@@ -3705,8 +3753,27 @@ def run_image_generation(
                         f" -> {img_w}x{img_h}, {reference_preparation}, strength={img2img_strength})",
                         prefix="🖼️",
                     )
+                    if inpaint_mask_raw:
+                        mask_source, mask_error = load_image_source_with_error(
+                            inpaint_mask_raw,
+                            base_url=SERVER_BASE,
+                        )
+                        if mask_source is None:
+                            raise RuntimeError(f"Failed to load inpainting mask: {mask_error}")
+                        inpaint_mask = _prepare_inpaint_mask(
+                            mask_source,
+                            reference_source_size,
+                            init_pil.size,
+                            preserve_reference_aspect,
+                        )
+                        if inpaint_mask.getbbox() is None:
+                            raise RuntimeError("Inpainting mask does not contain a selected area")
+                        log("Inpainting mask prepared; white pixels will be regenerated", prefix="🖌️")
 
-                pipe_mode = "img2img" if init_pil is not None else "txt2img"
+                if inpaint_mask is not None:
+                    pipe_mode = "inpaint"
+                else:
+                    pipe_mode = "img2img" if init_pil is not None else "txt2img"
                 log(f"Preparing {pipe_mode} pipeline…", prefix="ℹ️", device=device)
                 if callable(progress_fn):
                     progress_fn(5, "loading_image_model")
@@ -3743,6 +3810,8 @@ def run_image_generation(
                     if init_pil is not None:
                         generation_kwargs["image"] = init_pil
                         generation_kwargs["strength"] = img2img_strength
+                        if inpaint_mask is not None:
+                            generation_kwargs["mask_image"] = inpaint_mask
                         progress_steps = max(1, int(steps * img2img_strength))
                     else:
                         generation_kwargs["height"] = img_h
@@ -3759,9 +3828,12 @@ def run_image_generation(
                     with torch.inference_mode():
                         result = pipe(pos_text, **generation_kwargs)
                     image_to_image_used = init_pil is not None
+                    inpainting_used = inpaint_mask is not None
                     generation_ms = int((time.time() - gen_t0) * 1000)
                     log(f"Generated in {generation_ms}ms", prefix="✅")
                     img = result.images[0]
+                    if inpaint_mask is not None and init_pil is not None:
+                        img = Image.composite(img.convert("RGB"), init_pil.convert("RGB"), inpaint_mask)
                     _save_output_image(img, output_path, task_id=task_id)
                     if return_b64:
                         with output_path.open("rb") as fh:
@@ -3812,6 +3884,7 @@ def run_image_generation(
         "generation_ms": int(generation_ms),
         "reference_face_used": bool(reference_face_used),
         "image_to_image_used": image_to_image_used,
+        "inpainting_used": inpainting_used,
         "img2img_strength": img2img_strength if use_img2img else None,
         "preserve_reference_aspect": preserve_reference_aspect if use_img2img else None,
         "seed": resolved_seed,

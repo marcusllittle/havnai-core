@@ -3281,6 +3281,19 @@ def submit_job() -> Any:
             or payload.get("init_image_b64")
             or None
         )
+        inpaint_mask = (
+            payload.get("inpaint_mask")
+            or payload.get("mask_image")
+            or payload.get("mask_image_b64")
+            or None
+        )
+        if inpaint_mask and not init_image:
+            return jsonify(
+                {
+                    "error": "inpaint_reference_required",
+                    "message": "A reference image is required when an inpainting mask is provided.",
+                }
+            ), 400
         if init_image and reference_face_url:
             return jsonify(
                 {
@@ -3357,6 +3370,8 @@ def submit_job() -> Any:
             job_settings["reference_face_url"] = reference_face_url
         if init_image:
             job_settings["init_image"] = init_image
+            if inpaint_mask:
+                job_settings["inpaint_mask"] = inpaint_mask
             img2img_strength = _try_parse_float(payload.get("img2img_strength"))
             job_settings["img2img_strength"] = max(
                 0.05,
@@ -3925,6 +3940,7 @@ def get_creator_tasks() -> Any:
                             "seed",
                             "reference_face_url",
                             "init_image",
+                            "inpaint_mask",
                             "img2img_strength",
                             "preserve_reference_aspect",
                         ):
@@ -3949,7 +3965,7 @@ def get_creator_tasks() -> Any:
                                 value_str = str(value).strip()
                                 if value_str:
                                     image_overrides[key] = value_str
-                            elif key in {"reference_face_url", "init_image"}:
+                            elif key in {"reference_face_url", "init_image", "inpaint_mask"}:
                                 value_str = str(value).strip()
                                 if value_str:
                                     image_overrides[key] = value_str
@@ -4048,6 +4064,7 @@ def get_creator_tasks() -> Any:
                     "seed",
                     "reference_face_url",
                     "init_image",
+                    "inpaint_mask",
                     "img2img_strength",
                     "preserve_reference_aspect",
                 ):

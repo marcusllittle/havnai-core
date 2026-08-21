@@ -64,7 +64,9 @@ class _FakePipe:
             for step_index in range(total_steps):
                 callback_on_step_end(self, step_index, 0, {"latents": "state"})
         self.calls.append((args, kwargs))
-        image = client_module.Image.new("RGB", (64, 64), color=(10, 20, 30))
+        source = kwargs.get("image")
+        image_size = source.size if source is not None else (64, 64)
+        image = client_module.Image.new("RGB", image_size, color=(10, 20, 30))
         return SimpleNamespace(images=[image])
 
 
@@ -272,6 +274,58 @@ class ImagePipelineCacheTests(unittest.TestCase):
 
         self.assertEqual(prepared.size, (768, 768))
         self.assertEqual(mode, "center_crop")
+
+    def test_inpainting_regenerates_only_selected_pixels(self) -> None:
+        entry = SimpleNamespace(name="m-inpaint", pipeline="sdxl")
+        model_path = Path("/tmp/model-inpaint.safetensors")
+        fake_pipe = _FakePipe()
+        source = client_module.Image.new("RGB", (64, 64), color=(80, 90, 100))
+        mask = client_module.Image.new("RGB", (64, 64), color="black")
+        client_module.ImageDraw.Draw(mask).rectangle((0, 0, 31, 63), fill="white")
+        source_encoded = io.BytesIO()
+        mask_encoded = io.BytesIO()
+        source.save(source_encoded, format="PNG")
+        mask.save(mask_encoded, format="PNG")
+        source_data = "data:image/png;base64," + base64.b64encode(source_encoded.getvalue()).decode("ascii")
+        mask_data = "data:image/png;base64," + base64.b64encode(mask_encoded.getvalue()).decode("ascii")
+        saved = {}
+
+        def _capture_output(image, *_args, **_kwargs):
+            saved["image"] = image.copy()
+
+        with patch.object(client_module, "read_gpu_stats", return_value={"utilization": 0}), patch.object(
+            client_module, "_resolve_image_runtime", return_value=("cpu", "float32", True, "sdxl")
+        ), patch.object(
+            client_module, "_acquire_base_image_pipeline", return_value=(fake_pipe, True, 0)
+        ) as acquire_mock, patch.object(client_module, "_save_output_image", side_effect=_capture_output):
+            metrics, _, _ = client_module.run_image_generation(
+                task_id="job-inpaint",
+                entry=entry,
+                model_path=model_path,
+                reward_weight=1.0,
+                prompt="localized change",
+                negative_prompt="",
+                job_settings={
+                    "init_image": source_data,
+                    "inpaint_mask": mask_data,
+                    "img2img_strength": 0.35,
+                    "width": 256,
+                    "height": 256,
+                    "_return_b64": False,
+                },
+            )
+
+        self.assertEqual(metrics["status"], "success")
+        self.assertTrue(metrics["image_to_image_used"])
+        self.assertTrue(metrics["inpainting_used"])
+        acquire_mock.assert_called_once_with(
+            entry, model_path, "sdxl", "float32", True, "cpu", "inpaint"
+        )
+        _, kwargs = fake_pipe.calls[0]
+        self.assertEqual(kwargs["mask_image"].mode, "L")
+        self.assertEqual(kwargs["mask_image"].size, (256, 256))
+        self.assertEqual(saved["image"].getpixel((32, 128)), (10, 20, 30))
+        self.assertEqual(saved["image"].getpixel((224, 128)), (80, 90, 100))
 
     def test_reference_output_size_tracks_portrait_source_ratio(self) -> None:
         width, height = client_module._reference_output_size((768, 1344), (768, 768))

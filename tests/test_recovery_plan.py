@@ -274,6 +274,7 @@ class ExplicitLoraPolicyTests(unittest.TestCase):
                     "model": SDXL_MODEL,
                     "prompt": "preserve composition",
                     "init_image": "data:image/png;base64,abc",
+                    "inpaint_mask": "data:image/png;base64,mask",
                     "img2img_strength": 5,
                 },
             )
@@ -281,8 +282,28 @@ class ExplicitLoraPolicyTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         payload = json.loads(captured["data"])
         self.assertEqual(payload["init_image"], "data:image/png;base64,abc")
+        self.assertEqual(payload["inpaint_mask"], "data:image/png;base64,mask")
         self.assertEqual(payload["img2img_strength"], 0.95)
         self.assertTrue(payload["preserve_reference_aspect"])
+
+    def test_submit_job_rejects_inpaint_mask_without_reference(self) -> None:
+        with patch.object(app_module, "rate_limit", return_value=True), patch.object(
+            app_module.invite, "enforce_invite_limits", return_value=(None, None)
+        ), patch.object(app_module.safety, "check_safety", return_value=None), patch.object(
+            app_module.credits, "check_and_deduct_credits", return_value=None
+        ), patch.object(app_module, "refresh_manifest", return_value=None):
+            resp = self.client.post(
+                "/submit-job",
+                json={
+                    "wallet": VALID_WALLET,
+                    "model": SDXL_MODEL,
+                    "prompt": "localized edit",
+                    "inpaint_mask": "data:image/png;base64,mask",
+                },
+            )
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.get_json()["error"], "inpaint_reference_required")
 
 
 class CreditsFallbackCostTests(unittest.TestCase):

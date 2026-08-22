@@ -534,6 +534,117 @@ class PlatformApiContractTests(unittest.TestCase):
         self.assertNotIn("private prompt", body["canonical_json"])
         self.assertIn("immutable", response.headers["Cache-Control"])
 
+    def test_astra_receipt_batch_routes_create_prove_and_anchor(self) -> None:
+        receipt_hashes = [hashlib.sha256(f"receipt-{index}".encode()).hexdigest() for index in range(2)]
+        with app_module.app.app_context():
+            conn = app_module.get_db()
+            app_module.astra_receipts.init_receipt_tables(conn)
+            app_module.merkle_batches.init_merkle_tables(conn)
+            for index, receipt_hash in enumerate(receipt_hashes):
+                conn.execute(
+                    """INSERT INTO astra_artifact_receipts
+                       (job_id, schema_version, artifact_sha256, canonical_json,
+                        receipt_sha256, created_at)
+                       VALUES (?, 1, ?, '{}', ?, ?)""",
+                    (f"job-anchor-{index}", f"{index + 11:064x}", receipt_hash, float(index)),
+                )
+            conn.commit()
+
+        treasury = WALLET.lower()
+        with patch.object(
+            app_module.receipt_anchors, "TREASURY_WALLET", treasury
+        ), patch.object(
+            app_module, "_verify_wallet_signature", return_value=(True, None)
+        ) as verify_signature:
+            created = self.client.post(
+                "/astra/receipts/batches",
+                json={"wallet": treasury, "nonce": "nonce", "signature": "sig", "limit": 100},
+            )
+
+        self.assertEqual(created.status_code, 201, created.get_json())
+        verify_signature.assert_called_once()
+        batch = created.get_json()["batch"]
+        self.assertEqual(batch["leaf_count"], 2)
+        self.assertEqual(batch["status"], "ready")
+        self.assertEqual(batch["anchor_payload"]["from"], treasury)
+
+        proof_response = self.client.get("/astra/artifacts/job-anchor-0/receipt/proof")
+        self.assertEqual(proof_response.status_code, 200, proof_response.get_json())
+        proof = proof_response.get_json()
+        self.assertTrue(proof["valid"])
+        self.assertTrue(
+            app_module.merkle_batches.verify_proof(
+                proof["receipt_hash"], proof["proof"], proof["merkle_root"]
+            )
+        )
+
+        verification = {
+            "verified": True,
+            "pending": False,
+            "network": "sepolia",
+            "chain_id": 11155111,
+            "tx_hash": "0x" + "a" * 64,
+            "block_number": 123,
+            "confirmations": 2,
+            "from": treasury,
+            "to": treasury,
+            "calldata": batch["anchor_payload"]["calldata"],
+        }
+        with patch.object(
+            app_module.receipt_anchors,
+            "verify_anchor_transaction",
+            return_value=verification,
+        ):
+            anchored = self.client.post(
+                f"/astra/receipts/batches/{batch['batch_id']}/anchor",
+                json={"tx_hash": verification["tx_hash"]},
+            )
+        self.assertEqual(anchored.status_code, 200, anchored.get_json())
+        anchored_batch = anchored.get_json()["batch"]
+        self.assertEqual(anchored_batch["status"], "anchored")
+        self.assertEqual(anchored_batch["anchor_tx_hash"], verification["tx_hash"])
+        self.assertIn(verification["tx_hash"], anchored_batch["explorer_url"])
+
+        listing = self.client.get("/astra/receipts/batches")
+        self.assertEqual(listing.status_code, 200, listing.get_json())
+        self.assertEqual(listing.get_json()["batches"][0]["status"], "anchored")
+        self.assertEqual(listing.get_json()["unbatched_receipt_count"], 0)
+
+    def test_astra_receipt_anchor_pending_does_not_mutate_batch(self) -> None:
+        with app_module.app.app_context():
+            conn = app_module.get_db()
+            app_module.astra_receipts.init_receipt_tables(conn)
+            app_module.merkle_batches.init_merkle_tables(conn)
+            conn.execute(
+                """INSERT INTO astra_artifact_receipts
+                   (job_id, schema_version, artifact_sha256, canonical_json,
+                    receipt_sha256, created_at)
+                   VALUES ('job-pending-anchor', 1, ?, '{}', ?, 1)""",
+                ("1" * 64, "2" * 64),
+            )
+            conn.commit()
+            batch = app_module.merkle_batches.create_batch()
+        assert batch is not None
+
+        with patch.object(
+            app_module.receipt_anchors,
+            "verify_anchor_transaction",
+            return_value={
+                "verified": False,
+                "pending": True,
+                "error": "insufficient_confirmations",
+                "confirmations": 1,
+                "required_confirmations": 2,
+            },
+        ):
+            response = self.client.post(
+                f"/astra/receipts/batches/{batch['id']}/anchor",
+                json={"tx_hash": "0x" + "b" * 64},
+            )
+        self.assertEqual(response.status_code, 202, response.get_json())
+        self.assertEqual(response.get_json()["status"], "pending")
+        self.assertEqual(app_module.merkle_batches.get_batch(batch["id"])["status"], "ready")
+
     def test_video_last_frame_is_extracted_on_coordinator(self) -> None:
         videos_dir = app_module.OUTPUTS_DIR / "videos"
         videos_dir.mkdir(parents=True, exist_ok=True)

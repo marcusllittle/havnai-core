@@ -50,6 +50,8 @@ import gallery
 import astra_rewards
 import astra_gen
 import astra_receipts
+import merkle_batches
+import receipt_anchors
 import node_bundle
 import job_history
 import platform_v1
@@ -159,6 +161,7 @@ WALLET_NONCE_PURPOSE_GALLERY_DELIST = "gallery_delist"
 WALLET_NONCE_PURPOSE_IDENTITY_ANCHOR_CREATE = "identity_anchor_create"
 WALLET_NONCE_PURPOSE_IDENTITY_ANCHOR_DELETE = "identity_anchor_delete"
 WALLET_NONCE_PURPOSE_ASTRA_SESSION = "astra_session"
+WALLET_NONCE_PURPOSE_RECEIPT_BATCH_FLUSH = "receipt_batch_flush"
 WALLET_NONCE_ALLOWED_PURPOSES = {
     WALLET_NONCE_PURPOSE_CONVERT,
     WALLET_NONCE_PURPOSE_GALLERY_PURCHASE,
@@ -168,6 +171,7 @@ WALLET_NONCE_ALLOWED_PURPOSES = {
     WALLET_NONCE_PURPOSE_IDENTITY_ANCHOR_CREATE,
     WALLET_NONCE_PURPOSE_IDENTITY_ANCHOR_DELETE,
     WALLET_NONCE_PURPOSE_ASTRA_SESSION,
+    WALLET_NONCE_PURPOSE_RECEIPT_BATCH_FLUSH,
 }
 ASTRA_SESSION_TTL_SECONDS = max(
     300, int(os.getenv("HAVNAI_ASTRA_SESSION_TTL_SECONDS", "86400"))
@@ -755,6 +759,9 @@ def _inject_module_dependencies() -> None:
     hai_funding.log_event = log_event  # type: ignore[attr-defined]
     hai_funding.deposit_credits = credits.deposit_credits  # type: ignore[attr-defined]
 
+    # Receipt Merkle batching
+    merkle_batches.get_db = get_db  # type: ignore[attr-defined]
+
 
 # ---------------------------------------------------------------------------
 # Utility helpers
@@ -1094,6 +1101,7 @@ gallery.init_gallery_tables(get_db())
 astra_rewards.init_astra_tables(get_db())
 astra_gen.init_astra_gen_tables(get_db())
 astra_receipts.init_receipt_tables(get_db())
+merkle_batches.init_merkle_tables(get_db())
 
 # Optional: clear database and in-memory state on startup for a fresh dashboard
 if RESET_ON_STARTUP:
@@ -4996,8 +5004,11 @@ def wallet_nonce() -> Any:
         ), 400
 
     raw_amount = data.get("amount")
-    if purpose == WALLET_NONCE_PURPOSE_ASTRA_SESSION and raw_amount is None:
-        # A session proves ownership; there is no value being authorized.
+    if purpose in {
+        WALLET_NONCE_PURPOSE_ASTRA_SESSION,
+        WALLET_NONCE_PURPOSE_RECEIPT_BATCH_FLUSH,
+    } and raw_amount is None:
+        # These actions prove wallet control; no token value is being authorized.
         raw_amount = 1.0
     amount, amount_error = _parse_positive_amount(raw_amount)
     if amount_error:
@@ -7280,6 +7291,182 @@ def astra_artifact_receipt(job_id: str) -> Any:
     response = jsonify(payload)
     response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
     return response
+
+
+def _receipt_batch_response(batch: Dict[str, Any]) -> Dict[str, Any]:
+    batch_id = int(batch["id"])
+    tx_hash = str(batch.get("anchor_tx_hash") or "").strip().lower() or None
+    return {
+        "batch_id": batch_id,
+        "schema_version": batch["schema_version"],
+        "merkle_root": batch["merkle_root"],
+        "leaf_count": int(batch["leaf_count"]),
+        "status": batch["status"],
+        "created_at": batch["created_at"],
+        "anchor_network": batch.get("anchor_network"),
+        "anchor_chain_id": batch.get("anchor_chain_id"),
+        "anchor_tx_hash": tx_hash,
+        "anchor_block": batch.get("anchor_block"),
+        "anchor_from": batch.get("anchor_from"),
+        "anchor_to": batch.get("anchor_to"),
+        "anchored_at": batch.get("anchored_at"),
+        "anchor_payload": receipt_anchors.build_anchor_payload(
+            batch_id, str(batch["merkle_root"])
+        ),
+        "explorer_url": (
+            f"https://sepolia.etherscan.io/tx/{tx_hash}" if tx_hash else None
+        ),
+    }
+
+
+@app.route("/astra/artifacts/<job_id>/receipt/proof", methods=["GET"])
+def astra_artifact_receipt_proof(job_id: str) -> Any:
+    """Return the Merkle path that independently binds a receipt to its batch."""
+    normalized_job_id = str(job_id or "").strip()
+    if not normalized_job_id or not JOB_ID_REGEX.fullmatch(normalized_job_id):
+        return jsonify({"error": "invalid_job_id"}), 400
+    if not rate_limit(f"astra-receipt-proof:{request.remote_addr}", limit=120):
+        return jsonify({"error": "rate limit"}), 429
+    proof = merkle_batches.get_inclusion_proof(normalized_job_id)
+    if proof is None:
+        receipt = get_db().execute(
+            "SELECT 1 FROM astra_artifact_receipts WHERE job_id=?", (normalized_job_id,)
+        ).fetchone()
+        error = "receipt_not_batched" if receipt else "receipt_not_issued"
+        return jsonify({"error": error, "job_id": normalized_job_id}), 404
+    response = jsonify(proof)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/astra/receipts/batches", methods=["GET"])
+def astra_receipt_batches() -> Any:
+    """List public receipt roots and their independently verified anchor state."""
+    if not rate_limit(f"astra-receipt-batches:{request.remote_addr}", limit=120):
+        return jsonify({"error": "rate limit"}), 429
+    limit = _clamp(_coerce_int(request.args.get("limit"), 50), 1, 200)
+    batches = [_receipt_batch_response(row) for row in merkle_batches.list_batches(limit)]
+    response = jsonify(
+        {
+            "batches": batches,
+            "unbatched_receipt_count": merkle_batches.count_unbatched_receipts(),
+            "network": receipt_anchors.SEPOLIA_NETWORK,
+            "chain_id": receipt_anchors.SEPOLIA_CHAIN_ID,
+            "treasury_wallet": receipt_anchors.TREASURY_WALLET or None,
+            "minimum_confirmations": receipt_anchors.MIN_CONFIRMATIONS,
+        }
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/astra/receipts/batches", methods=["POST"])
+def astra_create_receipt_batch() -> Any:
+    """Build a batch after the configured treasury proves wallet control."""
+    if not rate_limit(f"astra-receipt-batch-create:{request.remote_addr}", limit=20):
+        return jsonify({"error": "rate limit"}), 429
+    treasury = receipt_anchors.TREASURY_WALLET
+    if not treasury or not WALLET_REGEX.fullmatch(treasury):
+        return jsonify({"error": "treasury_wallet_not_configured"}), 503
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "malformed_payload"}), 400
+    wallet = str(data.get("wallet") or "").strip().lower()
+    if not wallet or not WALLET_REGEX.fullmatch(wallet):
+        return jsonify({"error": "invalid_wallet"}), 400
+    if wallet != treasury:
+        return jsonify({"error": "treasury_wallet_required"}), 403
+    nonce = str(data.get("nonce") or "").strip()
+    signature = str(data.get("signature") or "").strip()
+    if not nonce or not signature:
+        return jsonify({"error": "missing_signature"}), 400
+    ok, failure = _verify_wallet_signature(
+        wallet,
+        nonce,
+        signature,
+        allowed_purposes={WALLET_NONCE_PURPOSE_RECEIPT_BATCH_FLUSH},
+        expected_amount=1.0,
+        log_label="Receipt batch flush",
+    )
+    if not ok:
+        return failure
+
+    limit = _clamp(_coerce_int(data.get("limit"), 100), 1, 1000)
+    min_count = _clamp(_coerce_int(data.get("min_count"), 1), 1, limit)
+    batch = merkle_batches.create_batch(limit=limit, min_count=min_count)
+    if batch is None:
+        return jsonify(
+            {
+                "created": False,
+                "batch": None,
+                "unbatched_receipt_count": merkle_batches.count_unbatched_receipts(),
+            }
+        )
+    return jsonify({"created": True, "batch": _receipt_batch_response(batch)}), 201
+
+
+@app.route("/astra/receipts/batches/<int:batch_id>/anchor", methods=["POST"])
+def astra_anchor_receipt_batch(batch_id: int) -> Any:
+    """Verify a treasury transaction and attach it to exactly one Merkle root."""
+    if not rate_limit(f"astra-receipt-anchor:{request.remote_addr}", limit=60):
+        return jsonify({"error": "rate limit"}), 429
+    batch = merkle_batches.get_batch(batch_id)
+    if batch is None:
+        return jsonify({"error": "batch_not_found"}), 404
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "malformed_payload"}), 400
+    tx_hash = str(data.get("tx_hash") or "").strip().lower()
+    if (
+        batch.get("status") == "anchored"
+        and str(batch.get("anchor_tx_hash") or "").lower() == tx_hash
+    ):
+        return jsonify(
+            {"status": "anchored", "batch": _receipt_batch_response(batch), "idempotent": True}
+        )
+
+    verification = receipt_anchors.verify_anchor_transaction(
+        tx_hash,
+        batch_id,
+        str(batch["merkle_root"]),
+        hai_funding._rpc_call,
+    )
+    if not verification.get("verified"):
+        if verification.get("pending"):
+            pending_batch = batch
+            if all(
+                key in verification
+                for key in (
+                    "network", "chain_id", "tx_hash", "block_number",
+                    "from", "to", "calldata",
+                )
+            ):
+                try:
+                    pending_batch = merkle_batches.mark_anchor_pending(batch_id, verification)
+                except (sqlite3.IntegrityError, ValueError) as exc:
+                    return jsonify({"error": str(exc)}), 409
+            return jsonify(
+                {
+                    "status": "pending",
+                    "batch": _receipt_batch_response(pending_batch),
+                    **verification,
+                }
+            ), 202
+        return jsonify({"status": "rejected", **verification}), 422
+    try:
+        anchored = merkle_batches.mark_anchored(batch_id, verification)
+    except (sqlite3.IntegrityError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 409
+    log_event(
+        "Astra receipt batch anchored",
+        batch_id=batch_id,
+        merkle_root=batch["merkle_root"],
+        tx_hash=verification["tx_hash"],
+        block_number=verification["block_number"],
+    )
+    return jsonify(
+        {"status": "anchored", "batch": _receipt_batch_response(anchored), "verification": verification}
+    )
 
 
 @app.route("/astra/recent", methods=["GET"])

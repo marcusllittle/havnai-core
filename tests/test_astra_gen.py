@@ -185,9 +185,97 @@ class RequestRewardImageTests(AstraGenTestCase):
         self.assertEqual(result["reason"], "no_capacity")
 
 
+class PreflightImageTests(AstraGenTestCase):
+    def _preflight(self, *, age_s=31.0, run_key="preflight:abc"):
+        return astra_gen.request_preflight_image(
+            wallet=WALLET,
+            run_key=run_key,
+            run_started_at=time.time() - age_s,
+            enqueue_fn=self._enqueue_fn,
+            ticket_fn=self._ticket_fn,
+            safety_fn=lambda p, n: None,
+            select_model_fn=lambda: "test_model",
+            job_payload_fn=json.dumps,
+            **VALID_IDS,
+        )
+
+    def test_starts_during_a_real_run(self) -> None:
+        result = self._preflight()
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.enqueued[0]["data"]["source"], "astra_reward")
+        row = self.conn.execute("SELECT grade FROM astra_reward_images").fetchone()
+        self.assertEqual(row["grade"], "DEPLOYMENT")
+
+    def test_rejects_an_instant_launch(self) -> None:
+        result = self._preflight(age_s=2.0)
+        self.assertEqual(result["reason"], "run_too_short")
+        self.assertEqual(self.enqueued, [])
+
+    def test_preflight_retry_is_idempotent(self) -> None:
+        first = self._preflight()
+        second = self._preflight()
+        self.assertEqual(second["status"], "existing")
+        self.assertEqual(second["job_id"], first["job_id"])
+        self.assertEqual(len(self.enqueued), 1)
+
+    def test_reward_finalizes_the_preflight_record(self) -> None:
+        result = self._preflight()
+        job_id = astra_gen.finalize_preflight(WALLET, "preflight:abc", "astra_final", "S")
+        self.assertEqual(job_id, result["job_id"])
+        row = self.conn.execute(
+            "SELECT run_id, grade FROM astra_reward_images WHERE job_id = ?", (job_id,)
+        ).fetchone()
+        self.assertEqual((row["run_id"], row["grade"]), ("astra_final", "S"))
+
+
+class RewardAnimationTests(AstraGenTestCase):
+    def test_completed_still_can_queue_one_ltx_animation(self) -> None:
+        self._insert_run()
+        image = self._request()
+        self.conn.execute("UPDATE jobs SET status='succeeded' WHERE id=?", (image["job_id"],))
+        self.conn.commit()
+
+        def request():
+            return astra_gen.request_reward_animation(
+                wallet=WALLET,
+                image_job_id=image["job_id"],
+                enqueue_fn=self._enqueue_fn,
+                ticket_fn=self._ticket_fn,
+                safety_fn=lambda p, n: None,
+                select_model_fn=lambda: astra_gen.ASTRA_LTX_MODEL,
+                result_fn=lambda job_id: {"image_url": f"/static/outputs/{job_id}.png"},
+                job_payload_fn=json.dumps,
+            )
+
+        first = request()
+        second = request()
+        self.assertTrue(first["ok"])
+        self.assertEqual(second["status"], "existing")
+        video = self.enqueued[-1]
+        self.assertEqual(video["task_type"], "LTX_VIDEO_GEN")
+        self.assertEqual(video["model"], astra_gen.ASTRA_LTX_MODEL)
+        self.assertEqual(video["data"]["workflow_id"], "portrait_i2v")
+        self.assertEqual(video["data"]["init_image"], f"/static/outputs/{image['job_id']}.png")
+
+    def test_animation_requires_a_completed_owned_source(self) -> None:
+        self._insert_run()
+        image = self._request()
+        result = astra_gen.request_reward_animation(
+            wallet=OTHER_WALLET,
+            image_job_id=image["job_id"],
+            enqueue_fn=self._enqueue_fn,
+            ticket_fn=self._ticket_fn,
+            safety_fn=lambda p, n: None,
+            select_model_fn=lambda: astra_gen.ASTRA_LTX_MODEL,
+            result_fn=lambda job_id: {"image_url": "/x.png"},
+            job_payload_fn=json.dumps,
+        )
+        self.assertEqual(result["reason"], "artifact_not_found")
+
+
 class GalleryTests(AstraGenTestCase):
     def test_gallery_states_and_url_attachment(self) -> None:
-        for i, status in enumerate(["queued", "completed", "failed"]):
+        for i, status in enumerate(["queued", "succeeded", "failed"]):
             run_id = f"astra_g{i}"
             self._insert_run(run_id=run_id)
             result = self._request(run_id=run_id)
@@ -213,6 +301,27 @@ class GalleryTests(AstraGenTestCase):
         self._request(run_id="astra_mine")
         gallery = astra_gen.get_gallery(OTHER_WALLET, lambda r: r)
         self.assertEqual(gallery["images"], [])
+
+    def test_gallery_attaches_completed_ltx_video(self) -> None:
+        self._insert_run()
+        image = self._request()
+        video_job_id = "job-video-1"
+        self.conn.execute("UPDATE jobs SET status='succeeded' WHERE id=?", (image["job_id"],))
+        self.conn.execute("INSERT INTO jobs (id, status) VALUES (?, 'succeeded')", (video_job_id,))
+        self.conn.execute(
+            "UPDATE astra_reward_images SET video_job_id=? WHERE job_id=?",
+            (video_job_id, image["job_id"]),
+        )
+        self.conn.commit()
+
+        def attach(record):
+            if record["job_id"] == video_job_id:
+                return {**record, "video_url": f"/x/{video_job_id}.mp4"}
+            return {**record, "image_url": f"/x/{record['job_id']}.png"}
+
+        artifact = astra_gen.get_gallery(WALLET, attach)["images"][0]
+        self.assertEqual(artifact["video_status"], "completed")
+        self.assertEqual(artifact["video_url"], f"/x/{video_job_id}.mp4")
 
     def test_recent_creations_only_completed_and_truncates_wallet(self) -> None:
         for i, status in enumerate(["queued", "completed"]):

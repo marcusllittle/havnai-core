@@ -33,12 +33,17 @@ log_event: Callable[..., None]
 
 DAILY_IMAGES_PER_WALLET = 10
 DAILY_IMAGES_GLOBAL = 200
+DAILY_VIDEOS_PER_WALLET = 2
+DAILY_VIDEOS_GLOBAL = 20
 RUN_MAX_AGE_SECONDS = 86400.0   # a run older than a day cannot claim art
 MIN_GRADE_FOR_IMAGE = {"S", "A", "B"}  # match the earn threshold: real play only
+PREFLIGHT_MIN_RUN_SECONDS = 30.0
 
 # Queue weight kept below typical paying traffic so a game launch spike
 # cannot starve the core product.
 ASTRA_JOB_WEIGHT = 5.0
+ASTRA_VIDEO_JOB_WEIGHT = 35.0
+ASTRA_LTX_MODEL = "ltx23_wangp_distilled"
 
 # ─── Locked template tables ──────────────────────────────────
 # Source of truth: Astra-Valkyries docs/ASTRA_ACTIVE_PROMPT_PACK.md.
@@ -62,6 +67,17 @@ NEGATIVE_PROMPT = (
     "low quality, text, logo, watermark, distorted anatomy, messy cockpit "
     "clutter, fused body parts, robotic body merge"
 )
+
+VIDEO_NEGATIVE_PROMPT = (
+    "identity drift, face morphing, outfit changes, extra limbs, bad hands, "
+    "jitter, flicker, ghosting, distorted anatomy, text, logo, watermark"
+)
+
+MOTION_FLAVOR: Dict[str, str] = {
+    "nebula-runway": "She steadies the flight controls as nebula light moves across the cockpit.",
+    "solar-rift": "She braces through a gentle shockwave while solar light sweeps across the cockpit.",
+    "abyss-crown": "She turns toward the viewport as ice crystals drift through cold teal starlight.",
+}
 
 PILOT_TEMPLATES: Dict[str, str] = {
     "pilot_nova": (
@@ -173,6 +189,9 @@ def init_astra_gen_tables(db: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_astra_reward_images_wallet
             ON astra_reward_images(wallet);
     """)
+    columns = {row[1] for row in db.execute("PRAGMA table_info(astra_reward_images)")}
+    if "video_job_id" not in columns:
+        db.execute("ALTER TABLE astra_reward_images ADD COLUMN video_job_id TEXT")
     db.commit()
 
 
@@ -191,6 +210,94 @@ def _daily_count(db: sqlite3.Connection, wallet: Optional[str] = None) -> int:
             (wallet, day_start),
         ).fetchone()
     return int(row[0])
+
+
+def _daily_video_count(db: sqlite3.Connection, wallet: Optional[str] = None) -> int:
+    day_start = float(int(time.time() // 86400) * 86400)
+    if wallet is None:
+        row = db.execute(
+            "SELECT COUNT(*) FROM astra_reward_images "
+            "WHERE video_job_id IS NOT NULL AND created_at >= ?",
+            (day_start,),
+        ).fetchone()
+    else:
+        row = db.execute(
+            "SELECT COUNT(*) FROM astra_reward_images "
+            "WHERE wallet = ? AND video_job_id IS NOT NULL AND created_at >= ?",
+            (wallet, day_start),
+        ).fetchone()
+    return int(row[0])
+
+
+def _queue_reward_image(
+    *,
+    db: sqlite3.Connection,
+    wallet: str,
+    run_id: str,
+    pilot_id: str,
+    outfit_id: str,
+    map_id: str,
+    grade: str,
+    prompt_grade: str,
+    enqueue_fn: Callable[..., str],
+    ticket_fn: Callable[..., None],
+    safety_fn: Callable[[str, str], Optional[str]],
+    select_model_fn: Callable[[], Optional[str]],
+    job_payload_fn: Callable[[Dict[str, Any]], str],
+) -> Dict[str, Any]:
+    existing = db.execute(
+        "SELECT job_id FROM astra_reward_images WHERE run_id = ?", (run_id,)
+    ).fetchone()
+    if existing is not None:
+        return {"ok": True, "job_id": existing["job_id"], "status": "existing"}
+
+    if _daily_count(db, wallet) >= DAILY_IMAGES_PER_WALLET:
+        return {"ok": False, "reason": "daily_image_cap_reached", "cap": DAILY_IMAGES_PER_WALLET}
+    if _daily_count(db) >= DAILY_IMAGES_GLOBAL:
+        return {"ok": False, "reason": "generation_busy"}
+
+    prompt = compose_prompt(pilot_id, outfit_id, map_id, prompt_grade)
+    if prompt is None:
+        return {"ok": False, "reason": "invalid_ids"}
+    block_reason = safety_fn(prompt, NEGATIVE_PROMPT)
+    if block_reason:
+        log_event(f"Astra gen blocked by safety: {block_reason}", level="warning")
+        return {"ok": False, "reason": "generation_unavailable"}
+
+    model = select_model_fn()
+    if not model:
+        return {"ok": False, "reason": "no_capacity"}
+
+    job_settings: Dict[str, Any] = {
+        "prompt": prompt,
+        "negative_prompt": NEGATIVE_PROMPT,
+        "sfw_mode": True,
+        "source": "astra_reward",
+        "astra_run_id": run_id,
+        **RENDER_SETTINGS,
+    }
+    job_data = job_payload_fn(job_settings)
+    job_id = enqueue_fn(wallet, model, "IMAGE_GEN", job_data, ASTRA_JOB_WEIGHT, None)
+    try:
+        ticket_fn(
+            job_id=job_id,
+            wallet=wallet,
+            job_type="IMAGE_GEN",
+            model=model,
+            job_data=job_data,
+        )
+    except Exception as exc:
+        log_event("Astra gen settlement ticket failed (non-fatal)", job_id=job_id, error=str(exc))
+
+    db.execute(
+        """INSERT INTO astra_reward_images
+           (run_id, job_id, wallet, pilot_id, outfit_id, map_id, grade, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (run_id, job_id, wallet, pilot_id, outfit_id, map_id, grade, time.time()),
+    )
+    db.commit()
+    log_event(f"Astra reward image queued: {wallet[:10]}… run {run_id} -> {job_id}")
+    return {"ok": True, "job_id": job_id, "status": "queued"}
 
 
 def request_reward_image(
@@ -230,65 +337,169 @@ def request_reward_image(
     if grade not in MIN_GRADE_FOR_IMAGE:
         return {"ok": False, "reason": "grade_too_low", "grade": grade}
 
-    # Idempotent: one image per run, retries return the original job.
-    existing = db.execute(
-        "SELECT job_id FROM astra_reward_images WHERE run_id = ?", (run_id,)
-    ).fetchone()
-    if existing is not None:
-        return {"ok": True, "job_id": existing["job_id"], "status": "existing"}
+    return _queue_reward_image(
+        db=db,
+        wallet=wallet,
+        run_id=run_id,
+        pilot_id=pilot_id,
+        outfit_id=outfit_id,
+        map_id=map_id,
+        grade=grade,
+        prompt_grade=grade,
+        enqueue_fn=enqueue_fn,
+        ticket_fn=ticket_fn,
+        safety_fn=safety_fn,
+        select_model_fn=select_model_fn,
+        job_payload_fn=job_payload_fn,
+    )
 
-    # Free-tier caps. GPU capacity is the real budget here.
-    if _daily_count(db, wallet) >= DAILY_IMAGES_PER_WALLET:
-        return {"ok": False, "reason": "daily_image_cap_reached", "cap": DAILY_IMAGES_PER_WALLET}
-    if _daily_count(db) >= DAILY_IMAGES_GLOBAL:
+
+def request_preflight_image(
+    *,
+    wallet: str,
+    run_key: str,
+    run_started_at: float,
+    pilot_id: str,
+    outfit_id: str,
+    map_id: str,
+    enqueue_fn: Callable[..., str],
+    ticket_fn: Callable[..., None],
+    safety_fn: Callable[[str, str], Optional[str]],
+    select_model_fn: Callable[[], Optional[str]],
+    job_payload_fn: Callable[[Dict[str, Any]], str],
+) -> Dict[str, Any]:
+    """Queue the still while a server-observed run is already in progress."""
+    elapsed = time.time() - float(run_started_at)
+    if elapsed < PREFLIGHT_MIN_RUN_SECONDS:
+        return {
+            "ok": False,
+            "reason": "run_too_short",
+            "wait_seconds": max(1, int(PREFLIGHT_MIN_RUN_SECONDS - elapsed) + 1),
+        }
+    return _queue_reward_image(
+        db=get_db(),
+        wallet=wallet,
+        run_id=run_key,
+        pilot_id=pilot_id,
+        outfit_id=outfit_id,
+        map_id=map_id,
+        grade="DEPLOYMENT",
+        prompt_grade="B",
+        enqueue_fn=enqueue_fn,
+        ticket_fn=ticket_fn,
+        safety_fn=safety_fn,
+        select_model_fn=select_model_fn,
+        job_payload_fn=job_payload_fn,
+    )
+
+
+def finalize_preflight(wallet: str, run_key: str, run_id: str, grade: str) -> Optional[str]:
+    """Attach a preflight render to the immutable rewarded run record."""
+    db = get_db()
+    row = db.execute(
+        "SELECT job_id FROM astra_reward_images WHERE run_id = ? AND wallet = ?",
+        (run_key, wallet),
+    ).fetchone()
+    if row is None:
+        return None
+    db.execute(
+        "UPDATE astra_reward_images SET run_id = ?, grade = ? WHERE run_id = ? AND wallet = ?",
+        (run_id, grade, run_key, wallet),
+    )
+    db.commit()
+    return str(row["job_id"])
+
+
+def request_reward_animation(
+    *,
+    wallet: str,
+    image_job_id: str,
+    enqueue_fn: Callable[..., str],
+    ticket_fn: Callable[..., None],
+    safety_fn: Callable[[str, str], Optional[str]],
+    select_model_fn: Callable[[], Optional[str]],
+    result_fn: Callable[[str], Optional[Dict[str, Any]]],
+    job_payload_fn: Callable[[Dict[str, Any]], str],
+) -> Dict[str, Any]:
+    """Animate a completed Astra still with the verified LTX 2.3 runtime."""
+    db = get_db()
+    row = db.execute(
+        """SELECT r.run_id, r.video_job_id, r.pilot_id, r.map_id, j.status AS image_status
+           FROM astra_reward_images r
+           LEFT JOIN jobs j ON j.id = r.job_id
+           WHERE r.job_id = ? AND r.wallet = ?""",
+        (image_job_id, wallet),
+    ).fetchone()
+    if row is None:
+        return {"ok": False, "reason": "artifact_not_found"}
+    if row["video_job_id"]:
+        return {"ok": True, "job_id": row["video_job_id"], "status": "existing"}
+    if str(row["image_status"] or "").lower() not in {"completed", "done", "succeeded", "success"}:
+        return {"ok": False, "reason": "source_not_ready"}
+    if _daily_video_count(db, wallet) >= DAILY_VIDEOS_PER_WALLET:
+        return {"ok": False, "reason": "daily_video_cap_reached", "cap": DAILY_VIDEOS_PER_WALLET}
+    if _daily_video_count(db) >= DAILY_VIDEOS_GLOBAL:
         return {"ok": False, "reason": "generation_busy"}
 
-    prompt = compose_prompt(pilot_id, outfit_id, map_id, grade)
-    if prompt is None:
+    source = result_fn(image_job_id) or {}
+    source_url = str(source.get("image_url") or "").strip()
+    if not source_url:
+        return {"ok": False, "reason": "source_not_ready"}
+    motion = MOTION_FLAVOR.get(str(row["map_id"]))
+    if str(row["pilot_id"]) not in PILOT_TEMPLATES or not motion:
         return {"ok": False, "reason": "invalid_ids"}
-
-    # Defense in depth: the prompt is entirely server-authored, but it
-    # still goes through the same safety gate as public submissions.
-    block_reason = safety_fn(prompt, NEGATIVE_PROMPT)
-    if block_reason:
-        log_event(f"Astra gen blocked by safety: {block_reason}", level="warning")
+    prompt = (
+        "Preserve the exact adult pilot, face, hair, body, outfit, cockpit, and framing from the source image. "
+        f"{motion} Natural restrained movement, stable anatomy, cinematic game cutscene, smooth motion."
+    )
+    if safety_fn(prompt, VIDEO_NEGATIVE_PROMPT):
         return {"ok": False, "reason": "generation_unavailable"}
-
     model = select_model_fn()
     if not model:
         return {"ok": False, "reason": "no_capacity"}
 
     job_settings: Dict[str, Any] = {
         "prompt": prompt,
-        "negative_prompt": NEGATIVE_PROMPT,
+        "negative_prompt": VIDEO_NEGATIVE_PROMPT,
         "sfw_mode": True,
-        "source": "astra_reward",
-        "astra_run_id": run_id,
-        **RENDER_SETTINGS,
+        "source": "astra_reward_animation",
+        "astra_run_id": row["run_id"],
+        "astra_source_job_id": image_job_id,
+        "init_image": source_url,
+        "workflow_id": "portrait_i2v",
+        "steps": 10,
+        "guidance": 1.0,
+        "width": 704,
+        "height": 1280,
+        "frames": 97,
+        "fps": 24,
+        "strength": 0.9,
+        "lora_strength": 0.9,
+        "prompt_enhancer": "TI1",
+        "pipeline_mode": "distilled_1_1",
+        "checkpoint_variant": "distilled_1_1",
+        "model_family": "ltx23_wangp",
+        "model_version": "2.3-distilled-1.1",
+        "timeout": 3600,
     }
     job_data = job_payload_fn(job_settings)
-
-    job_id = enqueue_fn(wallet, model, "IMAGE_GEN", job_data, ASTRA_JOB_WEIGHT, None)
+    job_id = enqueue_fn(wallet, model, "LTX_VIDEO_GEN", job_data, ASTRA_VIDEO_JOB_WEIGHT, None)
     try:
         ticket_fn(
             job_id=job_id,
             wallet=wallet,
-            job_type="IMAGE_GEN",
+            job_type="LTX_VIDEO_GEN",
             model=model,
             job_data=job_data,
         )
-    except Exception as exc:  # ticket failure is non-fatal, same as /submit-job
-        log_event("Astra gen settlement ticket failed (non-fatal)", job_id=job_id, error=str(exc))
-
+    except Exception as exc:
+        log_event("Astra animation settlement ticket failed (non-fatal)", job_id=job_id, error=str(exc))
     db.execute(
-        """INSERT INTO astra_reward_images
-           (run_id, job_id, wallet, pilot_id, outfit_id, map_id, grade, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (run_id, job_id, wallet, pilot_id, outfit_id, map_id, grade, time.time()),
+        "UPDATE astra_reward_images SET video_job_id = ? WHERE job_id = ? AND wallet = ?",
+        (job_id, image_job_id, wallet),
     )
     db.commit()
-
-    log_event(f"Astra reward image queued: {wallet[:10]}… run {run_id} -> {job_id}")
+    log_event(f"Astra LTX animation queued: {image_job_id} -> {job_id}")
     return {"ok": True, "job_id": job_id, "status": "queued"}
 
 
@@ -305,7 +516,7 @@ def get_recent_creations(
                   r.map_id, r.grade, r.created_at
            FROM astra_reward_images r
            JOIN jobs j ON j.id = r.job_id
-           WHERE j.status IN ('completed', 'done')
+           WHERE j.status IN ('completed', 'done', 'succeeded', 'success')
            ORDER BY r.created_at DESC
            LIMIT ?""",
         (limit,),
@@ -339,10 +550,12 @@ def get_gallery(
     result URLs attached via the platform's own resolver."""
     db = get_db()
     rows = db.execute(
-        """SELECT r.run_id, r.job_id, r.wallet, r.pilot_id, r.outfit_id,
-                  r.map_id, r.grade, r.created_at, j.status AS job_status
+        """SELECT r.run_id, r.job_id, r.video_job_id, r.wallet, r.pilot_id, r.outfit_id,
+                  r.map_id, r.grade, r.created_at, j.status AS job_status,
+                  v.status AS video_job_status
            FROM astra_reward_images r
            LEFT JOIN jobs j ON j.id = r.job_id
+           LEFT JOIN jobs v ON v.id = r.video_job_id
            WHERE r.wallet = ?
            ORDER BY r.created_at DESC
            LIMIT ?""",
@@ -351,8 +564,8 @@ def get_gallery(
 
     images: List[Dict[str, Any]] = []
     for row in rows:
-        job_status = str(row["job_status"] or "unknown")
-        if job_status in {"completed", "done"}:
+        job_status = str(row["job_status"] or "unknown").lower()
+        if job_status in {"completed", "done", "succeeded", "success"}:
             status = "completed"
         elif job_status in {"failed", "error", "cancelled"}:
             status = "failed"
@@ -370,6 +583,21 @@ def get_gallery(
         }
         if status == "completed":
             record = attach_fn(record)
+        video_job_id = str(row["video_job_id"] or "").strip()
+        if video_job_id:
+            video_job_status = str(row["video_job_status"] or "unknown").lower()
+            if video_job_status in {"completed", "done", "succeeded", "success"}:
+                video_status = "completed"
+            elif video_job_status in {"failed", "error", "cancelled", "canceled"}:
+                video_status = "failed"
+            else:
+                video_status = "pending"
+            record["video_job_id"] = video_job_id
+            record["video_status"] = video_status
+            if video_status == "completed":
+                video_result = attach_fn({"job_id": video_job_id})
+                if video_result.get("video_url"):
+                    record["video_url"] = video_result["video_url"]
         images.append(record)
 
     return {"images": images}

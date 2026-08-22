@@ -6986,6 +6986,21 @@ def astra_reward() -> Any:
         run_token=run_token,
     )
 
+    if result.get("ok") and result.get("run_id"):
+        run_key = f"preflight:{astra_rewards.run_token_fingerprint(run_token)}"
+        try:
+            artifact_job_id = astra_gen.finalize_preflight(
+                wallet,
+                run_key,
+                str(result["run_id"]),
+                grade,
+            )
+        except Exception as exc:
+            artifact_job_id = None
+            log_event("Astra preflight finalization failed (non-fatal)", level="warning", error=str(exc))
+        if artifact_job_id:
+            result["artifact_job_id"] = artifact_job_id
+
     status_code = 200 if result.get("ok") else 422
     return jsonify(result), status_code
 
@@ -7072,6 +7087,64 @@ def _select_astra_gen_model() -> Optional[str]:
     return None
 
 
+def _select_astra_ltx_model() -> Optional[str]:
+    """Return the configured LTX 2.3 model only when a capable node is online."""
+    requested = os.getenv("HAVNAI_ASTRA_LTX_MODEL", astra_gen.ASTRA_LTX_MODEL).strip().lower()
+    refresh_manifest()
+    meta = MANIFEST_MODELS.get(requested)
+    if not meta:
+        return None
+    selected = str(meta.get("name") or requested)
+    if not _is_ltx_video_config(meta):
+        return None
+    if _eligible_online_node_count(selected.lower(), "LTX_VIDEO_GEN") <= 0:
+        return None
+    return selected
+
+
+@app.route("/astra/generate-preflight", methods=["POST"])
+def astra_generate_preflight() -> Any:
+    """Start personalized art after a real run has remained active long enough."""
+    if not rate_limit(f"astra-preflight:{request.remote_addr}", limit=20):
+        return jsonify({"error": "rate limit"}), 429
+    wallet = _resolve_astra_session_wallet()
+    if not wallet:
+        return jsonify({"error": "unauthorized", "detail": "astra session required"}), 401
+    if not rate_limit(f"astra-preflight:wallet:{wallet}", limit=10):
+        return jsonify({"error": "rate limit", "detail": "per-wallet limit exceeded"}), 429
+
+    data = request.get_json(silent=True) or {}
+    run_token = str(data.get("run_token", "")).strip()
+    pilot_id = str(data.get("pilot_id", "")).strip()
+    outfit_id = str(data.get("outfit_id", "")).strip()
+    map_id = str(data.get("map_id", "")).strip()
+    if not run_token or not pilot_id or not outfit_id or not map_id:
+        return jsonify({"error": "missing_fields"}), 400
+
+    run, token_error = astra_rewards.inspect_run_token(wallet, run_token)
+    if token_error:
+        status = 403 if token_error == "run_token_wallet_mismatch" else 422
+        return jsonify({"ok": False, "reason": token_error}), status
+    if not run or str(run.get("map_id") or "") != map_id:
+        return jsonify({"ok": False, "reason": "run_map_mismatch"}), 422
+
+    run_key = f"preflight:{astra_rewards.run_token_fingerprint(run_token)}"
+    result = astra_gen.request_preflight_image(
+        wallet=wallet,
+        run_key=run_key,
+        run_started_at=float(run["started_at"]),
+        pilot_id=pilot_id,
+        outfit_id=outfit_id,
+        map_id=map_id,
+        enqueue_fn=job_helpers.enqueue_job,
+        ticket_fn=lambda **kw: _create_settlement_ticket_for_submission(**kw),
+        safety_fn=safety.check_safety,
+        select_model_fn=_select_astra_gen_model,
+        job_payload_fn=json.dumps,
+    )
+    return jsonify(result), 200 if result.get("ok") else 422
+
+
 @app.route("/astra/generate-reward", methods=["POST"])
 def astra_generate_reward() -> Any:
     """Queue a personalized reward image for a completed Astra run.
@@ -7116,6 +7189,41 @@ def astra_generate_reward() -> Any:
     reason = result.get("reason")
     if reason == "run_wallet_mismatch":
         return jsonify(result), 403
+    return jsonify(result), 422
+
+
+@app.route("/astra/animate-reward", methods=["POST"])
+def astra_animate_reward() -> Any:
+    """Turn one wallet-owned Astra still into an LTX 2.3 pilot clip."""
+    if not rate_limit(f"astra-animate:{request.remote_addr}", limit=10):
+        return jsonify({"error": "rate limit"}), 429
+    wallet = _resolve_astra_session_wallet()
+    if not wallet:
+        return jsonify({"error": "unauthorized", "detail": "astra session required"}), 401
+    if not rate_limit(f"astra-animate:wallet:{wallet}", limit=4):
+        return jsonify({"error": "rate limit", "detail": "per-wallet limit exceeded"}), 429
+
+    data = request.get_json(silent=True) or {}
+    image_job_id = str(data.get("job_id", "")).strip()
+    if not image_job_id:
+        return jsonify({"error": "job_id_required"}), 400
+    result = astra_gen.request_reward_animation(
+        wallet=wallet,
+        image_job_id=image_job_id,
+        enqueue_fn=job_helpers.enqueue_job,
+        ticket_fn=lambda **kw: _create_settlement_ticket_for_submission(**kw),
+        safety_fn=safety.check_safety,
+        select_model_fn=_select_astra_ltx_model,
+        result_fn=_build_result_payload,
+        job_payload_fn=json.dumps,
+    )
+    if result.get("ok"):
+        return jsonify(result), 200
+    reason = result.get("reason")
+    if reason == "artifact_not_found":
+        return jsonify(result), 404
+    if reason == "no_capacity":
+        return jsonify(result), 503
     return jsonify(result), 422
 
 

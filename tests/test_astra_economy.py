@@ -97,6 +97,15 @@ class RunTokenTests(AstraTestCase):
         _, error = astra.consume_run_token(WALLET, "fabricated")
         self.assertEqual(error, "unknown_run_token")
 
+    def test_open_run_can_be_inspected_without_consuming_it(self) -> None:
+        token = self._open_run()
+        run, error = astra.inspect_run_token(WALLET, token)
+        self.assertIsNone(error)
+        self.assertEqual(run["map_id"], "nebula-runway")
+        started_at, consume_error = astra.consume_run_token(WALLET, token)
+        self.assertIsNone(consume_error)
+        self.assertIsNotNone(started_at)
+
 
 class RewardTests(AstraTestCase):
     def setUp(self) -> None:

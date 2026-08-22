@@ -427,6 +427,32 @@ def start_run(wallet: str, map_id: str) -> Dict[str, Any]:
     return {"run_token": token, "started_at": now}
 
 
+def run_token_fingerprint(token: str) -> str:
+    """Stable, non-secret identifier used to make preflight work idempotent."""
+    return _hash_token(token)
+
+
+def inspect_run_token(wallet: str, token: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Validate an open run token without consuming it."""
+    if not token:
+        return None, "missing_run_token"
+
+    row = get_db().execute(
+        "SELECT wallet, map_id, started_at, expires_at, consumed_at "
+        "FROM astra_run_tokens WHERE token_hash = ?",
+        (_hash_token(token),),
+    ).fetchone()
+    if row is None:
+        return None, "unknown_run_token"
+    if str(row["wallet"]) != wallet:
+        return None, "run_token_wallet_mismatch"
+    if row["consumed_at"] is not None:
+        return None, "run_token_used"
+    if float(row["expires_at"]) < time.time():
+        return None, "run_token_expired"
+    return dict(row), None
+
+
 def consume_run_token(wallet: str, token: str) -> Tuple[Optional[float], Optional[str]]:
     """
     Claim a run token exactly once.

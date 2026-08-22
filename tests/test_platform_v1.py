@@ -534,6 +534,24 @@ class PlatformApiContractTests(unittest.TestCase):
         self.assertNotIn("private prompt", body["canonical_json"])
         self.assertIn("immutable", response.headers["Cache-Control"])
 
+    def test_public_astra_campaign_reports_real_progress_contract(self) -> None:
+        with app_module.app.app_context():
+            app_module.astra_rewards.init_astra_tables(app_module.get_db())
+            app_module.astra_gen.init_astra_gen_tables(app_module.get_db())
+            app_module.settlement.init_settlement_tables(app_module.get_db())
+        response = self.client.get(f"/astra/campaign?wallet={WALLET}")
+        self.assertEqual(response.status_code, 200, response.get_json())
+        body = response.get_json()
+        self.assertEqual(body["schema"], "havnai.astra.community-campaign")
+        self.assertEqual(body["version"], 1)
+        self.assertIn(body["map_id"], {"nebula-runway", "solar-rift", "abyss-crown"})
+        self.assertIn("current", body["combat"])
+        self.assertIn("settled_artifacts", body["forge"])
+        self.assertEqual(body["personal"]["combat_points"], 0)
+
+        invalid = self.client.get("/astra/campaign?wallet=not-a-wallet")
+        self.assertEqual(invalid.status_code, 400)
+
     def test_astra_receipt_batch_routes_create_prove_and_anchor(self) -> None:
         receipt_hashes = [hashlib.sha256(f"receipt-{index}".encode()).hexdigest() for index in range(2)]
         with app_module.app.app_context():

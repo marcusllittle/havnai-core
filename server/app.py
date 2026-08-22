@@ -48,6 +48,7 @@ import validators
 import workflows
 import gallery
 import astra_rewards
+import astra_campaign
 import astra_gen
 import astra_receipts
 import merkle_batches
@@ -742,6 +743,9 @@ def _inject_module_dependencies() -> None:
     # Astra Rewards module
     astra_rewards.get_db = get_db  # type: ignore[attr-defined]
     astra_rewards.log_event = log_event  # type: ignore[attr-defined]
+
+    # Shared Astra community campaign
+    astra_campaign.get_db = get_db  # type: ignore[attr-defined]
 
     # Per-wallet job history (Library / Collection)
     job_history.get_db = get_db  # type: ignore[attr-defined]
@@ -7000,6 +7004,9 @@ def astra_reward() -> Any:
     )
 
     if result.get("ok") and result.get("run_id"):
+        result["campaign_contribution"] = astra_campaign.get_run_contribution(
+            str(result["run_id"])
+        )
         run_key = f"preflight:{astra_rewards.run_token_fingerprint(run_token)}"
         try:
             artifact_job_id = astra_gen.finalize_preflight(
@@ -7068,6 +7075,15 @@ def astra_stats() -> Any:
     if not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid wallet"}), 400
     return jsonify(astra_rewards.get_player_stats(wallet))
+
+
+@app.route("/astra/campaign", methods=["GET"])
+def astra_campaign_status() -> Any:
+    """Current community front backed by accepted runs and final node work."""
+    wallet = (request.args.get("wallet") or "").strip().lower()
+    if wallet and not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid wallet"}), 400
+    return jsonify(astra_campaign.get_campaign(wallet or None))
 
 
 def _select_astra_gen_model(preferred_node_id: Optional[str] = None) -> Optional[str]:

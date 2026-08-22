@@ -53,6 +53,8 @@ import astra_gen
 import astra_receipts
 import merkle_batches
 import receipt_anchors
+import payout_claims
+import payout_chain
 import node_bundle
 import job_history
 import platform_v1
@@ -163,6 +165,7 @@ WALLET_NONCE_PURPOSE_IDENTITY_ANCHOR_CREATE = "identity_anchor_create"
 WALLET_NONCE_PURPOSE_IDENTITY_ANCHOR_DELETE = "identity_anchor_delete"
 WALLET_NONCE_PURPOSE_ASTRA_SESSION = "astra_session"
 WALLET_NONCE_PURPOSE_RECEIPT_BATCH_FLUSH = "receipt_batch_flush"
+WALLET_NONCE_PURPOSE_NODE_PAYOUT_BATCH_FLUSH = "node_payout_batch_flush"
 WALLET_NONCE_ALLOWED_PURPOSES = {
     WALLET_NONCE_PURPOSE_CONVERT,
     WALLET_NONCE_PURPOSE_GALLERY_PURCHASE,
@@ -173,6 +176,7 @@ WALLET_NONCE_ALLOWED_PURPOSES = {
     WALLET_NONCE_PURPOSE_IDENTITY_ANCHOR_DELETE,
     WALLET_NONCE_PURPOSE_ASTRA_SESSION,
     WALLET_NONCE_PURPOSE_RECEIPT_BATCH_FLUSH,
+    WALLET_NONCE_PURPOSE_NODE_PAYOUT_BATCH_FLUSH,
 }
 ASTRA_SESSION_TTL_SECONDS = max(
     300, int(os.getenv("HAVNAI_ASTRA_SESSION_TTL_SECONDS", "86400"))
@@ -766,6 +770,9 @@ def _inject_module_dependencies() -> None:
     # Receipt Merkle batching
     merkle_batches.get_db = get_db  # type: ignore[attr-defined]
 
+    # Operator-claimable node payout batches
+    payout_claims.get_db = get_db  # type: ignore[attr-defined]
+
 
 # ---------------------------------------------------------------------------
 # Utility helpers
@@ -1106,6 +1113,7 @@ astra_rewards.init_astra_tables(get_db())
 astra_gen.init_astra_gen_tables(get_db())
 astra_receipts.init_receipt_tables(get_db())
 merkle_batches.init_merkle_tables(get_db())
+payout_claims.init_payout_claim_tables(get_db())
 
 # Optional: clear database and in-memory state on startup for a fresh dashboard
 if RESET_ON_STARTUP:
@@ -6894,6 +6902,269 @@ def node_payouts(node_id: str) -> Any:
     limit = _clamp(_coerce_int(request.args.get("limit"), 50), 1, 200)
     payouts = settlement.get_node_payouts(node_id, limit=limit)
     return jsonify({"node_id": node_id, "payouts": payouts})
+
+
+def _payout_claim_batch_response(batch: Dict[str, Any]) -> Dict[str, Any]:
+    payload = dict(batch)
+    tx_hash = str(payload.get("publish_tx_hash") or "").strip().lower() or None
+    payload.update(
+        {
+            "publish_tx_hash": tx_hash,
+            "network": payout_chain.SEPOLIA_NETWORK,
+            "chain_id": payout_chain.SEPOLIA_CHAIN_ID,
+            "treasury_wallet": payout_chain.TREASURY_WALLET or None,
+            "claim_contract": payout_chain.CLAIM_CONTRACT or None,
+            "token_address": payout_chain.HAI_TOKEN_ADDRESS or None,
+            "minimum_confirmations": payout_chain.MIN_CONFIRMATIONS,
+            "publish_payload": payout_chain.publish_payload(
+                int(payload["batch_id"]),
+                str(payload["merkle_root"]),
+                int(payload["total_amount_wei"]),
+            ),
+            "explorer_url": (
+                f"https://sepolia.etherscan.io/tx/{tx_hash}" if tx_hash else None
+            ),
+        }
+    )
+    return payload
+
+
+def _payout_claim_response(claim: Dict[str, Any]) -> Dict[str, Any]:
+    payload = dict(claim)
+    tx_hash = str(payload.get("claimed_tx_hash") or "").strip().lower() or None
+    payload.update(
+        {
+            "claimed_tx_hash": tx_hash,
+            "network": payout_chain.SEPOLIA_NETWORK,
+            "chain_id": payout_chain.SEPOLIA_CHAIN_ID,
+            "claim_contract": payout_chain.CLAIM_CONTRACT or None,
+            "token_address": payout_chain.HAI_TOKEN_ADDRESS or None,
+            "minimum_confirmations": payout_chain.MIN_CONFIRMATIONS,
+            "explorer_url": (
+                f"https://sepolia.etherscan.io/tx/{tx_hash}" if tx_hash else None
+            ),
+        }
+    )
+    return payload
+
+
+@app.route("/payouts/claim-batches", methods=["GET"])
+def payout_claim_batches() -> Any:
+    """List immutable operator payout roots and publication state."""
+    if not rate_limit(f"payout-claim-batches:{request.remote_addr}", limit=120):
+        return jsonify({"error": "rate limit"}), 429
+    limit = _clamp(_coerce_int(request.args.get("limit"), 50), 1, 200)
+    batches = [
+        _payout_claim_batch_response(batch)
+        for batch in payout_claims.list_batches(limit)
+    ]
+    response = jsonify(
+        {
+            "batches": batches,
+            "unbatched_payout_count": payout_claims.count_unbatched_payouts(),
+            "network": payout_chain.SEPOLIA_NETWORK,
+            "chain_id": payout_chain.SEPOLIA_CHAIN_ID,
+            "treasury_wallet": payout_chain.TREASURY_WALLET or None,
+            "claim_contract": payout_chain.CLAIM_CONTRACT or None,
+            "token_address": payout_chain.HAI_TOKEN_ADDRESS or None,
+            "minimum_confirmations": payout_chain.MIN_CONFIRMATIONS,
+        }
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/payouts/claim-batches", methods=["POST"])
+def create_payout_claim_batch() -> Any:
+    """Snapshot final simulated payouts after treasury wallet authorization."""
+    if not rate_limit(f"payout-claim-batch-create:{request.remote_addr}", limit=20):
+        return jsonify({"error": "rate limit"}), 429
+    treasury = payout_chain.TREASURY_WALLET
+    if not treasury or not WALLET_REGEX.fullmatch(treasury):
+        return jsonify({"error": "treasury_wallet_not_configured"}), 503
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "malformed_payload"}), 400
+    wallet = str(data.get("wallet") or "").strip().lower()
+    if not wallet or not WALLET_REGEX.fullmatch(wallet):
+        return jsonify({"error": "invalid_wallet"}), 400
+    if wallet != treasury:
+        return jsonify({"error": "treasury_wallet_required"}), 403
+    nonce = str(data.get("nonce") or "").strip()
+    signature = str(data.get("signature") or "").strip()
+    if not nonce or not signature:
+        return jsonify({"error": "missing_signature"}), 400
+    ok, failure = _verify_wallet_signature(
+        wallet,
+        nonce,
+        signature,
+        allowed_purposes={WALLET_NONCE_PURPOSE_NODE_PAYOUT_BATCH_FLUSH},
+        expected_amount=1.0,
+        log_label="Node payout batch flush",
+    )
+    if not ok:
+        return failure
+
+    limit = _clamp(_coerce_int(data.get("limit"), 500), 1, 2000)
+    min_count = _clamp(_coerce_int(data.get("min_count"), 1), 1, limit)
+    try:
+        batch = payout_claims.create_batch(limit=limit, min_count=min_count)
+    except payout_claims.PayoutClaimError as exc:
+        return jsonify({"error": exc.code}), exc.status
+    if batch is None:
+        return jsonify(
+            {
+                "created": False,
+                "batch": None,
+                "unbatched_payout_count": payout_claims.count_unbatched_payouts(),
+            }
+        )
+    return jsonify(
+        {"created": True, "batch": _payout_claim_batch_response(batch)}
+    ), 201
+
+
+@app.route("/payouts/claim-batches/<int:batch_id>/publish", methods=["POST"])
+def publish_payout_claim_batch(batch_id: int) -> Any:
+    """Verify the treasury's exact publishRoot transaction on Sepolia."""
+    if not rate_limit(f"payout-claim-publish:{request.remote_addr}", limit=60):
+        return jsonify({"error": "rate limit"}), 429
+    batch = payout_claims.get_batch(batch_id)
+    if batch is None:
+        return jsonify({"error": "payout_batch_not_found"}), 404
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "malformed_payload"}), 400
+    tx_hash = str(data.get("tx_hash") or "").strip().lower()
+    if (
+        batch.get("status") == "published"
+        and str(batch.get("publish_tx_hash") or "").lower() == tx_hash
+    ):
+        return jsonify(
+            {
+                "status": "published",
+                "batch": _payout_claim_batch_response(batch),
+                "idempotent": True,
+            }
+        )
+    verification = payout_chain.verify_publish_transaction(
+        tx_hash,
+        batch_id,
+        str(batch["merkle_root"]),
+        int(batch["total_amount_wei"]),
+        hai_funding._rpc_call,
+    )
+    if not verification.get("verified"):
+        if verification.get("pending"):
+            try:
+                pending = payout_claims.mark_publish_pending(batch_id, verification)
+            except (sqlite3.IntegrityError, payout_claims.PayoutClaimError) as exc:
+                error = exc.code if isinstance(exc, payout_claims.PayoutClaimError) else str(exc)
+                return jsonify({"error": error}), 409
+            return jsonify(
+                {
+                    "status": "pending",
+                    "batch": _payout_claim_batch_response(pending),
+                    "verification": verification,
+                }
+            ), 202
+        return jsonify({"status": "rejected", **verification}), 422
+    try:
+        published = payout_claims.mark_published(batch_id, verification)
+    except (sqlite3.IntegrityError, payout_claims.PayoutClaimError) as exc:
+        error = exc.code if isinstance(exc, payout_claims.PayoutClaimError) else str(exc)
+        return jsonify({"error": error}), 409
+    log_event(
+        "Node payout root published",
+        batch_id=batch_id,
+        merkle_root=batch["merkle_root"],
+        total_amount_wei=batch["total_amount_wei"],
+        tx_hash=verification["tx_hash"],
+    )
+    return jsonify(
+        {
+            "status": "published",
+            "batch": _payout_claim_batch_response(published),
+            "verification": verification,
+        }
+    )
+
+
+@app.route("/payouts/claims", methods=["GET"])
+def wallet_payout_claims() -> Any:
+    """Return contract-ready claim proofs for one operator wallet."""
+    if not rate_limit(f"payout-claims:{request.remote_addr}", limit=120):
+        return jsonify({"error": "rate limit"}), 429
+    wallet = str(request.args.get("wallet") or "").strip().lower()
+    if not wallet or not WALLET_REGEX.fullmatch(wallet):
+        return jsonify({"error": "invalid_wallet"}), 400
+    try:
+        claims = [
+            _payout_claim_response(claim)
+            for claim in payout_claims.get_wallet_claims(wallet)
+        ]
+    except payout_claims.PayoutClaimError as exc:
+        return jsonify({"error": exc.code}), exc.status
+    response = jsonify({"wallet": wallet, "claims": claims})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route(
+    "/payouts/claims/<int:batch_id>/<int:leaf_index>/confirm",
+    methods=["POST"],
+)
+def confirm_wallet_payout_claim(batch_id: int, leaf_index: int) -> Any:
+    """Mark a claim paid only after its exact RewardClaimed event confirms."""
+    if not rate_limit(f"payout-claim-confirm:{request.remote_addr}", limit=60):
+        return jsonify({"error": "rate limit"}), 429
+    claim = payout_claims.get_claim(batch_id, leaf_index)
+    if claim is None:
+        return jsonify({"error": "payout_claim_not_found"}), 404
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "malformed_payload"}), 400
+    tx_hash = str(data.get("tx_hash") or "").strip().lower()
+    if claim.get("claimed") and str(claim.get("claimed_tx_hash") or "").lower() == tx_hash:
+        return jsonify(
+            {
+                "status": "claimed",
+                "claim": _payout_claim_response(claim),
+                "idempotent": True,
+            }
+        )
+    verification = payout_chain.verify_claim_transaction(
+        tx_hash,
+        batch_id,
+        leaf_index,
+        str(claim["wallet"]),
+        int(claim["amount_wei"]),
+        hai_funding._rpc_call,
+    )
+    if not verification.get("verified"):
+        status_code = 202 if verification.get("pending") else 422
+        status = "pending" if verification.get("pending") else "rejected"
+        return jsonify({"status": status, "verification": verification}), status_code
+    try:
+        paid = payout_claims.mark_claimed(batch_id, leaf_index, verification)
+    except (sqlite3.IntegrityError, payout_claims.PayoutClaimError) as exc:
+        error = exc.code if isinstance(exc, payout_claims.PayoutClaimError) else str(exc)
+        return jsonify({"error": error}), 409
+    log_event(
+        "Node payout claimed",
+        batch_id=batch_id,
+        leaf_index=leaf_index,
+        wallet=claim["wallet"],
+        amount_wei=claim["amount_wei"],
+        tx_hash=verification["tx_hash"],
+    )
+    return jsonify(
+        {
+            "status": "claimed",
+            "claim": _payout_claim_response(paid),
+            "verification": verification,
+        }
+    )
 
 
 @app.route("/credits/ledger", methods=["GET"])

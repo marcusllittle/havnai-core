@@ -4,4 +4,5 @@ gunicorn>=23.0.0
 requests>=2.31.0
 stripe>=10.0.0
 eth-account>=0.13.0
+eth-utils>=5.0.0
 python-dotenv>=1.0.0

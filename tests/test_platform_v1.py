@@ -628,6 +628,119 @@ class PlatformApiContractTests(unittest.TestCase):
         self.assertEqual(listing.get_json()["batches"][0]["status"], "anchored")
         self.assertEqual(listing.get_json()["unbatched_receipt_count"], 0)
 
+    def test_node_payout_claim_routes_batch_publish_and_confirm(self) -> None:
+        contract = "0x" + "c" * 40
+        token = "0x" + "d" * 40
+        publish_tx = "0x" + "e" * 64
+        claim_tx = "0x" + "f" * 64
+        with app_module.app.app_context():
+            conn = app_module.get_db()
+            app_module.settlement.init_settlement_tables(conn)
+            app_module.payout_claims.init_payout_claim_tables(conn)
+            conn.execute(
+                "INSERT OR REPLACE INTO node_wallets "
+                "(node_id, wallet, node_name, updated_at) VALUES ('node-claim', ?, 'Claim Node', 1)",
+                (WALLET,),
+            )
+            conn.execute(
+                """INSERT INTO node_payouts
+                   (node_id, job_id, reward_amount, reward_asset_type, status,
+                    created_at, updated_at)
+                   VALUES ('node-claim', 'job-claim', 2.5, 'simulated_hai',
+                           'completed', 1, 1)"""
+            )
+            conn.commit()
+
+        publish_verification = {
+            "verified": True,
+            "pending": False,
+            "network": "sepolia",
+            "chain_id": 11155111,
+            "tx_hash": publish_tx,
+            "block_number": 500,
+            "from": WALLET.lower(),
+            "to": contract,
+            "contract": contract,
+            "calldata": "0x1234",
+        }
+        claim_verification = {
+            "verified": True,
+            "pending": False,
+            "network": "sepolia",
+            "chain_id": 11155111,
+            "tx_hash": claim_tx,
+            "block_number": 501,
+            "from": WALLET.lower(),
+            "to": contract,
+            "contract": contract,
+            "wallet": WALLET.lower(),
+            "batch_id": 1,
+            "leaf_index": 0,
+            "amount_wei": "2500000000000000000",
+        }
+        with patch.object(
+            app_module.payout_chain, "TREASURY_WALLET", WALLET.lower()
+        ), patch.object(
+            app_module.payout_chain, "CLAIM_CONTRACT", contract
+        ), patch.object(
+            app_module.payout_chain, "HAI_TOKEN_ADDRESS", token
+        ), patch.object(
+            app_module, "_verify_wallet_signature", return_value=(True, None)
+        ) as verify_signature, patch.object(
+            app_module.payout_chain,
+            "verify_publish_transaction",
+            return_value=publish_verification,
+        ), patch.object(
+            app_module.payout_chain,
+            "verify_claim_transaction",
+            return_value=claim_verification,
+        ):
+            created = self.client.post(
+                "/payouts/claim-batches",
+                json={
+                    "wallet": WALLET,
+                    "nonce": "nonce-claim-batch",
+                    "signature": "0xsigned",
+                },
+            )
+            self.assertEqual(created.status_code, 201, created.get_json())
+            batch = created.get_json()["batch"]
+            self.assertEqual(batch["total_amount_wei"], "2500000000000000000")
+            self.assertEqual(batch["claim_contract"], contract)
+            self.assertEqual(batch["publish_payload"]["to"], contract)
+            self.assertEqual(
+                verify_signature.call_args.kwargs["allowed_purposes"],
+                {app_module.WALLET_NONCE_PURPOSE_NODE_PAYOUT_BATCH_FLUSH},
+            )
+
+            published = self.client.post(
+                f"/payouts/claim-batches/{batch['batch_id']}/publish",
+                json={"tx_hash": publish_tx},
+            )
+            self.assertEqual(published.status_code, 200, published.get_json())
+            self.assertEqual(published.get_json()["batch"]["status"], "published")
+
+            proof = self.client.get(f"/payouts/claims?wallet={WALLET}")
+            self.assertEqual(proof.status_code, 200, proof.get_json())
+            claim = proof.get_json()["claims"][0]
+            self.assertTrue(claim["valid"])
+            self.assertEqual(claim["amount_hai"], "2.5")
+            self.assertEqual(claim["batch_status"], "published")
+
+            confirmed = self.client.post(
+                f"/payouts/claims/{batch['batch_id']}/0/confirm",
+                json={"tx_hash": claim_tx},
+            )
+            self.assertEqual(confirmed.status_code, 200, confirmed.get_json())
+            self.assertTrue(confirmed.get_json()["claim"]["claimed"])
+
+        with app_module.app.app_context():
+            payout = app_module.get_db().execute(
+                "SELECT reward_asset_type, tx_hash FROM node_payouts WHERE job_id='job-claim'"
+            ).fetchone()
+            self.assertEqual(payout["reward_asset_type"], "onchain_hai")
+            self.assertEqual(payout["tx_hash"], claim_tx)
+
     def test_astra_receipt_anchor_pending_does_not_mutate_batch(self) -> None:
         with app_module.app.app_context():
             conn = app_module.get_db()

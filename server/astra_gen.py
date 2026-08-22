@@ -305,7 +305,7 @@ def get_recent_creations(
                   r.map_id, r.grade, r.created_at
            FROM astra_reward_images r
            JOIN jobs j ON j.id = r.job_id
-           WHERE j.status IN ('completed', 'done')
+           WHERE j.status IN ('completed', 'done', 'succeeded', 'success')
            ORDER BY r.created_at DESC
            LIMIT ?""",
         (limit,),
@@ -352,7 +352,7 @@ def get_gallery(
     images: List[Dict[str, Any]] = []
     for row in rows:
         job_status = str(row["job_status"] or "unknown")
-        if job_status in {"completed", "done"}:
+        if job_status in {"completed", "done", "succeeded", "success"}:
             status = "completed"
         elif job_status in {"failed", "error", "cancelled"}:
             status = "failed"

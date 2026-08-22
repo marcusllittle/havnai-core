@@ -187,7 +187,7 @@ class RequestRewardImageTests(AstraGenTestCase):
 
 class GalleryTests(AstraGenTestCase):
     def test_gallery_states_and_url_attachment(self) -> None:
-        for i, status in enumerate(["queued", "completed", "failed"]):
+        for i, status in enumerate(["queued", "completed", "succeeded", "failed"]):
             run_id = f"astra_g{i}"
             self._insert_run(run_id=run_id)
             result = self._request(run_id=run_id)
@@ -203,10 +203,10 @@ class GalleryTests(AstraGenTestCase):
         by_status = {img["status"] for img in gallery["images"]}
         self.assertEqual(by_status, {"pending", "completed", "failed"})
         completed = [img for img in gallery["images"] if img["status"] == "completed"]
-        self.assertEqual(len(completed), 1)
-        self.assertIn("image_url", completed[0])
+        self.assertEqual(len(completed), 2)
+        self.assertTrue(all("image_url" in image for image in completed))
         # URL resolver only runs for completed jobs.
-        self.assertEqual(len(attached), 1)
+        self.assertEqual(len(attached), 2)
 
     def test_gallery_is_per_wallet(self) -> None:
         self._insert_run(run_id="astra_mine")
@@ -215,7 +215,7 @@ class GalleryTests(AstraGenTestCase):
         self.assertEqual(gallery["images"], [])
 
     def test_recent_creations_only_completed_and_truncates_wallet(self) -> None:
-        for i, status in enumerate(["queued", "completed"]):
+        for i, status in enumerate(["queued", "completed", "succeeded"]):
             run_id = f"astra_rc{i}"
             self._insert_run(run_id=run_id)
             result = self._request(run_id=run_id)
@@ -225,7 +225,7 @@ class GalleryTests(AstraGenTestCase):
         recent = astra_gen.get_recent_creations(
             lambda r: {**r, "image_url": f"/x/{r['job_id']}.png"}
         )
-        self.assertEqual(len(recent["creations"]), 1)
+        self.assertEqual(len(recent["creations"]), 2)
         entry = recent["creations"][0]
         self.assertNotIn("wallet", entry)
         self.assertIn("…", entry["pilot_short"])

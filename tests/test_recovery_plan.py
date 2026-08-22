@@ -137,6 +137,45 @@ class JobHelperSupportMappingTests(unittest.TestCase):
         job = job_helpers.fetch_next_job_for_node("node-a")
         self.assertEqual(job["id"], "job-reference")
 
+    def test_creator_preference_has_exclusive_window_then_falls_back(self) -> None:
+        now = time.time()
+        payload = {
+            "routing_source": "player_affinity",
+            "preferred_node_id": "node-a",
+            "preferred_node_expires_at": now + 15,
+        }
+        self.conn.execute(
+            """
+            INSERT INTO jobs (id, wallet, model, data, task_type, weight, status, node_id, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, 'queued', NULL, ?)
+            """,
+            ("job-affinity", VALID_WALLET, SDXL_MODEL, json.dumps(payload), "IMAGE_GEN", 10.0, now),
+        )
+        self.conn.commit()
+        creator = {
+            "role": "creator",
+            "supports": ["image"],
+            "models": [SDXL_MODEL],
+            "pipelines": ["sdxl"],
+        }
+        job_helpers.get_db = lambda: self.conn
+        job_helpers.get_model_config = lambda model_name: (
+            {"pipeline": "sdxl"} if model_name == SDXL_MODEL else None
+        )
+        job_helpers.NODES = {"node-a": creator, "node-b": creator}
+
+        self.assertIsNone(job_helpers.fetch_next_job_for_node("node-b"))
+        self.assertEqual(job_helpers.fetch_next_job_for_node("node-a")["id"], "job-affinity")
+        self.conn.execute(
+            "UPDATE jobs SET timestamp=?, data=? WHERE id='job-affinity'",
+            (
+                now - 20,
+                json.dumps({**payload, "preferred_node_expires_at": now - 5}),
+            ),
+        )
+        self.conn.commit()
+        self.assertEqual(job_helpers.fetch_next_job_for_node("node-b")["id"], "job-affinity")
+
 
 class CoordinatorCapacityEndpointTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -162,6 +201,32 @@ class CoordinatorCapacityEndpointTests(unittest.TestCase):
         stack.enter_context(patch.object(app_module.credits, "check_and_deduct_credits", return_value=None))
         stack.enter_context(patch.object(app_module, "refresh_manifest", return_value=None))
         return stack
+
+    def test_astra_creator_route_prefers_eligible_node_and_falls_back(self) -> None:
+        app_module.MANIFEST_MODELS[SDXL_MODEL] = {
+            "name": SDXL_MODEL,
+            "pipeline": "sdxl",
+            "task_type": "IMAGE_GEN",
+            "reward_weight": 10.0,
+            "tags": [],
+        }
+        creator = {
+            "role": "creator",
+            "last_seen_unix": app_module.unix_now(),
+            "supports": ["image"],
+            "models": [SDXL_MODEL],
+            "pipelines": ["sdxl"],
+        }
+        app_module.NODES.update({"node-a": creator, "node-b": creator})
+
+        with patch.object(app_module, "refresh_manifest", return_value=None):
+            selected_model, selected_node = app_module._resolve_astra_creator_route("node-a")
+            fallback_model, fallback_node = app_module._resolve_astra_creator_route("missing")
+
+        self.assertEqual(selected_model, SDXL_MODEL)
+        self.assertEqual(selected_node, "node-a")
+        self.assertEqual(fallback_model, SDXL_MODEL)
+        self.assertIsNone(fallback_node)
 
     def test_submit_job_returns_no_capacity(self) -> None:
         app_module.MANIFEST_MODELS[SDXL_MODEL] = {

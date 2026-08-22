@@ -18,6 +18,7 @@ get_model_config: Callable[[str], Optional[Dict[str, Any]]]
 NODES: Dict[str, Dict[str, Any]]
 CREATOR_TASK_TYPE: str = "IMAGE_GEN"
 LEASE_SECONDS = max(30, int(os.getenv("HAVNAI_JOB_LEASE_SECONDS", "90")))
+PREFERRED_NODE_CLAIM_SECONDS = 15.0
 
 
 def _image_job_requires_reference_face(raw_data: Any) -> bool:
@@ -51,6 +52,32 @@ def required_model_capabilities(raw_data: Any) -> Set[str]:
         or parsed.get("reference_image_b64")
     )
     return {"ingredients_reference_sheet"} if reference_image else set()
+
+
+def preferred_node_for_job(
+    raw_data: Any,
+    queued_at: float,
+    *,
+    now: Optional[float] = None,
+) -> Optional[str]:
+    """Return a short-lived server-authored creator preference, if still active."""
+    if not isinstance(raw_data, str) or not raw_data.strip():
+        return None
+    try:
+        parsed = json.loads(raw_data)
+    except Exception:
+        return None
+    if not isinstance(parsed, dict) or parsed.get("routing_source") != "player_affinity":
+        return None
+    node_id = str(parsed.get("preferred_node_id") or "").strip()
+    if not node_id or len(node_id) > 128:
+        return None
+    try:
+        requested_expiry = float(parsed.get("preferred_node_expires_at"))
+    except (TypeError, ValueError):
+        return None
+    expiry = min(requested_expiry, float(queued_at) + PREFERRED_NODE_CLAIM_SECONDS)
+    return node_id if (time.time() if now is None else now) < expiry else None
 
 
 def node_supports_model_capabilities(
@@ -125,6 +152,9 @@ def fetch_next_job_for_node(node_id: str) -> Optional[Dict[str, Any]]:
         "LTX_VIDEO_GEN": "ltx_video",
     }
     for row in rows:
+        preferred_node_id = preferred_node_for_job(row["data"], float(row["timestamp"]))
+        if preferred_node_id and preferred_node_id != node_id:
+            continue
         task_type = (row["task_type"] or CREATOR_TASK_TYPE).upper()
         # Support image, legacy video, verified LTX-Video, AnimateDiff, and face swap jobs.
         if task_type not in {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP", "LTX_VIDEO_GEN"}:

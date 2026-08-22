@@ -38,6 +38,7 @@ DAILY_VIDEOS_GLOBAL = 20
 RUN_MAX_AGE_SECONDS = 86400.0   # a run older than a day cannot claim art
 MIN_GRADE_FOR_IMAGE = {"S", "A", "B"}  # match the earn threshold: real play only
 PREFLIGHT_MIN_RUN_SECONDS = 30.0
+PREFERRED_NODE_CLAIM_SECONDS = 15.0
 
 # Queue weight kept below typical paying traffic so a game launch spike
 # cannot starve the core product.
@@ -244,6 +245,7 @@ def _queue_reward_image(
     safety_fn: Callable[[str, str], Optional[str]],
     select_model_fn: Callable[[], Optional[str]],
     job_payload_fn: Callable[[Dict[str, Any]], str],
+    preferred_node_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     existing = db.execute(
         "SELECT job_id FROM astra_reward_images WHERE run_id = ?", (run_id,)
@@ -276,6 +278,12 @@ def _queue_reward_image(
         "astra_run_id": run_id,
         **RENDER_SETTINGS,
     }
+    if preferred_node_id:
+        job_settings.update({
+            "routing_source": "player_affinity",
+            "preferred_node_id": preferred_node_id,
+            "preferred_node_expires_at": time.time() + PREFERRED_NODE_CLAIM_SECONDS,
+        })
     job_data = job_payload_fn(job_settings)
     job_id = enqueue_fn(wallet, model, "IMAGE_GEN", job_data, ASTRA_JOB_WEIGHT, None)
     try:
@@ -297,7 +305,10 @@ def _queue_reward_image(
     )
     db.commit()
     log_event(f"Astra reward image queued: {wallet[:10]}… run {run_id} -> {job_id}")
-    return {"ok": True, "job_id": job_id, "status": "queued"}
+    result = {"ok": True, "job_id": job_id, "status": "queued"}
+    if preferred_node_id:
+        result["preferred_node_id"] = preferred_node_id
+    return result
 
 
 def request_reward_image(
@@ -311,6 +322,7 @@ def request_reward_image(
     safety_fn: Callable[[str, str], Optional[str]],
     select_model_fn: Callable[[], Optional[str]],
     job_payload_fn: Callable[[Dict[str, Any]], str],
+    preferred_node_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Validate the run and enqueue one reward image for it.
@@ -351,6 +363,7 @@ def request_reward_image(
         safety_fn=safety_fn,
         select_model_fn=select_model_fn,
         job_payload_fn=job_payload_fn,
+        preferred_node_id=preferred_node_id,
     )
 
 
@@ -367,6 +380,7 @@ def request_preflight_image(
     safety_fn: Callable[[str, str], Optional[str]],
     select_model_fn: Callable[[], Optional[str]],
     job_payload_fn: Callable[[Dict[str, Any]], str],
+    preferred_node_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Queue the still while a server-observed run is already in progress."""
     elapsed = time.time() - float(run_started_at)
@@ -390,6 +404,7 @@ def request_preflight_image(
         safety_fn=safety_fn,
         select_model_fn=select_model_fn,
         job_payload_fn=job_payload_fn,
+        preferred_node_id=preferred_node_id,
     )
 
 

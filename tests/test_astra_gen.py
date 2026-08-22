@@ -206,6 +206,28 @@ class PreflightImageTests(AstraGenTestCase):
         row = self.conn.execute("SELECT grade FROM astra_reward_images").fetchone()
         self.assertEqual(row["grade"], "DEPLOYMENT")
 
+    def test_preflight_embeds_a_bounded_creator_preference(self) -> None:
+        result = astra_gen.request_preflight_image(
+            wallet=WALLET,
+            run_key="preflight:preferred",
+            run_started_at=time.time() - 31,
+            enqueue_fn=self._enqueue_fn,
+            ticket_fn=self._ticket_fn,
+            safety_fn=lambda p, n: None,
+            select_model_fn=lambda: "test_model",
+            job_payload_fn=json.dumps,
+            preferred_node_id="creator-one",
+            **VALID_IDS,
+        )
+        self.assertEqual(result["preferred_node_id"], "creator-one")
+        payload = self.enqueued[0]["data"]
+        self.assertEqual(payload["routing_source"], "player_affinity")
+        self.assertEqual(payload["preferred_node_id"], "creator-one")
+        self.assertLessEqual(
+            payload["preferred_node_expires_at"] - time.time(),
+            astra_gen.PREFERRED_NODE_CLAIM_SECONDS,
+        )
+
     def test_rejects_an_instant_launch(self) -> None:
         result = self._preflight(age_s=2.0)
         self.assertEqual(result["reason"], "run_too_short")

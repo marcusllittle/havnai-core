@@ -7057,7 +7057,7 @@ def astra_stats() -> Any:
     return jsonify(astra_rewards.get_player_stats(wallet))
 
 
-def _select_astra_gen_model() -> Optional[str]:
+def _select_astra_gen_model(preferred_node_id: Optional[str] = None) -> Optional[str]:
     """Pick a render model for Astra reward images.
 
     Env override first, then the pack's preferred models, then any creator
@@ -7074,7 +7074,8 @@ def _select_astra_gen_model() -> Optional[str]:
         task = str(meta.get("task_type") or CREATOR_TASK_TYPE).upper()
         if task != CREATOR_TASK_TYPE:
             return False
-        return _eligible_online_node_count(key, CREATOR_TASK_TYPE) > 0
+        eligible = _eligible_online_node_ids(key, CREATOR_TASK_TYPE)
+        return preferred_node_id in eligible if preferred_node_id else bool(eligible)
 
     if override and _usable(override):
         return str(MANIFEST_MODELS[override].get("name") or override)
@@ -7085,6 +7086,16 @@ def _select_astra_gen_model() -> Optional[str]:
         if _usable(key):
             return str(meta.get("name") or key)
     return None
+
+
+def _resolve_astra_creator_route(requested_node_id: str) -> tuple[Optional[str], Optional[str]]:
+    """Prefer one compatible live creator, then fall back to normal routing."""
+    preferred = requested_node_id if 0 < len(requested_node_id) <= 128 else ""
+    if preferred:
+        model = _select_astra_gen_model(preferred)
+        if model:
+            return model, preferred
+    return _select_astra_gen_model(), None
 
 
 def _select_astra_ltx_model() -> Optional[str]:
@@ -7118,6 +7129,7 @@ def astra_generate_preflight() -> Any:
     pilot_id = str(data.get("pilot_id", "")).strip()
     outfit_id = str(data.get("outfit_id", "")).strip()
     map_id = str(data.get("map_id", "")).strip()
+    requested_node_id = str(data.get("preferred_node_id", "")).strip()
     if not run_token or not pilot_id or not outfit_id or not map_id:
         return jsonify({"error": "missing_fields"}), 400
 
@@ -7129,6 +7141,7 @@ def astra_generate_preflight() -> Any:
         return jsonify({"ok": False, "reason": "run_map_mismatch"}), 422
 
     run_key = f"preflight:{astra_rewards.run_token_fingerprint(run_token)}"
+    selected_model, preferred_node_id = _resolve_astra_creator_route(requested_node_id)
     result = astra_gen.request_preflight_image(
         wallet=wallet,
         run_key=run_key,
@@ -7139,8 +7152,9 @@ def astra_generate_preflight() -> Any:
         enqueue_fn=job_helpers.enqueue_job,
         ticket_fn=lambda **kw: _create_settlement_ticket_for_submission(**kw),
         safety_fn=safety.check_safety,
-        select_model_fn=_select_astra_gen_model,
+        select_model_fn=lambda: selected_model,
         job_payload_fn=json.dumps,
+        preferred_node_id=preferred_node_id,
     )
     return jsonify(result), 200 if result.get("ok") else 422
 
@@ -7168,9 +7182,11 @@ def astra_generate_reward() -> Any:
     pilot_id = str(data.get("pilot_id", "")).strip()
     outfit_id = str(data.get("outfit_id", "")).strip()
     map_id = str(data.get("map_id", "")).strip()
+    requested_node_id = str(data.get("preferred_node_id", "")).strip()
     if not run_id or not pilot_id or not outfit_id or not map_id:
         return jsonify({"error": "missing_fields", "detail": "run_id, pilot_id, outfit_id, map_id required"}), 400
 
+    selected_model, preferred_node_id = _resolve_astra_creator_route(requested_node_id)
     result = astra_gen.request_reward_image(
         wallet=wallet,
         run_id=run_id,
@@ -7180,8 +7196,9 @@ def astra_generate_reward() -> Any:
         enqueue_fn=job_helpers.enqueue_job,
         ticket_fn=lambda **kw: _create_settlement_ticket_for_submission(**kw),
         safety_fn=safety.check_safety,
-        select_model_fn=_select_astra_gen_model,
+        select_model_fn=lambda: selected_model,
         job_payload_fn=json.dumps,
+        preferred_node_id=preferred_node_id,
     )
 
     if result.get("ok"):

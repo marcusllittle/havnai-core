@@ -49,6 +49,7 @@ import workflows
 import gallery
 import astra_rewards
 import astra_gen
+import astra_receipts
 import node_bundle
 import job_history
 import platform_v1
@@ -1092,6 +1093,7 @@ workflows.init_workflow_tables(get_db())
 gallery.init_gallery_tables(get_db())
 astra_rewards.init_astra_tables(get_db())
 astra_gen.init_astra_gen_tables(get_db())
+astra_receipts.init_receipt_tables(get_db())
 
 # Optional: clear database and in-memory state on startup for a fresh dashboard
 if RESET_ON_STARTUP:
@@ -7253,6 +7255,31 @@ def astra_gallery() -> Any:
 
     limit = _clamp(_coerce_int(request.args.get("limit"), 50), 1, 100)
     return jsonify(astra_gen.get_gallery(wallet, gallery._attach_result_urls, limit))
+
+
+@app.route("/astra/artifacts/<job_id>/receipt", methods=["GET"])
+def astra_artifact_receipt(job_id: str) -> Any:
+    """Public, prompt-free provenance for one finalized Astra artifact."""
+    normalized_job_id = str(job_id or "").strip()
+    if not normalized_job_id or not JOB_ID_REGEX.fullmatch(normalized_job_id):
+        return jsonify({"error": "invalid_job_id"}), 400
+    if not rate_limit(f"astra-receipt:{request.remote_addr}", limit=120):
+        return jsonify({"error": "rate limit"}), 429
+    try:
+        payload = astra_receipts.get_or_issue_receipt(
+            get_db(), normalized_job_id, OUTPUTS_DIR
+        )
+    except astra_receipts.ReceiptUnavailable as exc:
+        return jsonify({"error": exc.code, "job_id": normalized_job_id}), exc.status
+
+    result = _build_result_payload(normalized_job_id) or {}
+    artifact_kind = str(payload["receipt"]["artifact"].get("kind") or "")
+    payload["artifact_url"] = (
+        result.get("video_url") if artifact_kind == "video" else result.get("image_url")
+    )
+    response = jsonify(payload)
+    response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return response
 
 
 @app.route("/astra/recent", methods=["GET"])

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import io
 import json
 import sqlite3
@@ -474,6 +475,64 @@ class PlatformApiContractTests(unittest.TestCase):
         )
         self.assertEqual(control.status_code, 200)
         self.assertTrue(control.get_json()["cancel_requested"])
+
+    def test_public_astra_receipt_exposes_hashes_without_prompt_or_wallet(self) -> None:
+        job_id = self._create_image_job()
+        output = app_module.OUTPUTS_DIR / f"{job_id}.png"
+        output.write_bytes(b"final-astra-image")
+        artifact_digest = hashlib.sha256(output.read_bytes()).hexdigest()
+        with app_module.app.app_context():
+            conn = app_module.get_db()
+            app_module.astra_gen.init_astra_gen_tables(conn)
+            app_module.settlement.init_settlement_tables(conn)
+            app_module.astra_receipts.init_receipt_tables(conn)
+            conn.execute(
+                "UPDATE jobs SET status='succeeded', node_id='node-test', completed_at=120 WHERE id=?",
+                (job_id,),
+            )
+            conn.execute(
+                """INSERT INTO astra_reward_images
+                   (run_id, job_id, wallet, pilot_id, outfit_id, map_id, grade, created_at)
+                   VALUES ('run-receipt', ?, ?, 'pilot_nova', 'outfit_17', 'nebula-runway', 'S', 100)""",
+                (job_id, WALLET),
+            )
+            conn.execute(
+                """INSERT INTO artifacts
+                   (id, job_id, kind, filename, content_type, path, size_bytes, sha256, created_at)
+                   VALUES ('artifact-receipt', ?, 'image', 'result.png', 'image/png', ?, ?, ?, 119)""",
+                (job_id, str(output), output.stat().st_size, artifact_digest),
+            )
+            conn.execute(
+                """INSERT INTO job_settlement
+                   (job_id, wallet, job_type, prompt, model, input_metadata,
+                    execution_status, quality_status, settlement_outcome,
+                    assigned_node_id, attempt_count, created_at, updated_at)
+                   VALUES (?, ?, 'IMAGE_GEN', 'private prompt', ?, ?, 'settled',
+                           'valid', 'spent', 'node-test', 1, 100, 121)""",
+                (job_id, WALLET, IMAGE_MODEL, json.dumps({"pipeline": "sdxl", "tier": "A"})),
+            )
+            conn.execute(
+                """INSERT INTO node_payouts
+                   (node_id, job_id, reward_amount, reward_asset_type, status, created_at, updated_at)
+                   VALUES ('node-test', ?, 2.5, 'simulated_hai', 'completed', 121, 121)""",
+                (job_id,),
+            )
+            conn.commit()
+
+        response = self.client.get(f"/astra/artifacts/{job_id}/receipt")
+        self.assertEqual(response.status_code, 200, response.get_json())
+        body = response.get_json()
+        self.assertEqual(body["receipt"]["artifact"]["sha256"], artifact_digest)
+        self.assertEqual(body["receipt"]["execution"]["creator_node_id"], "node-test")
+        self.assertEqual(body["receipt"]["settlement"]["node_reward"], 2.5)
+        self.assertEqual(body["artifact_url"], f"/static/outputs/{job_id}.png")
+        self.assertEqual(
+            body["receipt_sha256"],
+            "sha256:" + hashlib.sha256(body["canonical_json"].encode()).hexdigest(),
+        )
+        self.assertNotIn(WALLET, body["canonical_json"])
+        self.assertNotIn("private prompt", body["canonical_json"])
+        self.assertIn("immutable", response.headers["Cache-Control"])
 
     def test_video_last_frame_is_extracted_on_coordinator(self) -> None:
         videos_dir = app_module.OUTPUTS_DIR / "videos"

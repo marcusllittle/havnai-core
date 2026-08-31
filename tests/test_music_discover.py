@@ -73,7 +73,15 @@ class MusicDiscoverTestCase(unittest.TestCase):
     def tearDown(self) -> None:
         self.conn.close()
 
-    def _insert_music_job(self, *, wallet: str = WALLET, status: str = "succeeded", task_type: str = "MUSIC_GEN") -> None:
+    def _insert_music_job(
+        self,
+        *,
+        job_id: str = "job-1",
+        artifact_id: str = "artifact-1",
+        wallet: str = WALLET,
+        status: str = "succeeded",
+        task_type: str = "MUSIC_GEN",
+    ) -> None:
         resolved = {
             "parameters": {
                 "prompt": "private prompt should not leak",
@@ -87,16 +95,16 @@ class MusicDiscoverTestCase(unittest.TestCase):
         self.conn.execute(
             """
             INSERT INTO jobs (id, wallet, model, task_type, weight, status, timestamp, completed_at, resolved_spec)
-            VALUES ('job-1', ?, 'ace_step_1_5_turbo', ?, 1, ?, ?, ?, ?)
+            VALUES (?, ?, 'ace_step_1_5_turbo', ?, 1, ?, ?, ?, ?)
             """,
-            (wallet, task_type, status, time.time(), time.time(), json.dumps(resolved)),
+            (job_id, wallet, task_type, status, time.time(), time.time(), json.dumps(resolved)),
         )
         self.conn.execute(
             """
             INSERT INTO artifacts (id, job_id, kind, filename, content_type, path, size_bytes, sha256, metadata, created_at)
-            VALUES ('artifact-1', 'job-1', 'audio', 'song.mp3', 'audio/mpeg', '/safe/song.mp3', 20, 'hash', ?, ?)
+            VALUES (?, ?, 'audio', 'song.mp3', 'audio/mpeg', '/safe/song.mp3', 20, 'hash', ?, ?)
             """,
-            (json.dumps({"duration": 91, "bpm": 120, "keyscale": "B Minor"}), time.time()),
+            (artifact_id, job_id, json.dumps({"duration": 91, "bpm": 120, "keyscale": "B Minor"}), time.time()),
         )
         self.conn.commit()
 
@@ -112,11 +120,20 @@ class MusicDiscoverTestCase(unittest.TestCase):
         self.assertTrue(result["ok"])
         publication = result["publication"]
         self.assertEqual(publication["title"], "Neon Coast")
-        self.assertEqual(publication["audio_url"], "/static/outputs/music.mp3")
+        self.assertEqual(publication["audio_url"], f"/api/music/publications/{publication['id']}/audio")
         self.assertEqual(publication["bpm"], 120)
         self.assertEqual(publication["key"], "B Minor")
+        self.assertEqual(publication["job_id"], "job-1")
         self.assertNotIn("prompt", publication)
         self.assertNotIn("/safe/song.mp3", json.dumps(publication))
+
+        public_publication = music_discover.browse_publications()["publications"][0]
+        self.assertEqual(public_publication["audio_url"], f"/api/music/publications/{publication['id']}/audio")
+        self.assertNotIn("job_id", public_publication)
+        self.assertNotIn("audio_artifact_id", public_publication)
+        self.assertNotIn("model", public_publication)
+        self.assertNotIn("cover_art_seed", public_publication)
+        self.assertNotIn("prompt", public_publication)
 
     def test_rejects_wrong_wallet_incomplete_or_non_music_jobs(self) -> None:
         self._insert_music_job()
@@ -165,6 +182,111 @@ class MusicDiscoverTestCase(unittest.TestCase):
         self.assertTrue(counted["counted"])
         self.assertFalse(duplicate["counted"])
         self.assertEqual(music_discover.get_publication(publication_id)["play_count"], 1)
+
+    def test_library_saves_are_idempotent_and_do_not_change_ownership(self) -> None:
+        self._insert_music_job()
+        publication_id = music_discover.publish_song(job_id="job-1", creator_wallet=WALLET, title="Song")["publication"]["id"]
+
+        first = music_discover.set_saved(publication_id, OTHER_WALLET, saved=True)
+        second = music_discover.set_saved(publication_id, OTHER_WALLET, saved=True)
+        saved = music_discover.list_saved(wallet=OTHER_WALLET)
+        removed = music_discover.set_saved(publication_id, OTHER_WALLET, saved=False)
+
+        self.assertTrue(first["saved"])
+        self.assertTrue(second["saved"])
+        self.assertEqual(saved["total"], 1)
+        self.assertEqual(saved["publications"][0]["creator_wallet"], WALLET)
+        self.assertTrue(saved["publications"][0]["saved_by_me"])
+        self.assertFalse(removed["saved"])
+        self.assertEqual(music_discover.list_saved(wallet=OTHER_WALLET)["total"], 0)
+
+    def test_library_hides_saved_songs_after_unpublish(self) -> None:
+        self._insert_music_job()
+        publication_id = music_discover.publish_song(job_id="job-1", creator_wallet=WALLET, title="Song")["publication"]["id"]
+        music_discover.set_saved(publication_id, OTHER_WALLET, saved=True)
+
+        before = music_discover.list_saved(wallet=OTHER_WALLET)
+        music_discover.unpublish_song(publication_id, WALLET)
+        after = music_discover.list_saved(wallet=OTHER_WALLET)
+
+        self.assertEqual([item["id"] for item in before["publications"]], [publication_id])
+        self.assertEqual(after["total"], 0)
+        self.assertEqual(after["publications"], [])
+
+    def test_playlist_owner_access_ordering_and_public_visibility(self) -> None:
+        self._insert_music_job(job_id="job-1", artifact_id="artifact-1")
+        self._insert_music_job(job_id="job-2", artifact_id="artifact-2")
+        pub_one = music_discover.publish_song(job_id="job-1", creator_wallet=WALLET, title="One")["publication"]["id"]
+        pub_two = music_discover.publish_song(job_id="job-2", creator_wallet=WALLET, title="Two")["publication"]["id"]
+
+        created = music_discover.create_playlist(owner_wallet=WALLET, title="Night Set")
+        playlist_id = created["playlist"]["id"]
+        self.assertIsNone(music_discover.get_playlist(playlist_id, requester_wallet=None))
+        self.assertEqual(created["playlist"]["artwork_url"], "")
+        self.assertEqual(
+            music_discover.add_playlist_item(playlist_id, pub_one, owner_wallet=OTHER_WALLET)["error"],
+            "playlist_not_found",
+        )
+
+        music_discover.add_playlist_item(playlist_id, pub_one, owner_wallet=WALLET)
+        music_discover.add_playlist_item(playlist_id, pub_two, owner_wallet=WALLET)
+        private = music_discover.get_playlist(playlist_id, requester_wallet=WALLET)
+        self.assertEqual(private["artwork_url"], "")
+        self.assertEqual(private["artwork_tiles"], [
+            f"/api/music/publications/{pub_one}/cover.svg",
+            f"/api/music/publications/{pub_two}/cover.svg",
+        ])
+        reordered = music_discover.reorder_playlist_items(playlist_id, [pub_two, pub_one], owner_wallet=WALLET)
+        self.assertEqual([item["id"] for item in reordered["playlist"]["publications"]], [pub_two, pub_one])
+        self.assertEqual(reordered["playlist"]["artwork_tiles"], [
+            f"/api/music/publications/{pub_two}/cover.svg",
+            f"/api/music/publications/{pub_one}/cover.svg",
+        ])
+        deduped_reorder = music_discover.reorder_playlist_items(
+            playlist_id,
+            [pub_one, pub_one, "missing-publication"],
+            owner_wallet=WALLET,
+        )
+        self.assertEqual([item["id"] for item in deduped_reorder["playlist"]["publications"]], [pub_one, pub_two])
+
+        music_discover.update_playlist(playlist_id, owner_wallet=WALLET, is_public=True)
+        public = music_discover.get_playlist(playlist_id, requester_wallet=None)
+        self.assertIsNotNone(public)
+        self.assertTrue(public["artwork_url"].endswith(f"/music/playlists/{playlist_id}/cover.svg"))
+        self.assertEqual(public["artwork_tiles"], [
+            f"/api/music/publications/{pub_one}/cover.svg",
+            f"/api/music/publications/{pub_two}/cover.svg",
+        ])
+        self.assertEqual(public["track_count"], 2)
+
+        music_discover.unpublish_song(pub_two, WALLET)
+        after_unpublish = music_discover.get_playlist(playlist_id, requester_wallet=None)
+        self.assertEqual([item["id"] for item in after_unpublish["publications"]], [pub_one])
+
+    def test_creator_summary_uses_public_tracks_and_public_playlists(self) -> None:
+        self._insert_music_job()
+        publication_id = music_discover.publish_song(job_id="job-1", creator_wallet=WALLET, title="Creator Song")["publication"]["id"]
+        music_discover.set_like(publication_id, OTHER_WALLET, liked=True)
+        playlist = music_discover.create_playlist(owner_wallet=WALLET, title="Public Mix", is_public=True)["playlist"]
+        music_discover.add_playlist_item(playlist["id"], publication_id, owner_wallet=WALLET)
+
+        creator = music_discover.get_creator(WALLET, requester_wallet=OTHER_WALLET)
+
+        self.assertEqual(creator["wallet"], WALLET)
+        self.assertEqual(creator["track_count"], 1)
+        self.assertEqual(creator["like_count"], 1)
+        self.assertEqual(creator["publications"][0]["id"], publication_id)
+        self.assertEqual(creator["playlists"][0]["id"], playlist["id"])
+
+    def test_public_creator_summary_never_includes_private_playlists(self) -> None:
+        self._insert_music_job()
+        music_discover.publish_song(job_id="job-1", creator_wallet=WALLET, title="Creator Song")
+        private_playlist = music_discover.create_playlist(owner_wallet=WALLET, title="Private Mix")["playlist"]
+
+        creator = music_discover.get_creator(WALLET, requester_wallet=WALLET)
+
+        self.assertEqual(private_playlist["is_public"], False)
+        self.assertEqual(creator["playlists"], [])
 
 
 if __name__ == "__main__":

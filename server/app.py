@@ -159,6 +159,16 @@ WALLET_NONCE_PURPOSE_GALLERY_DELIST = "gallery_delist"
 WALLET_NONCE_PURPOSE_MUSIC_PUBLISH = "music_publish"
 WALLET_NONCE_PURPOSE_MUSIC_UNPUBLISH = "music_unpublish"
 WALLET_NONCE_PURPOSE_MUSIC_LIKE = "music_like"
+WALLET_NONCE_PURPOSE_MUSIC_LIBRARY_READ = "music_library_read"
+WALLET_NONCE_PURPOSE_MUSIC_SAVE = "music_save"
+WALLET_NONCE_PURPOSE_MUSIC_UNSAVE = "music_unsave"
+WALLET_NONCE_PURPOSE_PLAYLIST_READ = "playlist_read"
+WALLET_NONCE_PURPOSE_PLAYLIST_CREATE = "playlist_create"
+WALLET_NONCE_PURPOSE_PLAYLIST_UPDATE = "playlist_update"
+WALLET_NONCE_PURPOSE_PLAYLIST_DELETE = "playlist_delete"
+WALLET_NONCE_PURPOSE_PLAYLIST_ADD = "playlist_add"
+WALLET_NONCE_PURPOSE_PLAYLIST_REMOVE = "playlist_remove"
+WALLET_NONCE_PURPOSE_PLAYLIST_REORDER = "playlist_reorder"
 WALLET_NONCE_PURPOSE_IDENTITY_ANCHOR_CREATE = "identity_anchor_create"
 WALLET_NONCE_PURPOSE_IDENTITY_ANCHOR_DELETE = "identity_anchor_delete"
 WALLET_NONCE_PURPOSE_ASTRA_SESSION = "astra_session"
@@ -171,6 +181,16 @@ WALLET_NONCE_ALLOWED_PURPOSES = {
     WALLET_NONCE_PURPOSE_MUSIC_PUBLISH,
     WALLET_NONCE_PURPOSE_MUSIC_UNPUBLISH,
     WALLET_NONCE_PURPOSE_MUSIC_LIKE,
+    WALLET_NONCE_PURPOSE_MUSIC_LIBRARY_READ,
+    WALLET_NONCE_PURPOSE_MUSIC_SAVE,
+    WALLET_NONCE_PURPOSE_MUSIC_UNSAVE,
+    WALLET_NONCE_PURPOSE_PLAYLIST_READ,
+    WALLET_NONCE_PURPOSE_PLAYLIST_CREATE,
+    WALLET_NONCE_PURPOSE_PLAYLIST_UPDATE,
+    WALLET_NONCE_PURPOSE_PLAYLIST_DELETE,
+    WALLET_NONCE_PURPOSE_PLAYLIST_ADD,
+    WALLET_NONCE_PURPOSE_PLAYLIST_REMOVE,
+    WALLET_NONCE_PURPOSE_PLAYLIST_REORDER,
     WALLET_NONCE_PURPOSE_IDENTITY_ANCHOR_CREATE,
     WALLET_NONCE_PURPOSE_IDENTITY_ANCHOR_DELETE,
     WALLET_NONCE_PURPOSE_ASTRA_SESSION,
@@ -4581,6 +4601,7 @@ def _build_gallery_nonce_message(
     listing_id: Optional[int] = None,
     job_id: Optional[str] = None,
     publication_id: Optional[str] = None,
+    playlist_id: Optional[str] = None,
 ) -> str:
     """Build a signed message for user-authorized content operations."""
     lines = [
@@ -4594,6 +4615,8 @@ def _build_gallery_nonce_message(
         lines.append(f"job_id: {job_id}")
     if publication_id is not None:
         lines.append(f"publication_id: {publication_id}")
+    if playlist_id is not None:
+        lines.append(f"playlist_id: {playlist_id}")
     lines += [
         f"amount: {amount:.8f}",
         f"nonce: {nonce}",
@@ -4806,6 +4829,16 @@ def wallet_nonce() -> Any:
         WALLET_NONCE_PURPOSE_MUSIC_PUBLISH,
         WALLET_NONCE_PURPOSE_MUSIC_UNPUBLISH,
         WALLET_NONCE_PURPOSE_MUSIC_LIKE,
+        WALLET_NONCE_PURPOSE_MUSIC_LIBRARY_READ,
+        WALLET_NONCE_PURPOSE_MUSIC_SAVE,
+        WALLET_NONCE_PURPOSE_MUSIC_UNSAVE,
+        WALLET_NONCE_PURPOSE_PLAYLIST_READ,
+        WALLET_NONCE_PURPOSE_PLAYLIST_CREATE,
+        WALLET_NONCE_PURPOSE_PLAYLIST_UPDATE,
+        WALLET_NONCE_PURPOSE_PLAYLIST_DELETE,
+        WALLET_NONCE_PURPOSE_PLAYLIST_ADD,
+        WALLET_NONCE_PURPOSE_PLAYLIST_REMOVE,
+        WALLET_NONCE_PURPOSE_PLAYLIST_REORDER,
     } and raw_amount is None:
         # Non-payment action; keep nonce schema compatibility.
         raw_amount = 1.0
@@ -4817,6 +4850,7 @@ def wallet_nonce() -> Any:
     listing_id = None
     job_id_ctx = None
     publication_id_ctx = None
+    playlist_id_ctx = None
     if purpose == WALLET_NONCE_PURPOSE_GALLERY_PURCHASE:
         try:
             listing_id = int(data.get("listing_id", 0))
@@ -4843,8 +4877,33 @@ def wallet_nonce() -> Any:
         job_id_ctx = str(data.get("job_id", "")).strip() or None
         if not job_id_ctx:
             return jsonify({"error": "missing job_id", "message": "job_id required for music_publish"}), 400
-    elif purpose in {WALLET_NONCE_PURPOSE_MUSIC_UNPUBLISH, WALLET_NONCE_PURPOSE_MUSIC_LIKE}:
+    elif purpose in {
+        WALLET_NONCE_PURPOSE_MUSIC_UNPUBLISH,
+        WALLET_NONCE_PURPOSE_MUSIC_LIKE,
+        WALLET_NONCE_PURPOSE_MUSIC_SAVE,
+        WALLET_NONCE_PURPOSE_MUSIC_UNSAVE,
+    }:
         publication_id_ctx = str(data.get("publication_id", "")).strip() or None
+        if not publication_id_ctx:
+            return jsonify({"error": "missing publication_id", "message": f"publication_id required for {purpose}"}), 400
+    elif purpose == WALLET_NONCE_PURPOSE_MUSIC_LIBRARY_READ:
+        publication_id_ctx = str(data.get("publication_id", "")).strip() or None
+    elif purpose in {
+        WALLET_NONCE_PURPOSE_PLAYLIST_READ,
+        WALLET_NONCE_PURPOSE_PLAYLIST_UPDATE,
+        WALLET_NONCE_PURPOSE_PLAYLIST_DELETE,
+        WALLET_NONCE_PURPOSE_PLAYLIST_REORDER,
+    }:
+        playlist_id_ctx = str(data.get("playlist_id", "")).strip() or None
+        if not playlist_id_ctx:
+            return jsonify({"error": "missing playlist_id", "message": f"playlist_id required for {purpose}"}), 400
+    elif purpose == WALLET_NONCE_PURPOSE_PLAYLIST_CREATE:
+        playlist_id_ctx = str(data.get("playlist_id", "new")).strip() or "new"
+    elif purpose in {WALLET_NONCE_PURPOSE_PLAYLIST_ADD, WALLET_NONCE_PURPOSE_PLAYLIST_REMOVE}:
+        playlist_id_ctx = str(data.get("playlist_id", "")).strip() or None
+        publication_id_ctx = str(data.get("publication_id", "")).strip() or None
+        if not playlist_id_ctx:
+            return jsonify({"error": "missing playlist_id", "message": f"playlist_id required for {purpose}"}), 400
         if not publication_id_ctx:
             return jsonify({"error": "missing publication_id", "message": f"publication_id required for {purpose}"}), 400
 
@@ -4870,6 +4929,7 @@ def wallet_nonce() -> Any:
             listing_id=listing_id,
             job_id=job_id_ctx,
             publication_id=publication_id_ctx,
+            playlist_id=playlist_id_ctx,
         )
 
     conn = get_db()
@@ -7206,19 +7266,61 @@ def _request_publication_wallet_payload() -> Tuple[Optional[str], Optional[Any],
     return wallet, None, data
 
 
-@app.route("/music/discover", methods=["GET"])
+def _verify_music_wallet_action(
+    wallet: str,
+    data: Dict[str, Any],
+    *,
+    purpose: str,
+    publication_id: Optional[str] = None,
+    playlist_id: Optional[str] = None,
+    log_label: str,
+) -> Optional[Any]:
+    sig_ok, sig_err = _verify_wallet_signature(
+        wallet,
+        str(data.get("nonce", "")).strip(),
+        str(data.get("signature", "")).strip(),
+        allowed_purposes={purpose},
+        expected_amount=1.0,
+        log_label=log_label,
+    )
+    if not sig_ok:
+        return sig_err
+    nonce_str = str(data.get("nonce", "")).strip()
+    if publication_id and not _nonce_message_has(wallet, nonce_str, f"publication_id: {publication_id}"):
+        return jsonify({"error": "invalid_nonce", "message": "nonce publication context mismatch"}), 400
+    if playlist_id and not _nonce_message_has(wallet, nonce_str, f"playlist_id: {playlist_id}"):
+        return jsonify({"error": "invalid_nonce", "message": "nonce playlist context mismatch"}), 400
+    return None
+
+
+@app.route("/music/discover", methods=["GET", "POST"])
 def api_music_discover() -> Any:
-    search = request.args.get("search", "").strip() or None
-    style = request.args.get("style", "").strip() or None
-    sort = request.args.get("sort", "newest").strip()
-    wallet = request.args.get("wallet", "").strip().lower() or None
-    if wallet and not WALLET_REGEX.match(wallet):
-        wallet = None
-    creator_wallet = request.args.get("creator_wallet", "").strip().lower() or None
+    requester_wallet = None
+    source: Any = request.args
+    if request.method == "POST":
+        wallet, error_response, data = _request_publication_wallet_payload()
+        if error_response:
+            return error_response
+        assert wallet is not None
+        verify_error = _verify_music_wallet_action(
+            wallet,
+            data,
+            purpose=WALLET_NONCE_PURPOSE_MUSIC_LIBRARY_READ,
+            log_label="Music discover read",
+        )
+        if verify_error:
+            return verify_error
+        requester_wallet = wallet
+        source = data
+    search = str(source.get("search", "")).strip() or None
+    style = str(source.get("style", "")).strip() or None
+    sort = str(source.get("sort", "newest")).strip()
+    creator_wallet = str(source.get("creator_wallet", "")).strip().lower() or None
     if creator_wallet and not WALLET_REGEX.match(creator_wallet):
         creator_wallet = None
-    limit = _clamp(_coerce_int(request.args.get("limit"), 24), 1, music_discover.MAX_LIMIT)
-    offset = max(0, _coerce_int(request.args.get("offset"), 0))
+    include_internal = bool(requester_wallet and creator_wallet and requester_wallet == creator_wallet)
+    limit = _clamp(_coerce_int(source.get("limit"), 24), 1, music_discover.MAX_LIMIT)
+    offset = max(0, _coerce_int(source.get("offset"), 0))
     return jsonify(
         music_discover.browse_publications(
             search=search,
@@ -7226,18 +7328,33 @@ def api_music_discover() -> Any:
             sort=sort,
             limit=limit,
             offset=offset,
-            liked_by_wallet=wallet,
+            liked_by_wallet=requester_wallet,
+            saved_by_wallet=requester_wallet,
             creator_wallet=creator_wallet,
+            include_internal=include_internal,
         )
     )
 
 
-@app.route("/music/discover/<publication_id>", methods=["GET"])
+@app.route("/music/discover/<publication_id>", methods=["GET", "POST"])
 def api_music_publication_detail(publication_id: str) -> Any:
-    wallet = request.args.get("wallet", "").strip().lower() or None
-    if wallet and not WALLET_REGEX.match(wallet):
-        wallet = None
-    publication = music_discover.get_publication(publication_id, liked_by_wallet=wallet)
+    requester_wallet = None
+    if request.method == "POST":
+        wallet, error_response, data = _request_publication_wallet_payload()
+        if error_response:
+            return error_response
+        assert wallet is not None
+        verify_error = _verify_music_wallet_action(
+            wallet,
+            data,
+            purpose=WALLET_NONCE_PURPOSE_MUSIC_LIBRARY_READ,
+            publication_id=publication_id,
+            log_label="Music publication read",
+        )
+        if verify_error:
+            return verify_error
+        requester_wallet = wallet
+    publication = music_discover.get_publication(publication_id, liked_by_wallet=requester_wallet, saved_by_wallet=requester_wallet)
     if not publication:
         return jsonify({"error": "publication_not_found"}), 404
     return jsonify(publication)
@@ -7334,6 +7451,306 @@ def api_music_like(publication_id: str) -> Any:
     return jsonify(result)
 
 
+@app.route("/music/library", methods=["GET", "POST"])
+def api_music_library() -> Any:
+    if request.method == "GET":
+        return jsonify({"error": "signature_required", "message": "signed wallet access is required"}), 401
+    wallet, error_response, data = _request_publication_wallet_payload()
+    if error_response:
+        return error_response
+    assert wallet is not None
+    verify_error = _verify_music_wallet_action(
+        wallet,
+        data,
+        purpose=WALLET_NONCE_PURPOSE_MUSIC_LIBRARY_READ,
+        log_label="Music library read",
+    )
+    if verify_error:
+        return verify_error
+    search = str(data.get("search", "")).strip() or None
+    limit = _clamp(_coerce_int(data.get("limit"), 24), 1, music_discover.MAX_LIMIT)
+    offset = max(0, _coerce_int(data.get("offset"), 0))
+    saved = music_discover.list_saved(wallet=wallet, search=search, limit=limit, offset=offset)
+    return jsonify(
+        {
+            **saved,
+            "recent_liked": music_discover.list_recent_liked(wallet=wallet, limit=12)["publications"],
+            "playlists": music_discover.list_playlists(wallet, requester_wallet=wallet)["playlists"],
+        }
+    )
+
+
+@app.route("/music/publications/<publication_id>/saved", methods=["GET", "POST"])
+def api_music_saved_state(publication_id: str) -> Any:
+    if request.method == "GET":
+        return jsonify({"error": "signature_required", "message": "signed wallet access is required"}), 401
+    wallet, error_response, data = _request_publication_wallet_payload()
+    if error_response:
+        return error_response
+    assert wallet is not None
+    verify_error = _verify_music_wallet_action(
+        wallet,
+        data,
+        purpose=WALLET_NONCE_PURPOSE_MUSIC_LIBRARY_READ,
+        publication_id=publication_id,
+        log_label="Music saved state read",
+    )
+    if verify_error:
+        return verify_error
+    return jsonify({"publication_id": publication_id, "saved": music_discover.is_saved(publication_id, wallet)})
+
+
+@app.route("/music/publications/<publication_id>/save", methods=["POST", "DELETE"])
+def api_music_save(publication_id: str) -> Any:
+    if not rate_limit(f"music-save:{request.remote_addr}", limit=60):
+        return jsonify({"error": "rate limit"}), 429
+    wallet, error_response, data = _request_publication_wallet_payload()
+    if error_response:
+        return error_response
+    assert wallet is not None
+    purpose = WALLET_NONCE_PURPOSE_MUSIC_SAVE if request.method == "POST" else WALLET_NONCE_PURPOSE_MUSIC_UNSAVE
+    verify_error = _verify_music_wallet_action(
+        wallet,
+        data,
+        purpose=purpose,
+        publication_id=publication_id,
+        log_label="Music library save",
+    )
+    if verify_error:
+        return verify_error
+    result = music_discover.set_saved(publication_id, wallet, saved=request.method == "POST")
+    if not result.get("ok"):
+        return jsonify({"error": result.get("error")}), 404
+    return jsonify(result)
+
+
+@app.route("/music/playlists", methods=["GET"])
+def api_music_playlists_public() -> Any:
+    wallet = request.args.get("wallet", "").strip().lower()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid_wallet"}), 400
+    return jsonify(music_discover.list_playlists(wallet, requester_wallet=None))
+
+
+@app.route("/music/playlists/mine", methods=["POST"])
+def api_music_playlists_mine() -> Any:
+    wallet, error_response, data = _request_publication_wallet_payload()
+    if error_response:
+        return error_response
+    assert wallet is not None
+    verify_error = _verify_music_wallet_action(
+        wallet,
+        data,
+        purpose=WALLET_NONCE_PURPOSE_PLAYLIST_READ,
+        playlist_id="library",
+        log_label="Music playlist list",
+    )
+    if verify_error:
+        return verify_error
+    return jsonify(music_discover.list_playlists(wallet, requester_wallet=wallet))
+
+
+@app.route("/music/playlists", methods=["POST"])
+def api_music_playlist_create() -> Any:
+    if not rate_limit(f"music-playlist-create:{request.remote_addr}", limit=30):
+        return jsonify({"error": "rate limit"}), 429
+    wallet, error_response, data = _request_publication_wallet_payload()
+    if error_response:
+        return error_response
+    assert wallet is not None
+    verify_error = _verify_music_wallet_action(
+        wallet,
+        data,
+        purpose=WALLET_NONCE_PURPOSE_PLAYLIST_CREATE,
+        playlist_id="new",
+        log_label="Music playlist create",
+    )
+    if verify_error:
+        return verify_error
+    result = music_discover.create_playlist(
+        owner_wallet=wallet,
+        title=str(data.get("title", "")).strip(),
+        description=str(data.get("description", "")).strip(),
+        is_public=bool(data.get("is_public", False)),
+    )
+    if not result.get("ok"):
+        return jsonify({"error": result.get("error")}), 400
+    return jsonify(result["playlist"]), 201
+
+
+@app.route("/music/playlists/<playlist_id>", methods=["GET"])
+def api_music_playlist_detail(playlist_id: str) -> Any:
+    playlist = music_discover.get_playlist(playlist_id, requester_wallet=None)
+    if not playlist:
+        return jsonify({"error": "playlist_not_found"}), 404
+    return jsonify(playlist)
+
+
+@app.route("/music/playlists/<playlist_id>/access", methods=["POST"])
+def api_music_playlist_access(playlist_id: str) -> Any:
+    wallet, error_response, data = _request_publication_wallet_payload()
+    if error_response:
+        return error_response
+    assert wallet is not None
+    verify_error = _verify_music_wallet_action(
+        wallet,
+        data,
+        purpose=WALLET_NONCE_PURPOSE_PLAYLIST_READ,
+        playlist_id=playlist_id,
+        log_label="Music playlist access",
+    )
+    if verify_error:
+        return verify_error
+    playlist = music_discover.get_playlist(playlist_id, requester_wallet=wallet)
+    if not playlist:
+        return jsonify({"error": "playlist_not_found"}), 404
+    return jsonify(playlist)
+
+
+@app.route("/music/playlists/<playlist_id>", methods=["PATCH", "DELETE"])
+def api_music_playlist_modify(playlist_id: str) -> Any:
+    if not rate_limit(f"music-playlist-modify:{request.remote_addr}", limit=60):
+        return jsonify({"error": "rate limit"}), 429
+    wallet, error_response, data = _request_publication_wallet_payload()
+    if error_response:
+        return error_response
+    assert wallet is not None
+    purpose = WALLET_NONCE_PURPOSE_PLAYLIST_DELETE if request.method == "DELETE" else WALLET_NONCE_PURPOSE_PLAYLIST_UPDATE
+    verify_error = _verify_music_wallet_action(
+        wallet,
+        data,
+        purpose=purpose,
+        playlist_id=playlist_id,
+        log_label="Music playlist modify",
+    )
+    if verify_error:
+        return verify_error
+    if request.method == "DELETE":
+        result = music_discover.delete_playlist(playlist_id, owner_wallet=wallet)
+        if not result.get("ok"):
+            return jsonify({"error": result.get("error")}), 404
+        return jsonify(result)
+    result = music_discover.update_playlist(
+        playlist_id,
+        owner_wallet=wallet,
+        title=str(data["title"]).strip() if "title" in data else None,
+        description=str(data["description"]).strip() if "description" in data else None,
+        is_public=bool(data["is_public"]) if "is_public" in data else None,
+    )
+    if not result.get("ok"):
+        status = 400 if result.get("error") == "missing_title" else 404
+        return jsonify({"error": result.get("error")}), status
+    return jsonify(result["playlist"])
+
+
+@app.route("/music/playlists/<playlist_id>/items", methods=["POST"])
+def api_music_playlist_add_item(playlist_id: str) -> Any:
+    if not rate_limit(f"music-playlist-item:{request.remote_addr}", limit=80):
+        return jsonify({"error": "rate limit"}), 429
+    wallet, error_response, data = _request_publication_wallet_payload()
+    if error_response:
+        return error_response
+    assert wallet is not None
+    publication_id = str(data.get("publication_id", "")).strip()
+    if not publication_id:
+        return jsonify({"error": "missing_publication_id"}), 400
+    verify_error = _verify_music_wallet_action(
+        wallet,
+        data,
+        purpose=WALLET_NONCE_PURPOSE_PLAYLIST_ADD,
+        publication_id=publication_id,
+        playlist_id=playlist_id,
+        log_label="Music playlist add",
+    )
+    if verify_error:
+        return verify_error
+    result = music_discover.add_playlist_item(playlist_id, publication_id, owner_wallet=wallet)
+    if not result.get("ok"):
+        status = 404 if result.get("error") in {"playlist_not_found", "publication_not_found"} else 400
+        return jsonify({"error": result.get("error")}), status
+    return jsonify(result["playlist"])
+
+
+@app.route("/music/playlists/<playlist_id>/items/<publication_id>", methods=["DELETE"])
+def api_music_playlist_remove_item(playlist_id: str, publication_id: str) -> Any:
+    if not rate_limit(f"music-playlist-item:{request.remote_addr}", limit=80):
+        return jsonify({"error": "rate limit"}), 429
+    wallet, error_response, data = _request_publication_wallet_payload()
+    if error_response:
+        return error_response
+    assert wallet is not None
+    verify_error = _verify_music_wallet_action(
+        wallet,
+        data,
+        purpose=WALLET_NONCE_PURPOSE_PLAYLIST_REMOVE,
+        publication_id=publication_id,
+        playlist_id=playlist_id,
+        log_label="Music playlist remove",
+    )
+    if verify_error:
+        return verify_error
+    result = music_discover.remove_playlist_item(playlist_id, publication_id, owner_wallet=wallet)
+    if not result.get("ok"):
+        return jsonify({"error": result.get("error")}), 404
+    return jsonify(result["playlist"])
+
+
+@app.route("/music/playlists/<playlist_id>/reorder", methods=["POST"])
+def api_music_playlist_reorder(playlist_id: str) -> Any:
+    if not rate_limit(f"music-playlist-reorder:{request.remote_addr}", limit=60):
+        return jsonify({"error": "rate limit"}), 429
+    wallet, error_response, data = _request_publication_wallet_payload()
+    if error_response:
+        return error_response
+    assert wallet is not None
+    verify_error = _verify_music_wallet_action(
+        wallet,
+        data,
+        purpose=WALLET_NONCE_PURPOSE_PLAYLIST_REORDER,
+        playlist_id=playlist_id,
+        log_label="Music playlist reorder",
+    )
+    if verify_error:
+        return verify_error
+    raw_ids = data.get("publication_ids")
+    if not isinstance(raw_ids, list):
+        return jsonify({"error": "invalid_publication_ids"}), 400
+    result = music_discover.reorder_playlist_items(
+        playlist_id,
+        [str(item) for item in raw_ids],
+        owner_wallet=wallet,
+    )
+    if not result.get("ok"):
+        return jsonify({"error": result.get("error")}), 404
+    return jsonify(result["playlist"])
+
+
+@app.route("/music/creator/<wallet>", methods=["GET", "POST"])
+def api_music_creator(wallet: str) -> Any:
+    requester_wallet = None
+    source: Any = request.args
+    if request.method == "POST":
+        viewer, error_response, data = _request_publication_wallet_payload()
+        if error_response:
+            return error_response
+        assert viewer is not None
+        verify_error = _verify_music_wallet_action(
+            viewer,
+            data,
+            purpose=WALLET_NONCE_PURPOSE_MUSIC_LIBRARY_READ,
+            log_label="Music creator read",
+        )
+        if verify_error:
+            return verify_error
+        requester_wallet = viewer
+        source = data
+    sort = str(source.get("sort", "newest")).strip()
+    creator = music_discover.get_creator(wallet, sort=sort, requester_wallet=requester_wallet)
+    if not creator:
+        return jsonify({"error": "creator_not_found"}), 404
+    return jsonify(creator)
+
+
 @app.route("/music/publications/<publication_id>/play", methods=["POST"])
 def api_music_play(publication_id: str) -> Any:
     if not rate_limit(f"music-play:{request.remote_addr}", limit=120):
@@ -7365,9 +7782,35 @@ def api_music_play(publication_id: str) -> Any:
     return jsonify(result)
 
 
+@app.route("/music/publications/<publication_id>/audio", methods=["GET"])
+def api_music_audio(publication_id: str) -> Any:
+    row = get_db().execute(
+        """
+        SELECT a.filename, a.content_type, a.path
+        FROM music_publications p
+        JOIN artifacts a ON a.id = p.audio_artifact_id
+        WHERE p.id = ? AND p.state = 'published' AND a.kind = 'audio'
+        """,
+        (publication_id,),
+    ).fetchone()
+    if not row:
+        return jsonify({"error": "publication_not_found"}), 404
+    if not _artifact_url(str(row["path"] or "")):
+        return jsonify({"error": "audio_unavailable"}), 404
+    path = Path(str(row["path"])).resolve()
+    if not path.is_file():
+        return jsonify({"error": "audio_missing"}), 410
+    return send_file(
+        path,
+        mimetype=str(row["content_type"] or "audio/mpeg"),
+        download_name=str(row["filename"] or f"{publication_id}.mp3"),
+        conditional=True,
+    )
+
+
 @app.route("/music/publications/<publication_id>/cover.svg", methods=["GET"])
 def api_music_cover(publication_id: str) -> Any:
-    publication = music_discover.get_publication(publication_id)
+    publication = music_discover.get_publication(publication_id, include_internal=True)
     if not publication:
         return jsonify({"error": "publication_not_found"}), 404
     seed = str(publication.get("cover_art_seed") or publication_id)
@@ -7390,6 +7833,36 @@ def api_music_cover(publication_id: str) -> Any:
 <circle cx="178" cy="414" r="54" fill="#071017" fill-opacity="0.28"/>
 <circle cx="438" cy="366" r="54" fill="#071017" fill-opacity="0.28"/>
 </g>
+</svg>"""
+    return Response(svg, mimetype="image/svg+xml")
+
+
+@app.route("/music/playlists/<playlist_id>/cover.svg", methods=["GET"])
+def api_music_playlist_cover(playlist_id: str) -> Any:
+    row = get_db().execute("SELECT * FROM music_playlists WHERE id=?", (playlist_id,)).fetchone()
+    if not row or not bool(row["is_public"]):
+        return jsonify({"error": "playlist_not_found"}), 404
+    seed = str(row["artwork_seed"] or playlist_id)
+    hue_a = int(seed[:2], 16) % 360
+    hue_b = (hue_a + 118) % 360
+    hue_c = (hue_a + 224) % 360
+    tiles = music_discover.playlist_art_tiles(playlist_id) if bool(row["is_public"]) else []
+    tile_markup = ""
+    for index, url in enumerate(tiles[:4]):
+        x = 0 if index % 2 == 0 else 320
+        y = 0 if index < 2 else 320
+        tile_markup += f'<image href="{html.escape(url, quote=True)}" x="{x}" y="{y}" width="320" height="320" preserveAspectRatio="xMidYMid slice"/>'
+    fallback = f"""
+<rect width="640" height="640" fill="hsl({hue_a} 76% 46%)"/>
+<path d="M0 492 C118 370 202 508 320 360 S514 192 640 286 V640 H0 Z" fill="hsl({hue_b} 70% 36%)" opacity="0.82"/>
+<path d="M86 162 C184 74 294 110 372 206 S514 264 590 150" fill="none" stroke="hsl({hue_c} 92% 70%)" stroke-width="34" stroke-linecap="round" opacity="0.62"/>
+<g fill="none" stroke="#fff" stroke-opacity="0.62" stroke-width="16"><path d="M210 400 V204 L446 164 V342"/><circle cx="210" cy="424" r="52"/><circle cx="446" cy="366" r="52"/></g>
+"""
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640" role="img" aria-label="HavnAI playlist artwork">
+<defs><filter id="soft"><feGaussianBlur stdDeviation="18"/></filter></defs>
+<rect width="640" height="640" fill="#071018"/>
+{tile_markup or fallback}
+<rect width="640" height="640" fill="none" stroke="#fff" stroke-opacity="0.16" stroke-width="2"/>
 </svg>"""
     return Response(svg, mimetype="image/svg+xml")
 

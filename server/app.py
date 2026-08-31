@@ -9,6 +9,7 @@ except ImportError:
 import io
 import json
 import logging
+import html
 from logging.handlers import RotatingFileHandler
 import os
 import re
@@ -52,6 +53,7 @@ import astra_gen
 import node_bundle
 import job_history
 import platform_v1
+import music_discover
 
 try:
     from eth_account import Account  # type: ignore
@@ -154,6 +156,9 @@ WALLET_NONCE_PURPOSE_GALLERY_PURCHASE = "gallery_purchase"
 WALLET_NONCE_PURPOSE_GALLERY_LIST = "gallery_list"
 WALLET_NONCE_PURPOSE_GALLERY_RELIST = "gallery_relist"
 WALLET_NONCE_PURPOSE_GALLERY_DELIST = "gallery_delist"
+WALLET_NONCE_PURPOSE_MUSIC_PUBLISH = "music_publish"
+WALLET_NONCE_PURPOSE_MUSIC_UNPUBLISH = "music_unpublish"
+WALLET_NONCE_PURPOSE_MUSIC_LIKE = "music_like"
 WALLET_NONCE_PURPOSE_IDENTITY_ANCHOR_CREATE = "identity_anchor_create"
 WALLET_NONCE_PURPOSE_IDENTITY_ANCHOR_DELETE = "identity_anchor_delete"
 WALLET_NONCE_PURPOSE_ASTRA_SESSION = "astra_session"
@@ -163,6 +168,9 @@ WALLET_NONCE_ALLOWED_PURPOSES = {
     WALLET_NONCE_PURPOSE_GALLERY_LIST,
     WALLET_NONCE_PURPOSE_GALLERY_RELIST,
     WALLET_NONCE_PURPOSE_GALLERY_DELIST,
+    WALLET_NONCE_PURPOSE_MUSIC_PUBLISH,
+    WALLET_NONCE_PURPOSE_MUSIC_UNPUBLISH,
+    WALLET_NONCE_PURPOSE_MUSIC_LIKE,
     WALLET_NONCE_PURPOSE_IDENTITY_ANCHOR_CREATE,
     WALLET_NONCE_PURPOSE_IDENTITY_ANCHOR_DELETE,
     WALLET_NONCE_PURPOSE_ASTRA_SESSION,
@@ -735,6 +743,12 @@ def _inject_module_dependencies() -> None:
     gallery.WALLET_REGEX = WALLET_REGEX  # type: ignore[attr-defined]
     gallery.build_result_payload = _build_result_payload  # type: ignore[attr-defined]
 
+    # Public music Discover module
+    music_discover.get_db = get_db  # type: ignore[attr-defined]
+    music_discover.log_event = log_event  # type: ignore[attr-defined]
+    music_discover.WALLET_REGEX = WALLET_REGEX  # type: ignore[attr-defined]
+    music_discover.artifact_url = lambda path: _artifact_url(path)  # type: ignore[attr-defined]
+
     # Astra Rewards module
     astra_rewards.get_db = get_db  # type: ignore[attr-defined]
     astra_rewards.log_event = log_event  # type: ignore[attr-defined]
@@ -1091,6 +1105,7 @@ blockchain.init_blockchain_tables(get_db())
 validators.init_validator_tables(get_db())
 workflows.init_workflow_tables(get_db())
 gallery.init_gallery_tables(get_db())
+music_discover.init_music_discover_tables(get_db())
 astra_rewards.init_astra_tables(get_db())
 astra_gen.init_astra_gen_tables(get_db())
 
@@ -4565,8 +4580,9 @@ def _build_gallery_nonce_message(
     *,
     listing_id: Optional[int] = None,
     job_id: Optional[str] = None,
+    publication_id: Optional[str] = None,
 ) -> str:
-    """Build a signed message for gallery operations (purchase or list)."""
+    """Build a signed message for user-authorized content operations."""
     lines = [
         "HavnAI Wallet Signature",
         f"action: {purpose}",
@@ -4576,6 +4592,8 @@ def _build_gallery_nonce_message(
         lines.append(f"listing_id: {listing_id}")
     if job_id is not None:
         lines.append(f"job_id: {job_id}")
+    if publication_id is not None:
+        lines.append(f"publication_id: {publication_id}")
     lines += [
         f"amount: {amount:.8f}",
         f"nonce: {nonce}",
@@ -4668,6 +4686,15 @@ def _verify_wallet_signature(
         raise
 
     return True, None
+
+
+def _nonce_message_has(wallet: str, nonce_str: str, line: str) -> bool:
+    row = get_db().execute(
+        "SELECT message FROM wallet_nonces WHERE wallet=? AND nonce=?",
+        (wallet, nonce_str),
+    ).fetchone()
+    message = str(row["message"] or "") if row else ""
+    return line in message.splitlines()
 
 
 def _parse_positive_amount(raw_amount: Any) -> Tuple[Optional[float], Optional[Any]]:
@@ -4775,6 +4802,13 @@ def wallet_nonce() -> Any:
     if purpose == WALLET_NONCE_PURPOSE_ASTRA_SESSION and raw_amount is None:
         # A session proves ownership; there is no value being authorized.
         raw_amount = 1.0
+    if purpose in {
+        WALLET_NONCE_PURPOSE_MUSIC_PUBLISH,
+        WALLET_NONCE_PURPOSE_MUSIC_UNPUBLISH,
+        WALLET_NONCE_PURPOSE_MUSIC_LIKE,
+    } and raw_amount is None:
+        # Non-payment action; keep nonce schema compatibility.
+        raw_amount = 1.0
     amount, amount_error = _parse_positive_amount(raw_amount)
     if amount_error:
         return amount_error
@@ -4782,6 +4816,7 @@ def wallet_nonce() -> Any:
 
     listing_id = None
     job_id_ctx = None
+    publication_id_ctx = None
     if purpose == WALLET_NONCE_PURPOSE_GALLERY_PURCHASE:
         try:
             listing_id = int(data.get("listing_id", 0))
@@ -4804,6 +4839,14 @@ def wallet_nonce() -> Any:
             listing_id = None
         if not listing_id:
             return jsonify({"error": "missing listing_id", "message": "listing_id required for gallery_delist"}), 400
+    elif purpose == WALLET_NONCE_PURPOSE_MUSIC_PUBLISH:
+        job_id_ctx = str(data.get("job_id", "")).strip() or None
+        if not job_id_ctx:
+            return jsonify({"error": "missing job_id", "message": "job_id required for music_publish"}), 400
+    elif purpose in {WALLET_NONCE_PURPOSE_MUSIC_UNPUBLISH, WALLET_NONCE_PURPOSE_MUSIC_LIKE}:
+        publication_id_ctx = str(data.get("publication_id", "")).strip() or None
+        if not publication_id_ctx:
+            return jsonify({"error": "missing publication_id", "message": f"publication_id required for {purpose}"}), 400
 
     now_ts = unix_now()
     issued_at_iso = datetime.fromtimestamp(now_ts, timezone.utc).isoformat().replace("+00:00", "Z")
@@ -4826,6 +4869,7 @@ def wallet_nonce() -> Any:
             domain,
             listing_id=listing_id,
             job_id=job_id_ctx,
+            publication_id=publication_id_ctx,
         )
 
     conn = get_db()
@@ -5203,6 +5247,7 @@ def _v1_job_payload(job: Dict[str, Any]) -> Dict[str, Any]:
         "stage": job.get("stage") or status,
         "progress": float(job.get("progress") or (100 if status in platform_v1.FINAL_JOB_STATES else 0)),
         "model": job.get("model"),
+        "wallet": job.get("wallet"),
         "node_id": job.get("node_id"),
         "attempt_id": job.get("attempt_id"),
         "created_at": job.get("timestamp"),
@@ -7142,6 +7187,211 @@ def api_marketplace_browse() -> Any:
         limit=limit, offset=offset,
     )
     return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
+# Music Discover — public publishing/listening/social layer
+# ---------------------------------------------------------------------------
+
+
+def _request_publication_wallet_payload() -> Tuple[Optional[str], Optional[Any], Dict[str, Any]]:
+    data = request.get_json(silent=True) or {}
+    wallet = str(data.get("wallet", "")).strip().lower()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return None, (jsonify({"error": "invalid wallet"}), 400), data
+    nonce_str = str(data.get("nonce", "")).strip()
+    signature = str(data.get("signature", "")).strip()
+    if not nonce_str or not signature:
+        return None, (jsonify({"error": "signature_required", "message": "nonce and signature are required"}), 400), data
+    return wallet, None, data
+
+
+@app.route("/music/discover", methods=["GET"])
+def api_music_discover() -> Any:
+    search = request.args.get("search", "").strip() or None
+    style = request.args.get("style", "").strip() or None
+    sort = request.args.get("sort", "newest").strip()
+    wallet = request.args.get("wallet", "").strip().lower() or None
+    if wallet and not WALLET_REGEX.match(wallet):
+        wallet = None
+    creator_wallet = request.args.get("creator_wallet", "").strip().lower() or None
+    if creator_wallet and not WALLET_REGEX.match(creator_wallet):
+        creator_wallet = None
+    limit = _clamp(_coerce_int(request.args.get("limit"), 24), 1, music_discover.MAX_LIMIT)
+    offset = max(0, _coerce_int(request.args.get("offset"), 0))
+    return jsonify(
+        music_discover.browse_publications(
+            search=search,
+            style=style,
+            sort=sort,
+            limit=limit,
+            offset=offset,
+            liked_by_wallet=wallet,
+            creator_wallet=creator_wallet,
+        )
+    )
+
+
+@app.route("/music/discover/<publication_id>", methods=["GET"])
+def api_music_publication_detail(publication_id: str) -> Any:
+    wallet = request.args.get("wallet", "").strip().lower() or None
+    if wallet and not WALLET_REGEX.match(wallet):
+        wallet = None
+    publication = music_discover.get_publication(publication_id, liked_by_wallet=wallet)
+    if not publication:
+        return jsonify({"error": "publication_not_found"}), 404
+    return jsonify(publication)
+
+
+@app.route("/music/publications", methods=["POST"])
+def api_music_publish() -> Any:
+    if not rate_limit(f"music-publish:{request.remote_addr}", limit=30):
+        return jsonify({"error": "rate limit"}), 429
+    wallet, error_response, data = _request_publication_wallet_payload()
+    if error_response:
+        return error_response
+    assert wallet is not None
+    job_id = str(data.get("job_id", "")).strip()
+    if not job_id:
+        return jsonify({"error": "missing job_id"}), 400
+    sig_ok, sig_err = _verify_wallet_signature(
+        wallet,
+        str(data.get("nonce", "")).strip(),
+        str(data.get("signature", "")).strip(),
+        allowed_purposes={WALLET_NONCE_PURPOSE_MUSIC_PUBLISH},
+        expected_amount=1.0,
+        log_label="Music publication",
+    )
+    if not sig_ok:
+        return sig_err
+    if not _nonce_message_has(wallet, str(data.get("nonce", "")).strip(), f"job_id: {job_id}"):
+        return jsonify({"error": "invalid_nonce", "message": "nonce job context mismatch"}), 400
+    raw_tags = data.get("tags")
+    tags = [str(item) for item in raw_tags] if isinstance(raw_tags, list) else None
+    result = music_discover.publish_song(
+        job_id=job_id,
+        creator_wallet=wallet,
+        title=str(data.get("title", "")).strip(),
+        style=str(data.get("style", "")).strip(),
+        tags=tags,
+    )
+    if not result.get("ok"):
+        status = 404 if result.get("error") == "job_not_found" else 403 if result.get("error") == "not_your_job" else 400
+        return jsonify({"error": result.get("error")}), status
+    return jsonify(result["publication"]), 200 if result["publication"].get("already_published") else 201
+
+
+@app.route("/music/publications/<publication_id>", methods=["DELETE"])
+def api_music_unpublish(publication_id: str) -> Any:
+    if not rate_limit(f"music-unpublish:{request.remote_addr}", limit=30):
+        return jsonify({"error": "rate limit"}), 429
+    wallet, error_response, data = _request_publication_wallet_payload()
+    if error_response:
+        return error_response
+    assert wallet is not None
+    sig_ok, sig_err = _verify_wallet_signature(
+        wallet,
+        str(data.get("nonce", "")).strip(),
+        str(data.get("signature", "")).strip(),
+        allowed_purposes={WALLET_NONCE_PURPOSE_MUSIC_UNPUBLISH},
+        expected_amount=1.0,
+        log_label="Music unpublish",
+    )
+    if not sig_ok:
+        return sig_err
+    if not _nonce_message_has(wallet, str(data.get("nonce", "")).strip(), f"publication_id: {publication_id}"):
+        return jsonify({"error": "invalid_nonce", "message": "nonce publication context mismatch"}), 400
+    result = music_discover.unpublish_song(publication_id, wallet)
+    if not result.get("ok"):
+        status = 404 if result.get("error") == "publication_not_found" else 403
+        return jsonify({"error": result.get("error")}), status
+    return jsonify({"ok": True})
+
+
+@app.route("/music/publications/<publication_id>/like", methods=["POST"])
+def api_music_like(publication_id: str) -> Any:
+    if not rate_limit(f"music-like:{request.remote_addr}", limit=60):
+        return jsonify({"error": "rate limit"}), 429
+    wallet, error_response, data = _request_publication_wallet_payload()
+    if error_response:
+        return error_response
+    assert wallet is not None
+    sig_ok, sig_err = _verify_wallet_signature(
+        wallet,
+        str(data.get("nonce", "")).strip(),
+        str(data.get("signature", "")).strip(),
+        allowed_purposes={WALLET_NONCE_PURPOSE_MUSIC_LIKE},
+        expected_amount=1.0,
+        log_label="Music like",
+    )
+    if not sig_ok:
+        return sig_err
+    if not _nonce_message_has(wallet, str(data.get("nonce", "")).strip(), f"publication_id: {publication_id}"):
+        return jsonify({"error": "invalid_nonce", "message": "nonce publication context mismatch"}), 400
+    result = music_discover.set_like(publication_id, wallet, liked=bool(data.get("liked", True)))
+    if not result.get("ok"):
+        return jsonify({"error": result.get("error")}), 404
+    return jsonify(result)
+
+
+@app.route("/music/publications/<publication_id>/play", methods=["POST"])
+def api_music_play(publication_id: str) -> Any:
+    if not rate_limit(f"music-play:{request.remote_addr}", limit=120):
+        return jsonify({"error": "rate limit"}), 429
+    data = request.get_json(silent=True) or {}
+    seconds = data.get("seconds_listened", 0)
+    try:
+        seconds_listened = float(seconds)
+    except (TypeError, ValueError):
+        seconds_listened = 0.0
+    completed = bool(data.get("completed", False))
+    listener_hint = str(data.get("session_id") or "").strip()[:128]
+    listener_key = "|".join(
+        [
+            publication_id,
+            listener_hint,
+            str(request.headers.get("X-Forwarded-For") or request.remote_addr or ""),
+            str(request.headers.get("User-Agent") or "")[:160],
+        ]
+    )
+    result = music_discover.record_play(
+        publication_id,
+        listener_key=listener_key,
+        seconds_listened=seconds_listened,
+        completed=completed,
+    )
+    if not result.get("ok"):
+        return jsonify({"error": result.get("error")}), 404
+    return jsonify(result)
+
+
+@app.route("/music/publications/<publication_id>/cover.svg", methods=["GET"])
+def api_music_cover(publication_id: str) -> Any:
+    publication = music_discover.get_publication(publication_id)
+    if not publication:
+        return jsonify({"error": "publication_not_found"}), 404
+    seed = str(publication.get("cover_art_seed") or publication_id)
+    title = html.escape(str(publication.get("title") or "HavnAI"), quote=True)
+    hue_a = int(seed[:2], 16) % 360
+    hue_b = (hue_a + 142) % 360
+    hue_c = (hue_a + 52) % 360
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640" role="img" aria-label="{title}">
+<defs>
+<linearGradient id="g" x1="0" x2="1" y1="0" y2="1"><stop offset="0" stop-color="hsl({hue_a} 84% 56%)"/><stop offset="0.55" stop-color="hsl({hue_b} 75% 42%)"/><stop offset="1" stop-color="hsl({hue_c} 88% 64%)"/></linearGradient>
+<filter id="blur"><feGaussianBlur stdDeviation="24"/></filter>
+</defs>
+<rect width="640" height="640" fill="#061016"/>
+<rect width="640" height="640" fill="url(#g)" opacity="0.92"/>
+<path d="M58 410 C170 286 228 488 348 344 S512 198 594 282 V640 H58 Z" fill="#061016" opacity="0.42"/>
+<circle cx="{120 + int(seed[2:4], 16)}" cy="{110 + int(seed[4:6], 16)}" r="118" fill="#fff" opacity="0.16" filter="url(#blur)"/>
+<circle cx="{310 + int(seed[6:8], 16) % 120}" cy="{300 + int(seed[8:10], 16) % 130}" r="154" fill="#fff" opacity="0.1" filter="url(#blur)"/>
+<g fill="none" stroke="#fff" stroke-opacity="0.55" stroke-width="14">
+<path d="M178 392 V205 L438 158 V344"/>
+<circle cx="178" cy="414" r="54" fill="#071017" fill-opacity="0.28"/>
+<circle cx="438" cy="366" r="54" fill="#071017" fill-opacity="0.28"/>
+</g>
+</svg>"""
+    return Response(svg, mimetype="image/svg+xml")
 
 
 # ---------------------------------------------------------------------------

@@ -172,13 +172,14 @@ ASTRA_SESSION_TTL_SECONDS = max(
 )
 WALLET_NONCE_TTL_SECONDS = max(60, int(os.getenv("HAVNAI_WALLET_NONCE_TTL_SECONDS", "300")))
 
-SUPPORTED_TASK_TYPES = {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP", "LTX_VIDEO_GEN"}
+SUPPORTED_TASK_TYPES = {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP", "LTX_VIDEO_GEN", "MUSIC_GEN"}
 TASK_SUPPORT_MAP = {
     CREATOR_TASK_TYPE: "image",
     "VIDEO_GEN": "video",
     "ANIMATEDIFF": "animatediff",
     "FACE_SWAP": "face_swap",
     "LTX_VIDEO_GEN": "ltx_video",
+    "MUSIC_GEN": "music",
 }
 SUPPORT_TO_JOB_TYPE_MAP = {
     "image": CREATOR_TASK_TYPE,
@@ -186,6 +187,7 @@ SUPPORT_TO_JOB_TYPE_MAP = {
     "animatediff": "ANIMATEDIFF",
     "face_swap": "FACE_SWAP",
     "ltx_video": "LTX_VIDEO_GEN",
+    "music": "MUSIC_GEN",
 }
 LTX_VIDEO_PIPELINES = {"ltx_video", "ltx23_wangp"}
 
@@ -1157,6 +1159,7 @@ def load_manifest() -> None:
             "available_modes": entry.get("available_modes", []),
             "default_pipeline_mode": entry.get("default_pipeline_mode", ""),
             "default_upscaler": entry.get("default_upscaler", ""),
+            "engine_model": entry.get("engine_model", ""),
             # How nodes obtain the weights; see _public_model_source().
             "source": entry.get("source") if isinstance(entry.get("source"), dict) else {},
         }
@@ -1961,7 +1964,7 @@ def pending_tasks_for_node(node_id: str) -> List[Dict[str, Any]]:
         if task.get("status") not in relevant_status:
             continue
         task_type = (task.get("task_type") or CREATOR_TASK_TYPE).upper()
-        if task_type not in {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP", "LTX_VIDEO_GEN"}:
+        if task_type not in {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP", "LTX_VIDEO_GEN", "MUSIC_GEN"}:
             continue
         tasks.append(task)
     return tasks
@@ -4049,6 +4052,19 @@ def get_creator_tasks() -> Any:
                     ):
                         if key in ltx_settings and ltx_settings[key] is not None:
                             task_payload[key] = ltx_settings[key]
+            if task_payload["type"].upper() == "MUSIC_GEN":
+                try:
+                    raw_music = task.get("data") or ""
+                    music_settings = json.loads(raw_music) if isinstance(raw_music, str) else {}
+                except Exception:
+                    music_settings = {}
+                if isinstance(music_settings, dict):
+                    for key in (
+                        "prompt", "style", "lyrics", "instrumental", "duration",
+                        "bpm", "key", "seed", "timeout", "engine_model",
+                    ):
+                        if key in music_settings and music_settings[key] is not None:
+                            task_payload[key] = music_settings[key]
             if task_payload["type"].upper() == "FACE_SWAP":
                 try:
                     raw_fs = task.get("data") or ""
@@ -5282,6 +5298,8 @@ def v1_list_jobs() -> Any:
             compatible_types = {str(payload["type"]), raw_task_type}
             if raw_task_type in {"ltx_video_gen", "video_gen", "animatediff"}:
                 compatible_types.add("image_to_video")
+            if raw_task_type == "music_gen":
+                compatible_types.add("text_to_music")
             if requested_type not in compatible_types:
                 continue
         if requested_status and payload["status"] != requested_status:
@@ -5299,7 +5317,7 @@ def v1_create_job() -> Any:
         return auth_error
     payload = request.get_json(silent=True) or {}
     job_type = str(payload.get("type") or "").strip().lower()
-    if job_type not in {"image", "image_to_video"}:
+    if job_type not in {"image", "image_to_video", "text_to_music"}:
         return jsonify({"error": "invalid_job_type"}), 400
     if job_type == "image_to_video" and not VIDEO_V2_ENABLED:
         return jsonify({"error": "feature_disabled", "feature": "video_v2"}), 404
@@ -5307,7 +5325,12 @@ def v1_create_job() -> Any:
     if not prompt:
         return jsonify({"error": "missing_prompt"}), 400
 
-    model_name = str(payload.get("model") or ("ltx23_wangp_distilled" if job_type == "image_to_video" else "juggernautXL_ragnarokBy")).strip()
+    default_model = (
+        "ltx23_wangp_distilled" if job_type == "image_to_video"
+        else "ace_step_1_5_turbo" if job_type == "text_to_music"
+        else "juggernautXL_ragnarokBy"
+    )
+    model_name = str(payload.get("model") or default_model).strip()
     refresh_manifest()
     cfg = get_model_config(model_name.lower())
     if not cfg:
@@ -5333,7 +5356,19 @@ def v1_create_job() -> Any:
     if job_type == "image_to_video" and not source_asset_id:
         return jsonify({"error": "source_image_required"}), 400
 
-    if job_type == "image_to_video":
+    if job_type == "text_to_music":
+        try:
+            resolved_spec = platform_v1.resolve_music_spec(payload, model=selected_model)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        settings.update(dict(resolved_spec["parameters"]))
+        settings.update({
+            "timeout": resolved_spec["timeout_seconds"],
+            "engine_model": str(cfg.get("engine_model") or "acestep-v15-turbo"),
+        })
+        resolved_spec["engine"]["model"] = settings["engine_model"]
+        task_type = "MUSIC_GEN"
+    elif job_type == "image_to_video":
         try:
             resolved_spec = platform_v1.resolve_video_spec(
                 payload,
@@ -5558,6 +5593,8 @@ def v1_node_artifact(job_id: str) -> Any:
         destination = OUTPUTS_DIR / f"{job_id}{extension}"
     elif kind == "video":
         destination = OUTPUTS_DIR / "videos" / f"{job_id}{extension}"
+    elif kind == "audio":
+        destination = OUTPUTS_DIR / "audio" / f"{job_id}{extension}"
     else:
         destination = OUTPUTS_DIR / "artifacts" / job_id / platform_v1.safe_filename(uploaded.filename, f"artifact{extension}")
     try:
@@ -6319,6 +6356,7 @@ def models_list() -> Any:
                 "available_modes": model_data.get("available_modes") or None,
                 "default_pipeline_mode": model_data.get("default_pipeline_mode") or None,
                 "default_upscaler": model_data.get("default_upscaler") if "default_upscaler" in model_data else None,
+                "engine_model": model_data.get("engine_model") or None,
                 # Delivery descriptor: tells a node how to obtain the weights.
                 # Never exposes our local filesystem paths.
                 "source": _public_model_source(model_data),

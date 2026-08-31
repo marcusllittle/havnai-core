@@ -37,6 +37,7 @@ except Exception:  # pragma: no cover
         available_modes: List[str] = field(default_factory=list)
         default_pipeline_mode: str = ""
         default_upscaler: str = ""
+        engine_model: str = ""
 
     @dataclass
     class Manifest:  # type: ignore

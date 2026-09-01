@@ -247,6 +247,13 @@ class MusicDiscoverApiTests(unittest.TestCase):
         added = self.client.post(f"/music/playlists/{playlist_id}/items", json=add_payload)
         self.assertEqual(added.status_code, 200, added.get_data(as_text=True))
         self.assertEqual(added.get_json()["publications"][0]["id"], publication_id)
+        duplicate_add_payload = {
+            **self._signed_payload("playlist_add", playlist_id=playlist_id, publication_id=publication_id),
+            "publication_id": publication_id,
+        }
+        duplicate_added = self.client.post(f"/music/playlists/{playlist_id}/items", json=duplicate_add_payload)
+        self.assertEqual(duplicate_added.status_code, 200, duplicate_added.get_data(as_text=True))
+        self.assertEqual([item["id"] for item in duplicate_added.get_json()["publications"]], [publication_id])
         second_add_payload = {
             **self._signed_payload("playlist_add", playlist_id=playlist_id, publication_id=second_publication_id),
             "publication_id": second_publication_id,
@@ -298,6 +305,34 @@ class MusicDiscoverApiTests(unittest.TestCase):
         }
         other_update = self.client.patch(f"/music/playlists/{playlist_id}", json=other_update_payload)
         self.assertEqual(other_update.status_code, 404, other_update.get_data(as_text=True))
+        other_reorder_payload = {
+            **self._signed_payload(
+                "playlist_reorder",
+                wallet=self.other_wallet,
+                account=self.other_account,
+                playlist_id=playlist_id,
+            ),
+            "publication_ids": [publication_id, second_publication_id],
+        }
+        other_reorder = self.client.post(f"/music/playlists/{playlist_id}/reorder", json=other_reorder_payload)
+        self.assertEqual(other_reorder.status_code, 404, other_reorder.get_data(as_text=True))
+        other_remove_payload = self._signed_payload(
+            "playlist_remove",
+            wallet=self.other_wallet,
+            account=self.other_account,
+            playlist_id=playlist_id,
+            publication_id=publication_id,
+        )
+        other_remove = self.client.delete(f"/music/playlists/{playlist_id}/items/{publication_id}", json=other_remove_payload)
+        self.assertEqual(other_remove.status_code, 404, other_remove.get_data(as_text=True))
+        other_delete_payload = self._signed_payload(
+            "playlist_delete",
+            wallet=self.other_wallet,
+            account=self.other_account,
+            playlist_id=playlist_id,
+        )
+        other_delete = self.client.delete(f"/music/playlists/{playlist_id}", json=other_delete_payload)
+        self.assertEqual(other_delete.status_code, 404, other_delete.get_data(as_text=True))
 
         spoofed_creator = self.client.get(f"/music/creator/{self.wallet}?wallet={self.wallet}")
         self.assertEqual(spoofed_creator.status_code, 200, spoofed_creator.get_data(as_text=True))

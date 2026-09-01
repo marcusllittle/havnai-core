@@ -229,9 +229,11 @@ class MusicDiscoverTestCase(unittest.TestCase):
         )
 
         music_discover.add_playlist_item(playlist_id, pub_one, owner_wallet=WALLET)
+        music_discover.add_playlist_item(playlist_id, pub_one, owner_wallet=WALLET)
         music_discover.add_playlist_item(playlist_id, pub_two, owner_wallet=WALLET)
         private = music_discover.get_playlist(playlist_id, requester_wallet=WALLET)
         self.assertEqual(private["artwork_url"], "")
+        self.assertEqual([item["id"] for item in private["publications"]], [pub_one, pub_two])
         self.assertEqual(private["artwork_tiles"], [
             f"/api/music/publications/{pub_one}/cover.svg",
             f"/api/music/publications/{pub_two}/cover.svg",

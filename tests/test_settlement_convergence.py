@@ -283,6 +283,63 @@ class SettlementConvergenceTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 409)
         self.assertEqual(resp.get_json().get("error"), "job_finalized")
 
+    def test_gallery_purchase_route_requires_signature(self) -> None:
+        with patch.object(app_module, "rate_limit", return_value=True):
+            response = self.client.post(
+                "/gallery/listings/1/purchase", json={"wallet": VALID_WALLET}
+            )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "signature_required")
+
+    def test_gallery_purchase_transfers_ownership_and_credits_once(self) -> None:
+        buyer = "0x2222222222222222222222222222222222222222"
+        listing = app_module.gallery.create_listing(
+            "purchase-route-job", VALID_WALLET, "Route test", 3.0
+        )
+        app_module.credits.CREDITS_ENABLED = True
+        app_module.credits.deposit_credits(buyer, 10.0, reason="test")
+        seller_before = app_module.credits.get_credit_balance(VALID_WALLET)
+        payload = {"wallet": buyer, "nonce": "test-nonce", "signature": "test-signature"}
+        with patch.object(app_module, "rate_limit", return_value=True), patch.object(
+            app_module, "_verify_wallet_signature", return_value=(True, None)
+        ) as verify:
+            response = self.client.post(
+                f"/gallery/listings/{listing['id']}/purchase", json=payload
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.get_json()["ok"])
+            self.assertEqual(response.get_json()["remaining_credits"], 7.0)
+            self.assertEqual(verify.call_args.kwargs["expected_amount"], 3.0)
+            self.assertEqual(
+                verify.call_args.kwargs["allowed_purposes"],
+                {app_module.WALLET_NONCE_PURPOSE_GALLERY_PURCHASE},
+            )
+            repeat = self.client.post(
+                f"/gallery/listings/{listing['id']}/purchase", json=payload
+            )
+        self.assertEqual(repeat.status_code, 404)
+        self.assertEqual(repeat.get_json()["error"], "listing_not_available")
+        self.assertEqual(app_module.gallery.get_listing(listing["id"])["owner_wallet"], buyer)
+        self.assertEqual(app_module.credits.get_credit_balance(buyer), 7.0)
+        self.assertEqual(app_module.credits.get_credit_balance(VALID_WALLET), seller_before + 3.0)
+
+    def test_gallery_purchase_insufficient_credits_preserves_ownership(self) -> None:
+        buyer = "0x2222222222222222222222222222222222222222"
+        listing = app_module.gallery.create_listing(
+            "unfunded-purchase-job", VALID_WALLET, "Route test", 3.0
+        )
+        app_module.credits.CREDITS_ENABLED = True
+        with patch.object(app_module, "rate_limit", return_value=True), patch.object(
+            app_module, "_verify_wallet_signature", return_value=(True, None)
+        ):
+            response = self.client.post(
+                f"/gallery/listings/{listing['id']}/purchase",
+                json={"wallet": buyer, "nonce": "test", "signature": "test"},
+            )
+        self.assertEqual(response.status_code, 402)
+        self.assertEqual(response.get_json()["error"], "insufficient_credits")
+        self.assertEqual(app_module.gallery.get_listing(listing["id"])["owner_wallet"], VALID_WALLET)
+
     def test_gallery_listing_enforces_settlement_marketplace_eligibility(self) -> None:
         conn = app_module.get_db()
         now = time.time()

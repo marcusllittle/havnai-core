@@ -676,6 +676,9 @@ def _task_output_path(task_id: str, task_type: str) -> Optional[Path]:
     if task_type in {"IMAGE_GEN", "FACE_SWAP"}:
         path = OUTPUTS_DIR / f"{task_id}.png"
         return path if path.is_file() else None
+    if task_type == "MUSIC_GEN":
+        music_dir = OUTPUTS_DIR / "music" / task_id
+        return next((path for path in music_dir.glob("music.*") if path.is_file()), None)
     candidates = [
         OUTPUTS_DIR / f"video_{task_id}.mp4",
         OUTPUTS_DIR / f"animatediff_{task_id}.mp4",
@@ -784,9 +787,12 @@ def _upload_task_artifact(task: Dict[str, Any], path: Path, kind: str, metadata:
                 "file": (
                     path.name,
                     handle,
-                    {"image": "image/png", "video": "video/mp4", "manifest": "application/json"}.get(
-                        kind, "application/octet-stream"
-                    ),
+                    {
+                        "image": "image/png",
+                        "video": "video/mp4",
+                        "audio": "audio/wav" if path.suffix.lower() == ".wav" else "audio/mpeg",
+                        "manifest": "application/json",
+                    }.get(kind, "application/octet-stream"),
                 )
             },
             timeout=HTTP_TIMEOUT_RESULTS,
@@ -922,6 +928,30 @@ def discover_capabilities() -> Dict[str, Any]:
             continue
         if not _is_model_allowed(name):
             continue
+        if pipeline == "ace_step":
+            try:
+                from engines.ace_step.provider import runtime_probe
+
+                ready, probe = runtime_probe()
+            except Exception as exc:
+                ready, probe = False, {"error": str(exc)}
+            expected_model = str(getattr(entry, "engine_model", "") or "acestep-v15-turbo")
+            service_models = probe.get("models", []) if isinstance(probe, dict) else []
+            model_ready = ready and expected_model in service_models
+            details[name] = {
+                "pipeline": pipeline,
+                "model_family": "ace_step",
+                "model_version": str(getattr(entry, "model_version", "") or "1.5"),
+                "license_status": str(getattr(entry, "license_status", "unreviewed") or "unreviewed"),
+                "files_present": model_ready,
+                "capabilities": list(getattr(entry, "capabilities", []) or ["text_to_music"]),
+                "available_modes": list(getattr(entry, "available_modes", []) or ["text_to_music"]),
+                "service": probe,
+            }
+            if model_ready:
+                pipelines.add(pipeline)
+                models.append(name)
+            continue
         # LTX2 can be loaded from HF repo id; local path is optional.
         if pipeline == "ltx2":
             pipelines.add(pipeline)
@@ -1033,6 +1063,9 @@ def discover_supports(capabilities: Dict[str, Any]) -> List[str]:
 
     if _has_image_generation_model():
         supports.append("image")
+
+    if "ace_step" in pipelines and _has_runner("engines.ace_step.provider", "AceStepProvider"):
+        supports.append("music")
 
     if "ltx2" in pipelines and "ltx2" in models and _has_runner("engines.ltx2.ltx2_runner", "run_ltx2"):
         supports.append("video")
@@ -2402,6 +2435,69 @@ def _run_faceswap_task(
     return metrics, util, image_b64
 
 
+def _run_music_task(
+    task_id: str,
+    entry: ModelEntry,
+    reward_weight: float,
+    task: Dict[str, Any],
+) -> Tuple[Dict[str, Any], int]:
+    from engines.ace_step import AceStepCancelled, AceStepProvider
+
+    started = time.time()
+    cancel_event = task.get("_cancel_event")
+    settings = {
+        "prompt": str(task.get("prompt") or ""),
+        "style": str(task.get("style") or ""),
+        "lyrics": str(task.get("lyrics") or ""),
+        "instrumental": bool(task.get("instrumental")),
+        "duration": float(task.get("duration") or 60),
+        "bpm": task.get("bpm"),
+        "key": task.get("key"),
+        "seed": task.get("seed"),
+        "engine_model": str(task.get("engine_model") or getattr(entry, "engine_model", "") or "acestep-v15-turbo"),
+    }
+    try:
+        result = AceStepProvider().generate(
+            settings,
+            OUTPUTS_DIR / "music" / task_id,
+            progress=lambda value, stage: _report_task_progress(task, value, stage),
+            cancelled=lambda: bool(cancel_event and cancel_event.is_set()),
+            timeout=float(task.get("timeout") or 900),
+        )
+        metadata = dict(result.metadata)
+        return {
+            "status": "success",
+            "task_type": "music_gen",
+            "model_name": entry.name,
+            "reward_weight": reward_weight,
+            "inference_time_ms": round((time.time() - started) * 1000, 3),
+            "audio_metadata": metadata,
+            "content_type": result.content_type,
+            "duration": metadata.get("duration", settings["duration"]),
+            "bpm": metadata.get("bpm", settings.get("bpm")),
+            "key": metadata.get("key", settings.get("key")),
+            "seed": metadata.get("seed", settings.get("seed")),
+            "engine_model": metadata.get("model", settings["engine_model"]),
+        }, utilization_hint
+    except AceStepCancelled as exc:
+        return {
+            "status": "cancelled",
+            "task_type": "music_gen",
+            "model_name": entry.name,
+            "reward_weight": reward_weight,
+            "error": str(exc),
+        }, utilization_hint
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "task_type": "music_gen",
+            "model_name": entry.name,
+            "reward_weight": reward_weight,
+            "error": str(exc),
+            "error_code": "ace_step_unreachable" if isinstance(exc, requests.RequestException) else "ace_step_generation",
+        }, utilization_hint
+
+
 def execute_task(task: Dict[str, Any]) -> None:
     global utilization_hint
 
@@ -2413,7 +2509,7 @@ def execute_task(task: Dict[str, Any]) -> None:
     prompt = task.get("prompt") or ""
     negative_prompt = task.get("negative_prompt") or ""
 
-    if task_type in {"IMAGE_GEN", "VIDEO_GEN", "LTX_VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP"} and ROLE != "creator":
+    if task_type in {"IMAGE_GEN", "VIDEO_GEN", "LTX_VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP", "MUSIC_GEN"} and ROLE != "creator":
         log(f"Skipping creator task {task_id[:8]} — node not in creator mode", prefix="⚠️")
         return
 
@@ -2555,6 +2651,8 @@ def execute_task(task: Dict[str, Any]) -> None:
             metrics, util, video_b64 = _run_animatediff_task(task_id, entry, model_path, reward_weight, task)
         elif task_type == "FACE_SWAP":
             metrics, util, image_b64 = _run_faceswap_task(task_id, entry, model_path, reward_weight, task)
+        elif task_type == "MUSIC_GEN":
+            metrics, util = _run_music_task(task_id, entry, reward_weight, task)
         else:
             metrics = {
                 "status": "failed",
@@ -2575,7 +2673,7 @@ def execute_task(task: Dict[str, Any]) -> None:
     if metrics.get("status", "success") == "success" and output_path is not None:
         try:
             _report_task_progress(task, 95, "uploading")
-            if task_type not in {"IMAGE_GEN", "FACE_SWAP"}:
+            if task_type in {"VIDEO_GEN", "LTX_VIDEO_GEN", "ANIMATEDIFF"}:
                 output_path = _postprocess_video(task, output_path)
             resolved_spec = dict(task.get("resolved_spec")) if isinstance(task.get("resolved_spec"), dict) else {}
             metrics["output_sha256"] = _file_sha256(output_path)
@@ -2613,7 +2711,7 @@ def execute_task(task: Dict[str, Any]) -> None:
                 resolved_spec["model"] = model_spec
                 resolved_spec["loras"] = metrics.get("loras", [])
                 parameters = dict(resolved_spec.get("parameters") or {})
-                for key in ("seed", "steps", "guidance", "sampler", "width", "height", "frames", "fps"):
+                for key in ("seed", "steps", "guidance", "sampler", "width", "height", "frames", "fps", "duration", "bpm", "key"):
                     if metrics.get(key) is not None:
                         parameters[key] = metrics[key]
                 resolved_spec["parameters"] = parameters
@@ -2627,12 +2725,17 @@ def execute_task(task: Dict[str, Any]) -> None:
                     "sha256": metrics["output_sha256"],
                     "filename": output_path.name,
                 }
+                if metrics.get("content_type"):
+                    resolved_spec["output"]["content_type"] = metrics["content_type"]
             metrics["resolved_render_spec"] = resolved_spec
+            artifact_metadata = {"resolved_render_spec": resolved_spec, "metrics": metrics}
+            if task_type == "MUSIC_GEN" and isinstance(metrics.get("audio_metadata"), dict):
+                artifact_metadata.update(metrics["audio_metadata"])
             artifact_uploaded = _upload_task_artifact(
                 task,
                 output_path,
-                "image" if task_type in {"IMAGE_GEN", "FACE_SWAP"} else "video",
-                {"resolved_render_spec": resolved_spec, "metrics": metrics},
+                "image" if task_type in {"IMAGE_GEN", "FACE_SWAP"} else "audio" if task_type == "MUSIC_GEN" else "video",
+                artifact_metadata,
             )
             if artifact_uploaded and task.get("attempt_id"):
                 manifest_path = OUTPUTS_DIR / "manifests" / f"{task_id}.json"

@@ -27,6 +27,7 @@ import platform_v1
 WALLET = "0x1111111111111111111111111111111111111111"
 IMAGE_MODEL = "test_sdxl"
 VIDEO_MODEL = "test_ltx23_wangp"
+MUSIC_MODEL = "ace_step_1_5_turbo"
 
 
 class VideoSpecTests(unittest.TestCase):
@@ -54,6 +55,34 @@ class VideoSpecTests(unittest.TestCase):
             platform_v1.resolve_video_spec(
                 {"duration_seconds": 4}, model="ltx_video_distilled"
             )
+
+    def test_music_spec_validates_and_preserves_user_controls(self) -> None:
+        spec = platform_v1.resolve_music_spec(
+            {
+                "prompt": "a nocturnal city pop track",
+                "style": "city pop, warm bass",
+                "lyrics": "[Verse]\nStreetlights glow",
+                "instrumental": False,
+                "duration": 90,
+                "bpm": 118,
+                "key": "A Minor",
+                "seed": 17,
+            },
+            model=MUSIC_MODEL,
+        )
+        self.assertEqual(spec["task_type"], "text_to_music")
+        self.assertEqual(spec["parameters"]["bpm"], 118)
+        self.assertEqual(spec["parameters"]["key"], "A Minor")
+        self.assertEqual(spec["parameters"]["seed"], 17)
+
+    def test_music_spec_rejects_out_of_range_values(self) -> None:
+        for payload, error in (
+            ({"prompt": "test", "duration": 9}, "invalid_duration"),
+            ({"prompt": "test", "duration": 30, "bpm": 301}, "invalid_bpm"),
+            ({"prompt": "test", "duration": 30, "seed": -2}, "invalid_seed"),
+        ):
+            with self.subTest(error=error), self.assertRaisesRegex(ValueError, error):
+                platform_v1.resolve_music_spec(payload, model=MUSIC_MODEL)
 
 
 class ImageDefaultsRegressionTests(unittest.TestCase):
@@ -174,6 +203,16 @@ class PlatformApiContractTests(unittest.TestCase):
                     "license_status": "research_owner_only",
                     "capabilities": ["image_to_video"],
                 },
+                MUSIC_MODEL: {
+                    "name": MUSIC_MODEL,
+                    "pipeline": "ace_step",
+                    "task_type": "MUSIC_GEN",
+                    "reward_weight": 1.0,
+                    "model_family": "ace_step",
+                    "model_version": "1.5-turbo",
+                    "engine_model": "acestep-v15-turbo",
+                    "capabilities": ["text_to_music"],
+                },
             }
         )
         for directory in (app_module.STATIC_DIR, app_module.OUTPUTS_DIR, app_module.ASSETS_DIR):
@@ -213,9 +252,9 @@ class PlatformApiContractTests(unittest.TestCase):
         app_module.NODES["node-test"] = {
             "role": "creator",
             "last_seen_unix": time.time(),
-            "supports": ["image", "ltx_video"],
-            "models": [IMAGE_MODEL, VIDEO_MODEL],
-            "pipelines": ["sdxl", "ltx23_wangp"],
+            "supports": ["image", "ltx_video", "music"],
+            "models": [IMAGE_MODEL, VIDEO_MODEL, MUSIC_MODEL],
+            "pipelines": ["sdxl", "ltx23_wangp", "ace_step"],
             "capabilities": {
                 IMAGE_MODEL: {
                     "files_present": True,
@@ -228,6 +267,13 @@ class PlatformApiContractTests(unittest.TestCase):
                     "model_version": "2.3-distilled-1.1",
                     "capabilities": ["image_to_video"],
                     "available_modes": ["distilled"],
+                },
+                MUSIC_MODEL: {
+                    "files_present": True,
+                    "pipeline": "ace_step",
+                    "model_version": "1.5-turbo",
+                    "capabilities": ["text_to_music"],
+                    "available_modes": ["text_to_music"],
                 },
             },
         }
@@ -265,8 +311,11 @@ class PlatformApiContractTests(unittest.TestCase):
         available = self.client.get("/v1/capabilities", headers=self.owner_headers)
         payload = available.get_json()
         video = next(model for model in payload["models"] if model["id"] == VIDEO_MODEL)
+        music = next(model for model in payload["models"] if model["id"] == MUSIC_MODEL)
         self.assertTrue(payload["video_v2_available"])
         self.assertTrue(video["available"])
+        self.assertTrue(music["available"])
+        self.assertEqual(music["capabilities"], ["text_to_music"])
         self.assertEqual(video["verified_nodes"], ["node-test"])
         self.assertEqual(video["capabilities"], ["image_to_video"])
 
@@ -330,6 +379,64 @@ class PlatformApiContractTests(unittest.TestCase):
         self.assertEqual(task["type"], "LTX_VIDEO_GEN")
         self.assertEqual(task["timeout"], 3600)
         self.assertEqual(task["source_asset_id"], asset_id)
+
+    def test_music_job_claim_and_audio_artifact_contract(self) -> None:
+        response = self.client.post(
+            "/v1/jobs",
+            json={
+                "type": "text_to_music",
+                "model": MUSIC_MODEL,
+                "prompt": "cinematic electronic sunrise",
+                "style": "ambient techno",
+                "lyrics": "",
+                "instrumental": True,
+                "duration": 30,
+                "bpm": 110,
+                "key": "C Minor",
+                "seed": 23,
+                "wallet": WALLET,
+            },
+            headers=self.owner_headers,
+        )
+        self.assertEqual(response.status_code, 202, response.get_json())
+        job_id = str(response.get_json()["id"])
+        self.assertEqual(response.get_json()["type"], "text_to_music")
+        task = self._claim(job_id)
+        self.assertEqual(task["type"], "MUSIC_GEN")
+        self.assertEqual(task["style"], "ambient techno")
+        self.assertTrue(task["instrumental"])
+        self.assertEqual(task["duration"], 30.0)
+
+        artifact = self.client.post(
+            f"/v1/node/jobs/{job_id}/artifacts",
+            data={
+                "node_id": "node-test",
+                "attempt_id": task["attempt_id"],
+                "kind": "audio",
+                "metadata": json.dumps({"duration": 30, "bpm": 110, "key": "C Minor"}),
+                "file": (io.BytesIO(b"mp3-result"), "result.mp3"),
+            },
+            headers=self.node_headers,
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(artifact.status_code, 201, artifact.get_json())
+        self.assertIn(f"/static/outputs/audio/{job_id}.mp3", artifact.get_json()["url"])
+        completed = self.client.post(
+            "/results",
+            json={
+                "node_id": "node-test",
+                "task_id": job_id,
+                "attempt_id": task["attempt_id"],
+                "status": "success",
+                "metrics": {"inference_time_ms": 12},
+            },
+            headers=self.node_headers,
+        )
+        self.assertEqual(completed.status_code, 200, completed.get_json())
+        detail = self.client.get(f"/v1/jobs/{job_id}", headers=self.owner_headers).get_json()
+        self.assertEqual(detail["status"], "succeeded")
+        self.assertEqual(detail["artifacts"][0]["kind"], "audio")
+        self.assertNotIn("path", detail["artifacts"][0])
 
     def test_lease_upload_completion_and_stale_attempt_rejection(self) -> None:
         job_id = self._create_image_job()

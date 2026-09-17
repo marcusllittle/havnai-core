@@ -50,6 +50,9 @@ VIDEO_PRESETS: Dict[str, Dict[str, Dict[str, int | float | str]]] = {
 
 VIDEO_DURATIONS = {3, 5, 8}
 VIDEO_TIMEOUT_SECONDS = 3600
+MUSIC_DURATION_MIN = 10
+MUSIC_DURATION_MAX = 600
+MUSIC_TIMEOUT_SECONDS = 900
 
 
 def canonical_job_state(value: Any) -> str:
@@ -256,6 +259,71 @@ def resolve_video_spec(payload: Mapping[str, Any], *, model: str, backend: str =
             "guidance": float(payload.get("guidance") or (1.0 if "distilled" in model.lower() else 3.0)),
             "motion_strength": float(payload.get("motion_strength") or 0.65),
         },
+    }
+
+
+def resolve_music_spec(payload: Mapping[str, Any], *, model: str) -> Dict[str, Any]:
+    prompt = str(payload.get("prompt") or "").strip()
+    if not prompt or len(prompt) > 4000:
+        raise ValueError("invalid_prompt")
+    style = str(payload.get("style") or "").strip()
+    if len(style) > 500:
+        raise ValueError("invalid_style")
+    lyrics = str(payload.get("lyrics") or "")
+    if len(lyrics) > 12000:
+        raise ValueError("invalid_lyrics")
+    instrumental = payload.get("instrumental", False)
+    if not isinstance(instrumental, bool):
+        raise ValueError("invalid_instrumental")
+    try:
+        duration = float(payload.get("duration") or payload.get("duration_seconds") or 60)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid_duration") from exc
+    if not MUSIC_DURATION_MIN <= duration <= MUSIC_DURATION_MAX:
+        raise ValueError("invalid_duration")
+
+    bpm = payload.get("bpm")
+    if bpm not in (None, ""):
+        try:
+            bpm = int(bpm)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid_bpm") from exc
+        if not 30 <= bpm <= 300:
+            raise ValueError("invalid_bpm")
+    else:
+        bpm = None
+
+    key = str(payload.get("key") or "").strip()
+    if len(key) > 64:
+        raise ValueError("invalid_key")
+    seed = payload.get("seed")
+    if seed not in (None, ""):
+        try:
+            seed = int(seed)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid_seed") from exc
+        if not 0 <= seed <= 2**31 - 1:
+            raise ValueError("invalid_seed")
+    else:
+        seed = None
+
+    parameters = {
+        "prompt": prompt,
+        "style": style,
+        "lyrics": "" if instrumental else lyrics,
+        "instrumental": instrumental,
+        "duration": duration,
+        "bpm": bpm,
+        "key": key,
+        "seed": seed,
+    }
+    return {
+        "schema_version": 1,
+        "task_type": "text_to_music",
+        "model": {"id": model},
+        "engine": {"provider": "ace_step", "model": "acestep-v15-turbo"},
+        "timeout_seconds": MUSIC_TIMEOUT_SECONDS,
+        "parameters": parameters,
     }
 
 

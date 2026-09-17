@@ -7304,6 +7304,7 @@ def api_gallery_download(listing_id: int) -> Any:
         return send_file(serve, as_attachment=True, download_name=f"havnai-{job_id[:8]}.png")
 
     return jsonify({"error": "asset_not_found", "message": "Output file is no longer available on this server."}), 404
+@app.route("/gallery/listings/<int:listing_id>/purchase", methods=["POST"])
 def api_gallery_purchase(listing_id: int) -> Any:
     """Purchase a gallery listing using credits (requires wallet signature)."""
     if not rate_limit(f"gallery-purchase:{request.remote_addr}", limit=10):

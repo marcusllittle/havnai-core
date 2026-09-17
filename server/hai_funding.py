@@ -371,3 +371,99 @@ def get_funding_history(wallet: str, limit: int = 20) -> List[Dict[str, Any]]:
         }
         for row in rows
     ]
+
+# Test-token requests are a manual-review queue, separate from verified funding.
+def tester_distribution_config() -> Dict[str, Any]:
+    return {
+        "enabled": os.getenv("HAVNAI_TESTER_DISTRIBUTION_ENABLED", "1").lower() in {"1", "true", "yes"},
+        "allowlist_enforced": bool(os.getenv("HAVNAI_TESTER_DISTRIBUTION_ALLOWLIST", "").strip()),
+        "default_request_hai": 100.0,
+        "cooldown_hours": 24,
+    }
+
+
+def _init_tester_requests(conn: sqlite3.Connection) -> None:
+    conn.execute("""CREATE TABLE IF NOT EXISTS tester_distribution_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, wallet TEXT NOT NULL,
+        requested_hai REAL NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+        request_note TEXT NOT NULL DEFAULT '', admin_note TEXT NOT NULL DEFAULT '',
+        tx_hash TEXT, credits_granted REAL NOT NULL DEFAULT 0,
+        created_at REAL NOT NULL, updated_at REAL NOT NULL, resolved_at REAL
+    )""")
+    conn.commit()
+
+
+def create_tester_distribution_request(*, wallet: str, requested_hai: Any = None,
+                                       request_note: str = "") -> Dict[str, Any]:
+    import math
+    config = tester_distribution_config()
+    if not config["enabled"]:
+        return {"error": "disabled", "message": "Test HAI requests are currently disabled."}
+    wallet = wallet.strip().lower()
+    allowed = {item.strip().lower() for item in os.getenv("HAVNAI_TESTER_DISTRIBUTION_ALLOWLIST", "").split(",") if item.strip()}
+    if allowed and wallet not in allowed:
+        return {"error": "wallet_not_allowed", "message": "This wallet is not on the test HAI allowlist."}
+    try:
+        amount = float(config["default_request_hai"] if requested_hai is None else requested_hai)
+    except (TypeError, ValueError):
+        amount = 0
+    if not math.isfinite(amount) or amount <= 0:
+        return {"error": "invalid_amount", "message": "Enter a positive, finite HAI amount."}
+    conn = get_db()
+    _init_tester_requests(conn)
+    now = time.time()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        previous = conn.execute("SELECT * FROM tester_distribution_requests WHERE wallet=? ORDER BY id DESC LIMIT 1", (wallet,)).fetchone()
+        if previous and previous["status"] == "pending":
+            conn.rollback()
+            return {"status": "pending", "request": dict(previous), "request_id": previous["id"], "message": "Your existing request is awaiting manual review."}
+        if previous and now - previous["created_at"] < 86400:
+            conn.rollback()
+            return {"error": "cooldown_active", "message": "Please wait before requesting more test HAI.", "retry_after_seconds": int(86400 - (now - previous["created_at"]))}
+        cursor = conn.execute("INSERT INTO tester_distribution_requests (wallet, requested_hai, request_note, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                              (wallet, amount, request_note[:2000], now, now))
+        row = conn.execute("SELECT * FROM tester_distribution_requests WHERE id=?", (cursor.lastrowid,)).fetchone()
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return {"status": "pending", "request": dict(row), "request_id": row["id"], "message": "Request received for manual review. No tokens or credits have been granted yet."}
+
+
+def list_tester_distribution_requests(*, wallet: Optional[str] = None, status: Optional[str] = None,
+                                     limit: int = 20) -> List[Dict[str, Any]]:
+    conn = get_db()
+    _init_tester_requests(conn)
+    clauses, params = [], []
+    if wallet:
+        clauses.append("wallet=?")
+        params.append(wallet.strip().lower())
+    if status:
+        clauses.append("status=?")
+        params.append(status)
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    return [dict(row) for row in conn.execute("SELECT * FROM tester_distribution_requests" + where + " ORDER BY id DESC LIMIT ?", (*params, max(1, min(limit, 200))))]
+
+
+def resolve_tester_distribution_request(*, request_id: int, new_status: str, admin_note: str = "",
+                                        tx_hash: Optional[str] = None, credits_granted: Any = None) -> Dict[str, Any]:
+    """Record an administrator's manual resolution; never send funds from this route."""
+    import math
+    if new_status not in {"approved", "rejected", "fulfilled"}:
+        return {"error": "invalid_status"}
+    try:
+        granted = float(credits_granted or 0)
+    except (ValueError, TypeError):
+        return {"error": "invalid_credits_granted"}
+    if not math.isfinite(granted) or granted < 0:
+        return {"error": "invalid_credits_granted"}
+    conn = get_db()
+    _init_tester_requests(conn)
+    now = time.time()
+    cursor = conn.execute("UPDATE tester_distribution_requests SET status=?, admin_note=?, tx_hash=?, credits_granted=?, updated_at=?, resolved_at=? WHERE id=?",
+                          (new_status, admin_note[:2000], tx_hash, granted, now, now, request_id))
+    conn.commit()
+    if not cursor.rowcount:
+        return {"error": "not_found"}
+    return {"status": new_status, "request": dict(conn.execute("SELECT * FROM tester_distribution_requests WHERE id=?", (request_id,)).fetchone())}

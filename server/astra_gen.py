@@ -173,6 +173,10 @@ def init_astra_gen_tables(db: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_astra_reward_images_wallet
             ON astra_reward_images(wallet);
     """)
+    # Receipt lookup supports both image-only and later animated rewards.
+    columns = {row[1] for row in db.execute("PRAGMA table_info(astra_reward_images)")}
+    if "video_job_id" not in columns:
+        db.execute("ALTER TABLE astra_reward_images ADD COLUMN video_job_id TEXT")
     db.commit()
 
 

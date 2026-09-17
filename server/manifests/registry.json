@@ -724,6 +724,37 @@
         "revision": "main",
         "license": "LTX-Video (Lightricks) \u2014 see upstream repo"
       }
+    },
+    {
+      "name": "ace_step_1_5_turbo",
+      "pipeline": "ace_step",
+      "path": "",
+      "type": "service",
+      "tags": [
+        "music",
+        "audio",
+        "text_to_music",
+        "ace_step"
+      ],
+      "task_type": "MUSIC_GEN",
+      "weight": 20,
+      "reward_weight": 20,
+      "model_family": "ace_step",
+      "model_version": "1.5-turbo",
+      "license_status": "upstream_terms_apply",
+      "engine_model": "acestep-v15-turbo",
+      "capabilities": [
+        "text_to_music"
+      ],
+      "available_modes": [
+        "text_to_music"
+      ],
+      "strengths": "ACE-Step 1.5 service-backed music generation with lyrics, instrumental, duration, tempo, key, and seed controls.",
+      "weaknesses": "Requires a reachable ACE-Step API service on the render node.",
+      "source": {
+        "kind": "operator",
+        "notes": "Run the supported ACE-Step 1.5 API and configure ACESTEP_API_URL on the HavnAI render node."
+      }
     }
   ]
 }

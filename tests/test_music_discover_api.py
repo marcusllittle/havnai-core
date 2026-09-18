@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -20,6 +21,8 @@ import app as app_module
 
 class MusicDiscoverApiTests(unittest.TestCase):
     def setUp(self) -> None:
+        self._rate_buckets = copy.deepcopy(app_module.RATE_LIMIT_BUCKETS)
+        app_module.RATE_LIMIT_BUCKETS.clear()
         self.client = app_module.app.test_client()
         self.account = app_module.Account.create()
         self.wallet = self.account.address.lower()
@@ -50,6 +53,8 @@ class MusicDiscoverApiTests(unittest.TestCase):
         self._insert_completed_music_job()
 
     def tearDown(self) -> None:
+        app_module.RATE_LIMIT_BUCKETS.clear()
+        app_module.RATE_LIMIT_BUCKETS.update(self._rate_buckets)
         if app_module.DB_CONN is not None:
             app_module.DB_CONN.close()
         app_module.DB_PATH = self._orig_db_path
@@ -115,6 +120,80 @@ class MusicDiscoverApiTests(unittest.TestCase):
             "nonce": challenge["nonce"],
             "signature": signature,
         }
+
+    def test_read_session_reuses_authorization_but_cannot_write_or_impersonate(self) -> None:
+        self.client.post("/music/publications", json={
+            **self._signed_payload("music_publish", job_id="job-1"),
+            "job_id": "job-1", "title": "Session test",
+        })
+        signed = self._signed_payload("music_read_session")
+        response = self.client.post("/music/session", json=signed)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        session = response.get_json()
+        auth = {"wallet": self.wallet, "read_session": session["token"]}
+        for path in ["/music/library", "/music/playlists/mine", "/music/discover", f"/music/creator/{self.wallet}"]:
+            for _ in range(2):
+                read = self.client.post(path, json=auth)
+                self.assertEqual(read.status_code, 200, read.get_data(as_text=True))
+        self.assertEqual(self.client.post("/music/library", json={**auth, "wallet": self.other_wallet}).status_code, 401)
+        self.assertEqual(self.client.post("/music/playlists", json={**auth, "title": "Forbidden"}).status_code, 401)
+        self.assertEqual(self.client.post("/music/publications", json={**auth, "job_id": "job-1"}).status_code, 400)
+        self.assertEqual(self.client.post("/music/session", json=signed).status_code, 409)
+        row = app_module.get_db().execute("SELECT token_hash FROM music_read_sessions").fetchone()
+        self.assertNotEqual(row["token_hash"], session["token"])
+        app_module.get_db().execute("UPDATE music_read_sessions SET expires_at=0")
+        app_module.get_db().commit()
+        self.assertEqual(self.client.post("/music/library", json=auth).status_code, 401)
+
+    def test_read_session_nonce_explains_scope_without_a_payment_amount(self) -> None:
+        response = self.client.post("/wallet/nonce", json={"wallet": self.wallet, "purpose": "music_read_session"})
+        message = response.get_json()["message"]
+        self.assertIn("read-only", message)
+        self.assertIn("8 hours", message)
+        self.assertNotIn("amount:", message)
+        self.assertIn("No payment", message)
+
+    def test_wallet_nonce_rejects_nonfinite_amounts(self) -> None:
+        for value in ["NaN", "Infinity", "-Infinity"]:
+            response = self.client.post("/wallet/nonce", json={
+                "wallet": self.wallet, "purpose": "convert_credits_to_hai", "amount": value,
+            })
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(response.get_json()["error"], "invalid_amount")
+
+    def test_music_malformed_payload_returns_json(self) -> None:
+        for value in [[1], "invalid", 5]:
+            response = self.client.post("/music/library", json=value)
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(response.get_json()["error"], "malformed_payload")
+
+    def test_gallery_signature_is_bound_to_listing_and_delisting_requires_it(self) -> None:
+        first = app_module.gallery.create_listing("gallery-a", self.wallet, "First", 2.0)
+        second = app_module.gallery.create_listing("gallery-b", self.wallet, "Second", 2.0)
+        signed = self._signed_payload("gallery_purchase", wallet=self.other_wallet,
+                                      account=self.other_account, listing_id=first["id"], amount=2.0)
+        wrong = self.client.post(f"/gallery/listings/{second['id']}/purchase", json=signed)
+        self.assertEqual(wrong.status_code, 400)
+        self.assertEqual(wrong.get_json()["error"], "invalid_nonce")
+        unsigned = self.client.delete(f"/gallery/listings/{first['id']}", json={"wallet": self.wallet})
+        self.assertEqual(unsigned.status_code, 400)
+        authorization = self._signed_payload("gallery_delist", listing_id=first["id"], amount=1)
+        wrong_delete = self.client.delete(f"/gallery/listings/{second['id']}", json=authorization)
+        self.assertEqual(wrong_delete.status_code, 400)
+        valid_delete = self.client.delete(f"/gallery/listings/{first['id']}", json=authorization)
+        self.assertEqual(valid_delete.status_code, 200)
+
+    def test_api_errors_return_json_and_internal_reference(self) -> None:
+        missing = self.client.get("/does-not-exist")
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(missing.get_json()["error"], "not_found")
+        with patch.object(app_module.music_discover, "browse_publications", side_effect=RuntimeError("private internal details")):
+            failed = self.client.get("/music/discover")
+        self.assertEqual(failed.status_code, 500)
+        self.assertEqual(failed.get_json()["error"], "internal_error")
+        self.assertTrue(failed.get_json()["reference"])
+        self.assertNotIn("private internal details", failed.get_data(as_text=True))
 
     def test_publish_discover_like_and_count_genuine_play(self) -> None:
         publish_payload = {

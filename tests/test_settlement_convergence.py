@@ -308,7 +308,7 @@ class SettlementConvergenceTests(unittest.TestCase):
             request_id = response.get_json()["request_id"]
             with patch.object(app_module, "check_join_token", return_value=False):
                 self.assertEqual(self.client.post(f"/credits/tester-distribution/requests/{request_id}/resolve", json={"status": "approved"}).status_code, 403)
-            with patch.object(app_module, "check_join_token", return_value=True):
+            with patch.object(app_module, "check_join_token", return_value=True), patch.object(app_module, "SERVER_JOIN_TOKEN", "test-admin"):
                 resolved = self.client.post(f"/credits/tester-distribution/requests/{request_id}/resolve", json={"status": "rejected"})
                 self.assertEqual(resolved.status_code, 200)
             self.assertEqual(self.client.post("/credits/tester-distribution/request", json=payload).status_code, 429)

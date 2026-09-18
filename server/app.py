@@ -9,6 +9,7 @@ except ImportError:
 import io
 import json
 import logging
+import math
 import html
 from logging.handlers import RotatingFileHandler
 import os
@@ -32,6 +33,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from flask import abort, Flask, jsonify, request, Response, send_file, send_from_directory, g, has_app_context
 from flask_cors import CORS
+from werkzeug.exceptions import HTTPException
 
 # Import our local modules
 import safety
@@ -59,6 +61,7 @@ import node_bundle
 import job_history
 import platform_v1
 import music_discover
+import music_sessions
 
 try:
     from eth_account import Account  # type: ignore
@@ -164,6 +167,7 @@ WALLET_NONCE_PURPOSE_GALLERY_DELIST = "gallery_delist"
 WALLET_NONCE_PURPOSE_MUSIC_PUBLISH = "music_publish"
 WALLET_NONCE_PURPOSE_MUSIC_UNPUBLISH = "music_unpublish"
 WALLET_NONCE_PURPOSE_MUSIC_LIKE = "music_like"
+WALLET_NONCE_PURPOSE_MUSIC_READ_SESSION = "music_read_session"
 WALLET_NONCE_PURPOSE_MUSIC_LIBRARY_READ = "music_library_read"
 WALLET_NONCE_PURPOSE_MUSIC_SAVE = "music_save"
 WALLET_NONCE_PURPOSE_MUSIC_UNSAVE = "music_unsave"
@@ -180,6 +184,7 @@ WALLET_NONCE_PURPOSE_ASTRA_SESSION = "astra_session"
 WALLET_NONCE_PURPOSE_RECEIPT_BATCH_FLUSH = "receipt_batch_flush"
 WALLET_NONCE_PURPOSE_NODE_PAYOUT_BATCH_FLUSH = "node_payout_batch_flush"
 WALLET_NONCE_ALLOWED_PURPOSES = {
+    WALLET_NONCE_PURPOSE_MUSIC_READ_SESSION,
     WALLET_NONCE_PURPOSE_CONVERT,
     WALLET_NONCE_PURPOSE_GALLERY_PURCHASE,
     WALLET_NONCE_PURPOSE_GALLERY_LIST,
@@ -638,6 +643,8 @@ class JSONFormatter(logging.Formatter):
         }
         if hasattr(record, "extra") and isinstance(record.extra, dict):
             payload.update(record.extra)
+        if record.exc_info:
+            payload["exception"] = self.formatException(record.exc_info)
         return json.dumps(payload)
 
 
@@ -671,8 +678,27 @@ if not CORS_ORIGINS:
 
 
 def log_event(message: str, level: str = "info", **extra: Any) -> None:
-    LOGGER.log(getattr(logging, level.upper(), logging.INFO), message, extra=extra if extra else None)
+    LOGGER.log(getattr(logging, level.upper(), logging.INFO), message, extra={"extra": extra} if extra else None)
     EVENT_LOGS.append({"timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "level": level, "message": message})
+
+
+@app.errorhandler(HTTPException)
+def api_http_error(error: HTTPException) -> Any:
+    response = error.get_response()
+    response.data = json.dumps({"error": error.name.lower().replace(" ", "_"), "message": error.description})
+    response.content_type = "application/json"
+    return response
+
+
+@app.errorhandler(Exception)
+def api_unexpected_error(error: Exception) -> Any:
+    reference = secrets.token_hex(8)
+    log_event("API request failed", level="error", reference=reference,
+              method=request.method, path=request.path, exception_type=type(error).__name__)
+    # Keep the stack server-side; never log wallet signatures, tokens, or request bodies.
+    LOGGER.exception("API failure %s", reference)
+    return jsonify({"error": "internal_error", "message": "The coordinator could not complete this request.",
+                    "reference": reference}), 500
 
 
 def _build_result_payload(job_id: str) -> Optional[Dict[str, Any]]:
@@ -1123,6 +1149,7 @@ def init_db() -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_wallet_nonces_used ON wallet_nonces (used_at)"
     )
+    music_sessions.init_tables(conn)
     platform_v1.migrate(conn)
     conn.commit()
 
@@ -4635,8 +4662,15 @@ def _build_gallery_nonce_message(
         lines.append(f"publication_id: {publication_id}")
     if playlist_id is not None:
         lines.append(f"playlist_id: {playlist_id}")
+    if purpose in {WALLET_NONCE_PURPOSE_GALLERY_PURCHASE, WALLET_NONCE_PURPOSE_GALLERY_LIST, WALLET_NONCE_PURPOSE_GALLERY_RELIST}:
+        lines.append(f"amount: {amount:.8f}")
+    elif purpose.startswith(("music_", "playlist_", "identity_anchor_")) or purpose == WALLET_NONCE_PURPOSE_GALLERY_DELIST:
+        lines.append("No payment or credit charge is authorized by this signature.")
+    else:
+        lines.append("This signature does not submit an on-chain transaction.")
+    if purpose == WALLET_NONCE_PURPOSE_MUSIC_READ_SESSION:
+        lines.append("Allow read-only access to your private music library and playlists for 8 hours. No publishing, changes, or spending.")
     lines += [
-        f"amount: {amount:.8f}",
         f"nonce: {nonce}",
         f"issued_at: {issued_at_iso}",
         f"expires_at: {expires_at_iso}",
@@ -4653,6 +4687,7 @@ def _verify_wallet_signature(
     allowed_purposes: set,
     expected_amount: Optional[float] = None,
     log_label: str = "Signature verification",
+    expected_context: Optional[str] = None,
 ) -> Tuple[bool, Optional[Any]]:
     """Verify a wallet signature against a stored nonce.
 
@@ -4686,7 +4721,7 @@ def _verify_wallet_signature(
         except (TypeError, ValueError):
             log_event(f"{log_label} rejected", level="warning", wallet=wallet, reason="nonce_amount_invalid")
             return False, (jsonify({"error": "invalid_nonce", "message": "nonce amount invalid"}), 400)
-        if abs(nonce_amount - expected_amount) > 1e-9:
+        if not math.isfinite(nonce_amount) or not math.isfinite(expected_amount) or abs(nonce_amount - expected_amount) > 1e-9:
             log_event(f"{log_label} rejected", level="warning", wallet=wallet, reason="nonce_amount_mismatch")
             return False, (jsonify({"error": "invalid_nonce", "message": "nonce amount mismatch"}), 400)
 
@@ -4700,6 +4735,8 @@ def _verify_wallet_signature(
         return False, (jsonify({"error": "nonce_expired", "message": "nonce expired"}), 400)
 
     message = str(row["message"] or "")
+    if expected_context and expected_context not in message.splitlines():
+        return False, (jsonify({"error": "invalid_nonce", "message": "signed action does not match the requested asset"}), 400)
     try:
         recovered = Account.recover_message(encode_defunct(text=message), signature=signature)
     except Exception as exc:
@@ -4743,8 +4780,8 @@ def _parse_positive_amount(raw_amount: Any) -> Tuple[Optional[float], Optional[A
         amount = float(raw_amount)
     except (TypeError, ValueError):
         return None, (jsonify({"error": "invalid_amount", "message": "amount must be a number"}), 400)
-    if amount <= 0:
-        return None, (jsonify({"error": "invalid_amount", "message": "amount must be positive"}), 400)
+    if not math.isfinite(amount) or amount <= 0:
+        return None, (jsonify({"error": "invalid_amount", "message": "amount must be positive and finite"}), 400)
     return amount, None
 
 
@@ -4848,6 +4885,7 @@ def wallet_nonce() -> Any:
         raw_amount = 1.0
     if purpose in {
         WALLET_NONCE_PURPOSE_MUSIC_PUBLISH,
+        WALLET_NONCE_PURPOSE_MUSIC_READ_SESSION,
         WALLET_NONCE_PURPOSE_MUSIC_UNPUBLISH,
         WALLET_NONCE_PURPOSE_MUSIC_LIKE,
         WALLET_NONCE_PURPOSE_MUSIC_LIBRARY_READ,
@@ -6745,7 +6783,7 @@ def tester_distribution_requests() -> Any:
 @app.route("/credits/tester-distribution/requests/<int:request_id>/resolve", methods=["POST"])
 def tester_distribution_resolve(request_id: int) -> Any:
     """Admin-only resolution endpoint for tester distribution requests."""
-    if not check_join_token():
+    if not SERVER_JOIN_TOKEN or not check_join_token():
         abort(403)
 
     data = request.get_json(silent=True) or {}
@@ -7740,13 +7778,15 @@ def api_marketplace_browse() -> Any:
 
 
 def _request_publication_wallet_payload() -> Tuple[Optional[str], Optional[Any], Dict[str, Any]]:
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return None, (jsonify({"error": "malformed_payload", "message": "JSON object required"}), 400), {}
     wallet = str(data.get("wallet", "")).strip().lower()
     if not wallet or not WALLET_REGEX.match(wallet):
         return None, (jsonify({"error": "invalid wallet"}), 400), data
     nonce_str = str(data.get("nonce", "")).strip()
     signature = str(data.get("signature", "")).strip()
-    if not nonce_str or not signature:
+    if (not nonce_str or not signature) and not data.get("read_session"):
         return None, (jsonify({"error": "signature_required", "message": "nonce and signature are required"}), 400), data
     return wallet, None, data
 
@@ -7760,6 +7800,13 @@ def _verify_music_wallet_action(
     playlist_id: Optional[str] = None,
     log_label: str,
 ) -> Optional[Any]:
+    if data.get("read_session"):
+        if purpose not in {WALLET_NONCE_PURPOSE_MUSIC_LIBRARY_READ, WALLET_NONCE_PURPOSE_PLAYLIST_READ}:
+            return jsonify({"error": "signature_required", "message": "A read-only session cannot authorize changes."}), 401
+        session_wallet = music_sessions.resolve(get_db(), data["read_session"])
+        if session_wallet != wallet:
+            return jsonify({"error": "music_session_expired", "message": "Music access expired. Unlock your library again."}), 401
+        return None
     sig_ok, sig_err = _verify_wallet_signature(
         wallet,
         str(data.get("nonce", "")).strip(),
@@ -7776,6 +7823,25 @@ def _verify_music_wallet_action(
     if playlist_id and not _nonce_message_has(wallet, nonce_str, f"playlist_id: {playlist_id}"):
         return jsonify({"error": "invalid_nonce", "message": "nonce playlist context mismatch"}), 400
     return None
+
+
+@app.route("/music/session", methods=["POST"])
+def api_music_read_session() -> Any:
+    if not rate_limit(f"music-session:{request.remote_addr}", limit=30):
+        return jsonify({"error": "rate limit"}), 429
+    wallet, error_response, data = _request_publication_wallet_payload()
+    if error_response:
+        return error_response
+    ok, error = _verify_wallet_signature(
+        wallet, str(data.get("nonce", "")), str(data.get("signature", "")),
+        allowed_purposes={WALLET_NONCE_PURPOSE_MUSIC_READ_SESSION}, expected_amount=1.0,
+        log_label="Music read session",
+    )
+    if not ok:
+        return error
+    response = jsonify(music_sessions.create(get_db(), wallet))
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.route("/music/discover", methods=["GET", "POST"])
@@ -8402,7 +8468,7 @@ def api_gallery_create_listing() -> Any:
     price = data.get("price_credits")
     try:
         price_credits = float(price)
-        if price_credits <= 0:
+        if not math.isfinite(price_credits) or price_credits <= 0:
             raise ValueError
     except (TypeError, ValueError):
         return jsonify({"error": "invalid price_credits — must be > 0"}), 400
@@ -8414,6 +8480,7 @@ def api_gallery_create_listing() -> Any:
         allowed_purposes={WALLET_NONCE_PURPOSE_GALLERY_LIST},
         expected_amount=price_credits,
         log_label="Gallery listing",
+        expected_context=f"job_id: {job_id}",
     )
     if not sig_ok:
         return sig_err
@@ -8577,6 +8644,7 @@ def api_gallery_purchase(listing_id: int) -> Any:
         allowed_purposes={WALLET_NONCE_PURPOSE_GALLERY_PURCHASE},
         expected_amount=price,
         log_label="Gallery purchase",
+        expected_context=f"listing_id: {listing_id}",
     )
     if not sig_ok:
         return sig_err
@@ -8615,20 +8683,22 @@ def api_gallery_purchase(listing_id: int) -> Any:
 def api_gallery_delist(listing_id: int) -> Any:
     """Remove a listing (current owner only, requires signature)."""
     data = request.get_json() or {}
-    wallet = str(data.get("wallet", "")).strip()
+    wallet = str(data.get("wallet", "")).strip().lower()
     if not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid wallet"}), 400
 
     nonce_str = str(data.get("nonce", "")).strip()
     signature = str(data.get("signature", "")).strip()
-    if nonce_str and signature:
-        sig_ok, sig_err = _verify_wallet_signature(
-            wallet, nonce_str, signature,
-            allowed_purposes={WALLET_NONCE_PURPOSE_GALLERY_DELIST},
-            log_label="Gallery delist",
-        )
-        if not sig_ok:
-            return sig_err
+    if not nonce_str or not signature:
+        return jsonify({"error": "signature_required", "message": "nonce and signature are required"}), 400
+    sig_ok, sig_err = _verify_wallet_signature(
+        wallet, nonce_str, signature,
+        allowed_purposes={WALLET_NONCE_PURPOSE_GALLERY_DELIST},
+        log_label="Gallery delist",
+        expected_context=f"listing_id: {listing_id}",
+    )
+    if not sig_ok:
+        return sig_err
 
     ok = gallery.delist(listing_id, wallet)
     if not ok:
@@ -8707,6 +8777,7 @@ def api_gallery_relist() -> Any:
         allowed_purposes={WALLET_NONCE_PURPOSE_GALLERY_RELIST},
         expected_amount=price_credits,
         log_label="Gallery relist",
+        expected_context=f"job_id: {job_id}",
     )
     if not sig_ok:
         return sig_err

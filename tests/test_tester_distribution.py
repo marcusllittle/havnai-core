@@ -6,6 +6,7 @@ import copy
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -160,6 +161,13 @@ class TesterDistributionTests(unittest.TestCase):
         second_body = second.get_json()
         self.assertEqual(second_body.get("status"), "pending_exists")
         self.assertEqual(int(second_body.get("request_id")), first_id)
+
+    def test_missing_admin_configuration_cannot_grant_credits(self) -> None:
+        with patch.object(app_module, "SERVER_JOIN_TOKEN", ""):
+            response = self.client.post("/credits/tester-distribution/requests/1/resolve",
+                                        json={"status": "completed", "credits_granted": 100})
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(app_module.credits.get_credit_balance(VALID_WALLET), 0)
 
     def test_credit_grant_not_double_counted_across_status_updates(self) -> None:
         create_resp = self.client.post(

@@ -23,6 +23,39 @@ Deploy `HavnNodeRewardClaims` with:
 The treasury remains in MetaMask. Do not add a treasury private key to the
 coordinator, node service, systemd environment, or repository.
 
+## Local MetaMask deployment helper
+
+`contracts/deploy` builds a local page for deploying this contract using MetaMask.
+The prepared configuration is Sepolia, HAI token
+`0x8aaa7f1075de91b2103542379bfd3b889c89105f`, and treasury owner
+`0x7110347e2bcd02f5f3485dc6bec5e0b5f9eb9262`.
+
+Install `solc@0.8.30`, `ethers@6.17.0`, and (for local tests) `ganache@7.9.2`
+in a separate tools directory. Set `NODE_PATH` to that directory's `node_modules`:
+
+```text
+node contracts/deploy/build.cjs <output-directory>
+node contracts/deploy/verify-local.cjs <output-directory>
+node <output-directory>/serve.cjs
+```
+
+Open `http://127.0.0.1:8787` in the browser containing MetaMask. Connect the
+treasury account, inspect the estimate, then explicitly approve deployment.
+Compilation pins Solidity 0.8.30, optimizer 200 runs, and Shanghai EVM.
+Compiler input and source are included for review and explorer verification.
+
+The page persists a deployment intent before requesting a transaction to avoid
+duplicates on refresh or interrupted wallet responses. Under **Resume an
+existing deployment**, check the saved transaction hash after confirmation.
+If the wallet response was interrupted before a hash was saved, obtain that
+hash from MetaMask Activity instead of deploying again. A rejected request
+(4001) clears the intent and permits retry.
+
+Verification checks transaction sender, creation data, zero ETH value, runtime
+bytecode (with immutable slots masked), token, owner, claim domain, and two
+confirmations. Download the resulting deployment record and use its address in
+`HAVNAI_NODE_CLAIM_CONTRACT`. The page does not fund or publish reward batches.
+
 ## Coordinator Environment
 
 ```text

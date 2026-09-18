@@ -62,6 +62,7 @@ import job_history
 import platform_v1
 import music_discover
 import music_sessions
+import network_status
 
 try:
     from eth_account import Account  # type: ignore
@@ -8649,34 +8650,12 @@ def api_gallery_purchase(listing_id: int) -> Any:
     if not sig_ok:
         return sig_err
 
-    # Deduct credits from buyer
-    ok, remaining = credits.deduct_credits(buyer_wallet, price, job_id=f"gallery-{listing_id}")
-    if not ok:
-        return jsonify({
-            "error": "insufficient_credits",
-            "balance": remaining,
-            "cost": price,
-            "message": f"This item costs {price} credits but you only have {remaining}.",
-        }), 402
-
-    # Complete the purchase
-    result = gallery.purchase_listing(listing_id, buyer_wallet)
+    result = gallery.purchase_listing(listing_id, buyer_wallet, settle_credits=True, expected_price=price)
     if not result.get("ok"):
-        # Refund buyer if purchase failed after deduction
-        credits.deposit_credits(buyer_wallet, price, reason=f"gallery-refund-{listing_id}")
-        return jsonify({"error": result.get("error", "purchase_failed")}), 400
+        status = 402 if result.get("error") == "insufficient_credits" else 409
+        return jsonify(result), status
+    return jsonify({"ok": True, "sale": result["sale"], "remaining_credits": result["remaining_credits"]})
 
-    # Credit the previous owner (the wallet that listed it)
-    credits.deposit_credits(
-        result["sale"]["seller_wallet"], price,
-        reason=f"gallery-sale-{listing_id}",
-    )
-
-    return jsonify({
-        "ok": True,
-        "sale": result["sale"],
-        "remaining_credits": remaining,
-    })
 
 
 @app.route("/gallery/listings/<int:listing_id>", methods=["DELETE"])
@@ -9004,6 +8983,22 @@ def nodes_endpoint() -> Any:
             "models_catalog": models_catalog,
         }
     )
+
+
+@app.route("/v1/network/summary")
+@app.route("/v1/network/control-plane")
+def network_telemetry() -> Any:
+    with LOCK:
+        nodes = [(node_id, dict(info)) for node_id, info in NODES.items()]
+    snapshots = [_worker_snapshot(node_id, node_info=info) for node_id, info in nodes]
+    summary, control = network_status.snapshot(
+        get_db(), snapshots, version=APP_VERSION, lease_seconds=job_helpers.LEASE_SECONDS,
+        receipt_count=merkle_batches.count_unbatched_receipts(),
+        receipt_batches=merkle_batches.list_batches(5),
+    )
+    response = jsonify(control if request.path.endswith("control-plane") else summary)
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.route("/dashboard")

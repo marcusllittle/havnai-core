@@ -11,6 +11,8 @@ Environment variables:
 
 from __future__ import annotations
 
+import credits
+
 import os
 import time
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
@@ -167,30 +169,17 @@ def handle_webhook_event(payload: bytes, sig_header: str) -> Dict[str, Any]:
             )
             return {"status": "ignored", "reason": "missing metadata"}
 
-        # Idempotency: only process if this session is still pending.
-        # Use atomic UPDATE ... WHERE status='pending' to prevent double-deposits.
+        # The local checkout is authoritative. Commit completion and credits together.
         conn = get_db()
-        cur = conn.execute(
-            """
-            UPDATE stripe_payments
-            SET status = 'completed', completed_at = ?
-            WHERE stripe_session_id = ? AND status = 'pending'
-            """,
-            (time.time(), session_id),
-        )
-        conn.commit()
-
-        if cur.rowcount == 0:
-            # Already processed or unknown session — skip deposit
-            log_event(
-                "Stripe webhook: duplicate or unknown session, skipping deposit",
-                level="info",
-                session_id=session_id,
-            )
-            return {"status": "already_processed", "session_id": session_id}
-
-        # Deposit credits (only reached once per session)
-        new_balance = deposit_credits(wallet, credits_amount, reason=f"stripe:{package_id}:{session_id}")
+        with conn:
+            row = conn.execute("SELECT wallet, credits_amount, package_id FROM stripe_payments WHERE stripe_session_id=? AND status='pending'", (session_id,)).fetchone()
+            if row is None:
+                return {"status": "already_processed", "session_id": session_id}
+            wallet, credits_amount, package_id = row["wallet"], float(row["credits_amount"]), row["package_id"]
+            cur = conn.execute("UPDATE stripe_payments SET status='completed', completed_at=? WHERE stripe_session_id=? AND status='pending'", (time.time(), session_id))
+            if cur.rowcount == 0:
+                return {"status": "already_processed", "session_id": session_id}
+            new_balance = credits.deposit_in_transaction(conn, wallet, credits_amount)
 
         log_event(
             "Stripe payment completed",

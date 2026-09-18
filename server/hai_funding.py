@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     pass
 
 import requests
+import credits
 
 # Will be injected by app.py (same pattern as stripe_payments.py)
 get_db: Callable[[], sqlite3.Connection]
@@ -248,6 +249,7 @@ def fund_credits_with_hai(
         )
         conn.commit()
     except sqlite3.IntegrityError:
+        conn.rollback()
         # tx_hash already exists — check its status
         existing = conn.execute(
             "SELECT status, credits_granted FROM hai_fundings WHERE tx_hash = ?",
@@ -283,11 +285,13 @@ def fund_credits_with_hai(
         error_msg = verification.get("error", "Verification failed.")
         is_pending = bool(verification.get("pending"))
         next_status = "pending" if is_pending else "failed"
-        conn.execute(
-            "UPDATE hai_fundings SET status = ?, error = ? WHERE tx_hash = ?",
+        cursor = conn.execute(
+            "UPDATE hai_fundings SET status = ?, error = ? WHERE tx_hash = ? AND status != 'completed'",
             (next_status, error_msg, tx_hash),
         )
         conn.commit()
+        if cursor.rowcount == 0:
+            return {"status": "already_processed", "tx_hash": tx_hash}
         if is_pending:
             log_event(
                 "HAI funding pending verification",
@@ -305,27 +309,17 @@ def fund_credits_with_hai(
             "confirmations": verification.get("confirmations"),
         }
 
-    # Verification passed — deposit credits
-    # Use atomic UPDATE to prevent double-crediting the same tx hash.
-    cur = conn.execute(
-        """
-        UPDATE hai_fundings
-        SET status = 'completed', credits_granted = ?, verified_at = ?, error = NULL
-        WHERE tx_hash = ? AND status != 'completed'
-        """,
-        (credits_amount, time.time(), tx_hash),
-    )
-    conn.commit()
-
-    if cur.rowcount == 0:
-        # Race: another request already processed this tx
-        return {
-            "status": "already_processed",
-            "tx_hash": tx_hash,
-            "message": "This transaction was already processed by another request.",
-        }
-
-    new_balance = deposit_credits(wallet, credits_amount, reason=f"hai:{tx_hash}")
+    # Completion and the credit grant must commit together, including concurrent retries.
+    with conn:
+        cur = conn.execute(
+            """UPDATE hai_fundings SET status='completed', wallet=?, amount=?,
+               credits_granted=?, verified_at=?, error=NULL
+               WHERE tx_hash=? AND status!='completed'""",
+            (wallet, amount, credits_amount, time.time(), tx_hash),
+        )
+        if cur.rowcount == 0:
+            return {"status": "already_processed", "tx_hash": tx_hash}
+        new_balance = credits.deposit_in_transaction(conn, wallet, credits_amount)
 
     log_event(
         "HAI funding completed",

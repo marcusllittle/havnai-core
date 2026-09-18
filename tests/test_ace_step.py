@@ -8,7 +8,13 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from engines.ace_step import AceStepError, AceStepProvider
+from engines.ace_step import (
+    TURBO_TASK_TYPES,
+    AceStepCapabilityError,
+    AceStepError,
+    AceStepModel,
+    AceStepProvider,
+)
 
 
 class FakeResponse:
@@ -114,14 +120,16 @@ class AceStepProviderTests(unittest.TestCase):
                 Path(directory),
                 progress=lambda value, stage: progress.append((value, stage)),
             )
-            self.assertEqual(generated.path.read_bytes(), b"real-audio")
+            self.assertEqual(len(generated), 1)
+            self.assertEqual(generated[0].path.read_bytes(), b"real-audio")
+            self.assertTrue(generated[0].is_primary)
         release_payload = session.post_calls[0][1]["json"]
         self.assertEqual(release_payload["task_type"], "text2music")
         self.assertEqual(release_payload["lyrics"], "")
         self.assertIn("Style: synthwave", release_payload["prompt"])
         self.assertFalse(release_payload["thinking"])
         self.assertFalse(release_payload["use_random_seed"])
-        self.assertEqual(generated.metadata["bpm"], 112)
+        self.assertEqual(generated[0].metadata["bpm"], 112)
         self.assertEqual(progress[-1][1], "finishing")
 
     def test_service_error_is_not_treated_as_success(self) -> None:
@@ -135,6 +143,130 @@ class AceStepProviderTests(unittest.TestCase):
         self.assertEqual(AceStepProvider._metadata_value("N/A", 108), 108)
         self.assertEqual(AceStepProvider._metadata_value("none", "C Minor"), "C Minor")
         self.assertIsNone(AceStepProvider._metadata_value("N/A"))
+
+
+
+
+class AceStepTaskSurfaceTests(unittest.TestCase):
+    """The provider must expose the whole ACE-Step task surface, not just text2music."""
+
+    def test_cover_payload_carries_source_and_strength(self) -> None:
+        payload = AceStepProvider._generation_payload({
+            "task_type": "cover",
+            "prompt": "make it a bossa nova",
+            "duration": 45,
+            "audio_cover_strength": 0.4,
+            "cover_noise_strength": 0.2,
+        })
+        self.assertEqual(payload["task_type"], "cover")
+        self.assertAlmostEqual(payload["audio_cover_strength"], 0.4)
+        self.assertAlmostEqual(payload["cover_noise_strength"], 0.2)
+
+    def test_repaint_payload_sets_explicit_mask(self) -> None:
+        payload = AceStepProvider._generation_payload({
+            "task_type": "repaint",
+            "prompt": "fix the second verse",
+            "duration": 90,
+            "repainting_start": 30.0,
+            "repainting_end": 45.0,
+            "repaint_mode": "aggressive",
+        })
+        self.assertEqual(payload["chunk_mask_mode"], "explicit")
+        self.assertEqual(payload["repainting_start"], 30.0)
+        self.assertEqual(payload["repainting_end"], 45.0)
+        self.assertEqual(payload["repaint_mode"], "aggressive")
+        # repaint_strength only applies to balanced mode
+        self.assertNotIn("repaint_strength", payload)
+
+    def test_extract_requires_a_known_track_name(self) -> None:
+        payload = AceStepProvider._generation_payload({
+            "task_type": "extract",
+            "duration": 60,
+            "track_name": "Drums",
+        })
+        self.assertEqual(payload["track_name"], "drums")
+        with self.assertRaises(AceStepCapabilityError):
+            AceStepProvider._generation_payload({
+                "task_type": "extract",
+                "duration": 60,
+                "track_name": "kazoo",
+            })
+
+    def test_complete_requires_track_classes(self) -> None:
+        payload = AceStepProvider._generation_payload({
+            "task_type": "complete",
+            "duration": 60,
+            "track_classes": ["bass", "Drums", "kazoo"],
+        })
+        self.assertEqual(payload["track_classes"], ["bass", "drums"])
+        with self.assertRaises(AceStepCapabilityError):
+            AceStepProvider._generation_payload({
+                "task_type": "complete",
+                "duration": 60,
+                "track_classes": ["kazoo"],
+            })
+
+    def test_batch_size_is_clamped(self) -> None:
+        payload = AceStepProvider._generation_payload({
+            "task_type": "text2music",
+            "prompt": "x",
+            "duration": 30,
+            "batch_size": 99,
+        })
+        self.assertEqual(payload["batch_size"], 8)
+
+    def test_unknown_task_type_rejected(self) -> None:
+        with self.assertRaises(AceStepCapabilityError):
+            AceStepProvider._generation_payload({"task_type": "stemify", "duration": 30})
+
+    def test_validate_rejects_source_tasks_without_audio(self) -> None:
+        provider = AceStepProvider(session=FakeSession(posts=[], gets=[]))
+        with self.assertRaisesRegex(AceStepCapabilityError, "source_audio_required"):
+            provider.validate({"task_type": "repaint", "duration": 30})
+
+    def test_validate_rejects_task_the_checkpoint_cannot_run(self) -> None:
+        provider = AceStepProvider(session=FakeSession(posts=[], gets=[]))
+        models = [AceStepModel(name="acestep-v15-turbo", supported_task_types=TURBO_TASK_TYPES)]
+        with self.assertRaisesRegex(AceStepCapabilityError, "task_unsupported_by_model"):
+            provider.validate(
+                {
+                    "task_type": "extract",
+                    "duration": 30,
+                    "src_audio_path": "/tmp/x.mp3",
+                    "engine_model": "acestep-v15-turbo",
+                },
+                models=models,
+            )
+
+    def test_batch_results_are_written_to_distinct_files(self) -> None:
+        items = [
+            {"file": "/v1/audio?path=a.mp3", "seed_value": "1", "metas": {"duration": 30}},
+            {"file": "/v1/audio?path=b.mp3", "seed_value": "2", "metas": {"duration": 30}},
+        ]
+        session = FakeSession(
+            posts=[
+                wrapped({"task_id": "ace-2"}),
+                wrapped([{"task_id": "ace-2", "status": 1, "result": json.dumps(items)}]),
+            ],
+            gets=[
+                FakeResponse(body=b"take-one", content_type="audio/mpeg"),
+                FakeResponse(body=b"take-two", content_type="audio/mpeg"),
+            ],
+        )
+        provider = AceStepProvider(session=session, poll_interval=0.001)
+        with tempfile.TemporaryDirectory() as directory:
+            results = provider.generate(
+                {"prompt": "two takes", "duration": 30, "batch_size": 2},
+                Path(directory),
+            )
+            self.assertEqual(len(results), 2)
+            self.assertEqual(results[0].path.name, "music.mp3")
+            self.assertEqual(results[1].path.name, "music-2.mp3")
+            self.assertEqual(results[0].path.read_bytes(), b"take-one")
+            self.assertEqual(results[1].path.read_bytes(), b"take-two")
+            self.assertTrue(results[0].is_primary)
+            self.assertFalse(results[1].is_primary)
+            self.assertEqual(results[1].metadata["variation"], 2)
 
 
 if __name__ == "__main__":

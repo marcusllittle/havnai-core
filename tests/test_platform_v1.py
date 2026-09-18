@@ -806,3 +806,130 @@ class PlatformApiContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MusicSpecModeTests(unittest.TestCase):
+    """resolve_music_spec must cover the full studio mode surface."""
+
+    TURBO_CAPS = ("text_to_music", "cover", "repaint")
+    BASE_CAPS = ("text_to_music", "cover", "repaint", "extract", "lego", "complete")
+
+    def spec(self, payload, **kwargs):
+        kwargs.setdefault("model", "ace_step_1_5_base")
+        kwargs.setdefault("capabilities", self.BASE_CAPS)
+        return platform_v1.resolve_music_spec(payload, **kwargs)
+
+    def test_default_mode_is_create(self) -> None:
+        spec = self.spec({"prompt": "a warm house track", "duration": 60})
+        self.assertEqual(spec["mode"], "create")
+        self.assertEqual(spec["engine"]["task_type"], "text2music")
+        self.assertEqual(spec["parameters"]["batch_size"], 1)
+
+    def test_engine_task_type_is_accepted_directly(self) -> None:
+        spec = self.spec({
+            "task_type": "cover",
+            "prompt": "bossa nova",
+            "duration": 60,
+            "audio_asset_id": "asset-1",
+        })
+        self.assertEqual(spec["mode"], "remix")
+
+    def test_mode_rejected_when_model_lacks_capability(self) -> None:
+        with self.assertRaisesRegex(ValueError, "mode_unsupported_by_model"):
+            self.spec(
+                {"mode": "extract", "track_name": "vocals", "audio_asset_id": "a", "duration": 60},
+                capabilities=self.TURBO_CAPS,
+            )
+
+    def test_source_audio_required_for_editing_modes(self) -> None:
+        for mode in ("remix", "repaint", "extract", "layer", "arrange"):
+            with self.subTest(mode=mode):
+                with self.assertRaisesRegex(ValueError, "source_audio_required"):
+                    self.spec({
+                        "mode": mode,
+                        "prompt": "x",
+                        "duration": 60,
+                        "track_name": "drums",
+                        "track_classes": ["bass"],
+                    })
+
+    def test_stem_modes_may_omit_the_prompt(self) -> None:
+        spec = self.spec({
+            "mode": "extract",
+            "track_name": "vocals",
+            "audio_asset_id": "asset-9",
+            "duration": 60,
+        })
+        self.assertEqual(spec["parameters"]["track_name"], "vocals")
+        self.assertEqual(spec["parameters"]["task_type"], "extract")
+
+    def test_create_still_requires_a_prompt(self) -> None:
+        with self.assertRaisesRegex(ValueError, "invalid_prompt"):
+            self.spec({"mode": "create", "duration": 60})
+
+    def test_repaint_range_must_be_ordered(self) -> None:
+        with self.assertRaisesRegex(ValueError, "invalid_repaint_range"):
+            self.spec({
+                "mode": "repaint",
+                "prompt": "x",
+                "duration": 60,
+                "audio_asset_id": "a",
+                "repainting_start": 40,
+                "repainting_end": 20,
+            })
+
+    def test_open_ended_repaint_is_allowed(self) -> None:
+        spec = self.spec({
+            "mode": "repaint",
+            "prompt": "x",
+            "duration": 60,
+            "audio_asset_id": "a",
+            "repainting_start": 40,
+            "repainting_end": -1,
+        })
+        self.assertEqual(spec["parameters"]["repainting_end"], -1.0)
+
+    def test_batch_size_clamped_to_model_ceiling(self) -> None:
+        spec = self.spec(
+            {"prompt": "x", "duration": 60, "batch_size": 8},
+            max_batch_size=2,
+        )
+        self.assertEqual(spec["parameters"]["batch_size"], 2)
+
+    def test_registry_defaults_apply_when_caller_is_silent(self) -> None:
+        spec = self.spec(
+            {"prompt": "x", "duration": 60},
+            defaults={"inference_steps": 50, "guidance_scale": 7.0, "audio_format": "flac"},
+        )
+        self.assertEqual(spec["parameters"]["inference_steps"], 50)
+        self.assertEqual(spec["parameters"]["guidance_scale"], 7.0)
+        self.assertEqual(spec["parameters"]["audio_format"], "flac")
+
+    def test_caller_overrides_registry_defaults(self) -> None:
+        spec = self.spec(
+            {"prompt": "x", "duration": 60, "inference_steps": 12, "audio_format": "wav"},
+            defaults={"inference_steps": 50, "audio_format": "flac"},
+        )
+        self.assertEqual(spec["parameters"]["inference_steps"], 12)
+        self.assertEqual(spec["parameters"]["audio_format"], "wav")
+
+    def test_batch_extends_the_timeout(self) -> None:
+        single = self.spec({"prompt": "x", "duration": 60}, timeout_seconds=900)
+        batch = self.spec({"prompt": "x", "duration": 60, "batch_size": 4}, timeout_seconds=900)
+        self.assertGreater(batch["timeout_seconds"], single["timeout_seconds"])
+
+    def test_invalid_audio_format_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "invalid_audio_format"):
+            self.spec({"prompt": "x", "duration": 60, "audio_format": "ogg"})
+
+    def test_instrumental_clears_lyrics(self) -> None:
+        spec = self.spec({
+            "prompt": "x", "duration": 60, "instrumental": True, "lyrics": "la la la",
+        })
+        self.assertNotIn("lyrics", spec["parameters"])
+
+    def test_duration_bounds_enforced(self) -> None:
+        for bad in (5, 900):
+            with self.subTest(duration=bad):
+                with self.assertRaisesRegex(ValueError, "invalid_duration"):
+                    self.spec({"prompt": "x", "duration": bad})

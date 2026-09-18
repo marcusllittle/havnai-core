@@ -938,14 +938,37 @@ def discover_capabilities() -> Dict[str, Any]:
             expected_model = str(getattr(entry, "engine_model", "") or "acestep-v15-turbo")
             service_models = probe.get("models", []) if isinstance(probe, dict) else []
             model_ready = ready and expected_model in service_models
+            declared_caps = list(getattr(entry, "capabilities", []) or ["text_to_music"])
+            declared_modes = list(getattr(entry, "available_modes", []) or ["text2music"])
+            # Only advertise a capability the loaded checkpoint actually implements.
+            service_tasks = set()
+            if isinstance(probe, dict):
+                by_model = probe.get("model_task_types") or {}
+                if isinstance(by_model, dict) and expected_model in by_model:
+                    service_tasks = {str(value) for value in by_model[expected_model] or []}
+            if service_tasks:
+                capability_task = {
+                    "text_to_music": "text2music",
+                    "cover": "cover",
+                    "repaint": "repaint",
+                    "extract": "extract",
+                    "lego": "lego",
+                    "complete": "complete",
+                }
+                declared_caps = [
+                    cap for cap in declared_caps
+                    if capability_task.get(cap, cap) in service_tasks
+                ]
+                declared_modes = [mode for mode in declared_modes if mode in service_tasks]
             details[name] = {
                 "pipeline": pipeline,
                 "model_family": "ace_step",
                 "model_version": str(getattr(entry, "model_version", "") or "1.5"),
                 "license_status": str(getattr(entry, "license_status", "unreviewed") or "unreviewed"),
                 "files_present": model_ready,
-                "capabilities": list(getattr(entry, "capabilities", []) or ["text_to_music"]),
-                "available_modes": list(getattr(entry, "available_modes", []) or ["text_to_music"]),
+                "capabilities": declared_caps,
+                "available_modes": declared_modes,
+                "max_batch_size": int(getattr(entry, "max_batch_size", 0) or 1),
                 "service": probe,
             }
             if model_ready:
@@ -2441,30 +2464,73 @@ def _run_music_task(
     reward_weight: float,
     task: Dict[str, Any],
 ) -> Tuple[Dict[str, Any], int]:
-    from engines.ace_step import AceStepCancelled, AceStepProvider
+    from engines.ace_step import AceStepCancelled, AceStepCapabilityError, AceStepProvider
 
     started = time.time()
     cancel_event = task.get("_cancel_event")
-    settings = {
+
+    def _optional(key: str) -> Any:
+        value = task.get(key)
+        return None if value in (None, "") else value
+
+    settings: Dict[str, Any] = {
+        "task_type": str(task.get("task_type") or "text2music"),
         "prompt": str(task.get("prompt") or ""),
         "style": str(task.get("style") or ""),
         "lyrics": str(task.get("lyrics") or ""),
         "instrumental": bool(task.get("instrumental")),
         "duration": float(task.get("duration") or 60),
-        "bpm": task.get("bpm"),
-        "key": task.get("key"),
-        "seed": task.get("seed"),
-        "engine_model": str(task.get("engine_model") or getattr(entry, "engine_model", "") or "acestep-v15-turbo"),
+        "bpm": _optional("bpm"),
+        "key": _optional("key"),
+        "time_signature": _optional("time_signature"),
+        "vocal_language": _optional("vocal_language"),
+        "seed": _optional("seed"),
+        "batch_size": int(task.get("batch_size") or 1),
+        "audio_format": str(task.get("audio_format") or "mp3"),
+        "inference_steps": _optional("inference_steps"),
+        "guidance_scale": _optional("guidance_scale"),
+        "shift": _optional("shift"),
+        "infer_method": _optional("infer_method"),
+        "audio_cover_strength": _optional("audio_cover_strength"),
+        "cover_noise_strength": _optional("cover_noise_strength"),
+        "repainting_start": _optional("repainting_start"),
+        "repainting_end": _optional("repainting_end"),
+        "repaint_mode": _optional("repaint_mode"),
+        "repaint_strength": _optional("repaint_strength"),
+        "repaint_wav_crossfade_sec": _optional("repaint_wav_crossfade_sec"),
+        "track_name": _optional("track_name"),
+        "track_classes": task.get("track_classes") or None,
+        "global_caption": _optional("global_caption"),
+        "src_audio_path": _optional("audio_input"),
+        "reference_audio_path": _optional("reference_audio"),
+        "engine_model": str(
+            task.get("engine_model")
+            or getattr(entry, "engine_model", "")
+            or "acestep-v15-turbo"
+        ),
     }
+    settings = {key: value for key, value in settings.items() if value is not None}
+
     try:
-        result = AceStepProvider().generate(
+        provider = AceStepProvider()
+        provider.validate(settings)
+        results = provider.generate(
             settings,
             OUTPUTS_DIR / "music" / task_id,
             progress=lambda value, stage: _report_task_progress(task, value, stage),
             cancelled=lambda: bool(cancel_event and cancel_event.is_set()),
             timeout=float(task.get("timeout") or 900),
         )
-        metadata = dict(result.metadata)
+        primary = results[0]
+        metadata = dict(primary.metadata)
+        variations = [
+            {
+                "path": str(item.path),
+                "content_type": item.content_type,
+                "metadata": dict(item.metadata),
+            }
+            for item in results[1:]
+        ]
         return {
             "status": "success",
             "task_type": "music_gen",
@@ -2472,12 +2538,15 @@ def _run_music_task(
             "reward_weight": reward_weight,
             "inference_time_ms": round((time.time() - started) * 1000, 3),
             "audio_metadata": metadata,
-            "content_type": result.content_type,
-            "duration": metadata.get("duration", settings["duration"]),
+            "content_type": primary.content_type,
+            "duration": metadata.get("duration", settings.get("duration")),
             "bpm": metadata.get("bpm", settings.get("bpm")),
             "key": metadata.get("key", settings.get("key")),
             "seed": metadata.get("seed", settings.get("seed")),
             "engine_model": metadata.get("model", settings["engine_model"]),
+            "music_task_type": settings.get("task_type"),
+            "variation_count": len(results),
+            "music_variations": variations,
         }, utilization_hint
     except AceStepCancelled as exc:
         return {
@@ -2486,6 +2555,15 @@ def _run_music_task(
             "model_name": entry.name,
             "reward_weight": reward_weight,
             "error": str(exc),
+        }, utilization_hint
+    except AceStepCapabilityError as exc:
+        return {
+            "status": "failed",
+            "task_type": "music_gen",
+            "model_name": entry.name,
+            "reward_weight": reward_weight,
+            "error": str(exc),
+            "error_code": "ace_step_capability",
         }, utilization_hint
     except Exception as exc:
         return {
@@ -2560,6 +2638,9 @@ def execute_task(task: Dict[str, Any]) -> None:
         audio_asset_id = str(task.get("audio_asset_id") or "").strip()
         if audio_asset_id:
             task["audio_input"] = str(_download_task_asset(audio_asset_id, task_id, "audio"))
+        reference_asset_id = str(task.get("reference_asset_id") or "").strip()
+        if reference_asset_id:
+            task["reference_audio"] = str(_download_task_asset(reference_asset_id, task_id, "reference"))
     except Exception as exc:
         asset_error = f"Asset download failed: {exc}"
     task["_cancel_event"] = cancel_event
@@ -2737,6 +2818,23 @@ def execute_task(task: Dict[str, Any]) -> None:
                 "image" if task_type in {"IMAGE_GEN", "FACE_SWAP"} else "audio" if task_type == "MUSIC_GEN" else "video",
                 artifact_metadata,
             )
+            if artifact_uploaded and task_type == "MUSIC_GEN":
+                for variation in metrics.get("music_variations") or []:
+                    try:
+                        variation_path = Path(str(variation.get("path") or ""))
+                        if not variation_path.is_file():
+                            continue
+                        _upload_task_artifact(
+                            task,
+                            variation_path,
+                            "audio",
+                            {
+                                "resolved_render_spec": resolved_spec,
+                                **(variation.get("metadata") or {}),
+                            },
+                        )
+                    except Exception as exc:
+                        log(f"Variation upload failed for {task_id[:8]}: {exc}", prefix="⚠️")
             if artifact_uploaded and task.get("attempt_id"):
                 manifest_path = OUTPUTS_DIR / "manifests" / f"{task_id}.json"
                 manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2747,6 +2845,8 @@ def execute_task(task: Dict[str, Any]) -> None:
                 _upload_task_artifact(task, manifest_path, "manifest", {"schema_version": 1})
         except Exception as exc:
             log(f"Streamed artifact upload failed for {task_id[:8]}: {exc}", prefix="⚠️")
+
+    metrics.pop("music_variations", None)
 
     with lock:
         utilization_hint = util

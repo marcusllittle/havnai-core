@@ -4141,8 +4141,15 @@ def get_creator_tasks() -> Any:
                     music_settings = {}
                 if isinstance(music_settings, dict):
                     for key in (
-                        "prompt", "style", "lyrics", "instrumental", "duration",
-                        "bpm", "key", "seed", "timeout", "engine_model",
+                        "mode", "task_type", "prompt", "style", "lyrics", "instrumental",
+                        "duration", "bpm", "key", "time_signature", "vocal_language",
+                        "seed", "batch_size", "audio_format", "inference_steps",
+                        "guidance_scale", "shift", "infer_method", "timeout",
+                        "engine_model", "audio_asset_id", "reference_asset_id",
+                        "audio_cover_strength", "cover_noise_strength",
+                        "repainting_start", "repainting_end", "repaint_mode",
+                        "repaint_strength", "repaint_wav_crossfade_sec",
+                        "track_name", "track_classes", "global_caption",
                     ):
                         if key in music_settings and music_settings[key] is not None:
                             task_payload[key] = music_settings[key]
@@ -5487,7 +5494,7 @@ def v1_create_job() -> Any:
     if job_type == "image_to_video" and not VIDEO_V2_ENABLED:
         return jsonify({"error": "feature_disabled", "feature": "video_v2"}), 404
     prompt = str(payload.get("prompt") or "").strip()
-    if not prompt:
+    if not prompt and job_type != "text_to_music":
         return jsonify({"error": "missing_prompt"}), 400
 
     default_model = (
@@ -5512,7 +5519,12 @@ def v1_create_job() -> Any:
     }
     source_asset_id = str(payload.get("source_asset_id") or "").strip()
     audio_asset_id = str(payload.get("audio_asset_id") or "").strip()
-    for asset_id, expected_kind in ((source_asset_id, "image"), (audio_asset_id, "audio")):
+    reference_asset_id = str(payload.get("reference_asset_id") or "").strip()
+    for asset_id, expected_kind in (
+        (source_asset_id, "image"),
+        (audio_asset_id, "audio"),
+        (reference_asset_id, "audio"),
+    ):
         if not asset_id:
             continue
         asset = get_db().execute("SELECT kind FROM assets WHERE id=?", (asset_id,)).fetchone()
@@ -5522,16 +5534,24 @@ def v1_create_job() -> Any:
         return jsonify({"error": "source_image_required"}), 400
 
     if job_type == "text_to_music":
+        engine_model = str(cfg.get("engine_model") or "acestep-v15-turbo")
         try:
-            resolved_spec = platform_v1.resolve_music_spec(payload, model=selected_model)
+            resolved_spec = platform_v1.resolve_music_spec(
+                payload,
+                model=selected_model,
+                capabilities=cfg.get("capabilities") or (),
+                defaults=cfg.get("music_defaults") or {},
+                max_batch_size=cfg.get("max_batch_size"),
+                timeout_seconds=cfg.get("timeout_seconds"),
+                engine_model=engine_model,
+            )
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
         settings.update(dict(resolved_spec["parameters"]))
         settings.update({
             "timeout": resolved_spec["timeout_seconds"],
-            "engine_model": str(cfg.get("engine_model") or "acestep-v15-turbo"),
+            "engine_model": engine_model,
         })
-        resolved_spec["engine"]["model"] = settings["engine_model"]
         task_type = "MUSIC_GEN"
     elif job_type == "image_to_video":
         try:
@@ -6522,6 +6542,9 @@ def models_list() -> Any:
                 "default_pipeline_mode": model_data.get("default_pipeline_mode") or None,
                 "default_upscaler": model_data.get("default_upscaler") if "default_upscaler" in model_data else None,
                 "engine_model": model_data.get("engine_model") or None,
+                "music_defaults": model_data.get("music_defaults") or None,
+                "max_batch_size": model_data.get("max_batch_size") or None,
+                "timeout_seconds": model_data.get("timeout_seconds") or None,
                 # Delivery descriptor: tells a node how to obtain the weights.
                 # Never exposes our local filesystem paths.
                 "source": _public_model_source(model_data),

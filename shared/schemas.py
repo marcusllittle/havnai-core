@@ -98,6 +98,10 @@ class ModelEntry:
     default_pipeline_mode: str = ""
     default_upscaler: str = ""
     engine_model: str = ""
+    # Music (ACE-Step) tuning carried through from the coordinator manifest.
+    music_defaults: Dict[str, Any] = field(default_factory=dict)
+    max_batch_size: int = 1
+    timeout_seconds: int = 0
 
 
 @dataclass

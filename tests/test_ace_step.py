@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +14,7 @@ from engines.ace_step import (
     AceStepCapabilityError,
     AceStepError,
     AceStepModel,
+    AceStepModelMismatch,
     AceStepProvider,
 )
 
@@ -267,6 +269,110 @@ class AceStepTaskSurfaceTests(unittest.TestCase):
             self.assertTrue(results[0].is_primary)
             self.assertFalse(results[1].is_primary)
             self.assertEqual(results[1].metadata["variation"], 2)
+
+
+
+
+class AceStepFallbackGuardTests(unittest.TestCase):
+    """ACE-Step answers an unknown/unloaded `model` with primary-model audio at
+    HTTP 200. That must never reach rewards or publication as the real thing."""
+
+    def test_result_from_a_different_checkpoint_is_rejected(self) -> None:
+        item = {
+            "file": "/v1/audio?path=a.mp3",
+            "dit_model": "acestep-v15-turbo",
+            "metas": {"duration": 30},
+        }
+        session = FakeSession(
+            posts=[
+                wrapped({"task_id": "ace-3"}),
+                wrapped([{"task_id": "ace-3", "status": 1, "result": json.dumps([item])}]),
+            ],
+            gets=[FakeResponse(body=b"wrong-model", content_type="audio/mpeg")],
+        )
+        provider = AceStepProvider(session=session, poll_interval=0.001)
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(AceStepModelMismatch, "model_fallback"):
+                provider.generate(
+                    {"prompt": "x", "duration": 30, "engine_model": "acestep-v15-base"},
+                    Path(directory),
+                )
+
+    def test_matching_checkpoint_passes(self) -> None:
+        item = {
+            "file": "/v1/audio?path=a.mp3",
+            "dit_model": "acestep-v15-base",
+            "metas": {"duration": 30},
+        }
+        session = FakeSession(
+            posts=[
+                wrapped({"task_id": "ace-4"}),
+                wrapped([{"task_id": "ace-4", "status": 1, "result": json.dumps([item])}]),
+            ],
+            gets=[FakeResponse(body=b"right-model", content_type="audio/mpeg")],
+        )
+        provider = AceStepProvider(session=session, poll_interval=0.001)
+        with tempfile.TemporaryDirectory() as directory:
+            results = provider.generate(
+                {"prompt": "x", "duration": 30, "engine_model": "acestep-v15-base"},
+                Path(directory),
+            )
+            self.assertEqual(results[0].path.read_bytes(), b"right-model")
+
+    def test_service_without_dit_model_reporting_is_tolerated(self) -> None:
+        AceStepProvider._verify_engine_model(
+            [{"file": "a.mp3"}], {"engine_model": "acestep-v15-base"}
+        )
+
+    def test_downloaded_but_unloaded_checkpoint_is_not_selectable(self) -> None:
+        provider = AceStepProvider(session=FakeSession(posts=[], gets=[]))
+        models = [
+            AceStepModel(name="acestep-v15-turbo", is_default=True, is_loaded=True),
+            # On disk (so the inventory lists it) but not loaded into any slot.
+            AceStepModel(name="acestep-v15-base", is_loaded=False),
+        ]
+        with self.assertRaisesRegex(AceStepCapabilityError, "model_not_loaded"):
+            provider.validate(
+                {"task_type": "text2music", "duration": 30, "engine_model": "acestep-v15-base"},
+                models=models,
+            )
+
+
+
+
+class AceStepOnDemandTests(unittest.TestCase):
+    """With the service in on-demand mode an on-disk checkpoint is servable."""
+
+    def setUp(self) -> None:
+        os.environ.pop("HAVNAI_ACESTEP_ON_DEMAND", None)
+
+    def tearDown(self) -> None:
+        os.environ.pop("HAVNAI_ACESTEP_ON_DEMAND", None)
+
+    def test_off_by_default(self) -> None:
+        self.assertFalse(AceStepProvider(session=FakeSession(posts=[], gets=[])).on_demand)
+
+    def test_unloaded_checkpoint_allowed_when_enabled(self) -> None:
+        os.environ["HAVNAI_ACESTEP_ON_DEMAND"] = "1"
+        provider = AceStepProvider(session=FakeSession(posts=[], gets=[]))
+        self.assertTrue(provider.on_demand)
+        models = [
+            AceStepModel(name="acestep-v15-turbo", is_default=True, is_loaded=True),
+            AceStepModel(name="acestep-v15-base", is_loaded=False),
+        ]
+        # No raise: the service will swap its primary slot on the request.
+        provider.validate(
+            {"task_type": "text2music", "duration": 30, "engine_model": "acestep-v15-base"},
+            models=models,
+        )
+
+    def test_mismatch_guard_still_applies_in_on_demand_mode(self) -> None:
+        os.environ["HAVNAI_ACESTEP_ON_DEMAND"] = "1"
+        with self.assertRaises(AceStepModelMismatch):
+            AceStepProvider._verify_engine_model(
+                [{"file": "a.mp3", "dit_model": "acestep-v15-turbo"}],
+                {"engine_model": "acestep-v15-base"},
+            )
 
 
 if __name__ == "__main__":

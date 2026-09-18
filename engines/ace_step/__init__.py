@@ -13,6 +13,7 @@ from .provider import (
     AceStepCapabilityError,
     AceStepError,
     AceStepModel,
+    AceStepModelMismatch,
     AceStepProvider,
     AceStepResult,
 )
@@ -30,6 +31,7 @@ __all__ = [
     "AceStepCapabilityError",
     "AceStepError",
     "AceStepModel",
+    "AceStepModelMismatch",
     "AceStepProvider",
     "AceStepResult",
 ]

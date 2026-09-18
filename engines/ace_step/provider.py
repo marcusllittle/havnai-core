@@ -96,6 +96,17 @@ class AceStepCapabilityError(AceStepError):
     """Raised when the requested task is not supported by the selected checkpoint."""
 
 
+class AceStepModelMismatch(AceStepError):
+    """Raised when the service generated with a different checkpoint than requested.
+
+    ACE-Step does not fail a job whose ``model`` is unknown or not loaded into a
+    slot — it logs, falls back to its primary checkpoint and returns HTTP 200.
+    For HavnAI that is worse than an error: the audio is attributed, rewarded and
+    published against a model that never ran. The only signal is ``dit_model`` on
+    the result, so we check it on every take.
+    """
+
+
 @dataclass(frozen=True)
 class AceStepResult:
     path: Path
@@ -154,6 +165,9 @@ class AceStepProvider:
         self.session = session or requests.Session()
         self.request_timeout = max(1.0, float(request_timeout))
         self.poll_interval = max(0.1, float(poll_interval))
+        self.on_demand = str(
+            os.getenv("HAVNAI_ACESTEP_ON_DEMAND", "")
+        ).strip().lower() in {"1", "true", "yes"}
 
     # ------------------------------------------------------------------ helpers
 
@@ -232,21 +246,45 @@ class AceStepProvider:
         if default_model and str(default_model) not in names:
             names.append(str(default_model))
 
+        # The inventory is disk-driven: it lists every acestep-* directory under
+        # the checkpoints dir, loaded or not. Only a LOADED checkpoint is actually
+        # servable — asking for an unloaded one silently returns primary-model
+        # audio at HTTP 200 (see _verify_engine_model), so the two lists are kept
+        # apart and callers gate on `loaded_models`.
+        loaded = [model.name for model in models if model.is_loaded]
+        if default_model and str(default_model) not in loaded:
+            loaded.append(str(default_model))
+
+        # When the service runs with ACESTEP_ON_DEMAND_MODEL_LOAD=true it swaps its
+        # primary slot to whatever `model` asks for, so an on-disk checkpoint IS
+        # servable even though it is not resident yet. The operator opts in with
+        # HAVNAI_ACESTEP_ON_DEMAND=1 on the node to match their service config; the
+        # dit_model check on every result stays as the backstop either way.
+        if self.on_demand:
+            loaded = list(dict.fromkeys(loaded + names))
+
         capabilities: set[str] = set()
         for model in models:
+            if model.name not in loaded:
+                continue
             capabilities.update(model.supported_task_types or TURBO_TASK_TYPES)
+
 
         return {
             "service": health.get("service") or "ACE-Step API",
             "version": health.get("version"),
             "models": names,
+            "loaded_models": loaded,
             "default_model": default_model,
             "loaded_model": health.get("loaded_model"),
             "loaded_lm_model": health.get("loaded_lm_model"),
             "llm_initialized": bool(health.get("llm_initialized")),
+            "on_demand": self.on_demand,
             "task_types": sorted(capabilities),
             "model_task_types": {
-                model.name: list(model.supported_task_types) for model in models
+                model.name: list(model.supported_task_types)
+                for model in models
+                if model.name in loaded
             },
         }
 
@@ -402,6 +440,11 @@ class AceStepProvider:
             raise AceStepCapabilityError(
                 f"task_unsupported_by_model:{task_type}:{engine_model}"
             )
+        # Present in the inventory only means "downloaded". A checkpoint that is
+        # not loaded into a slot is not selectable: the service would fall back to
+        # its primary model and return that audio as if we had asked for it.
+        if entry and not entry.is_loaded and not entry.is_default and not self.on_demand:
+            raise AceStepCapabilityError(f"model_not_loaded:{engine_model}")
 
     # --------------------------------------------------------------- generation
 
@@ -450,6 +493,7 @@ class AceStepProvider:
             raise AceStepError("ACE-Step did not return a task id")
 
         items = self._await_results(task_id, notify, is_cancelled, timeout)
+        self._verify_engine_model(items, settings)
         notify(90, "finishing")
 
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -468,6 +512,20 @@ class AceStepProvider:
         if not results:
             raise AceStepError("ACE-Step returned no audio result")
         return results
+
+    @staticmethod
+    def _verify_engine_model(items: Sequence[Mapping[str, Any]], settings: Mapping[str, Any]) -> None:
+        """Reject a result the service produced with a different checkpoint."""
+        requested = str(settings.get("engine_model") or "").strip()
+        if not requested:
+            return
+        for item in items:
+            served = str(item.get("dit_model") or "").strip()
+            # An older service build may not report dit_model at all; nothing to check.
+            if served and served != requested:
+                raise AceStepModelMismatch(
+                    f"model_fallback:requested={requested}:served={served}"
+                )
 
     def _await_results(
         self,

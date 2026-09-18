@@ -936,7 +936,12 @@ def discover_capabilities() -> Dict[str, Any]:
             except Exception as exc:
                 ready, probe = False, {"error": str(exc)}
             expected_model = str(getattr(entry, "engine_model", "") or "acestep-v15-turbo")
-            service_models = probe.get("models", []) if isinstance(probe, dict) else []
+            # `models` lists every checkpoint on disk; only `loaded_models` is
+            # actually servable. Advertising a downloaded-but-unloaded checkpoint
+            # would win us jobs the service then answers with the wrong model.
+            service_models = []
+            if isinstance(probe, dict):
+                service_models = probe.get("loaded_models") or probe.get("models") or []
             model_ready = ready and expected_model in service_models
             declared_caps = list(getattr(entry, "capabilities", []) or ["text_to_music"])
             declared_modes = list(getattr(entry, "available_modes", []) or ["text2music"])
@@ -2464,7 +2469,12 @@ def _run_music_task(
     reward_weight: float,
     task: Dict[str, Any],
 ) -> Tuple[Dict[str, Any], int]:
-    from engines.ace_step import AceStepCancelled, AceStepCapabilityError, AceStepProvider
+    from engines.ace_step import (
+        AceStepCancelled,
+        AceStepCapabilityError,
+        AceStepModelMismatch,
+        AceStepProvider,
+    )
 
     started = time.time()
     cancel_event = task.get("_cancel_event")
@@ -2555,6 +2565,17 @@ def _run_music_task(
             "model_name": entry.name,
             "reward_weight": reward_weight,
             "error": str(exc),
+        }, utilization_hint
+    except AceStepModelMismatch as exc:
+        # The service quietly served a different checkpoint. Failing here keeps
+        # the wrong model out of rewards, receipts and publication metadata.
+        return {
+            "status": "failed",
+            "task_type": "music_gen",
+            "model_name": entry.name,
+            "reward_weight": reward_weight,
+            "error": str(exc),
+            "error_code": "ace_step_model_mismatch",
         }, utilization_hint
     except AceStepCapabilityError as exc:
         return {

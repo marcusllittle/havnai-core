@@ -58,11 +58,17 @@ confirmations. Download the resulting deployment record and use its address in
 
 ## Coordinator Environment
 
+Verified Sepolia deployment: `0x37ADe176ac43cd4e37Cd72054028cde7B8653E25`.
+Transaction and build provenance are recorded in
+[`deployments/sepolia-node-rewards.json`](deployments/sepolia-node-rewards.json).
+Its owner and token match the local deployment helper's prepared configuration.
+Use this existing contract for that treasury rather than deploying another copy.
+
 ```text
 HAVNAI_SEPOLIA_RPC_URL=<Sepolia JSON-RPC endpoint>
 HAVNAI_HAI_TOKEN_ADDRESS=<Sepolia HAI token address>
 HAVNAI_HAI_TREASURY_WALLET=<treasury owner address>
-HAVNAI_NODE_CLAIM_CONTRACT=<deployed HavnNodeRewardClaims address>
+HAVNAI_NODE_CLAIM_CONTRACT=0x37ADe176ac43cd4e37Cd72054028cde7B8653E25
 HAVNAI_NODE_CLAIM_CONFIRMATIONS=2
 ```
 

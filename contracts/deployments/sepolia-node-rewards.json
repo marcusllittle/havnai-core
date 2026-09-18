@@ -1,0 +1,12 @@
+{
+  "status": "verified",
+  "transactionHash": "0xe405d8b5f418cf3b85d2c718ad6ec5b81092acd140b3e331296e40908f532c47",
+  "contractAddress": "0x37ADe176ac43cd4e37Cd72054028cde7B8653E25",
+  "chainId": 11155111,
+  "owner": "0x7110347e2bcd02f5f3485dc6bec5e0b5f9eb9262",
+  "token": "0x8aaa7f1075de91b2103542379bfd3b889c89105f",
+  "blockNumber": 11727902,
+  "confirmations": 12,
+  "compiler": "0.8.30+commit.73712a01.Emscripten.clang",
+  "sourceSha256": "763936b4d280b9dc8790e597e5a02e14fe494fcd862ef7edb084ec24cee19594"
+}

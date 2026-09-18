@@ -436,6 +436,26 @@ class PlatformApiContractTests(unittest.TestCase):
         )
         self.assertEqual(artifact.status_code, 201, artifact.get_json())
         self.assertIn(f"/static/outputs/audio/{job_id}.mp3", artifact.get_json()["url"])
+        second = self.client.post(
+            f"/v1/node/jobs/{job_id}/artifacts",
+            data={
+                "node_id": "node-test",
+                "attempt_id": task["attempt_id"],
+                "kind": "audio",
+                "metadata": json.dumps({"variation": 2, "seed": 24}),
+                "file": (io.BytesIO(b"second-mp3-result"), "music-2.mp3"),
+            },
+            headers=self.node_headers,
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(second.status_code, 201, second.get_json())
+        self.assertIn(f"/static/outputs/audio/{job_id}-take-2.mp3", second.get_json()["url"])
+        self.assertNotEqual(artifact.get_json()["url"], second.get_json()["url"])
+        self.assertEqual((app_module.OUTPUTS_DIR / "audio" / f"{job_id}.mp3").read_bytes(), b"mp3-result")
+        self.assertEqual(
+            (app_module.OUTPUTS_DIR / "audio" / f"{job_id}-take-2.mp3").read_bytes(),
+            b"second-mp3-result",
+        )
         completed = self.client.post(
             "/results",
             json={

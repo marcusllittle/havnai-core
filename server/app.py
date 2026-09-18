@@ -5777,13 +5777,16 @@ def v1_node_artifact(job_id: str) -> Any:
         return jsonify({"error": "insufficient_storage"}), 507
     kind = str(request.form.get("kind") or "artifact").strip().lower()[:32]
     content_type = str(uploaded.mimetype or "application/octet-stream")
+    metadata = platform_v1.parse_json_object(request.form.get("metadata"))
     extension = Path(uploaded.filename).suffix.lower() or ".bin"
     if kind == "image":
         destination = OUTPUTS_DIR / f"{job_id}{extension}"
     elif kind == "video":
         destination = OUTPUTS_DIR / "videos" / f"{job_id}{extension}"
     elif kind == "audio":
-        destination = OUTPUTS_DIR / "audio" / f"{job_id}{extension}"
+        variation = metadata.get("variation")
+        take_suffix = f"-take-{variation}" if type(variation) is int and 2 <= variation <= 32 else ""
+        destination = OUTPUTS_DIR / "audio" / f"{job_id}{take_suffix}{extension}"
     else:
         destination = OUTPUTS_DIR / "artifacts" / job_id / platform_v1.safe_filename(uploaded.filename, f"artifact{extension}")
     try:
@@ -5791,7 +5794,6 @@ def v1_node_artifact(job_id: str) -> Any:
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 413
     artifact_id = platform_v1.new_artifact_id()
-    metadata = platform_v1.parse_json_object(request.form.get("metadata"))
     conn = get_db()
     conn.execute(
         """

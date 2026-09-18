@@ -9,6 +9,8 @@ except ImportError:
 import io
 import json
 import logging
+import math
+import html
 from logging.handlers import RotatingFileHandler
 import os
 import re
@@ -31,6 +33,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from flask import abort, Flask, jsonify, request, Response, send_file, send_from_directory, g, has_app_context
 from flask_cors import CORS
+from werkzeug.exceptions import HTTPException
 
 # Import our local modules
 import safety
@@ -49,9 +52,17 @@ import workflows
 import gallery
 import astra_rewards
 import astra_gen
+import astra_receipts
+import merkle_batches
+import receipt_anchors
+import payout_claims
+import payout_chain
 import node_bundle
 import job_history
 import platform_v1
+import music_discover
+import music_sessions
+import network_status
 
 try:
     from eth_account import Account  # type: ignore
@@ -154,31 +165,64 @@ WALLET_NONCE_PURPOSE_GALLERY_PURCHASE = "gallery_purchase"
 WALLET_NONCE_PURPOSE_GALLERY_LIST = "gallery_list"
 WALLET_NONCE_PURPOSE_GALLERY_RELIST = "gallery_relist"
 WALLET_NONCE_PURPOSE_GALLERY_DELIST = "gallery_delist"
+WALLET_NONCE_PURPOSE_MUSIC_PUBLISH = "music_publish"
+WALLET_NONCE_PURPOSE_MUSIC_UNPUBLISH = "music_unpublish"
+WALLET_NONCE_PURPOSE_MUSIC_LIKE = "music_like"
+WALLET_NONCE_PURPOSE_MUSIC_READ_SESSION = "music_read_session"
+WALLET_NONCE_PURPOSE_MUSIC_LIBRARY_READ = "music_library_read"
+WALLET_NONCE_PURPOSE_MUSIC_SAVE = "music_save"
+WALLET_NONCE_PURPOSE_MUSIC_UNSAVE = "music_unsave"
+WALLET_NONCE_PURPOSE_PLAYLIST_READ = "playlist_read"
+WALLET_NONCE_PURPOSE_PLAYLIST_CREATE = "playlist_create"
+WALLET_NONCE_PURPOSE_PLAYLIST_UPDATE = "playlist_update"
+WALLET_NONCE_PURPOSE_PLAYLIST_DELETE = "playlist_delete"
+WALLET_NONCE_PURPOSE_PLAYLIST_ADD = "playlist_add"
+WALLET_NONCE_PURPOSE_PLAYLIST_REMOVE = "playlist_remove"
+WALLET_NONCE_PURPOSE_PLAYLIST_REORDER = "playlist_reorder"
 WALLET_NONCE_PURPOSE_IDENTITY_ANCHOR_CREATE = "identity_anchor_create"
 WALLET_NONCE_PURPOSE_IDENTITY_ANCHOR_DELETE = "identity_anchor_delete"
 WALLET_NONCE_PURPOSE_ASTRA_SESSION = "astra_session"
+WALLET_NONCE_PURPOSE_RECEIPT_BATCH_FLUSH = "receipt_batch_flush"
+WALLET_NONCE_PURPOSE_NODE_PAYOUT_BATCH_FLUSH = "node_payout_batch_flush"
 WALLET_NONCE_ALLOWED_PURPOSES = {
+    WALLET_NONCE_PURPOSE_MUSIC_READ_SESSION,
     WALLET_NONCE_PURPOSE_CONVERT,
     WALLET_NONCE_PURPOSE_GALLERY_PURCHASE,
     WALLET_NONCE_PURPOSE_GALLERY_LIST,
     WALLET_NONCE_PURPOSE_GALLERY_RELIST,
     WALLET_NONCE_PURPOSE_GALLERY_DELIST,
+    WALLET_NONCE_PURPOSE_MUSIC_PUBLISH,
+    WALLET_NONCE_PURPOSE_MUSIC_UNPUBLISH,
+    WALLET_NONCE_PURPOSE_MUSIC_LIKE,
+    WALLET_NONCE_PURPOSE_MUSIC_LIBRARY_READ,
+    WALLET_NONCE_PURPOSE_MUSIC_SAVE,
+    WALLET_NONCE_PURPOSE_MUSIC_UNSAVE,
+    WALLET_NONCE_PURPOSE_PLAYLIST_READ,
+    WALLET_NONCE_PURPOSE_PLAYLIST_CREATE,
+    WALLET_NONCE_PURPOSE_PLAYLIST_UPDATE,
+    WALLET_NONCE_PURPOSE_PLAYLIST_DELETE,
+    WALLET_NONCE_PURPOSE_PLAYLIST_ADD,
+    WALLET_NONCE_PURPOSE_PLAYLIST_REMOVE,
+    WALLET_NONCE_PURPOSE_PLAYLIST_REORDER,
     WALLET_NONCE_PURPOSE_IDENTITY_ANCHOR_CREATE,
     WALLET_NONCE_PURPOSE_IDENTITY_ANCHOR_DELETE,
     WALLET_NONCE_PURPOSE_ASTRA_SESSION,
+    WALLET_NONCE_PURPOSE_RECEIPT_BATCH_FLUSH,
+    WALLET_NONCE_PURPOSE_NODE_PAYOUT_BATCH_FLUSH,
 }
 ASTRA_SESSION_TTL_SECONDS = max(
     300, int(os.getenv("HAVNAI_ASTRA_SESSION_TTL_SECONDS", "86400"))
 )
 WALLET_NONCE_TTL_SECONDS = max(60, int(os.getenv("HAVNAI_WALLET_NONCE_TTL_SECONDS", "300")))
 
-SUPPORTED_TASK_TYPES = {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP", "LTX_VIDEO_GEN"}
+SUPPORTED_TASK_TYPES = {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP", "LTX_VIDEO_GEN", "MUSIC_GEN"}
 TASK_SUPPORT_MAP = {
     CREATOR_TASK_TYPE: "image",
     "VIDEO_GEN": "video",
     "ANIMATEDIFF": "animatediff",
     "FACE_SWAP": "face_swap",
     "LTX_VIDEO_GEN": "ltx_video",
+    "MUSIC_GEN": "music",
 }
 SUPPORT_TO_JOB_TYPE_MAP = {
     "image": CREATOR_TASK_TYPE,
@@ -186,6 +230,7 @@ SUPPORT_TO_JOB_TYPE_MAP = {
     "animatediff": "ANIMATEDIFF",
     "face_swap": "FACE_SWAP",
     "ltx_video": "LTX_VIDEO_GEN",
+    "music": "MUSIC_GEN",
 }
 LTX_VIDEO_PIPELINES = {"ltx_video", "ltx23_wangp"}
 
@@ -599,6 +644,8 @@ class JSONFormatter(logging.Formatter):
         }
         if hasattr(record, "extra") and isinstance(record.extra, dict):
             payload.update(record.extra)
+        if record.exc_info:
+            payload["exception"] = self.formatException(record.exc_info)
         return json.dumps(payload)
 
 
@@ -632,8 +679,27 @@ if not CORS_ORIGINS:
 
 
 def log_event(message: str, level: str = "info", **extra: Any) -> None:
-    LOGGER.log(getattr(logging, level.upper(), logging.INFO), message, extra=extra if extra else None)
+    LOGGER.log(getattr(logging, level.upper(), logging.INFO), message, extra={"extra": extra} if extra else None)
     EVENT_LOGS.append({"timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "level": level, "message": message})
+
+
+@app.errorhandler(HTTPException)
+def api_http_error(error: HTTPException) -> Any:
+    response = error.get_response()
+    response.data = json.dumps({"error": error.name.lower().replace(" ", "_"), "message": error.description})
+    response.content_type = "application/json"
+    return response
+
+
+@app.errorhandler(Exception)
+def api_unexpected_error(error: Exception) -> Any:
+    reference = secrets.token_hex(8)
+    log_event("API request failed", level="error", reference=reference,
+              method=request.method, path=request.path, exception_type=type(error).__name__)
+    # Keep the stack server-side; never log wallet signatures, tokens, or request bodies.
+    LOGGER.exception("API failure %s", reference)
+    return jsonify({"error": "internal_error", "message": "The coordinator could not complete this request.",
+                    "reference": reference}), 500
 
 
 def _build_result_payload(job_id: str) -> Optional[Dict[str, Any]]:
@@ -733,6 +799,12 @@ def _inject_module_dependencies() -> None:
     gallery.WALLET_REGEX = WALLET_REGEX  # type: ignore[attr-defined]
     gallery.build_result_payload = _build_result_payload  # type: ignore[attr-defined]
 
+    # Public music Discover module
+    music_discover.get_db = get_db  # type: ignore[attr-defined]
+    music_discover.log_event = log_event  # type: ignore[attr-defined]
+    music_discover.WALLET_REGEX = WALLET_REGEX  # type: ignore[attr-defined]
+    music_discover.artifact_url = lambda path: _artifact_url(path)  # type: ignore[attr-defined]
+
     # Astra Rewards module
     astra_rewards.get_db = get_db  # type: ignore[attr-defined]
     astra_rewards.log_event = log_event  # type: ignore[attr-defined]
@@ -752,6 +824,12 @@ def _inject_module_dependencies() -> None:
     hai_funding.get_db = get_db  # type: ignore[attr-defined]
     hai_funding.log_event = log_event  # type: ignore[attr-defined]
     hai_funding.deposit_credits = credits.deposit_credits  # type: ignore[attr-defined]
+
+    # Receipt Merkle batching
+    merkle_batches.get_db = get_db  # type: ignore[attr-defined]
+
+    # Operator-claimable node payout batches
+    payout_claims.get_db = get_db  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
@@ -1072,6 +1150,7 @@ def init_db() -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_wallet_nonces_used ON wallet_nonces (used_at)"
     )
+    music_sessions.init_tables(conn)
     platform_v1.migrate(conn)
     conn.commit()
 
@@ -1089,8 +1168,12 @@ blockchain.init_blockchain_tables(get_db())
 validators.init_validator_tables(get_db())
 workflows.init_workflow_tables(get_db())
 gallery.init_gallery_tables(get_db())
+music_discover.init_music_discover_tables(get_db())
 astra_rewards.init_astra_tables(get_db())
 astra_gen.init_astra_gen_tables(get_db())
+astra_receipts.init_receipt_tables(get_db())
+merkle_batches.init_merkle_tables(get_db())
+payout_claims.init_payout_claim_tables(get_db())
 
 # Optional: clear database and in-memory state on startup for a fresh dashboard
 if RESET_ON_STARTUP:
@@ -1157,6 +1240,7 @@ def load_manifest() -> None:
             "available_modes": entry.get("available_modes", []),
             "default_pipeline_mode": entry.get("default_pipeline_mode", ""),
             "default_upscaler": entry.get("default_upscaler", ""),
+            "engine_model": entry.get("engine_model", ""),
             # How nodes obtain the weights; see _public_model_source().
             "source": entry.get("source") if isinstance(entry.get("source"), dict) else {},
         }
@@ -1961,7 +2045,7 @@ def pending_tasks_for_node(node_id: str) -> List[Dict[str, Any]]:
         if task.get("status") not in relevant_status:
             continue
         task_type = (task.get("task_type") or CREATOR_TASK_TYPE).upper()
-        if task_type not in {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP", "LTX_VIDEO_GEN"}:
+        if task_type not in {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP", "LTX_VIDEO_GEN", "MUSIC_GEN"}:
             continue
         tasks.append(task)
     return tasks
@@ -4049,6 +4133,19 @@ def get_creator_tasks() -> Any:
                     ):
                         if key in ltx_settings and ltx_settings[key] is not None:
                             task_payload[key] = ltx_settings[key]
+            if task_payload["type"].upper() == "MUSIC_GEN":
+                try:
+                    raw_music = task.get("data") or ""
+                    music_settings = json.loads(raw_music) if isinstance(raw_music, str) else {}
+                except Exception:
+                    music_settings = {}
+                if isinstance(music_settings, dict):
+                    for key in (
+                        "prompt", "style", "lyrics", "instrumental", "duration",
+                        "bpm", "key", "seed", "timeout", "engine_model",
+                    ):
+                        if key in music_settings and music_settings[key] is not None:
+                            task_payload[key] = music_settings[key]
             if task_payload["type"].upper() == "FACE_SWAP":
                 try:
                     raw_fs = task.get("data") or ""
@@ -4549,8 +4646,10 @@ def _build_gallery_nonce_message(
     *,
     listing_id: Optional[int] = None,
     job_id: Optional[str] = None,
+    publication_id: Optional[str] = None,
+    playlist_id: Optional[str] = None,
 ) -> str:
-    """Build a signed message for gallery operations (purchase or list)."""
+    """Build a signed message for user-authorized content operations."""
     lines = [
         "HavnAI Wallet Signature",
         f"action: {purpose}",
@@ -4560,8 +4659,19 @@ def _build_gallery_nonce_message(
         lines.append(f"listing_id: {listing_id}")
     if job_id is not None:
         lines.append(f"job_id: {job_id}")
+    if publication_id is not None:
+        lines.append(f"publication_id: {publication_id}")
+    if playlist_id is not None:
+        lines.append(f"playlist_id: {playlist_id}")
+    if purpose in {WALLET_NONCE_PURPOSE_GALLERY_PURCHASE, WALLET_NONCE_PURPOSE_GALLERY_LIST, WALLET_NONCE_PURPOSE_GALLERY_RELIST}:
+        lines.append(f"amount: {amount:.8f}")
+    elif purpose.startswith(("music_", "playlist_", "identity_anchor_")) or purpose == WALLET_NONCE_PURPOSE_GALLERY_DELIST:
+        lines.append("No payment or credit charge is authorized by this signature.")
+    else:
+        lines.append("This signature does not submit an on-chain transaction.")
+    if purpose == WALLET_NONCE_PURPOSE_MUSIC_READ_SESSION:
+        lines.append("Allow read-only access to your private music library and playlists for 8 hours. No publishing, changes, or spending.")
     lines += [
-        f"amount: {amount:.8f}",
         f"nonce: {nonce}",
         f"issued_at: {issued_at_iso}",
         f"expires_at: {expires_at_iso}",
@@ -4578,6 +4688,7 @@ def _verify_wallet_signature(
     allowed_purposes: set,
     expected_amount: Optional[float] = None,
     log_label: str = "Signature verification",
+    expected_context: Optional[str] = None,
 ) -> Tuple[bool, Optional[Any]]:
     """Verify a wallet signature against a stored nonce.
 
@@ -4611,7 +4722,7 @@ def _verify_wallet_signature(
         except (TypeError, ValueError):
             log_event(f"{log_label} rejected", level="warning", wallet=wallet, reason="nonce_amount_invalid")
             return False, (jsonify({"error": "invalid_nonce", "message": "nonce amount invalid"}), 400)
-        if abs(nonce_amount - expected_amount) > 1e-9:
+        if not math.isfinite(nonce_amount) or not math.isfinite(expected_amount) or abs(nonce_amount - expected_amount) > 1e-9:
             log_event(f"{log_label} rejected", level="warning", wallet=wallet, reason="nonce_amount_mismatch")
             return False, (jsonify({"error": "invalid_nonce", "message": "nonce amount mismatch"}), 400)
 
@@ -4625,6 +4736,8 @@ def _verify_wallet_signature(
         return False, (jsonify({"error": "nonce_expired", "message": "nonce expired"}), 400)
 
     message = str(row["message"] or "")
+    if expected_context and expected_context not in message.splitlines():
+        return False, (jsonify({"error": "invalid_nonce", "message": "signed action does not match the requested asset"}), 400)
     try:
         recovered = Account.recover_message(encode_defunct(text=message), signature=signature)
     except Exception as exc:
@@ -4654,13 +4767,22 @@ def _verify_wallet_signature(
     return True, None
 
 
+def _nonce_message_has(wallet: str, nonce_str: str, line: str) -> bool:
+    row = get_db().execute(
+        "SELECT message FROM wallet_nonces WHERE wallet=? AND nonce=?",
+        (wallet, nonce_str),
+    ).fetchone()
+    message = str(row["message"] or "") if row else ""
+    return line in message.splitlines()
+
+
 def _parse_positive_amount(raw_amount: Any) -> Tuple[Optional[float], Optional[Any]]:
     try:
         amount = float(raw_amount)
     except (TypeError, ValueError):
         return None, (jsonify({"error": "invalid_amount", "message": "amount must be a number"}), 400)
-    if amount <= 0:
-        return None, (jsonify({"error": "invalid_amount", "message": "amount must be positive"}), 400)
+    if not math.isfinite(amount) or amount <= 0:
+        return None, (jsonify({"error": "invalid_amount", "message": "amount must be positive and finite"}), 400)
     return amount, None
 
 
@@ -4756,8 +4878,29 @@ def wallet_nonce() -> Any:
         ), 400
 
     raw_amount = data.get("amount")
-    if purpose == WALLET_NONCE_PURPOSE_ASTRA_SESSION and raw_amount is None:
-        # A session proves ownership; there is no value being authorized.
+    if purpose in {
+        WALLET_NONCE_PURPOSE_ASTRA_SESSION,
+        WALLET_NONCE_PURPOSE_RECEIPT_BATCH_FLUSH,
+    } and raw_amount is None:
+        # These actions prove wallet control; no token value is being authorized.
+        raw_amount = 1.0
+    if purpose in {
+        WALLET_NONCE_PURPOSE_MUSIC_PUBLISH,
+        WALLET_NONCE_PURPOSE_MUSIC_READ_SESSION,
+        WALLET_NONCE_PURPOSE_MUSIC_UNPUBLISH,
+        WALLET_NONCE_PURPOSE_MUSIC_LIKE,
+        WALLET_NONCE_PURPOSE_MUSIC_LIBRARY_READ,
+        WALLET_NONCE_PURPOSE_MUSIC_SAVE,
+        WALLET_NONCE_PURPOSE_MUSIC_UNSAVE,
+        WALLET_NONCE_PURPOSE_PLAYLIST_READ,
+        WALLET_NONCE_PURPOSE_PLAYLIST_CREATE,
+        WALLET_NONCE_PURPOSE_PLAYLIST_UPDATE,
+        WALLET_NONCE_PURPOSE_PLAYLIST_DELETE,
+        WALLET_NONCE_PURPOSE_PLAYLIST_ADD,
+        WALLET_NONCE_PURPOSE_PLAYLIST_REMOVE,
+        WALLET_NONCE_PURPOSE_PLAYLIST_REORDER,
+    } and raw_amount is None:
+        # Non-payment action; keep nonce schema compatibility.
         raw_amount = 1.0
     amount, amount_error = _parse_positive_amount(raw_amount)
     if amount_error:
@@ -4766,6 +4909,8 @@ def wallet_nonce() -> Any:
 
     listing_id = None
     job_id_ctx = None
+    publication_id_ctx = None
+    playlist_id_ctx = None
     if purpose == WALLET_NONCE_PURPOSE_GALLERY_PURCHASE:
         try:
             listing_id = int(data.get("listing_id", 0))
@@ -4788,6 +4933,39 @@ def wallet_nonce() -> Any:
             listing_id = None
         if not listing_id:
             return jsonify({"error": "missing listing_id", "message": "listing_id required for gallery_delist"}), 400
+    elif purpose == WALLET_NONCE_PURPOSE_MUSIC_PUBLISH:
+        job_id_ctx = str(data.get("job_id", "")).strip() or None
+        if not job_id_ctx:
+            return jsonify({"error": "missing job_id", "message": "job_id required for music_publish"}), 400
+    elif purpose in {
+        WALLET_NONCE_PURPOSE_MUSIC_UNPUBLISH,
+        WALLET_NONCE_PURPOSE_MUSIC_LIKE,
+        WALLET_NONCE_PURPOSE_MUSIC_SAVE,
+        WALLET_NONCE_PURPOSE_MUSIC_UNSAVE,
+    }:
+        publication_id_ctx = str(data.get("publication_id", "")).strip() or None
+        if not publication_id_ctx:
+            return jsonify({"error": "missing publication_id", "message": f"publication_id required for {purpose}"}), 400
+    elif purpose == WALLET_NONCE_PURPOSE_MUSIC_LIBRARY_READ:
+        publication_id_ctx = str(data.get("publication_id", "")).strip() or None
+    elif purpose in {
+        WALLET_NONCE_PURPOSE_PLAYLIST_READ,
+        WALLET_NONCE_PURPOSE_PLAYLIST_UPDATE,
+        WALLET_NONCE_PURPOSE_PLAYLIST_DELETE,
+        WALLET_NONCE_PURPOSE_PLAYLIST_REORDER,
+    }:
+        playlist_id_ctx = str(data.get("playlist_id", "")).strip() or None
+        if not playlist_id_ctx:
+            return jsonify({"error": "missing playlist_id", "message": f"playlist_id required for {purpose}"}), 400
+    elif purpose == WALLET_NONCE_PURPOSE_PLAYLIST_CREATE:
+        playlist_id_ctx = str(data.get("playlist_id", "new")).strip() or "new"
+    elif purpose in {WALLET_NONCE_PURPOSE_PLAYLIST_ADD, WALLET_NONCE_PURPOSE_PLAYLIST_REMOVE}:
+        playlist_id_ctx = str(data.get("playlist_id", "")).strip() or None
+        publication_id_ctx = str(data.get("publication_id", "")).strip() or None
+        if not playlist_id_ctx:
+            return jsonify({"error": "missing playlist_id", "message": f"playlist_id required for {purpose}"}), 400
+        if not publication_id_ctx:
+            return jsonify({"error": "missing publication_id", "message": f"publication_id required for {purpose}"}), 400
 
     now_ts = unix_now()
     issued_at_iso = datetime.fromtimestamp(now_ts, timezone.utc).isoformat().replace("+00:00", "Z")
@@ -4810,6 +4988,8 @@ def wallet_nonce() -> Any:
             domain,
             listing_id=listing_id,
             job_id=job_id_ctx,
+            publication_id=publication_id_ctx,
+            playlist_id=playlist_id_ctx,
         )
 
     conn = get_db()
@@ -5187,6 +5367,7 @@ def _v1_job_payload(job: Dict[str, Any]) -> Dict[str, Any]:
         "stage": job.get("stage") or status,
         "progress": float(job.get("progress") or (100 if status in platform_v1.FINAL_JOB_STATES else 0)),
         "model": job.get("model"),
+        "wallet": job.get("wallet"),
         "node_id": job.get("node_id"),
         "attempt_id": job.get("attempt_id"),
         "created_at": job.get("timestamp"),
@@ -5282,6 +5463,8 @@ def v1_list_jobs() -> Any:
             compatible_types = {str(payload["type"]), raw_task_type}
             if raw_task_type in {"ltx_video_gen", "video_gen", "animatediff"}:
                 compatible_types.add("image_to_video")
+            if raw_task_type == "music_gen":
+                compatible_types.add("text_to_music")
             if requested_type not in compatible_types:
                 continue
         if requested_status and payload["status"] != requested_status:
@@ -5299,7 +5482,7 @@ def v1_create_job() -> Any:
         return auth_error
     payload = request.get_json(silent=True) or {}
     job_type = str(payload.get("type") or "").strip().lower()
-    if job_type not in {"image", "image_to_video"}:
+    if job_type not in {"image", "image_to_video", "text_to_music"}:
         return jsonify({"error": "invalid_job_type"}), 400
     if job_type == "image_to_video" and not VIDEO_V2_ENABLED:
         return jsonify({"error": "feature_disabled", "feature": "video_v2"}), 404
@@ -5307,7 +5490,12 @@ def v1_create_job() -> Any:
     if not prompt:
         return jsonify({"error": "missing_prompt"}), 400
 
-    model_name = str(payload.get("model") or ("ltx23_wangp_distilled" if job_type == "image_to_video" else "juggernautXL_ragnarokBy")).strip()
+    default_model = (
+        "ltx23_wangp_distilled" if job_type == "image_to_video"
+        else "ace_step_1_5_turbo" if job_type == "text_to_music"
+        else "juggernautXL_ragnarokBy"
+    )
+    model_name = str(payload.get("model") or default_model).strip()
     refresh_manifest()
     cfg = get_model_config(model_name.lower())
     if not cfg:
@@ -5333,7 +5521,19 @@ def v1_create_job() -> Any:
     if job_type == "image_to_video" and not source_asset_id:
         return jsonify({"error": "source_image_required"}), 400
 
-    if job_type == "image_to_video":
+    if job_type == "text_to_music":
+        try:
+            resolved_spec = platform_v1.resolve_music_spec(payload, model=selected_model)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        settings.update(dict(resolved_spec["parameters"]))
+        settings.update({
+            "timeout": resolved_spec["timeout_seconds"],
+            "engine_model": str(cfg.get("engine_model") or "acestep-v15-turbo"),
+        })
+        resolved_spec["engine"]["model"] = settings["engine_model"]
+        task_type = "MUSIC_GEN"
+    elif job_type == "image_to_video":
         try:
             resolved_spec = platform_v1.resolve_video_spec(
                 payload,
@@ -5558,6 +5758,8 @@ def v1_node_artifact(job_id: str) -> Any:
         destination = OUTPUTS_DIR / f"{job_id}{extension}"
     elif kind == "video":
         destination = OUTPUTS_DIR / "videos" / f"{job_id}{extension}"
+    elif kind == "audio":
+        destination = OUTPUTS_DIR / "audio" / f"{job_id}{extension}"
     else:
         destination = OUTPUTS_DIR / "artifacts" / job_id / platform_v1.safe_filename(uploaded.filename, f"artifact{extension}")
     try:
@@ -6319,6 +6521,7 @@ def models_list() -> Any:
                 "available_modes": model_data.get("available_modes") or None,
                 "default_pipeline_mode": model_data.get("default_pipeline_mode") or None,
                 "default_upscaler": model_data.get("default_upscaler") if "default_upscaler" in model_data else None,
+                "engine_model": model_data.get("engine_model") or None,
                 # Delivery descriptor: tells a node how to obtain the weights.
                 # Never exposes our local filesystem paths.
                 "source": _public_model_source(model_data),
@@ -6581,7 +6784,7 @@ def tester_distribution_requests() -> Any:
 @app.route("/credits/tester-distribution/requests/<int:request_id>/resolve", methods=["POST"])
 def tester_distribution_resolve(request_id: int) -> Any:
     """Admin-only resolution endpoint for tester distribution requests."""
-    if not check_join_token():
+    if not SERVER_JOIN_TOKEN or not check_join_token():
         abort(403)
 
     data = request.get_json(silent=True) or {}
@@ -6634,6 +6837,269 @@ def node_payouts(node_id: str) -> Any:
     limit = _clamp(_coerce_int(request.args.get("limit"), 50), 1, 200)
     payouts = settlement.get_node_payouts(node_id, limit=limit)
     return jsonify({"node_id": node_id, "payouts": payouts})
+
+
+def _payout_claim_batch_response(batch: Dict[str, Any]) -> Dict[str, Any]:
+    payload = dict(batch)
+    tx_hash = str(payload.get("publish_tx_hash") or "").strip().lower() or None
+    payload.update(
+        {
+            "publish_tx_hash": tx_hash,
+            "network": payout_chain.SEPOLIA_NETWORK,
+            "chain_id": payout_chain.SEPOLIA_CHAIN_ID,
+            "treasury_wallet": payout_chain.TREASURY_WALLET or None,
+            "claim_contract": payout_chain.CLAIM_CONTRACT or None,
+            "token_address": payout_chain.HAI_TOKEN_ADDRESS or None,
+            "minimum_confirmations": payout_chain.MIN_CONFIRMATIONS,
+            "publish_payload": payout_chain.publish_payload(
+                int(payload["batch_id"]),
+                str(payload["merkle_root"]),
+                int(payload["total_amount_wei"]),
+            ),
+            "explorer_url": (
+                f"https://sepolia.etherscan.io/tx/{tx_hash}" if tx_hash else None
+            ),
+        }
+    )
+    return payload
+
+
+def _payout_claim_response(claim: Dict[str, Any]) -> Dict[str, Any]:
+    payload = dict(claim)
+    tx_hash = str(payload.get("claimed_tx_hash") or "").strip().lower() or None
+    payload.update(
+        {
+            "claimed_tx_hash": tx_hash,
+            "network": payout_chain.SEPOLIA_NETWORK,
+            "chain_id": payout_chain.SEPOLIA_CHAIN_ID,
+            "claim_contract": payout_chain.CLAIM_CONTRACT or None,
+            "token_address": payout_chain.HAI_TOKEN_ADDRESS or None,
+            "minimum_confirmations": payout_chain.MIN_CONFIRMATIONS,
+            "explorer_url": (
+                f"https://sepolia.etherscan.io/tx/{tx_hash}" if tx_hash else None
+            ),
+        }
+    )
+    return payload
+
+
+@app.route("/payouts/claim-batches", methods=["GET"])
+def payout_claim_batches() -> Any:
+    """List immutable operator payout roots and publication state."""
+    if not rate_limit(f"payout-claim-batches:{request.remote_addr}", limit=120):
+        return jsonify({"error": "rate limit"}), 429
+    limit = _clamp(_coerce_int(request.args.get("limit"), 50), 1, 200)
+    batches = [
+        _payout_claim_batch_response(batch)
+        for batch in payout_claims.list_batches(limit)
+    ]
+    response = jsonify(
+        {
+            "batches": batches,
+            "unbatched_payout_count": payout_claims.count_unbatched_payouts(),
+            "network": payout_chain.SEPOLIA_NETWORK,
+            "chain_id": payout_chain.SEPOLIA_CHAIN_ID,
+            "treasury_wallet": payout_chain.TREASURY_WALLET or None,
+            "claim_contract": payout_chain.CLAIM_CONTRACT or None,
+            "token_address": payout_chain.HAI_TOKEN_ADDRESS or None,
+            "minimum_confirmations": payout_chain.MIN_CONFIRMATIONS,
+        }
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/payouts/claim-batches", methods=["POST"])
+def create_payout_claim_batch() -> Any:
+    """Snapshot final simulated payouts after treasury wallet authorization."""
+    if not rate_limit(f"payout-claim-batch-create:{request.remote_addr}", limit=20):
+        return jsonify({"error": "rate limit"}), 429
+    treasury = payout_chain.TREASURY_WALLET
+    if not treasury or not WALLET_REGEX.fullmatch(treasury):
+        return jsonify({"error": "treasury_wallet_not_configured"}), 503
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "malformed_payload"}), 400
+    wallet = str(data.get("wallet") or "").strip().lower()
+    if not wallet or not WALLET_REGEX.fullmatch(wallet):
+        return jsonify({"error": "invalid_wallet"}), 400
+    if wallet != treasury:
+        return jsonify({"error": "treasury_wallet_required"}), 403
+    nonce = str(data.get("nonce") or "").strip()
+    signature = str(data.get("signature") or "").strip()
+    if not nonce or not signature:
+        return jsonify({"error": "missing_signature"}), 400
+    ok, failure = _verify_wallet_signature(
+        wallet,
+        nonce,
+        signature,
+        allowed_purposes={WALLET_NONCE_PURPOSE_NODE_PAYOUT_BATCH_FLUSH},
+        expected_amount=1.0,
+        log_label="Node payout batch flush",
+    )
+    if not ok:
+        return failure
+
+    limit = _clamp(_coerce_int(data.get("limit"), 500), 1, 2000)
+    min_count = _clamp(_coerce_int(data.get("min_count"), 1), 1, limit)
+    try:
+        batch = payout_claims.create_batch(limit=limit, min_count=min_count)
+    except payout_claims.PayoutClaimError as exc:
+        return jsonify({"error": exc.code}), exc.status
+    if batch is None:
+        return jsonify(
+            {
+                "created": False,
+                "batch": None,
+                "unbatched_payout_count": payout_claims.count_unbatched_payouts(),
+            }
+        )
+    return jsonify(
+        {"created": True, "batch": _payout_claim_batch_response(batch)}
+    ), 201
+
+
+@app.route("/payouts/claim-batches/<int:batch_id>/publish", methods=["POST"])
+def publish_payout_claim_batch(batch_id: int) -> Any:
+    """Verify the treasury's exact publishRoot transaction on Sepolia."""
+    if not rate_limit(f"payout-claim-publish:{request.remote_addr}", limit=60):
+        return jsonify({"error": "rate limit"}), 429
+    batch = payout_claims.get_batch(batch_id)
+    if batch is None:
+        return jsonify({"error": "payout_batch_not_found"}), 404
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "malformed_payload"}), 400
+    tx_hash = str(data.get("tx_hash") or "").strip().lower()
+    if (
+        batch.get("status") == "published"
+        and str(batch.get("publish_tx_hash") or "").lower() == tx_hash
+    ):
+        return jsonify(
+            {
+                "status": "published",
+                "batch": _payout_claim_batch_response(batch),
+                "idempotent": True,
+            }
+        )
+    verification = payout_chain.verify_publish_transaction(
+        tx_hash,
+        batch_id,
+        str(batch["merkle_root"]),
+        int(batch["total_amount_wei"]),
+        hai_funding._rpc_call,
+    )
+    if not verification.get("verified"):
+        if verification.get("pending"):
+            try:
+                pending = payout_claims.mark_publish_pending(batch_id, verification)
+            except (sqlite3.IntegrityError, payout_claims.PayoutClaimError) as exc:
+                error = exc.code if isinstance(exc, payout_claims.PayoutClaimError) else str(exc)
+                return jsonify({"error": error}), 409
+            return jsonify(
+                {
+                    "status": "pending",
+                    "batch": _payout_claim_batch_response(pending),
+                    "verification": verification,
+                }
+            ), 202
+        return jsonify({"status": "rejected", **verification}), 422
+    try:
+        published = payout_claims.mark_published(batch_id, verification)
+    except (sqlite3.IntegrityError, payout_claims.PayoutClaimError) as exc:
+        error = exc.code if isinstance(exc, payout_claims.PayoutClaimError) else str(exc)
+        return jsonify({"error": error}), 409
+    log_event(
+        "Node payout root published",
+        batch_id=batch_id,
+        merkle_root=batch["merkle_root"],
+        total_amount_wei=batch["total_amount_wei"],
+        tx_hash=verification["tx_hash"],
+    )
+    return jsonify(
+        {
+            "status": "published",
+            "batch": _payout_claim_batch_response(published),
+            "verification": verification,
+        }
+    )
+
+
+@app.route("/payouts/claims", methods=["GET"])
+def wallet_payout_claims() -> Any:
+    """Return contract-ready claim proofs for one operator wallet."""
+    if not rate_limit(f"payout-claims:{request.remote_addr}", limit=120):
+        return jsonify({"error": "rate limit"}), 429
+    wallet = str(request.args.get("wallet") or "").strip().lower()
+    if not wallet or not WALLET_REGEX.fullmatch(wallet):
+        return jsonify({"error": "invalid_wallet"}), 400
+    try:
+        claims = [
+            _payout_claim_response(claim)
+            for claim in payout_claims.get_wallet_claims(wallet)
+        ]
+    except payout_claims.PayoutClaimError as exc:
+        return jsonify({"error": exc.code}), exc.status
+    response = jsonify({"wallet": wallet, "claims": claims})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route(
+    "/payouts/claims/<int:batch_id>/<int:leaf_index>/confirm",
+    methods=["POST"],
+)
+def confirm_wallet_payout_claim(batch_id: int, leaf_index: int) -> Any:
+    """Mark a claim paid only after its exact RewardClaimed event confirms."""
+    if not rate_limit(f"payout-claim-confirm:{request.remote_addr}", limit=60):
+        return jsonify({"error": "rate limit"}), 429
+    claim = payout_claims.get_claim(batch_id, leaf_index)
+    if claim is None:
+        return jsonify({"error": "payout_claim_not_found"}), 404
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "malformed_payload"}), 400
+    tx_hash = str(data.get("tx_hash") or "").strip().lower()
+    if claim.get("claimed") and str(claim.get("claimed_tx_hash") or "").lower() == tx_hash:
+        return jsonify(
+            {
+                "status": "claimed",
+                "claim": _payout_claim_response(claim),
+                "idempotent": True,
+            }
+        )
+    verification = payout_chain.verify_claim_transaction(
+        tx_hash,
+        batch_id,
+        leaf_index,
+        str(claim["wallet"]),
+        int(claim["amount_wei"]),
+        hai_funding._rpc_call,
+    )
+    if not verification.get("verified"):
+        status_code = 202 if verification.get("pending") else 422
+        status = "pending" if verification.get("pending") else "rejected"
+        return jsonify({"status": status, "verification": verification}), status_code
+    try:
+        paid = payout_claims.mark_claimed(batch_id, leaf_index, verification)
+    except (sqlite3.IntegrityError, payout_claims.PayoutClaimError) as exc:
+        error = exc.code if isinstance(exc, payout_claims.PayoutClaimError) else str(exc)
+        return jsonify({"error": error}), 409
+    log_event(
+        "Node payout claimed",
+        batch_id=batch_id,
+        leaf_index=leaf_index,
+        wallet=claim["wallet"],
+        amount_wei=claim["amount_wei"],
+        tx_hash=verification["tx_hash"],
+    )
+    return jsonify(
+        {
+            "status": "claimed",
+            "claim": _payout_claim_response(paid),
+            "verification": verification,
+        }
+    )
 
 
 @app.route("/credits/ledger", methods=["GET"])
@@ -6887,6 +7353,207 @@ def astra_gallery() -> Any:
     return jsonify(astra_gen.get_gallery(wallet, gallery._attach_result_urls, limit))
 
 
+@app.route("/astra/artifacts/<job_id>/receipt", methods=["GET"])
+def astra_artifact_receipt(job_id: str) -> Any:
+    """Public, prompt-free provenance for one finalized Astra artifact."""
+    normalized_job_id = str(job_id or "").strip()
+    if not normalized_job_id or not JOB_ID_REGEX.fullmatch(normalized_job_id):
+        return jsonify({"error": "invalid_job_id"}), 400
+    if not rate_limit(f"astra-receipt:{request.remote_addr}", limit=120):
+        return jsonify({"error": "rate limit"}), 429
+    try:
+        payload = astra_receipts.get_or_issue_receipt(
+            get_db(), normalized_job_id, OUTPUTS_DIR
+        )
+    except astra_receipts.ReceiptUnavailable as exc:
+        return jsonify({"error": exc.code, "job_id": normalized_job_id}), exc.status
+
+    result = _build_result_payload(normalized_job_id) or {}
+    artifact_kind = str(payload["receipt"]["artifact"].get("kind") or "")
+    payload["artifact_url"] = (
+        result.get("video_url") if artifact_kind == "video" else result.get("image_url")
+    )
+    response = jsonify(payload)
+    response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return response
+
+
+def _receipt_batch_response(batch: Dict[str, Any]) -> Dict[str, Any]:
+    batch_id = int(batch["id"])
+    tx_hash = str(batch.get("anchor_tx_hash") or "").strip().lower() or None
+    return {
+        "batch_id": batch_id,
+        "schema_version": batch["schema_version"],
+        "merkle_root": batch["merkle_root"],
+        "leaf_count": int(batch["leaf_count"]),
+        "status": batch["status"],
+        "created_at": batch["created_at"],
+        "anchor_network": batch.get("anchor_network"),
+        "anchor_chain_id": batch.get("anchor_chain_id"),
+        "anchor_tx_hash": tx_hash,
+        "anchor_block": batch.get("anchor_block"),
+        "anchor_from": batch.get("anchor_from"),
+        "anchor_to": batch.get("anchor_to"),
+        "anchored_at": batch.get("anchored_at"),
+        "anchor_payload": receipt_anchors.build_anchor_payload(
+            batch_id, str(batch["merkle_root"])
+        ),
+        "explorer_url": (
+            f"https://sepolia.etherscan.io/tx/{tx_hash}" if tx_hash else None
+        ),
+    }
+
+
+@app.route("/astra/artifacts/<job_id>/receipt/proof", methods=["GET"])
+def astra_artifact_receipt_proof(job_id: str) -> Any:
+    """Return the Merkle path that independently binds a receipt to its batch."""
+    normalized_job_id = str(job_id or "").strip()
+    if not normalized_job_id or not JOB_ID_REGEX.fullmatch(normalized_job_id):
+        return jsonify({"error": "invalid_job_id"}), 400
+    if not rate_limit(f"astra-receipt-proof:{request.remote_addr}", limit=120):
+        return jsonify({"error": "rate limit"}), 429
+    proof = merkle_batches.get_inclusion_proof(normalized_job_id)
+    if proof is None:
+        receipt = get_db().execute(
+            "SELECT 1 FROM astra_artifact_receipts WHERE job_id=?", (normalized_job_id,)
+        ).fetchone()
+        error = "receipt_not_batched" if receipt else "receipt_not_issued"
+        return jsonify({"error": error, "job_id": normalized_job_id}), 404
+    response = jsonify(proof)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/astra/receipts/batches", methods=["GET"])
+def astra_receipt_batches() -> Any:
+    """List public receipt roots and their independently verified anchor state."""
+    if not rate_limit(f"astra-receipt-batches:{request.remote_addr}", limit=120):
+        return jsonify({"error": "rate limit"}), 429
+    limit = _clamp(_coerce_int(request.args.get("limit"), 50), 1, 200)
+    batches = [_receipt_batch_response(row) for row in merkle_batches.list_batches(limit)]
+    response = jsonify(
+        {
+            "batches": batches,
+            "unbatched_receipt_count": merkle_batches.count_unbatched_receipts(),
+            "network": receipt_anchors.SEPOLIA_NETWORK,
+            "chain_id": receipt_anchors.SEPOLIA_CHAIN_ID,
+            "treasury_wallet": receipt_anchors.TREASURY_WALLET or None,
+            "minimum_confirmations": receipt_anchors.MIN_CONFIRMATIONS,
+        }
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/astra/receipts/batches", methods=["POST"])
+def astra_create_receipt_batch() -> Any:
+    """Build a batch after the configured treasury proves wallet control."""
+    if not rate_limit(f"astra-receipt-batch-create:{request.remote_addr}", limit=20):
+        return jsonify({"error": "rate limit"}), 429
+    treasury = receipt_anchors.TREASURY_WALLET
+    if not treasury or not WALLET_REGEX.fullmatch(treasury):
+        return jsonify({"error": "treasury_wallet_not_configured"}), 503
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "malformed_payload"}), 400
+    wallet = str(data.get("wallet") or "").strip().lower()
+    if not wallet or not WALLET_REGEX.fullmatch(wallet):
+        return jsonify({"error": "invalid_wallet"}), 400
+    if wallet != treasury:
+        return jsonify({"error": "treasury_wallet_required"}), 403
+    nonce = str(data.get("nonce") or "").strip()
+    signature = str(data.get("signature") or "").strip()
+    if not nonce or not signature:
+        return jsonify({"error": "missing_signature"}), 400
+    ok, failure = _verify_wallet_signature(
+        wallet,
+        nonce,
+        signature,
+        allowed_purposes={WALLET_NONCE_PURPOSE_RECEIPT_BATCH_FLUSH},
+        expected_amount=1.0,
+        log_label="Receipt batch flush",
+    )
+    if not ok:
+        return failure
+
+    limit = _clamp(_coerce_int(data.get("limit"), 100), 1, 1000)
+    min_count = _clamp(_coerce_int(data.get("min_count"), 1), 1, limit)
+    batch = merkle_batches.create_batch(limit=limit, min_count=min_count)
+    if batch is None:
+        return jsonify(
+            {
+                "created": False,
+                "batch": None,
+                "unbatched_receipt_count": merkle_batches.count_unbatched_receipts(),
+            }
+        )
+    return jsonify({"created": True, "batch": _receipt_batch_response(batch)}), 201
+
+
+@app.route("/astra/receipts/batches/<int:batch_id>/anchor", methods=["POST"])
+def astra_anchor_receipt_batch(batch_id: int) -> Any:
+    """Verify a treasury transaction and attach it to exactly one Merkle root."""
+    if not rate_limit(f"astra-receipt-anchor:{request.remote_addr}", limit=60):
+        return jsonify({"error": "rate limit"}), 429
+    batch = merkle_batches.get_batch(batch_id)
+    if batch is None:
+        return jsonify({"error": "batch_not_found"}), 404
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "malformed_payload"}), 400
+    tx_hash = str(data.get("tx_hash") or "").strip().lower()
+    if (
+        batch.get("status") == "anchored"
+        and str(batch.get("anchor_tx_hash") or "").lower() == tx_hash
+    ):
+        return jsonify(
+            {"status": "anchored", "batch": _receipt_batch_response(batch), "idempotent": True}
+        )
+
+    verification = receipt_anchors.verify_anchor_transaction(
+        tx_hash,
+        batch_id,
+        str(batch["merkle_root"]),
+        hai_funding._rpc_call,
+    )
+    if not verification.get("verified"):
+        if verification.get("pending"):
+            pending_batch = batch
+            if all(
+                key in verification
+                for key in (
+                    "network", "chain_id", "tx_hash", "block_number",
+                    "from", "to", "calldata",
+                )
+            ):
+                try:
+                    pending_batch = merkle_batches.mark_anchor_pending(batch_id, verification)
+                except (sqlite3.IntegrityError, ValueError) as exc:
+                    return jsonify({"error": str(exc)}), 409
+            return jsonify(
+                {
+                    "status": "pending",
+                    "batch": _receipt_batch_response(pending_batch),
+                    **verification,
+                }
+            ), 202
+        return jsonify({"status": "rejected", **verification}), 422
+    try:
+        anchored = merkle_batches.mark_anchored(batch_id, verification)
+    except (sqlite3.IntegrityError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 409
+    log_event(
+        "Astra receipt batch anchored",
+        batch_id=batch_id,
+        merkle_root=batch["merkle_root"],
+        tx_hash=verification["tx_hash"],
+        block_number=verification["block_number"],
+    )
+    return jsonify(
+        {"status": "anchored", "batch": _receipt_batch_response(anchored), "verification": verification}
+    )
+
+
 @app.route("/astra/recent", methods=["GET"])
 def astra_recent() -> Any:
     """Public strip of the latest completed Astra reward images, for the
@@ -7107,6 +7774,652 @@ def api_marketplace_browse() -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Music Discover — public publishing/listening/social layer
+# ---------------------------------------------------------------------------
+
+
+def _request_publication_wallet_payload() -> Tuple[Optional[str], Optional[Any], Dict[str, Any]]:
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return None, (jsonify({"error": "malformed_payload", "message": "JSON object required"}), 400), {}
+    wallet = str(data.get("wallet", "")).strip().lower()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return None, (jsonify({"error": "invalid wallet"}), 400), data
+    nonce_str = str(data.get("nonce", "")).strip()
+    signature = str(data.get("signature", "")).strip()
+    if (not nonce_str or not signature) and not data.get("read_session"):
+        return None, (jsonify({"error": "signature_required", "message": "nonce and signature are required"}), 400), data
+    return wallet, None, data
+
+
+def _verify_music_wallet_action(
+    wallet: str,
+    data: Dict[str, Any],
+    *,
+    purpose: str,
+    publication_id: Optional[str] = None,
+    playlist_id: Optional[str] = None,
+    log_label: str,
+) -> Optional[Any]:
+    if data.get("read_session"):
+        if purpose not in {WALLET_NONCE_PURPOSE_MUSIC_LIBRARY_READ, WALLET_NONCE_PURPOSE_PLAYLIST_READ}:
+            return jsonify({"error": "signature_required", "message": "A read-only session cannot authorize changes."}), 401
+        session_wallet = music_sessions.resolve(get_db(), data["read_session"])
+        if session_wallet != wallet:
+            return jsonify({"error": "music_session_expired", "message": "Music access expired. Unlock your library again."}), 401
+        return None
+    sig_ok, sig_err = _verify_wallet_signature(
+        wallet,
+        str(data.get("nonce", "")).strip(),
+        str(data.get("signature", "")).strip(),
+        allowed_purposes={purpose},
+        expected_amount=1.0,
+        log_label=log_label,
+    )
+    if not sig_ok:
+        return sig_err
+    nonce_str = str(data.get("nonce", "")).strip()
+    if publication_id and not _nonce_message_has(wallet, nonce_str, f"publication_id: {publication_id}"):
+        return jsonify({"error": "invalid_nonce", "message": "nonce publication context mismatch"}), 400
+    if playlist_id and not _nonce_message_has(wallet, nonce_str, f"playlist_id: {playlist_id}"):
+        return jsonify({"error": "invalid_nonce", "message": "nonce playlist context mismatch"}), 400
+    return None
+
+
+@app.route("/music/session", methods=["POST"])
+def api_music_read_session() -> Any:
+    if not rate_limit(f"music-session:{request.remote_addr}", limit=30):
+        return jsonify({"error": "rate limit"}), 429
+    wallet, error_response, data = _request_publication_wallet_payload()
+    if error_response:
+        return error_response
+    ok, error = _verify_wallet_signature(
+        wallet, str(data.get("nonce", "")), str(data.get("signature", "")),
+        allowed_purposes={WALLET_NONCE_PURPOSE_MUSIC_READ_SESSION}, expected_amount=1.0,
+        log_label="Music read session",
+    )
+    if not ok:
+        return error
+    response = jsonify(music_sessions.create(get_db(), wallet))
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/music/discover", methods=["GET", "POST"])
+def api_music_discover() -> Any:
+    requester_wallet = None
+    source: Any = request.args
+    if request.method == "POST":
+        wallet, error_response, data = _request_publication_wallet_payload()
+        if error_response:
+            return error_response
+        assert wallet is not None
+        verify_error = _verify_music_wallet_action(
+            wallet,
+            data,
+            purpose=WALLET_NONCE_PURPOSE_MUSIC_LIBRARY_READ,
+            log_label="Music discover read",
+        )
+        if verify_error:
+            return verify_error
+        requester_wallet = wallet
+        source = data
+    search = str(source.get("search", "")).strip() or None
+    style = str(source.get("style", "")).strip() or None
+    sort = str(source.get("sort", "newest")).strip()
+    creator_wallet = str(source.get("creator_wallet", "")).strip().lower() or None
+    if creator_wallet and not WALLET_REGEX.match(creator_wallet):
+        creator_wallet = None
+    include_internal = bool(requester_wallet and creator_wallet and requester_wallet == creator_wallet)
+    limit = _clamp(_coerce_int(source.get("limit"), 24), 1, music_discover.MAX_LIMIT)
+    offset = max(0, _coerce_int(source.get("offset"), 0))
+    return jsonify(
+        music_discover.browse_publications(
+            search=search,
+            style=style,
+            sort=sort,
+            limit=limit,
+            offset=offset,
+            liked_by_wallet=requester_wallet,
+            saved_by_wallet=requester_wallet,
+            creator_wallet=creator_wallet,
+            include_internal=include_internal,
+        )
+    )
+
+
+@app.route("/music/discover/<publication_id>", methods=["GET", "POST"])
+def api_music_publication_detail(publication_id: str) -> Any:
+    requester_wallet = None
+    if request.method == "POST":
+        wallet, error_response, data = _request_publication_wallet_payload()
+        if error_response:
+            return error_response
+        assert wallet is not None
+        verify_error = _verify_music_wallet_action(
+            wallet,
+            data,
+            purpose=WALLET_NONCE_PURPOSE_MUSIC_LIBRARY_READ,
+            publication_id=publication_id,
+            log_label="Music publication read",
+        )
+        if verify_error:
+            return verify_error
+        requester_wallet = wallet
+    publication = music_discover.get_publication(publication_id, liked_by_wallet=requester_wallet, saved_by_wallet=requester_wallet)
+    if not publication:
+        return jsonify({"error": "publication_not_found"}), 404
+    return jsonify(publication)
+
+
+@app.route("/music/publications", methods=["POST"])
+def api_music_publish() -> Any:
+    if not rate_limit(f"music-publish:{request.remote_addr}", limit=30):
+        return jsonify({"error": "rate limit"}), 429
+    wallet, error_response, data = _request_publication_wallet_payload()
+    if error_response:
+        return error_response
+    assert wallet is not None
+    job_id = str(data.get("job_id", "")).strip()
+    if not job_id:
+        return jsonify({"error": "missing job_id"}), 400
+    sig_ok, sig_err = _verify_wallet_signature(
+        wallet,
+        str(data.get("nonce", "")).strip(),
+        str(data.get("signature", "")).strip(),
+        allowed_purposes={WALLET_NONCE_PURPOSE_MUSIC_PUBLISH},
+        expected_amount=1.0,
+        log_label="Music publication",
+    )
+    if not sig_ok:
+        return sig_err
+    if not _nonce_message_has(wallet, str(data.get("nonce", "")).strip(), f"job_id: {job_id}"):
+        return jsonify({"error": "invalid_nonce", "message": "nonce job context mismatch"}), 400
+    raw_tags = data.get("tags")
+    tags = [str(item) for item in raw_tags] if isinstance(raw_tags, list) else None
+    result = music_discover.publish_song(
+        job_id=job_id,
+        creator_wallet=wallet,
+        title=str(data.get("title", "")).strip(),
+        style=str(data.get("style", "")).strip(),
+        tags=tags,
+    )
+    if not result.get("ok"):
+        status = 404 if result.get("error") == "job_not_found" else 403 if result.get("error") == "not_your_job" else 400
+        return jsonify({"error": result.get("error")}), status
+    return jsonify(result["publication"]), 200 if result["publication"].get("already_published") else 201
+
+
+@app.route("/music/publications/<publication_id>", methods=["DELETE"])
+def api_music_unpublish(publication_id: str) -> Any:
+    if not rate_limit(f"music-unpublish:{request.remote_addr}", limit=30):
+        return jsonify({"error": "rate limit"}), 429
+    wallet, error_response, data = _request_publication_wallet_payload()
+    if error_response:
+        return error_response
+    assert wallet is not None
+    sig_ok, sig_err = _verify_wallet_signature(
+        wallet,
+        str(data.get("nonce", "")).strip(),
+        str(data.get("signature", "")).strip(),
+        allowed_purposes={WALLET_NONCE_PURPOSE_MUSIC_UNPUBLISH},
+        expected_amount=1.0,
+        log_label="Music unpublish",
+    )
+    if not sig_ok:
+        return sig_err
+    if not _nonce_message_has(wallet, str(data.get("nonce", "")).strip(), f"publication_id: {publication_id}"):
+        return jsonify({"error": "invalid_nonce", "message": "nonce publication context mismatch"}), 400
+    result = music_discover.unpublish_song(publication_id, wallet)
+    if not result.get("ok"):
+        status = 404 if result.get("error") == "publication_not_found" else 403
+        return jsonify({"error": result.get("error")}), status
+    return jsonify({"ok": True})
+
+
+@app.route("/music/publications/<publication_id>/like", methods=["POST"])
+def api_music_like(publication_id: str) -> Any:
+    if not rate_limit(f"music-like:{request.remote_addr}", limit=60):
+        return jsonify({"error": "rate limit"}), 429
+    wallet, error_response, data = _request_publication_wallet_payload()
+    if error_response:
+        return error_response
+    assert wallet is not None
+    sig_ok, sig_err = _verify_wallet_signature(
+        wallet,
+        str(data.get("nonce", "")).strip(),
+        str(data.get("signature", "")).strip(),
+        allowed_purposes={WALLET_NONCE_PURPOSE_MUSIC_LIKE},
+        expected_amount=1.0,
+        log_label="Music like",
+    )
+    if not sig_ok:
+        return sig_err
+    if not _nonce_message_has(wallet, str(data.get("nonce", "")).strip(), f"publication_id: {publication_id}"):
+        return jsonify({"error": "invalid_nonce", "message": "nonce publication context mismatch"}), 400
+    result = music_discover.set_like(publication_id, wallet, liked=bool(data.get("liked", True)))
+    if not result.get("ok"):
+        return jsonify({"error": result.get("error")}), 404
+    return jsonify(result)
+
+
+@app.route("/music/library", methods=["GET", "POST"])
+def api_music_library() -> Any:
+    if request.method == "GET":
+        return jsonify({"error": "signature_required", "message": "signed wallet access is required"}), 401
+    wallet, error_response, data = _request_publication_wallet_payload()
+    if error_response:
+        return error_response
+    assert wallet is not None
+    verify_error = _verify_music_wallet_action(
+        wallet,
+        data,
+        purpose=WALLET_NONCE_PURPOSE_MUSIC_LIBRARY_READ,
+        log_label="Music library read",
+    )
+    if verify_error:
+        return verify_error
+    search = str(data.get("search", "")).strip() or None
+    limit = _clamp(_coerce_int(data.get("limit"), 24), 1, music_discover.MAX_LIMIT)
+    offset = max(0, _coerce_int(data.get("offset"), 0))
+    saved = music_discover.list_saved(wallet=wallet, search=search, limit=limit, offset=offset)
+    return jsonify(
+        {
+            **saved,
+            "recent_liked": music_discover.list_recent_liked(wallet=wallet, limit=12)["publications"],
+            "playlists": music_discover.list_playlists(wallet, requester_wallet=wallet)["playlists"],
+        }
+    )
+
+
+@app.route("/music/publications/<publication_id>/saved", methods=["GET", "POST"])
+def api_music_saved_state(publication_id: str) -> Any:
+    if request.method == "GET":
+        return jsonify({"error": "signature_required", "message": "signed wallet access is required"}), 401
+    wallet, error_response, data = _request_publication_wallet_payload()
+    if error_response:
+        return error_response
+    assert wallet is not None
+    verify_error = _verify_music_wallet_action(
+        wallet,
+        data,
+        purpose=WALLET_NONCE_PURPOSE_MUSIC_LIBRARY_READ,
+        publication_id=publication_id,
+        log_label="Music saved state read",
+    )
+    if verify_error:
+        return verify_error
+    return jsonify({"publication_id": publication_id, "saved": music_discover.is_saved(publication_id, wallet)})
+
+
+@app.route("/music/publications/<publication_id>/save", methods=["POST", "DELETE"])
+def api_music_save(publication_id: str) -> Any:
+    if not rate_limit(f"music-save:{request.remote_addr}", limit=60):
+        return jsonify({"error": "rate limit"}), 429
+    wallet, error_response, data = _request_publication_wallet_payload()
+    if error_response:
+        return error_response
+    assert wallet is not None
+    purpose = WALLET_NONCE_PURPOSE_MUSIC_SAVE if request.method == "POST" else WALLET_NONCE_PURPOSE_MUSIC_UNSAVE
+    verify_error = _verify_music_wallet_action(
+        wallet,
+        data,
+        purpose=purpose,
+        publication_id=publication_id,
+        log_label="Music library save",
+    )
+    if verify_error:
+        return verify_error
+    result = music_discover.set_saved(publication_id, wallet, saved=request.method == "POST")
+    if not result.get("ok"):
+        return jsonify({"error": result.get("error")}), 404
+    return jsonify(result)
+
+
+@app.route("/music/playlists", methods=["GET"])
+def api_music_playlists_public() -> Any:
+    wallet = request.args.get("wallet", "").strip().lower()
+    if not wallet or not WALLET_REGEX.match(wallet):
+        return jsonify({"error": "invalid_wallet"}), 400
+    return jsonify(music_discover.list_playlists(wallet, requester_wallet=None))
+
+
+@app.route("/music/playlists/mine", methods=["POST"])
+def api_music_playlists_mine() -> Any:
+    wallet, error_response, data = _request_publication_wallet_payload()
+    if error_response:
+        return error_response
+    assert wallet is not None
+    verify_error = _verify_music_wallet_action(
+        wallet,
+        data,
+        purpose=WALLET_NONCE_PURPOSE_PLAYLIST_READ,
+        playlist_id="library",
+        log_label="Music playlist list",
+    )
+    if verify_error:
+        return verify_error
+    return jsonify(music_discover.list_playlists(wallet, requester_wallet=wallet))
+
+
+@app.route("/music/playlists", methods=["POST"])
+def api_music_playlist_create() -> Any:
+    if not rate_limit(f"music-playlist-create:{request.remote_addr}", limit=30):
+        return jsonify({"error": "rate limit"}), 429
+    wallet, error_response, data = _request_publication_wallet_payload()
+    if error_response:
+        return error_response
+    assert wallet is not None
+    verify_error = _verify_music_wallet_action(
+        wallet,
+        data,
+        purpose=WALLET_NONCE_PURPOSE_PLAYLIST_CREATE,
+        playlist_id="new",
+        log_label="Music playlist create",
+    )
+    if verify_error:
+        return verify_error
+    result = music_discover.create_playlist(
+        owner_wallet=wallet,
+        title=str(data.get("title", "")).strip(),
+        description=str(data.get("description", "")).strip(),
+        is_public=bool(data.get("is_public", False)),
+    )
+    if not result.get("ok"):
+        return jsonify({"error": result.get("error")}), 400
+    return jsonify(result["playlist"]), 201
+
+
+@app.route("/music/playlists/<playlist_id>", methods=["GET"])
+def api_music_playlist_detail(playlist_id: str) -> Any:
+    playlist = music_discover.get_playlist(playlist_id, requester_wallet=None)
+    if not playlist:
+        return jsonify({"error": "playlist_not_found"}), 404
+    return jsonify(playlist)
+
+
+@app.route("/music/playlists/<playlist_id>/access", methods=["POST"])
+def api_music_playlist_access(playlist_id: str) -> Any:
+    wallet, error_response, data = _request_publication_wallet_payload()
+    if error_response:
+        return error_response
+    assert wallet is not None
+    verify_error = _verify_music_wallet_action(
+        wallet,
+        data,
+        purpose=WALLET_NONCE_PURPOSE_PLAYLIST_READ,
+        playlist_id=playlist_id,
+        log_label="Music playlist access",
+    )
+    if verify_error:
+        return verify_error
+    playlist = music_discover.get_playlist(playlist_id, requester_wallet=wallet)
+    if not playlist:
+        return jsonify({"error": "playlist_not_found"}), 404
+    return jsonify(playlist)
+
+
+@app.route("/music/playlists/<playlist_id>", methods=["PATCH", "DELETE"])
+def api_music_playlist_modify(playlist_id: str) -> Any:
+    if not rate_limit(f"music-playlist-modify:{request.remote_addr}", limit=60):
+        return jsonify({"error": "rate limit"}), 429
+    wallet, error_response, data = _request_publication_wallet_payload()
+    if error_response:
+        return error_response
+    assert wallet is not None
+    purpose = WALLET_NONCE_PURPOSE_PLAYLIST_DELETE if request.method == "DELETE" else WALLET_NONCE_PURPOSE_PLAYLIST_UPDATE
+    verify_error = _verify_music_wallet_action(
+        wallet,
+        data,
+        purpose=purpose,
+        playlist_id=playlist_id,
+        log_label="Music playlist modify",
+    )
+    if verify_error:
+        return verify_error
+    if request.method == "DELETE":
+        result = music_discover.delete_playlist(playlist_id, owner_wallet=wallet)
+        if not result.get("ok"):
+            return jsonify({"error": result.get("error")}), 404
+        return jsonify(result)
+    result = music_discover.update_playlist(
+        playlist_id,
+        owner_wallet=wallet,
+        title=str(data["title"]).strip() if "title" in data else None,
+        description=str(data["description"]).strip() if "description" in data else None,
+        is_public=bool(data["is_public"]) if "is_public" in data else None,
+    )
+    if not result.get("ok"):
+        status = 400 if result.get("error") == "missing_title" else 404
+        return jsonify({"error": result.get("error")}), status
+    return jsonify(result["playlist"])
+
+
+@app.route("/music/playlists/<playlist_id>/items", methods=["POST"])
+def api_music_playlist_add_item(playlist_id: str) -> Any:
+    if not rate_limit(f"music-playlist-item:{request.remote_addr}", limit=80):
+        return jsonify({"error": "rate limit"}), 429
+    wallet, error_response, data = _request_publication_wallet_payload()
+    if error_response:
+        return error_response
+    assert wallet is not None
+    publication_id = str(data.get("publication_id", "")).strip()
+    if not publication_id:
+        return jsonify({"error": "missing_publication_id"}), 400
+    verify_error = _verify_music_wallet_action(
+        wallet,
+        data,
+        purpose=WALLET_NONCE_PURPOSE_PLAYLIST_ADD,
+        publication_id=publication_id,
+        playlist_id=playlist_id,
+        log_label="Music playlist add",
+    )
+    if verify_error:
+        return verify_error
+    result = music_discover.add_playlist_item(playlist_id, publication_id, owner_wallet=wallet)
+    if not result.get("ok"):
+        status = 404 if result.get("error") in {"playlist_not_found", "publication_not_found"} else 400
+        return jsonify({"error": result.get("error")}), status
+    return jsonify(result["playlist"])
+
+
+@app.route("/music/playlists/<playlist_id>/items/<publication_id>", methods=["DELETE"])
+def api_music_playlist_remove_item(playlist_id: str, publication_id: str) -> Any:
+    if not rate_limit(f"music-playlist-item:{request.remote_addr}", limit=80):
+        return jsonify({"error": "rate limit"}), 429
+    wallet, error_response, data = _request_publication_wallet_payload()
+    if error_response:
+        return error_response
+    assert wallet is not None
+    verify_error = _verify_music_wallet_action(
+        wallet,
+        data,
+        purpose=WALLET_NONCE_PURPOSE_PLAYLIST_REMOVE,
+        publication_id=publication_id,
+        playlist_id=playlist_id,
+        log_label="Music playlist remove",
+    )
+    if verify_error:
+        return verify_error
+    result = music_discover.remove_playlist_item(playlist_id, publication_id, owner_wallet=wallet)
+    if not result.get("ok"):
+        return jsonify({"error": result.get("error")}), 404
+    return jsonify(result["playlist"])
+
+
+@app.route("/music/playlists/<playlist_id>/reorder", methods=["POST"])
+def api_music_playlist_reorder(playlist_id: str) -> Any:
+    if not rate_limit(f"music-playlist-reorder:{request.remote_addr}", limit=60):
+        return jsonify({"error": "rate limit"}), 429
+    wallet, error_response, data = _request_publication_wallet_payload()
+    if error_response:
+        return error_response
+    assert wallet is not None
+    verify_error = _verify_music_wallet_action(
+        wallet,
+        data,
+        purpose=WALLET_NONCE_PURPOSE_PLAYLIST_REORDER,
+        playlist_id=playlist_id,
+        log_label="Music playlist reorder",
+    )
+    if verify_error:
+        return verify_error
+    raw_ids = data.get("publication_ids")
+    if not isinstance(raw_ids, list):
+        return jsonify({"error": "invalid_publication_ids"}), 400
+    result = music_discover.reorder_playlist_items(
+        playlist_id,
+        [str(item) for item in raw_ids],
+        owner_wallet=wallet,
+    )
+    if not result.get("ok"):
+        return jsonify({"error": result.get("error")}), 404
+    return jsonify(result["playlist"])
+
+
+@app.route("/music/creator/<wallet>", methods=["GET", "POST"])
+def api_music_creator(wallet: str) -> Any:
+    requester_wallet = None
+    source: Any = request.args
+    if request.method == "POST":
+        viewer, error_response, data = _request_publication_wallet_payload()
+        if error_response:
+            return error_response
+        assert viewer is not None
+        verify_error = _verify_music_wallet_action(
+            viewer,
+            data,
+            purpose=WALLET_NONCE_PURPOSE_MUSIC_LIBRARY_READ,
+            log_label="Music creator read",
+        )
+        if verify_error:
+            return verify_error
+        requester_wallet = viewer
+        source = data
+    sort = str(source.get("sort", "newest")).strip()
+    creator = music_discover.get_creator(wallet, sort=sort, requester_wallet=requester_wallet)
+    if not creator:
+        return jsonify({"error": "creator_not_found"}), 404
+    return jsonify(creator)
+
+
+@app.route("/music/publications/<publication_id>/play", methods=["POST"])
+def api_music_play(publication_id: str) -> Any:
+    if not rate_limit(f"music-play:{request.remote_addr}", limit=120):
+        return jsonify({"error": "rate limit"}), 429
+    data = request.get_json(silent=True) or {}
+    seconds = data.get("seconds_listened", 0)
+    try:
+        seconds_listened = float(seconds)
+    except (TypeError, ValueError):
+        seconds_listened = 0.0
+    completed = bool(data.get("completed", False))
+    listener_hint = str(data.get("session_id") or "").strip()[:128]
+    listener_key = "|".join(
+        [
+            publication_id,
+            listener_hint,
+            str(request.headers.get("X-Forwarded-For") or request.remote_addr or ""),
+            str(request.headers.get("User-Agent") or "")[:160],
+        ]
+    )
+    result = music_discover.record_play(
+        publication_id,
+        listener_key=listener_key,
+        seconds_listened=seconds_listened,
+        completed=completed,
+    )
+    if not result.get("ok"):
+        return jsonify({"error": result.get("error")}), 404
+    return jsonify(result)
+
+
+@app.route("/music/publications/<publication_id>/audio", methods=["GET"])
+def api_music_audio(publication_id: str) -> Any:
+    row = get_db().execute(
+        """
+        SELECT a.filename, a.content_type, a.path
+        FROM music_publications p
+        JOIN artifacts a ON a.id = p.audio_artifact_id
+        WHERE p.id = ? AND p.state = 'published' AND a.kind = 'audio'
+        """,
+        (publication_id,),
+    ).fetchone()
+    if not row:
+        return jsonify({"error": "publication_not_found"}), 404
+    if not _artifact_url(str(row["path"] or "")):
+        return jsonify({"error": "audio_unavailable"}), 404
+    path = Path(str(row["path"])).resolve()
+    if not path.is_file():
+        return jsonify({"error": "audio_missing"}), 410
+    return send_file(
+        path,
+        mimetype=str(row["content_type"] or "audio/mpeg"),
+        download_name=str(row["filename"] or f"{publication_id}.mp3"),
+        conditional=True,
+    )
+
+
+@app.route("/music/publications/<publication_id>/cover.svg", methods=["GET"])
+def api_music_cover(publication_id: str) -> Any:
+    publication = music_discover.get_publication(publication_id, include_internal=True)
+    if not publication:
+        return jsonify({"error": "publication_not_found"}), 404
+    seed = str(publication.get("cover_art_seed") or publication_id)
+    title = html.escape(str(publication.get("title") or "HavnAI"), quote=True)
+    hue_a = int(seed[:2], 16) % 360
+    hue_b = (hue_a + 142) % 360
+    hue_c = (hue_a + 52) % 360
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640" role="img" aria-label="{title}">
+<defs>
+<linearGradient id="g" x1="0" x2="1" y1="0" y2="1"><stop offset="0" stop-color="hsl({hue_a} 84% 56%)"/><stop offset="0.55" stop-color="hsl({hue_b} 75% 42%)"/><stop offset="1" stop-color="hsl({hue_c} 88% 64%)"/></linearGradient>
+<filter id="blur"><feGaussianBlur stdDeviation="24"/></filter>
+</defs>
+<rect width="640" height="640" fill="#061016"/>
+<rect width="640" height="640" fill="url(#g)" opacity="0.92"/>
+<path d="M58 410 C170 286 228 488 348 344 S512 198 594 282 V640 H58 Z" fill="#061016" opacity="0.42"/>
+<circle cx="{120 + int(seed[2:4], 16)}" cy="{110 + int(seed[4:6], 16)}" r="118" fill="#fff" opacity="0.16" filter="url(#blur)"/>
+<circle cx="{310 + int(seed[6:8], 16) % 120}" cy="{300 + int(seed[8:10], 16) % 130}" r="154" fill="#fff" opacity="0.1" filter="url(#blur)"/>
+<g fill="none" stroke="#fff" stroke-opacity="0.55" stroke-width="14">
+<path d="M178 392 V205 L438 158 V344"/>
+<circle cx="178" cy="414" r="54" fill="#071017" fill-opacity="0.28"/>
+<circle cx="438" cy="366" r="54" fill="#071017" fill-opacity="0.28"/>
+</g>
+</svg>"""
+    return Response(svg, mimetype="image/svg+xml")
+
+
+@app.route("/music/playlists/<playlist_id>/cover.svg", methods=["GET"])
+def api_music_playlist_cover(playlist_id: str) -> Any:
+    row = get_db().execute("SELECT * FROM music_playlists WHERE id=?", (playlist_id,)).fetchone()
+    if not row or not bool(row["is_public"]):
+        return jsonify({"error": "playlist_not_found"}), 404
+    seed = str(row["artwork_seed"] or playlist_id)
+    hue_a = int(seed[:2], 16) % 360
+    hue_b = (hue_a + 118) % 360
+    hue_c = (hue_a + 224) % 360
+    tiles = music_discover.playlist_art_tiles(playlist_id) if bool(row["is_public"]) else []
+    tile_markup = ""
+    for index, url in enumerate(tiles[:4]):
+        x = 0 if index % 2 == 0 else 320
+        y = 0 if index < 2 else 320
+        tile_markup += f'<image href="{html.escape(url, quote=True)}" x="{x}" y="{y}" width="320" height="320" preserveAspectRatio="xMidYMid slice"/>'
+    fallback = f"""
+<rect width="640" height="640" fill="hsl({hue_a} 76% 46%)"/>
+<path d="M0 492 C118 370 202 508 320 360 S514 192 640 286 V640 H0 Z" fill="hsl({hue_b} 70% 36%)" opacity="0.82"/>
+<path d="M86 162 C184 74 294 110 372 206 S514 264 590 150" fill="none" stroke="hsl({hue_c} 92% 70%)" stroke-width="34" stroke-linecap="round" opacity="0.62"/>
+<g fill="none" stroke="#fff" stroke-opacity="0.62" stroke-width="16"><path d="M210 400 V204 L446 164 V342"/><circle cx="210" cy="424" r="52"/><circle cx="446" cy="366" r="52"/></g>
+"""
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640" role="img" aria-label="HavnAI playlist artwork">
+<defs><filter id="soft"><feGaussianBlur stdDeviation="18"/></filter></defs>
+<rect width="640" height="640" fill="#071018"/>
+{tile_markup or fallback}
+<rect width="640" height="640" fill="none" stroke="#fff" stroke-opacity="0.16" stroke-width="2"/>
+</svg>"""
+    return Response(svg, mimetype="image/svg+xml")
+
+
+# ---------------------------------------------------------------------------
 # Gallery — image/video marketplace
 # ---------------------------------------------------------------------------
 
@@ -7156,7 +8469,7 @@ def api_gallery_create_listing() -> Any:
     price = data.get("price_credits")
     try:
         price_credits = float(price)
-        if price_credits <= 0:
+        if not math.isfinite(price_credits) or price_credits <= 0:
             raise ValueError
     except (TypeError, ValueError):
         return jsonify({"error": "invalid price_credits — must be > 0"}), 400
@@ -7168,6 +8481,7 @@ def api_gallery_create_listing() -> Any:
         allowed_purposes={WALLET_NONCE_PURPOSE_GALLERY_LIST},
         expected_amount=price_credits,
         log_label="Gallery listing",
+        expected_context=f"job_id: {job_id}",
     )
     if not sig_ok:
         return sig_err
@@ -7304,6 +8618,7 @@ def api_gallery_download(listing_id: int) -> Any:
         return send_file(serve, as_attachment=True, download_name=f"havnai-{job_id[:8]}.png")
 
     return jsonify({"error": "asset_not_found", "message": "Output file is no longer available on this server."}), 404
+@app.route("/gallery/listings/<int:listing_id>/purchase", methods=["POST"])
 def api_gallery_purchase(listing_id: int) -> Any:
     """Purchase a gallery listing using credits (requires wallet signature)."""
     if not rate_limit(f"gallery-purchase:{request.remote_addr}", limit=10):
@@ -7330,58 +8645,39 @@ def api_gallery_purchase(listing_id: int) -> Any:
         allowed_purposes={WALLET_NONCE_PURPOSE_GALLERY_PURCHASE},
         expected_amount=price,
         log_label="Gallery purchase",
+        expected_context=f"listing_id: {listing_id}",
     )
     if not sig_ok:
         return sig_err
 
-    # Deduct credits from buyer
-    ok, remaining = credits.deduct_credits(buyer_wallet, price, job_id=f"gallery-{listing_id}")
-    if not ok:
-        return jsonify({
-            "error": "insufficient_credits",
-            "balance": remaining,
-            "cost": price,
-            "message": f"This item costs {price} credits but you only have {remaining}.",
-        }), 402
-
-    # Complete the purchase
-    result = gallery.purchase_listing(listing_id, buyer_wallet)
+    result = gallery.purchase_listing(listing_id, buyer_wallet, settle_credits=True, expected_price=price)
     if not result.get("ok"):
-        # Refund buyer if purchase failed after deduction
-        credits.deposit_credits(buyer_wallet, price, reason=f"gallery-refund-{listing_id}")
-        return jsonify({"error": result.get("error", "purchase_failed")}), 400
+        status = 402 if result.get("error") == "insufficient_credits" else 409
+        return jsonify(result), status
+    return jsonify({"ok": True, "sale": result["sale"], "remaining_credits": result["remaining_credits"]})
 
-    # Credit the previous owner (the wallet that listed it)
-    credits.deposit_credits(
-        result["sale"]["seller_wallet"], price,
-        reason=f"gallery-sale-{listing_id}",
-    )
-
-    return jsonify({
-        "ok": True,
-        "sale": result["sale"],
-        "remaining_credits": remaining,
-    })
 
 
 @app.route("/gallery/listings/<int:listing_id>", methods=["DELETE"])
 def api_gallery_delist(listing_id: int) -> Any:
     """Remove a listing (current owner only, requires signature)."""
     data = request.get_json() or {}
-    wallet = str(data.get("wallet", "")).strip()
+    wallet = str(data.get("wallet", "")).strip().lower()
     if not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid wallet"}), 400
 
     nonce_str = str(data.get("nonce", "")).strip()
     signature = str(data.get("signature", "")).strip()
-    if nonce_str and signature:
-        sig_ok, sig_err = _verify_wallet_signature(
-            wallet, nonce_str, signature,
-            allowed_purposes={WALLET_NONCE_PURPOSE_GALLERY_DELIST},
-            log_label="Gallery delist",
-        )
-        if not sig_ok:
-            return sig_err
+    if not nonce_str or not signature:
+        return jsonify({"error": "signature_required", "message": "nonce and signature are required"}), 400
+    sig_ok, sig_err = _verify_wallet_signature(
+        wallet, nonce_str, signature,
+        allowed_purposes={WALLET_NONCE_PURPOSE_GALLERY_DELIST},
+        log_label="Gallery delist",
+        expected_context=f"listing_id: {listing_id}",
+    )
+    if not sig_ok:
+        return sig_err
 
     ok = gallery.delist(listing_id, wallet)
     if not ok:
@@ -7460,6 +8756,7 @@ def api_gallery_relist() -> Any:
         allowed_purposes={WALLET_NONCE_PURPOSE_GALLERY_RELIST},
         expected_amount=price_credits,
         log_label="Gallery relist",
+        expected_context=f"job_id: {job_id}",
     )
     if not sig_ok:
         return sig_err
@@ -7686,6 +8983,22 @@ def nodes_endpoint() -> Any:
             "models_catalog": models_catalog,
         }
     )
+
+
+@app.route("/v1/network/summary")
+@app.route("/v1/network/control-plane")
+def network_telemetry() -> Any:
+    with LOCK:
+        nodes = [(node_id, dict(info)) for node_id, info in NODES.items()]
+    snapshots = [_worker_snapshot(node_id, node_info=info) for node_id, info in nodes]
+    summary, control = network_status.snapshot(
+        get_db(), snapshots, version=APP_VERSION, lease_seconds=job_helpers.LEASE_SECONDS,
+        receipt_count=merkle_batches.count_unbatched_receipts(),
+        receipt_batches=merkle_batches.list_batches(5),
+    )
+    response = jsonify(control if request.path.endswith("control-plane") else summary)
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.route("/dashboard")

@@ -12,6 +12,9 @@ log (``gallery_ownership_log``) records every transfer.
 
 from __future__ import annotations
 
+import math
+import credits
+
 import json
 import sqlite3
 import time
@@ -245,71 +248,50 @@ def browse_gallery(
     }
 
 
-def purchase_listing(listing_id: int, buyer_wallet: str) -> Dict[str, Any]:
-    """Purchase a gallery listing — transfers exclusive ownership to buyer.
-
-    Returns a dict with ``ok``, ``sale``, and optionally ``error``.
-    Credit deduction and seller credit are handled by the caller in app.py
-    so that we don't create a circular dependency on credits.py.
-    """
+def purchase_listing(listing_id: int, buyer_wallet: str, *, settle_credits: bool = False,
+                     expected_price: Optional[float] = None) -> Dict[str, Any]:
+    """Transfer ownership, sale history and (for API purchases) credits atomically."""
     conn = get_db()
-    row = conn.execute(
-        "SELECT * FROM gallery_listings WHERE id = ? AND listed = 1 AND sold = 0",
-        (listing_id,),
-    ).fetchone()
-    if not row:
-        return {"ok": False, "error": "listing_not_found"}
-
-    listing = _listing_to_dict(row)
-
-    if listing["owner_wallet"].lower() == buyer_wallet.lower():
-        return {"ok": False, "error": "cannot_buy_own_listing"}
-
-    now = time.time()
-    previous_owner = listing["owner_wallet"]
-
-    # Mark as sold and transfer ownership to buyer
-    conn.execute(
-        "UPDATE gallery_listings SET sold = 1, owner_wallet = ?, updated_at = ? WHERE id = ?",
-        (buyer_wallet, now, listing_id),
-    )
-
-    # Record sale
-    conn.execute(
-        """
-        INSERT INTO gallery_sales (listing_id, buyer_wallet, seller_wallet, price_paid, created_at)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (listing_id, buyer_wallet, previous_owner, listing["price_credits"], now),
-    )
-
-    # Record ownership transfer
-    conn.execute(
-        """
-        INSERT INTO gallery_ownership_log
-            (job_id, listing_id, from_wallet, to_wallet, event_type, price_credits, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        (listing["job_id"], listing_id, previous_owner, buyer_wallet, "sale", listing["price_credits"], now),
-    )
-
-    conn.commit()
-
-    sale = {
-        "listing_id": listing_id,
-        "buyer_wallet": buyer_wallet,
-        "seller_wallet": previous_owner,
-        "price_paid": listing["price_credits"],
-        "job_id": listing["job_id"],
-    }
-    log_event(
-        "Gallery sale completed — ownership transferred",
-        listing_id=listing_id,
-        buyer=buyer_wallet,
-        seller=previous_owner,
-        price=listing["price_credits"],
-    )
-    return {"ok": True, "sale": sale, "listing": listing}
+    buyer_wallet = buyer_wallet.strip().lower()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute("SELECT * FROM gallery_listings WHERE id=? AND listed=1 AND sold=0", (listing_id,)).fetchone()
+        if not row:
+            conn.rollback()
+            return {"ok": False, "error": "listing_not_found"}
+        listing = dict(row)
+        previous_owner = str(listing["owner_wallet"] or listing["seller_wallet"]).lower()
+        price = float(listing["price_credits"])
+        if not math.isfinite(price) or price <= 0 or (expected_price is not None and price != expected_price):
+            conn.rollback()
+            return {"ok": False, "error": "listing_price_changed"}
+        if previous_owner == buyer_wallet:
+            conn.rollback()
+            return {"ok": False, "error": "cannot_buy_own_listing"}
+        now = time.time()
+        remaining = None
+        if settle_credits:
+            debit = conn.execute("""UPDATE credits SET balance=balance-?, total_spent=total_spent+?, updated_at=?
+                WHERE wallet=? AND balance>=?""", (price, price, now, buyer_wallet, price))
+            balance = conn.execute("SELECT balance FROM credits WHERE wallet=?", (buyer_wallet,)).fetchone()
+            remaining = float(balance[0]) if balance else 0.0
+            if debit.rowcount != 1:
+                conn.rollback()
+                return {"ok": False, "error": "insufficient_credits", "balance": remaining, "cost": price}
+            credits.deposit_in_transaction(conn, previous_owner, price)
+        conn.execute("UPDATE gallery_listings SET sold=1, listed=0, owner_wallet=?, updated_at=? WHERE id=?", (buyer_wallet, now, listing_id))
+        conn.execute("INSERT INTO gallery_sales (listing_id,buyer_wallet,seller_wallet,price_paid,created_at) VALUES (?,?,?,?,?)",
+                     (listing_id, buyer_wallet, previous_owner, price, now))
+        conn.execute("""INSERT INTO gallery_ownership_log (job_id,listing_id,from_wallet,to_wallet,event_type,price_credits,created_at)
+                     VALUES (?,?,?,?,?,?,?)""", (listing["job_id"], listing_id, previous_owner, buyer_wallet, "sale", price, now))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    sale = {"listing_id": listing_id, "buyer_wallet": buyer_wallet, "seller_wallet": previous_owner,
+            "price_paid": price, "job_id": listing["job_id"]}
+    log_event("Gallery sale completed", listing_id=listing_id, buyer=buyer_wallet, seller=previous_owner, price=price)
+    return {"ok": True, "sale": sale, "remaining_credits": remaining}
 
 
 def relist_owned_asset(
@@ -330,14 +312,14 @@ def relist_owned_asset(
     # Verify ownership: find the most recent listing for this job where owner_wallet matches
     ownership_row = conn.execute(
         """
-        SELECT id, asset_type, model, prompt FROM gallery_listings
-        WHERE job_id = ? AND owner_wallet = ?
-        ORDER BY updated_at DESC LIMIT 1
+        SELECT id, asset_type, model, prompt, owner_wallet FROM gallery_listings
+        WHERE job_id = ?
+        ORDER BY updated_at DESC, id DESC LIMIT 1
         """,
-        (job_id, owner_wallet),
+        (job_id,),
     ).fetchone()
 
-    if not ownership_row:
+    if not ownership_row or str(ownership_row["owner_wallet"]).lower() != owner_wallet.lower():
         return {"ok": False, "error": "not_owner"}
 
     # Prevent duplicate active listings
@@ -385,18 +367,10 @@ def get_owned_assets(wallet: str) -> List[Dict[str, Any]]:
     """Get all assets currently owned by a wallet (most recent listing per job_id)."""
     conn = get_db()
     rows = conn.execute(
-        """
-        SELECT gl.* FROM gallery_listings gl
-        INNER JOIN (
-            SELECT job_id, MAX(updated_at) as max_updated
-            FROM gallery_listings
-            WHERE owner_wallet = ?
-            GROUP BY job_id
-        ) latest ON gl.job_id = latest.job_id AND gl.updated_at = latest.max_updated
-        WHERE gl.owner_wallet = ?
-        ORDER BY gl.updated_at DESC
-        """,
-        (wallet, wallet),
+        """SELECT gl.* FROM gallery_listings gl WHERE LOWER(gl.owner_wallet)=?
+           AND gl.id=(SELECT latest.id FROM gallery_listings latest WHERE latest.job_id=gl.job_id
+                      ORDER BY latest.updated_at DESC, latest.id DESC LIMIT 1)
+           ORDER BY gl.updated_at DESC, gl.id DESC""", (wallet.strip().lower(),)
     ).fetchall()
     return [_listing_to_dict(row) for row in rows]
 
@@ -422,7 +396,7 @@ def get_asset_owner(job_id: str) -> Optional[str]:
         """
         SELECT owner_wallet FROM gallery_listings
         WHERE job_id = ?
-        ORDER BY updated_at DESC LIMIT 1
+        ORDER BY updated_at DESC, id DESC LIMIT 1
         """,
         (job_id,),
     ).fetchone()

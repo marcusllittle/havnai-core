@@ -122,6 +122,14 @@ class ImageDefaultsRegressionTests(unittest.TestCase):
                                     "task_type": "LTX_VIDEO_GEN",
                                     "video_defaults": {"steps": 8, "guidance": 1.0},
                                 },
+                                {
+                                    "name": "music_one",
+                                    "pipeline": "ace_step",
+                                    "task_type": "MUSIC_GEN",
+                                    "music_defaults": {"inference_steps": 8, "batch_size": 2},
+                                    "max_batch_size": 4,
+                                    "timeout_seconds": 1200,
+                                },
                             ]
                         }
                     ),
@@ -145,6 +153,10 @@ class ImageDefaultsRegressionTests(unittest.TestCase):
                     app_module.MANIFEST_MODELS["video_one"]["video_defaults"],
                     {"steps": 8, "guidance": 1.0},
                 )
+                music = app_module.MANIFEST_MODELS["music_one"]
+                self.assertEqual(music["music_defaults"], {"inference_steps": 8, "batch_size": 2})
+                self.assertEqual(music["max_batch_size"], 4)
+                self.assertEqual(music["timeout_seconds"], 1200)
         finally:
             app_module.MANIFEST_MODELS.clear()
             app_module.MANIFEST_MODELS.update(original_manifest)

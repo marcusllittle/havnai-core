@@ -1241,6 +1241,9 @@ def load_manifest() -> None:
             "default_pipeline_mode": entry.get("default_pipeline_mode", ""),
             "default_upscaler": entry.get("default_upscaler", ""),
             "engine_model": entry.get("engine_model", ""),
+            "music_defaults": entry.get("music_defaults", {}),
+            "max_batch_size": entry.get("max_batch_size", 1),
+            "timeout_seconds": entry.get("timeout_seconds", 900),
             # How nodes obtain the weights; see _public_model_source().
             "source": entry.get("source") if isinstance(entry.get("source"), dict) else {},
         }

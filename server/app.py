@@ -5707,6 +5707,7 @@ def v1_capabilities() -> Any:
             "verified_nodes": verified_nodes,
             "capabilities": sorted(runtime_capabilities),
             "available_modes": sorted(runtime_modes),
+            "max_batch_size": cfg.get("max_batch_size") or 1,
             "declared_capabilities": cfg.get("capabilities", []),
             "license_status": cfg.get("license_status", "unreviewed"),
         })

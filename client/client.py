@@ -790,7 +790,13 @@ def _upload_task_artifact(task: Dict[str, Any], path: Path, kind: str, metadata:
                     {
                         "image": "image/png",
                         "video": "video/mp4",
-                        "audio": "audio/wav" if path.suffix.lower() == ".wav" else "audio/mpeg",
+                        "audio": {
+                            ".wav": "audio/wav",
+                            ".flac": "audio/flac",
+                            ".mp3": "audio/mpeg",
+                            ".opus": "audio/ogg",
+                            ".aac": "audio/aac",
+                        }.get(path.suffix.lower(), "application/octet-stream"),
                         "manifest": "application/json",
                     }.get(kind, "application/octet-stream"),
                 )
@@ -941,7 +947,7 @@ def discover_capabilities() -> Dict[str, Any]:
             # would win us jobs the service then answers with the wrong model.
             service_models = []
             if isinstance(probe, dict):
-                service_models = probe.get("loaded_models") or probe.get("models") or []
+                service_models = probe.get("loaded_models", probe.get("models")) or []
             model_ready = ready and expected_model in service_models
             declared_caps = list(getattr(entry, "capabilities", []) or ["text_to_music"])
             declared_modes = list(getattr(entry, "available_modes", []) or ["text2music"])

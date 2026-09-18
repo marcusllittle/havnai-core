@@ -213,6 +213,7 @@ class PlatformApiContractTests(unittest.TestCase):
                     "model_version": "1.5-turbo",
                     "engine_model": "acestep-v15-turbo",
                     "capabilities": ["text_to_music"],
+                    "max_batch_size": 4,
                 },
             }
         )
@@ -317,6 +318,7 @@ class PlatformApiContractTests(unittest.TestCase):
         self.assertTrue(video["available"])
         self.assertTrue(music["available"])
         self.assertEqual(music["capabilities"], ["text_to_music"])
+        self.assertEqual(music["max_batch_size"], 4)
         self.assertEqual(video["verified_nodes"], ["node-test"])
         self.assertEqual(video["capabilities"], ["image_to_video"])
 

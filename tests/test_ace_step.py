@@ -56,7 +56,7 @@ def wrapped(data: Any, *, error: str | None = None) -> FakeResponse:
 
 
 class AceStepProviderTests(unittest.TestCase):
-    def test_probe_reports_loaded_models(self) -> None:
+    def test_probe_does_not_treat_default_on_disk_as_loaded(self) -> None:
         session = FakeSession(
             posts=[],
             gets=[
@@ -70,6 +70,7 @@ class AceStepProviderTests(unittest.TestCase):
         probe = AceStepProvider(session=session).probe()
         self.assertEqual(probe["models"], ["acestep-v15-turbo"])
         self.assertEqual(probe["default_model"], "acestep-v15-turbo")
+        self.assertEqual(probe["loaded_models"], [])
 
     def test_probe_reports_lazy_configured_model_from_health(self) -> None:
         session = FakeSession(
@@ -87,6 +88,7 @@ class AceStepProviderTests(unittest.TestCase):
         probe = AceStepProvider(session=session).probe()
         self.assertEqual(probe["models"], ["acestep-v15-turbo"])
         self.assertEqual(probe["default_model"], "acestep-v15-turbo")
+        self.assertEqual(probe["loaded_models"], [])
 
     def test_generates_and_downloads_audio_with_metadata(self) -> None:
         result = [{
@@ -319,10 +321,11 @@ class AceStepFallbackGuardTests(unittest.TestCase):
             )
             self.assertEqual(results[0].path.read_bytes(), b"right-model")
 
-    def test_service_without_dit_model_reporting_is_tolerated(self) -> None:
-        AceStepProvider._verify_engine_model(
-            [{"file": "a.mp3"}], {"engine_model": "acestep-v15-base"}
-        )
+    def test_service_without_dit_model_reporting_is_rejected(self) -> None:
+        with self.assertRaisesRegex(AceStepModelMismatch, "model_unverified"):
+            AceStepProvider._verify_engine_model(
+                [{"file": "a.mp3"}], {"engine_model": "acestep-v15-base"}
+            )
 
     def test_downloaded_but_unloaded_checkpoint_is_not_selectable(self) -> None:
         provider = AceStepProvider(session=FakeSession(posts=[], gets=[]))

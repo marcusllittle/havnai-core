@@ -252,8 +252,13 @@ class AceStepProvider:
         # audio at HTTP 200 (see _verify_engine_model), so the two lists are kept
         # apart and callers gate on `loaded_models`.
         loaded = [model.name for model in models if model.is_loaded]
-        if default_model and str(default_model) not in loaded:
-            loaded.append(str(default_model))
+        health_loaded_model = str(health.get("loaded_model") or "").strip()
+        if (
+            health.get("models_initialized") is not False
+            and health_loaded_model
+            and health_loaded_model not in loaded
+        ):
+            loaded.append(health_loaded_model)
 
         # When the service runs with ACESTEP_ON_DEMAND_MODEL_LOAD=true it swaps its
         # primary slot to whatever `model` asks for, so an on-disk checkpoint IS
@@ -521,8 +526,10 @@ class AceStepProvider:
             return
         for item in items:
             served = str(item.get("dit_model") or "").strip()
-            # An older service build may not report dit_model at all; nothing to check.
-            if served and served != requested:
+            # Without dit_model, the requested checkpoint cannot be verified.
+            if not served:
+                raise AceStepModelMismatch(f"model_unverified:requested={requested}")
+            if served != requested:
                 raise AceStepModelMismatch(
                     f"model_fallback:requested={requested}:served={served}"
                 )

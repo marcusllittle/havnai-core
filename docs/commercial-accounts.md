@@ -2,9 +2,10 @@
 
 Contract version: 1. Work item: HAVN-18, under [HAVN-11](https://havnai.atlassian.net/browse/HAVN-11).
 
-Status: implementation contract and isolated identity foundation. This document does
-not claim that account sign-in, migration, account billing, or production checkout
-has shipped. Those require HAVN-19 through HAVN-23 and the evidence below.
+Status: account authentication, wallet-link API, integer ledger and account-owned
+job/asset APIs implemented on the feature branch. Production sign-in, content
+migration, publication/library integration and account checkout are not complete.
+Those require HAVN-19 through HAVN-23 and the evidence below.
 
 ## Decision and trust boundary
 
@@ -13,9 +14,9 @@ provider proves a user identity; its verified `(issuer, subject)` maps uniquely 
 that account. Email, a connected wallet, request body fields, and environment
 wallet defaults are never account identifiers or authorization evidence.
 
-The provider adapter is separate from the account repository. Provider choice and
-deployment credentials remain outstanding. Clerk is a candidate supported by the
-existing Next.js Pages Router and a Python backend. No custom password database
+The provider adapter is separate from the account repository. Clerk is selected;
+its new application and deployment credentials remain outstanding. It supports the
+existing Next.js Pages Router and Python backend. No custom password database
 is proposed. Changing providers must preserve account IDs through a separately
 audited, authenticated identity migration; matching email addresses never merges
 accounts automatically.
@@ -155,9 +156,11 @@ preview against a copy first. No automatic full-database backfill from wallet li
 
 ## Cross-repository API v2
 
-All paths below are proposed core routes, proxied through `/api` on web. The
-identity repository in this change is not a public API and trusts only the future
-verified-session adapter. These routes are not yet registered.
+Paths below define the target core API, proxied through `/api` on web. Account,
+credit balance/ledger, wallet link/unlink, assets, jobs and capabilities routes are
+registered on this branch. Payment, migration and account music routes remain
+implementation work. The identity repository is called by the verified-session
+adapter, never directly by a client-supplied principal.
 
 | Method/path | Input / result | Authorization |
 | --- | --- | --- |
@@ -275,10 +278,10 @@ References: [Clerk session tokens](https://clerk.com/docs/guides/sessions/sessio
 
 ## Evidence for this foundation change
 
-`server/account_identity.py` implements the isolated durable issuer/subject mapping,
+`server/account_identity.py` implements the durable issuer/subject mapping,
 account status checks, many-wallet links, stored EIP-191 challenges, one-time
 consumption, unlink invalidation, and transactional append-only link audit. It is
-deliberately not imported by `app.py`; running services and data are unaffected.
+now initialized by `app.py` with additive schema migrations on branch startup.
 `VerifiedPrincipal` is an internal adapter input, not proof by itself. HTTP code
 must never construct it from unverified request fields.
 
@@ -289,7 +292,18 @@ account creation, competing account links, and simultaneous nonce replay. They
 also cover wrong account/session/purpose, altered signatures, expiry, suspension,
 multiple wallets, unlink/relink, audit immutability and transactional rollback.
 
-This evidence does not cover provider verification/reauthentication, HTTP routes,
-resource migration, ledger/payment behavior, or a browser sign-in flow. Those are
-still required. The foundation has not been deployed to the coordinator, and no
-live account, wallet link, asset, credit, or payment was changed.
+Later branch checks cover real RSA session signatures, audience/issuer/origin and
+reauthentication validation, HTTP account isolation, integer ledger races/refunds,
+and account job reservation/recovery/cancellation/completion. Job API tests exercise
+the existing worker completion path and private artifact access; they use fixture
+artifact bytes rather than running a GPU generation.
+
+Private account jobs are excluded from legacy wallet history and the public job
+feed. Old per-job/result routes and direct static artifact URLs cannot bypass
+account authorization. The account artifact endpoint currently requires bearer
+authentication; browser media integration is still required.
+
+Provider token validation bounds session lifetime to 120 seconds. Revocation can
+therefore lag until expiry; provider user suspension/deletion webhook integration
+is still required before launch. The feature branch has not been deployed to the
+coordinator, and no live account, wallet link, asset, credit, or payment was changed.

@@ -59,14 +59,14 @@ def get_wallet_jobs(
     rows = conn.execute(
         """
         SELECT id, model, task_type, status, timestamp, completed_at
-        FROM jobs WHERE wallet = ?
+        FROM jobs WHERE wallet = ? AND owner_account_id IS NULL
         ORDER BY timestamp DESC
         LIMIT ? OFFSET ?
         """,
         (wallet, limit, offset),
     ).fetchall()
     total_row = conn.execute(
-        "SELECT COUNT(*) AS n FROM jobs WHERE wallet = ?", (wallet,)
+        "SELECT COUNT(*) AS n FROM jobs WHERE wallet = ? AND owner_account_id IS NULL", (wallet,)
     ).fetchone()
 
     jobs: List[Dict[str, Any]] = [

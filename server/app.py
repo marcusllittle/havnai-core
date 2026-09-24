@@ -63,6 +63,11 @@ import platform_v1
 import music_discover
 import music_sessions
 import network_status
+import account_identity
+import account_ledger
+import account_routes
+import account_auth
+import account_jobs
 
 try:
     from eth_account import Account  # type: ignore
@@ -1153,6 +1158,9 @@ def init_db() -> None:
     music_sessions.init_tables(conn)
     platform_v1.migrate(conn)
     conn.commit()
+    account_identity.initialize(conn)
+    account_ledger.initialize(conn)
+    account_jobs.initialize(conn)
 
 
 init_db()
@@ -1174,6 +1182,7 @@ astra_gen.init_astra_gen_tables(get_db())
 astra_receipts.init_receipt_tables(get_db())
 merkle_batches.init_merkle_tables(get_db())
 payout_claims.init_payout_claim_tables(get_db())
+app.register_blueprint(account_routes.create_blueprint(get_db, rate_limit))
 
 # Optional: clear database and in-memory state on startup for a fresh dashboard
 if RESET_ON_STARTUP:
@@ -1758,7 +1767,7 @@ def get_job_summary(limit: int = 50, offset: int = 0) -> Dict[str, Any]:
                jobs.completed_at, jobs.timestamp, rewards.reward_hai
         FROM jobs
         LEFT JOIN rewards ON rewards.task_id = jobs.id
-        WHERE UPPER(jobs.task_type) IN ({placeholders})
+        WHERE UPPER(jobs.task_type) IN ({placeholders}) AND jobs.owner_account_id IS NULL
         ORDER BY jobs.timestamp DESC
         LIMIT {limit_int} OFFSET {offset_int}
         """,
@@ -5370,6 +5379,10 @@ def _v1_job_payload(job: Dict[str, Any]) -> Dict[str, Any]:
     settings = platform_v1.parse_json_object(job.get("data"))
     resolved_spec = platform_v1.parse_json_object(job.get("resolved_spec"))
     status = platform_v1.canonical_job_state(job.get("status"))
+    artifacts = _job_artifacts(str(job.get("id") or ""))
+    if job.get("owner_account_id"):
+        for artifact in artifacts:
+            artifact["url"] = f"/v2/artifacts/{artifact['id']}/content"
     return {
         "id": job.get("id"),
         "type": settings.get("v1_type") or str(job.get("task_type") or "").lower(),
@@ -5378,6 +5391,7 @@ def _v1_job_payload(job: Dict[str, Any]) -> Dict[str, Any]:
         "progress": float(job.get("progress") or (100 if status in platform_v1.FINAL_JOB_STATES else 0)),
         "model": job.get("model"),
         "wallet": job.get("wallet"),
+        "owner_account_id": job.get("owner_account_id"),
         "node_id": job.get("node_id"),
         "attempt_id": job.get("attempt_id"),
         "created_at": job.get("timestamp"),
@@ -5385,13 +5399,88 @@ def _v1_job_payload(job: Dict[str, Any]) -> Dict[str, Any]:
         "completed_at": job.get("completed_at"),
         "error_code": job.get("error_code"),
         "resolved_spec": resolved_spec,
-        "artifacts": _job_artifacts(str(job.get("id") or "")),
+        "artifacts": artifacts,
     }
 
 
+def _require_studio_user() -> Optional[Any]:
+    if not request.path.startswith("/v2/"):
+        return require_owner()
+    if not rate_limit(f"account-studio:{request.remote_addr}", limit=120):
+        return jsonify({"error": "rate_limited"}), 429
+    try:
+        principal = account_auth.verify_bearer(request.headers.get("Authorization", ""),
+            config=account_auth.AuthConfig.from_environment())
+        g.account_id = account_identity.ensure_account(get_db(), principal)
+        return None
+    except account_auth.AccountAuthError as exc:
+        return jsonify({"error": str(exc)}), exc.status
+    except account_identity.IdentityError as exc:
+        return jsonify({"error": str(exc)}), 403
+
+
+def _studio_job_access(job: Dict[str, Any]) -> bool:
+    if request.path.startswith("/v2/"):
+        return bool(job.get("owner_account_id") == getattr(g, "account_id", None))
+    return not job.get("owner_account_id")
+
+
+@app.before_request
+def protect_account_content_from_legacy_routes() -> Optional[Any]:
+    # Legacy public job/result/receipt handlers must not become account-data bypasses.
+    job_id = (request.view_args or {}).get("job_id")
+    if job_id and not request.path.startswith(("/v2/", "/v1/node/")):
+        row = get_db().execute("SELECT owner_account_id FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if row and row[0]:
+            return jsonify({"error": "job_not_found"}), 404
+    if request.endpoint == "static":
+        filename = str((request.view_args or {}).get("filename", ""))
+        path = str((STATIC_DIR / filename).resolve())
+        conn = get_db()
+        # Also protect the brief interval between a worker writing a file and
+        # inserting its artifact row, using the durable job ID in the path.
+        private_job = conn.execute("""SELECT 1 FROM jobs WHERE owner_account_id IS NOT NULL
+            AND instr(?, id)>0 LIMIT 1""", (filename,)).fetchone()
+        private_asset = conn.execute("SELECT 1 FROM assets WHERE path=? AND owner_account_id IS NOT NULL", (path,)).fetchone()
+        if private_job or private_asset:
+            return jsonify({"error": "artifact_not_found"}), 404
+    return None
+
+
+@app.after_request
+def account_response_headers(response: Response) -> Response:
+    if request.path.startswith("/v2/"):
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["Vary"] = "Authorization"
+        if response.status_code >= 400:
+            body = response.get_json(silent=True) or {}
+            error = body.get("error")
+            if not isinstance(error, dict):
+                code = error if isinstance(error, str) else "account_request_failed"
+                response.set_data(json.dumps({"error": {"code": code, "message": body.get("message") or code.replace("_", " ").capitalize()}, "request_id": uuid.uuid4().hex}))
+                response.content_type = "application/json"
+    return response
+
+
+@app.route("/v2/artifacts/<artifact_id>/content", methods=["GET"])
+def account_artifact_content(artifact_id: str) -> Any:
+    error = _require_studio_user()
+    if error:
+        return error
+    row = get_db().execute("""SELECT a.* FROM artifacts a JOIN jobs j ON j.id=a.job_id
+        WHERE a.id=? AND j.owner_account_id=?""", (artifact_id, g.account_id)).fetchone()
+    if not row:
+        return jsonify({"error": "artifact_not_found"}), 404
+    path = Path(row["path"]).resolve()
+    if not path.is_relative_to(OUTPUTS_DIR.resolve()) or not path.is_file():
+        return jsonify({"error": "artifact_missing"}), 404
+    return send_file(path, mimetype=row["content_type"], download_name=row["filename"], conditional=True)
+
+
+@app.route("/v2/assets", methods=["POST"])
 @app.route("/v1/assets", methods=["POST"])
 def v1_create_asset() -> Any:
-    auth_error = require_owner()
+    auth_error = _require_studio_user()
     if auth_error:
         return auth_error
     uploaded = request.files.get("file")
@@ -5418,10 +5507,10 @@ def v1_create_asset() -> Any:
     conn = get_db()
     conn.execute(
         """
-        INSERT INTO assets (id, owner, kind, filename, content_type, path, size_bytes, sha256, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO assets (id, owner, kind, filename, content_type, path, size_bytes, sha256, created_at, owner_account_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (asset_id, owner, kind, filename, content_type, str(destination), size_bytes, sha256, now),
+        (asset_id, owner if not getattr(g, "account_id", None) else "", kind, filename, content_type, str(destination), size_bytes, sha256, now, getattr(g, "account_id", None)),
     )
     conn.commit()
     return jsonify({
@@ -5431,17 +5520,26 @@ def v1_create_asset() -> Any:
         "content_type": content_type,
         "size_bytes": size_bytes,
         "sha256": sha256,
-        "content_url": f"/v1/assets/{asset_id}/content",
+        "content_url": f"/{'v2' if getattr(g, 'account_id', None) else 'v1'}/assets/{asset_id}/content",
         "created_at": now,
     }), 201
 
 
+@app.route("/v2/assets/<asset_id>/content", methods=["GET"])
 @app.route("/v1/assets/<asset_id>/content", methods=["GET"])
 def v1_asset_content(asset_id: str) -> Any:
-    if not (_authorized(OWNER_API_TOKEN) or _authorized(NODE_API_TOKEN)):
+    if request.path.startswith("/v2/"):
+        error = _require_studio_user()
+        if error:
+            return error
+    elif not (_authorized(OWNER_API_TOKEN) or _authorized(NODE_API_TOKEN)):
         return jsonify({"error": "unauthorized"}), 401
     row = get_db().execute("SELECT * FROM assets WHERE id=?", (asset_id,)).fetchone()
     if not row:
+        return jsonify({"error": "asset_not_found"}), 404
+    if request.path.startswith("/v2/") and row["owner_account_id"] != g.account_id:
+        return jsonify({"error": "asset_not_found"}), 404
+    if not request.path.startswith("/v2/") and row["owner_account_id"] and not _authorized(NODE_API_TOKEN):
         return jsonify({"error": "asset_not_found"}), 404
     path = Path(str(row["path"]))
     if not path.is_file():
@@ -5449,9 +5547,11 @@ def v1_asset_content(asset_id: str) -> Any:
     return send_file(path, mimetype=row["content_type"], download_name=row["filename"], conditional=True)
 
 
+@app.route("/v2/account/jobs", methods=["GET"])
+@app.route("/v2/jobs", methods=["GET"])
 @app.route("/v1/jobs", methods=["GET"])
 def v1_list_jobs() -> Any:
-    auth_error = require_owner()
+    auth_error = _require_studio_user()
     if auth_error:
         return auth_error
     job_helpers.recover_expired_leases()
@@ -5462,8 +5562,8 @@ def v1_list_jobs() -> Any:
     requested_type = str(request.args.get("type") or "").strip().lower()
     requested_status = str(request.args.get("status") or "").strip().lower()
     rows = get_db().execute(
-        "SELECT * FROM jobs ORDER BY COALESCE(updated_at, timestamp) DESC LIMIT ?",
-        (max(limit * 3, limit),),
+        "SELECT * FROM jobs WHERE owner_account_id IS ? ORDER BY COALESCE(updated_at, timestamp) DESC LIMIT ?",
+        (getattr(g, "account_id", None), max(limit * 3, limit)),
     ).fetchall()
     jobs = []
     for row in rows:
@@ -5485,12 +5585,18 @@ def v1_list_jobs() -> Any:
     return jsonify({"jobs": jobs, "count": len(jobs)})
 
 
+@app.route("/v2/jobs", methods=["POST"])
 @app.route("/v1/jobs", methods=["POST"])
 def v1_create_job() -> Any:
-    auth_error = require_owner()
+    auth_error = _require_studio_user()
     if auth_error:
         return auth_error
     payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "invalid_payload"}), 422
+    account_id = getattr(g, "account_id", None)
+    if account_id and any(key in payload for key in ("wallet", "account_id", "owner_account_id")):
+        return jsonify({"error": "identity_is_session_owned"}), 422
     job_type = str(payload.get("type") or "").strip().lower()
     if job_type not in {"image", "image_to_video", "text_to_music"}:
         return jsonify({"error": "invalid_job_type"}), 400
@@ -5512,7 +5618,9 @@ def v1_create_job() -> Any:
         return jsonify({"error": "unknown_model", "model": model_name}), 400
     selected_model = str(cfg.get("name") or model_name)
     wallet = str(payload.get("wallet") or "0x0000000000000000000000000000000000000000").lower()
-    if not WALLET_REGEX.match(wallet):
+    if account_id:
+        wallet = ""
+    elif not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid_wallet"}), 400
 
     settings: Dict[str, Any] = {
@@ -5530,8 +5638,8 @@ def v1_create_job() -> Any:
     ):
         if not asset_id:
             continue
-        asset = get_db().execute("SELECT kind FROM assets WHERE id=?", (asset_id,)).fetchone()
-        if not asset or str(asset["kind"]) != expected_kind:
+        asset = get_db().execute("SELECT kind,owner_account_id FROM assets WHERE id=?", (asset_id,)).fetchone()
+        if not asset or str(asset["kind"]) != expected_kind or asset["owner_account_id"] != account_id:
             return jsonify({"error": "invalid_asset", "asset_id": asset_id, "expected_kind": expected_kind}), 400
     if job_type == "image_to_video" and not source_asset_id:
         return jsonify({"error": "source_image_required"}), 400
@@ -5599,6 +5707,15 @@ def v1_create_job() -> Any:
         task_type = CREATOR_TASK_TYPE
 
     weight = float(cfg.get("reward_weight", rewards.resolve_weight(selected_model, 10.0)))
+    if account_id:
+        try:
+            units = account_jobs.cost_units(credits.resolve_credit_cost(selected_model, task_type), int(settings.get("batch_size", 1)))
+            job_id = account_jobs.enqueue(get_db(), account_id, request_key=request.headers.get("Idempotency-Key", ""),
+                request_payload=payload, model=selected_model, task_type=task_type, settings=settings,
+                resolved_spec=resolved_spec, weight=weight, units=units)
+        except (ValueError, account_ledger.LedgerError) as exc:
+            return jsonify({"error": str(exc)}), 409 if str(exc) in {"idempotency_conflict", "insufficient_credits"} else 422
+        return jsonify(_v1_job_payload(get_job(job_id) or {})), 202
     job_id = job_helpers.enqueue_job(wallet, selected_model, task_type, json.dumps(settings), weight)
     conn = get_db()
     conn.execute(
@@ -5611,48 +5728,51 @@ def v1_create_job() -> Any:
     return jsonify(_v1_job_payload(job or {"id": job_id, "status": "queued", "model": selected_model})), 202
 
 
+@app.route("/v2/jobs/<job_id>", methods=["GET"])
 @app.route("/v1/jobs/<job_id>", methods=["GET"])
 def v1_get_job(job_id: str) -> Any:
-    auth_error = require_owner()
+    auth_error = _require_studio_user()
     if auth_error:
         return auth_error
     job_helpers.recover_expired_leases()
     job = get_job(job_id)
-    if not job:
+    if not job or not _studio_job_access(job):
         return jsonify({"error": "job_not_found"}), 404
     return jsonify(_v1_job_payload(job))
 
 
+@app.route("/v2/jobs/<job_id>/cancel", methods=["POST"])
 @app.route("/v1/jobs/<job_id>/cancel", methods=["POST"])
 def v1_cancel_job(job_id: str) -> Any:
-    auth_error = require_owner()
+    auth_error = _require_studio_user()
     if auth_error:
         return auth_error
     conn = get_db()
-    row = conn.execute("SELECT status, node_id FROM jobs WHERE id=?", (job_id,)).fetchone()
-    if not row:
-        return jsonify({"error": "job_not_found"}), 404
-    status = platform_v1.canonical_job_state(row["status"])
-    if status in platform_v1.FINAL_JOB_STATES:
-        return jsonify({"error": "job_finalized", "status": status}), 409
-    next_status = "cancelling" if row["node_id"] else "cancelled"
-    now = unix_now()
-    conn.execute(
-        """
-        UPDATE jobs
-           SET status=?, stage=?, completed_at=CASE WHEN ?='cancelled' THEN ? ELSE completed_at END,
-               updated_at=?
-         WHERE id=?
-        """,
-        (next_status, next_status, next_status, now, now, job_id),
-    )
-    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    with conn:
+        row = conn.execute("SELECT status, node_id, owner_account_id FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if not row or not _studio_job_access(dict(row)):
+            return jsonify({"error": "job_not_found"}), 404
+        status = platform_v1.canonical_job_state(row["status"])
+        if status in platform_v1.FINAL_JOB_STATES:
+            return jsonify({"error": "job_finalized", "status": status}), 409
+        next_status = "cancelling" if row["node_id"] else "cancelled"
+        now = unix_now()
+        conn.execute(
+            """UPDATE jobs
+               SET status=?, stage=?, completed_at=CASE WHEN ?='cancelled' THEN ? ELSE completed_at END,
+                   updated_at=? WHERE id=?""",
+            (next_status, next_status, next_status, now, now, job_id),
+        )
+        if next_status == "cancelled":
+            account_jobs.settle_if_account_job(conn, job_id, "cancelled")
     return jsonify({"id": job_id, "status": next_status}), 202
 
 
+@app.route("/v2/capabilities", methods=["GET"])
 @app.route("/v1/capabilities", methods=["GET"])
 def v1_capabilities() -> Any:
-    auth_error = require_owner()
+    auth_error = _require_studio_user()
     if auth_error:
         return auth_error
     now = unix_now()
@@ -8941,6 +9061,9 @@ def stitch_videos() -> Any:
     for raw_id in job_ids:
         if not isinstance(raw_id, str) or not JOB_ID_REGEX.match(raw_id):
             return jsonify({"error": "invalid_job_id"}), 400
+        account_owner = get_db().execute("SELECT owner_account_id FROM jobs WHERE id=?", (raw_id,)).fetchone()
+        if account_owner and account_owner[0]:
+            return jsonify({"error": "job_not_found"}), 404
         path = videos_dir / f"{raw_id}.mp4"
         if not path.exists():
             return jsonify({"error": "video_not_found", "job_id": raw_id}), 404

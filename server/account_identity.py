@@ -127,7 +127,8 @@ def issue_wallet_challenge(
     if not re.fullmatch(r"0x[0-9a-f]{40}", wallet) or int(wallet[2:], 16) == 0:
         raise IdentityError("invalid_wallet")
     parsed = urlsplit(origin)
-    if (parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password
+    secure_origin = parsed.scheme == "https" or (parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"})
+    if (not secure_origin or not parsed.netloc or parsed.username or parsed.password
             or parsed.path or parsed.query or parsed.fragment or any(c.isspace() for c in origin)):
         raise IdentityError("invalid_origin")
     if type(chain_id) is not int or chain_id <= 0 or chain_id >= 2**63:

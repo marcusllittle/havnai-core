@@ -7,6 +7,7 @@ import os
 import sqlite3
 import time
 import uuid
+import account_jobs
 from typing import Any, Dict, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -265,6 +266,7 @@ def complete_job(
                 attempt_id,
             ),
         )
+        account_jobs.settle_if_account_job(conn, job_id, canonical_status)
         conn.commit()
         return True
     except Exception:
@@ -301,6 +303,7 @@ def complete_job_if_queued(job_id: str, node_id: str, status: str) -> bool:
             "UPDATE jobs SET status=?, node_id=?, completed_at=? WHERE id=?",
             (status, node_id, time.time(), job_id),
         )
+        account_jobs.settle_if_account_job(conn, job_id, status)
         conn.commit()
         return True
     except Exception:

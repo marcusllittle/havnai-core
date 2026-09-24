@@ -47,7 +47,8 @@ class JobHistoryTestCase(unittest.TestCase):
                 timestamp REAL NOT NULL,
                 assigned_at REAL,
                 completed_at REAL,
-                invite_code TEXT
+                invite_code TEXT,
+                owner_account_id TEXT
             )
             """
         )
@@ -86,6 +87,14 @@ class JobHistoryTestCase(unittest.TestCase):
         result = job_history.get_wallet_jobs(OTHER_WALLET)
         self.assertEqual(result["jobs"], [])
         self.assertEqual(result["total"], 0)
+
+    def test_imported_account_jobs_are_not_accessible_by_legacy_wallet(self) -> None:
+        self._add("legacy")
+        self._add("imported")
+        self.conn.execute("UPDATE jobs SET owner_account_id='acct_owner' WHERE id='imported'")
+        result = job_history.get_wallet_jobs(WALLET)
+        self.assertEqual([job["job_id"] for job in result["jobs"]], ["legacy"])
+        self.assertEqual(result["total"], 1)
 
     # -- ordering and paging ----------------------------------------------
     def test_newest_first(self) -> None:

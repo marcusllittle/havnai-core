@@ -2661,13 +2661,13 @@ def execute_task(task: Dict[str, Any]) -> None:
     try:
         source_asset_id = str(task.get("source_asset_id") or "").strip()
         if source_asset_id:
-            task["init_image"] = str(_download_task_asset(source_asset_id, task_id, "source"))
+            task["base_image_url" if task_type == "FACE_SWAP" else "init_image"] = str(_download_task_asset(source_asset_id, task_id, "source"))
         mask_asset_id = str(task.get("mask_asset_id") or "").strip()
         if mask_asset_id:
             task["inpaint_mask"] = str(_download_task_asset(mask_asset_id, task_id, "mask"))
         face_asset_id = str(task.get("face_asset_id") or "").strip()
         if face_asset_id:
-            task["reference_face_url"] = str(_download_task_asset(face_asset_id, task_id, "face"))
+            task["face_source_url" if task_type == "FACE_SWAP" else "reference_face_url"] = str(_download_task_asset(face_asset_id, task_id, "face"))
         audio_asset_id = str(task.get("audio_asset_id") or "").strip()
         if audio_asset_id:
             task["audio_input"] = str(_download_task_asset(audio_asset_id, task_id, "audio"))

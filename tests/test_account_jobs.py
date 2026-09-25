@@ -21,6 +21,8 @@ import job_helpers
 def platform(keys, monkeypatch):
     harness = platform_fixture.PlatformApiContractTests(methodName="runTest")
     harness.setUp()
+    # Each test represents a fresh coordinator, including its request budget.
+    monkeypatch.setattr(app, "RATE_LIMIT_BUCKETS", {})
     monkeypatch.setattr(account_auth.AuthConfig, "from_environment", lambda: config(keys))
     headers = {"Authorization": token(keys), "Idempotency-Key": "create-one"}
     alice = harness.client.get("/v2/account", headers=headers).json["id"]
@@ -339,3 +341,60 @@ def test_owned_face_reference_requires_a_face_capable_worker(platform):
     task = harness.client.get("/tasks/creator?node_id=node-test", headers=harness.node_headers).json["tasks"][0]
     assert task["task_id"] == response.json["id"]
     assert task["face_asset_id"] == asset["id"]
+
+
+def test_account_face_swap_claim_preserves_owned_inputs_controls_and_one_charge(platform):
+    harness, headers, _ = platform
+    ids = []
+    for name in ("base.png", "face.png"):
+        upload = harness.client.post("/v2/assets", headers=headers,
+            data={"kind": "image", "file": (io.BytesIO(b"image"), name)})
+        assert upload.status_code == 201, upload.json
+        ids.append(upload.json["id"])
+    body = {"type": "face_swap", "model": platform_fixture.IMAGE_MODEL, "prompt": "",
+            "source_asset_id": ids[0], "face_asset_id": ids[1], "strength": 0.6, "num_steps": 24,
+            "guidance": 5, "seed": 42, "sfw_mode": True,
+            "base_image_url": "/private/forged", "face_source_url": "http://localhost/forged"}
+    first = harness.client.post("/v2/jobs", headers=headers, json=body)
+    assert first.status_code == 202, first.json
+    assert first.json["type"] == "face_swap"
+    balance = harness.client.get("/v2/account/credits", headers=headers).json
+    assert balance["reserved_units"] > 0
+    assert harness.client.post("/v2/jobs", headers=headers, json=body).json["id"] == first.json["id"]
+    assert harness.client.get("/v2/account/credits", headers=headers).json["reserved_units"] == balance["reserved_units"]
+    harness._register_node()
+    app.NODES["node-test"]["supports"].append("face_swap")
+    task = harness.client.get("/tasks/creator?node_id=node-test", headers=harness.node_headers).json["tasks"][0]
+    assert task["type"] == "FACE_SWAP"
+    for key in ("source_asset_id", "face_asset_id", "strength", "num_steps", "guidance", "seed"):
+        assert task[key] == body[key]
+        assert task["resolved_spec"]["parameters"][key] == body[key]
+    assert "base_image_url" not in task
+    assert "face_source_url" not in task
+
+
+def test_account_face_swap_rejects_unowned_sources_and_raw_urls(platform, keys):
+    harness, headers, _ = platform
+    own = harness.client.post("/v2/assets", headers=headers,
+        data={"kind": "image", "file": (io.BytesIO(b"image"), "base.png")}).json["id"]
+    bob = {"Authorization": token(keys, sub="user_bob", sid="sess_bob")}
+    foreign = harness.client.post("/v2/assets", headers=bob,
+        data={"kind": "image", "file": (io.BytesIO(b"private"), "face.png")}).json["id"]
+    for inputs, error in [({"source_asset_id": own, "face_asset_id": foreign}, "invalid_asset"),
+                          ({"source_asset_id": foreign, "face_asset_id": own}, "invalid_asset"),
+                          ({"base_image_url": "/private", "face_source_url": "/private"}, "face_swap_images_required")]:
+        response = create(harness, headers, type="face_swap", **inputs)
+        assert response.status_code == 400
+        assert response.json["error"]["code"] == error
+    assert harness.client.get("/v2/account/credits", headers=headers).json["reserved_units"] == 0
+
+
+@pytest.mark.parametrize("control", [{"seed": "invalid"}, {"num_steps": []}, {"strength": 0}, {"guidance": True}, {"seed": 2**32}])
+def test_invalid_face_swap_controls_do_not_charge(platform, control):
+    harness, headers, _ = platform
+    asset = harness.client.post("/v2/assets", headers=headers,
+        data={"kind": "image", "file": (io.BytesIO(b"image"), "base.png")}).json["id"]
+    response = create(harness, headers, type="face_swap", source_asset_id=asset, face_asset_id=asset, **control)
+    assert response.status_code == 400
+    assert response.json["error"]["code"] == "invalid_face_swap_settings"
+    assert harness.client.get("/v2/account/credits", headers=headers).json["reserved_units"] == 0

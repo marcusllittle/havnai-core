@@ -237,6 +237,23 @@ class ImagePipelineCacheTests(unittest.TestCase):
         self.assertEqual(settings["img2img_strength"], 0.4)
         self.assertTrue(settings["preserve_reference_aspect"])
 
+    def test_face_swap_worker_uses_downloaded_owned_sources(self) -> None:
+        task = {"task_id": "owned-swap", "type": "FACE_SWAP", "model_name": "sdxl",
+                "source_asset_id": "base-owned", "face_asset_id": "face-owned",
+                "base_image_url": "/untrusted", "face_source_url": "/untrusted"}
+        with patch.object(client_module, "ROLE", "creator"), patch.object(client_module, "_is_model_allowed", return_value=True), patch.object(
+            client_module, "_download_task_asset", side_effect=lambda asset, job, kind: Path("/tmp") / f"{asset}.png"
+        ), patch.object(client_module, "ensure_model_entry", return_value=SimpleNamespace(name="sdxl")), patch.object(
+            client_module, "ensure_model_path", return_value=Path("model")
+        ), patch.object(client_module, "_run_faceswap_task", return_value=({"status": "success"}, 0, None)) as generate, patch.object(
+            client_module, "_task_output_path", return_value=None
+        ), patch.object(client_module.SESSION, "post") as post:
+            post.return_value.json.return_value = {"reward": 0}
+            client_module.execute_task(task)
+        received = generate.call_args.args[4]
+        self.assertEqual(received["base_image_url"], "/tmp/base-owned.png")
+        self.assertEqual(received["face_source_url"], "/tmp/face-owned.png")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4184,6 +4184,8 @@ def get_creator_tasks() -> Any:
                         "negative_prompt",
                         "base_image_url",
                         "face_source_url",
+                        "source_asset_id",
+                        "face_asset_id",
                         "strength",
                         "num_steps",
                         "guidance",
@@ -5791,12 +5793,12 @@ def v1_create_job() -> Any:
         if previous_id:
             return jsonify(_v1_job_payload(get_job(previous_id) or {})), 202
     job_type = str(payload.get("type") or "").strip().lower()
-    if job_type not in {"image", "image_to_video", "text_to_music"}:
+    if job_type not in {"image", "face_swap", "image_to_video", "text_to_music"}:
         return jsonify({"error": "invalid_job_type"}), 400
     if job_type == "image_to_video" and not VIDEO_V2_ENABLED:
         return jsonify({"error": "feature_disabled", "feature": "video_v2"}), 404
     prompt = str(payload.get("prompt") or "").strip()
-    if not prompt and job_type != "text_to_music":
+    if not prompt and job_type not in {"text_to_music", "face_swap"}:
         return jsonify({"error": "missing_prompt"}), 400
 
     default_model = (
@@ -5818,6 +5820,7 @@ def v1_create_job() -> Any:
         "image": {CREATOR_TASK_TYPE},
         "image_to_video": {"LTX_VIDEO_GEN", "VIDEO_GEN", "ANIMATEDIFF"},
         "text_to_music": {"MUSIC_GEN"},
+        "face_swap": {CREATOR_TASK_TYPE, "FACE_SWAP"},
     }
     if model_task not in compatible_tasks[job_type]:
         return jsonify({"error": "model_task_mismatch", "model": selected_model, "type": job_type}), 400
@@ -5853,7 +5856,38 @@ def v1_create_job() -> Any:
     if job_type == "image_to_video" and not source_asset_id:
         return jsonify({"error": "source_image_required"}), 400
 
-    if job_type == "text_to_music":
+    if job_type == "face_swap":
+        if "sdxl" not in str(cfg.get("pipeline") or "").lower():
+            return jsonify({"error": "model_task_mismatch", "model": selected_model, "type": job_type}), 400
+        if not source_asset_id or not face_asset_id:
+            return jsonify({"error": "face_swap_images_required"}), 400
+        # Build worker settings only from an explicit control allowlist. Raw
+        # image URLs/paths and legacy aliases never become worker inputs here.
+        controls = {key: payload[key] for key in ("seed", "strength", "num_steps", "steps", "guidance", "negative_prompt") if key in payload}
+        for key in ("seed", "strength", "num_steps", "steps", "guidance"):
+            if key not in controls:
+                continue
+            try:
+                value = float(controls[key])
+                if isinstance(controls[key], bool) or not math.isfinite(value):
+                    raise ValueError()
+                if key in {"seed", "num_steps", "steps"} and not value.is_integer():
+                    raise ValueError()
+                if key == "seed" and not -1 <= value <= 2**32 - 1:
+                    raise ValueError()
+                controls[key] = int(value) if key in {"seed", "num_steps", "steps"} else value
+            except (ValueError, TypeError, OverflowError):
+                return jsonify({"error": "invalid_face_swap_settings"}), 400
+        settings.update(build_faceswap_settings(controls, prompt, cfg, sfw_mode=payload.get("sfw_mode") is True))
+        settings.pop("base_image_url", None)
+        settings.pop("face_source_url", None)
+        if settings["strength"] <= 0 or int(settings["num_steps"] * settings["strength"]) < 1:
+            return jsonify({"error": "invalid_face_swap_settings"}), 400
+        settings.update(source_asset_id=source_asset_id, face_asset_id=face_asset_id, sfw_mode=payload.get("sfw_mode") is True)
+        resolved_spec = {"schema_version": 1, "task_type": "face_swap", "model": {"id": selected_model},
+            "engine": {"backend": "instantid"}, "parameters": {key: value for key, value in settings.items() if key not in {"v1_type", "defaults_source", "defaults_confidence"}}}
+        task_type = "FACE_SWAP"
+    elif job_type == "text_to_music":
         engine_model = str(cfg.get("engine_model") or "acestep-v15-turbo")
         try:
             resolved_spec = platform_v1.resolve_music_spec(

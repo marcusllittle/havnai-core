@@ -61,6 +61,7 @@ import node_bundle
 import job_history
 import platform_v1
 import music_discover
+import account_playlists
 import music_sessions
 import network_status
 import account_identity
@@ -5479,6 +5480,80 @@ def account_artifact_content(artifact_id: str) -> Any:
     return send_file(path, mimetype=row["content_type"], download_name=row["filename"], conditional=True)
 
 
+@app.route("/v2/music/library", methods=["GET"])
+def account_music_library() -> Any:
+    error = _require_studio_user()
+    if error:
+        return error
+    if set(request.args) - {"limit", "offset", "search"}:
+        return jsonify({"error": "invalid_payload"}), 422
+    try:
+        limit = int(request.args.get("limit", "80"))
+        offset = int(request.args.get("offset", "0"))
+    except ValueError:
+        return jsonify({"error": "invalid_payload"}), 422
+    search = request.args.get("search", "").strip()
+    if len(search) > 200:
+        return jsonify({"error": "invalid_payload"}), 422
+    return jsonify({**music_discover.account_music_library(g.account_id, limit=limit, offset=offset, search=search),
+                    "playlists": account_playlists.listing(g.account_id)})
+
+
+@app.route("/v2/music/playlists", methods=["GET", "POST"])
+def account_music_playlists() -> Any:
+    error = _require_studio_user()
+    if error:
+        return error
+    if request.method == "GET":
+        playlists = account_playlists.listing(g.account_id)
+        return jsonify({"playlists": playlists, "total": len(playlists)})
+    try:
+        playlist, created = account_playlists.create(g.account_id, request.get_json(silent=True))
+        return jsonify(playlist), 201 if created else 200
+    except account_playlists.PlaylistError as exc:
+        return jsonify({"error": exc.code}), exc.status
+
+
+@app.route("/v2/music/playlists/<playlist_id>", methods=["GET", "PATCH", "DELETE"])
+@app.route("/v2/music/playlists/<playlist_id>/items/<publication_id>", methods=["PUT", "DELETE"])
+@app.route("/v2/music/playlists/<playlist_id>/reorder", methods=["PUT"])
+def account_music_playlist(playlist_id: str, publication_id: Optional[str] = None) -> Any:
+    error = _require_studio_user()
+    if error:
+        return error
+    try:
+        if request.method == "GET":
+            return jsonify(account_playlists.detail(g.account_id, playlist_id))
+        if publication_id is not None:
+            # Membership mutations carry identity only in the verified session.
+            if request.get_data():
+                return jsonify({"error": "invalid_payload"}), 422
+            operation = "add" if request.method == "PUT" else "remove"
+        elif request.path.endswith("/reorder"):
+            operation = "reorder"
+        else:
+            operation = "delete" if request.method == "DELETE" else "metadata"
+        return jsonify(account_playlists.modify(g.account_id, playlist_id, operation=operation,
+            publication_id=publication_id, data=request.get_json(silent=True)))
+    except account_playlists.PlaylistError as exc:
+        return jsonify({"error": exc.code}), exc.status
+
+
+@app.route("/v2/music/publications/<publication_id>/like", methods=["PUT"])
+@app.route("/v2/music/publications/<publication_id>/save", methods=["PUT"])
+def account_music_preference(publication_id: str) -> Any:
+    error = _require_studio_user()
+    if error:
+        return error
+    kind = request.path.rsplit("/", 1)[-1]
+    key = "liked" if kind == "like" else "saved"
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or set(data) != {key} or not isinstance(data[key], bool):
+        return jsonify({"error": "invalid_payload"}), 422
+    result = music_discover.set_account_music_preference(g.account_id, publication_id, kind=kind, enabled=data[key])
+    return jsonify(result), 200 if result["ok"] else 404
+
+
 @app.route("/v2/music/publications", methods=["GET", "POST"])
 def account_music_publications() -> Any:
     error = _require_studio_user()
@@ -5532,10 +5607,14 @@ def account_public_music_creator(profile_id: str) -> Any:
     order = {"popular": "play_count DESC,like_count DESC,published_at DESC", "liked": "like_count DESC,play_count DESC,published_at DESC"}.get(sort, "published_at DESC")
     rows = conn.execute(f"SELECT * FROM music_publications WHERE creator_account_id=? AND state='published' ORDER BY {order} LIMIT 100",
                         (profile["account_id"],)).fetchall()
+    stats = conn.execute("""SELECT COUNT(*) AS tracks,COALESCE(SUM(play_count),0) AS plays,COALESCE(SUM(like_count),0) AS likes
+        FROM music_publications WHERE creator_account_id=? AND state='published'""", (profile["account_id"],)).fetchone()
+    playlists = conn.execute("SELECT * FROM music_playlists WHERE owner_account_id=? AND is_public=1 ORDER BY updated_at DESC",
+                             (profile["account_id"],)).fetchall()
     return jsonify({"wallet": "", "profile_id": profile["id"], "display_name": profile["display_name"],
-                    "publications": [music_discover.publication_to_dict(row) for row in rows], "playlists": [],
-                    "track_count": len(rows), "play_count": sum(row["play_count"] for row in rows),
-                    "like_count": sum(row["like_count"] for row in rows), "sort": sort})
+                    "publications": [music_discover.publication_to_dict(row) for row in rows],
+                    "playlists": [music_discover.playlist_to_dict(row, include_items=False) for row in playlists],
+                    "track_count": stats["tracks"], "play_count": stats["plays"], "like_count": stats["likes"], "sort": sort})
 
 
 @app.route("/v2/assets", methods=["POST"])

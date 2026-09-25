@@ -145,6 +145,16 @@ def init_music_discover_tables(conn: sqlite3.Connection) -> None:
         id TEXT PRIMARY KEY, account_id TEXT NOT NULL UNIQUE REFERENCES accounts(id),
         display_name TEXT NOT NULL, created_at REAL NOT NULL)""")
     conn.execute("CREATE INDEX IF NOT EXISTS music_publications_account ON music_publications(owner_account_id,state)")
+    for table in ("account_music_likes", "account_music_saves"):
+        conn.execute(f"""CREATE TABLE IF NOT EXISTS {table} (
+            account_id TEXT NOT NULL REFERENCES accounts(id),
+            publication_id TEXT NOT NULL REFERENCES music_publications(id),
+            created_at REAL NOT NULL,
+            PRIMARY KEY(account_id, publication_id))""")
+        conn.execute(f"CREATE INDEX IF NOT EXISTS {table}_publication ON {table}(publication_id)")
+    if "owner_account_id" not in {row[1] for row in conn.execute("PRAGMA table_info(music_playlists)")}:
+        conn.execute("ALTER TABLE music_playlists ADD COLUMN owner_account_id TEXT REFERENCES accounts(id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS account_music_playlists_owner ON music_playlists(owner_account_id,updated_at)")
     conn.commit()
 
 
@@ -397,8 +407,9 @@ def set_like(publication_id: str, wallet: str, liked: bool = True) -> Dict[str, 
             (publication_id, normalized_wallet),
         )
     count_row = conn.execute(
-        "SELECT COUNT(*) AS n FROM music_publication_likes WHERE publication_id=?",
-        (publication_id,),
+        """SELECT (SELECT COUNT(*) FROM music_publication_likes WHERE publication_id=?)
+            + (SELECT COUNT(*) FROM account_music_likes WHERE publication_id=?) AS n""",
+        (publication_id, publication_id),
     ).fetchone()
     like_count = int(count_row["n"] if count_row else 0)
     conn.execute(
@@ -407,6 +418,54 @@ def set_like(publication_id: str, wallet: str, liked: bool = True) -> Dict[str, 
     )
     conn.commit()
     return {"ok": True, "liked": liked, "like_count": like_count}
+
+
+def set_account_music_preference(account_id: str, publication_id: str, *, kind: str, enabled: bool) -> Dict[str, Any]:
+    """Set an explicit state atomically; retries never toggle or duplicate a like."""
+    table = {"like": "account_music_likes", "save": "account_music_saves"}[kind]
+    conn = get_db()
+    conn.execute("BEGIN IMMEDIATE")
+    with conn:
+        row = conn.execute("SELECT state FROM music_publications WHERE id=?", (publication_id,)).fetchone()
+        if not row or (enabled and row["state"] != "published"):
+            return {"ok": False, "error": "publication_not_found"}
+        if enabled:
+            conn.execute(f"INSERT OR IGNORE INTO {table} VALUES (?,?,?)", (account_id, publication_id, time.time()))
+        else:
+            conn.execute(f"DELETE FROM {table} WHERE account_id=? AND publication_id=?", (account_id, publication_id))
+        count = conn.execute("""SELECT (SELECT COUNT(*) FROM music_publication_likes WHERE publication_id=?)
+            + (SELECT COUNT(*) FROM account_music_likes WHERE publication_id=?)""", (publication_id, publication_id)).fetchone()[0]
+        if kind == "like":
+            conn.execute("UPDATE music_publications SET like_count=? WHERE id=?", (count, publication_id))
+        return {"ok": True, "liked" if kind == "like" else "saved": enabled, "like_count": count}
+
+
+def account_publication(row: sqlite3.Row, account_id: str) -> Dict[str, Any]:
+    result = publication_to_dict(row)
+    for key, table in (("liked_by_me", "account_music_likes"), ("saved_by_me", "account_music_saves")):
+        result[key] = bool(get_db().execute(f"SELECT 1 FROM {table} WHERE account_id=? AND publication_id=?",
+                                          (account_id, row["id"])).fetchone())
+    return result
+
+
+def account_music_library(account_id: str, *, limit: int = 80, offset: int = 0, search: str = "") -> Dict[str, Any]:
+    conn = get_db()
+    limit = max(1, min(limit, MAX_LIMIT))
+    offset = max(0, offset)
+    where = "s.account_id=? AND p.state='published'"
+    params: List[Any] = [account_id]
+    if search:
+        where += " AND (p.title LIKE ? OR p.style LIKE ? OR p.tags LIKE ?)"
+        params.extend([f"%{search}%"] * 3)
+    query = f"FROM account_music_saves s JOIN music_publications p ON p.id=s.publication_id WHERE {where}"
+    total = conn.execute(f"SELECT COUNT(*) {query}", params).fetchone()[0]
+    rows = conn.execute(f"SELECT p.* {query} ORDER BY s.created_at DESC,p.id LIMIT ? OFFSET ?",
+                        [*params, limit, offset]).fetchall()
+    liked = conn.execute("""SELECT p.* FROM account_music_likes l JOIN music_publications p ON p.id=l.publication_id
+        WHERE l.account_id=? AND p.state='published' ORDER BY l.created_at DESC,p.id LIMIT 12""", (account_id,)).fetchall()
+    return {"publications": [account_publication(row, account_id) for row in rows],
+            "recent_liked": [account_publication(row, account_id) for row in liked],
+            "total": total, "limit": limit, "offset": offset}
 
 
 def set_saved(publication_id: str, wallet: str, saved: bool = True) -> Dict[str, Any]:
@@ -693,7 +752,7 @@ def get_playlist(playlist_id: str, requester_wallet: Optional[str] = None) -> Op
     if not row:
         return None
     requester = (requester_wallet or "").strip().lower()
-    is_owner = bool(requester) and requester == str(row["owner_wallet"]).lower()
+    is_owner = not row["owner_account_id"] and bool(requester) and requester == str(row["owner_wallet"]).lower()
     if not bool(row["is_public"]) and not is_owner:
         return None
     return playlist_to_dict(row, requester_wallet=requester)
@@ -706,12 +765,12 @@ def list_playlists(owner_wallet: str, requester_wallet: Optional[str] = None) ->
     conn = get_db()
     if include_private:
         rows = conn.execute(
-            "SELECT * FROM music_playlists WHERE owner_wallet=? ORDER BY updated_at DESC",
+            "SELECT * FROM music_playlists WHERE owner_wallet=? AND owner_account_id IS NULL ORDER BY updated_at DESC",
             (owner,),
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT * FROM music_playlists WHERE owner_wallet=? AND is_public=1 ORDER BY updated_at DESC",
+            "SELECT * FROM music_playlists WHERE owner_wallet=? AND owner_account_id IS NULL AND is_public=1 ORDER BY updated_at DESC",
             (owner,),
         ).fetchall()
     playlists = [playlist_to_dict(row, requester_wallet=requester, include_items=False) for row in rows]
@@ -877,10 +936,12 @@ def playlist_to_dict(
     requester_wallet: Optional[str] = None,
     *,
     include_items: bool = True,
+    requester_account: Optional[str] = None,
 ) -> Dict[str, Any]:
     owner_wallet = str(row["owner_wallet"])
     requester = (requester_wallet or "").strip().lower()
-    is_owner = bool(requester) and requester == owner_wallet.lower()
+    is_owner = (requester_account == row["owner_account_id"] if row["owner_account_id"]
+                else bool(requester) and requester == owner_wallet.lower())
     publications = _playlist_publications(str(row["id"]), requester_wallet=requester) if include_items else []
     artwork_tiles = (
         [str(item.get("cover_art_url") or "") for item in publications if item.get("cover_art_url")]
@@ -888,7 +949,7 @@ def playlist_to_dict(
         else playlist_art_tiles(str(row["id"]))
     )[:4]
     total_duration = sum(float(item.get("duration") or 0) for item in publications)
-    return {
+    result = {
         "id": row["id"],
         "owner_wallet": owner_wallet,
         "owner": _format_wallet(owner_wallet),
@@ -906,6 +967,17 @@ def playlist_to_dict(
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
+    if row["owner_account_id"]:
+        profile = get_db().execute("SELECT id,display_name FROM account_public_profiles WHERE account_id=?",
+                                   (row["owner_account_id"],)).fetchone()
+        result.update({"owner_wallet": "", "owner": profile["display_name"] if profile else "HavnAI creator",
+                       "owner_url": f"/creator/{profile['id']}" if profile else "/discover"})
+    if requester_account:
+        for publication in publications:
+            for key, table in (("liked_by_me", "account_music_likes"), ("saved_by_me", "account_music_saves")):
+                publication[key] = bool(get_db().execute(f"SELECT 1 FROM {table} WHERE account_id=? AND publication_id=?",
+                    (requester_account, publication["id"])).fetchone())
+    return result
 
 
 def playlist_art_tiles(playlist_id: str) -> List[str]:
@@ -1021,7 +1093,7 @@ def _owner_playlist_row(playlist_id: str, wallet: str) -> Optional[sqlite3.Row]:
     return (
         get_db()
         .execute(
-            "SELECT * FROM music_playlists WHERE id=? AND owner_wallet=?",
+            "SELECT * FROM music_playlists WHERE id=? AND owner_wallet=? AND owner_account_id IS NULL",
             (playlist_id, normalized_wallet),
         )
         .fetchone()

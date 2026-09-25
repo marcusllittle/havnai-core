@@ -179,6 +179,21 @@ network or origin. Unselected jobs and balances never enlarge the selection.
 This is the confirmation foundation only: signature consumption and transfer
 execution are not exposed, and no frontend requests this signature yet.
 
+The internal `account_ledger.import_legacy_in_transaction` settlement primitive
+moves the exact, positive available legacy balance to account credits in a
+caller-owned write transaction. It requires an active account wallet link and
+rejects ambiguous wallet rows, changed balances, fractional units and overflow.
+It sets the old balance to zero without floating-point subtraction and preserves
+historical deposit/spend totals. An append-only `account_credit_imports` record
+stores the negative legacy-unit delta and references the matching positive
+account ledger entry. A global migration ID binds wallet, account and units;
+retries return the original receipt without sweeping later legacy deposits.
+Savepoints prevent a caught error from retaining half a transfer. Tests cover
+concurrent retries, distinct imports, races with legacy spending, account limits,
+receipt failures and outer transaction rollback. This primitive is not a public
+transfer API: its caller still needs atomic proof consumption, resource transfer,
+legacy payment/refund provenance handling and the rollout evidence below.
+
 Migration is a separate **Import existing wallet content** action after linking.
 Proof of the wallet alone is insufficient if a resource already belongs to an
 account. Never trust the creator wallet as proof of current gallery ownership.

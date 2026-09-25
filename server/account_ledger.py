@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import time
+from decimal import Decimal, InvalidOperation
 
 SCALE = 1000
 MAX_UNITS = 10**15
@@ -68,6 +70,21 @@ def initialize(conn: sqlite3.Connection) -> None:
         CREATE TRIGGER IF NOT EXISTS account_sales_no_delete
             BEFORE DELETE ON account_credit_sales BEGIN
                 SELECT RAISE(ABORT, 'sale receipts are append-only'); END;
+        CREATE TABLE IF NOT EXISTS account_credit_imports (
+            migration_id TEXT PRIMARY KEY,
+            wallet TEXT NOT NULL, account_id TEXT NOT NULL REFERENCES accounts(id),
+            units INTEGER NOT NULL CHECK(typeof(units)='integer' AND units>0),
+            legacy_delta_units INTEGER NOT NULL CHECK(typeof(legacy_delta_units)='integer' AND legacy_delta_units=-units),
+            legacy_after_units INTEGER NOT NULL CHECK(legacy_after_units=0),
+            credit_entry_id INTEGER NOT NULL UNIQUE REFERENCES account_credit_ledger(id),
+            created_at REAL NOT NULL
+        );
+        CREATE TRIGGER IF NOT EXISTS account_import_receipt_no_update
+            BEFORE UPDATE ON account_credit_imports BEGIN
+                SELECT RAISE(ABORT, 'credit import receipts are append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS account_import_receipt_no_delete
+            BEFORE DELETE ON account_credit_imports BEGIN
+                SELECT RAISE(ABORT, 'credit import receipts are append-only'); END;
     """)
 
 
@@ -126,6 +143,69 @@ def fund_in_transaction(conn: sqlite3.Connection, account_id: str, units: int, *
     _units(units)
     return _apply(conn, account_id, operation="fund", key=f"fund:{payment_id}", resource=payment_id,
                   settled_delta=units, reserved_delta=0, actor=actor, reason="paid_credit_purchase")
+
+
+def import_legacy_in_transaction(conn: sqlite3.Connection, account_id: str, wallet: str,
+                                 units: int, *, migration_id: str) -> dict:
+    """Move the exact available legacy balance into the account, with paired audit.
+
+    Internal settlement only. The caller must verify/consume a fresh import proof
+    and revalidate its snapshot in this same BEGIN IMMEDIATE transaction. Zeroing
+    the exact full balance avoids floating-point subtraction/rounding; historical
+    deposit/spend totals and pending legacy refunds/payments remain untouched.
+    """
+    if not conn.in_transaction:
+        raise RuntimeError("credit import requires a caller-owned transaction")
+    _units(units)
+    if (not isinstance(migration_id, str) or not migration_id.strip() or len(migration_id) > 200
+            or not isinstance(wallet, str) or not re.fullmatch(r"0x[0-9a-fA-F]{40}", wallet)
+            or int(wallet[2:], 16) == 0):
+        raise LedgerError("invalid_credit_import")
+    wallet = wallet.lower()
+    prior = conn.execute("""SELECT wallet,account_id,units,credit_entry_id
+        FROM account_credit_imports WHERE migration_id=?""", (migration_id,)).fetchone()
+    if prior:
+        if tuple(prior[:3]) != (wallet, account_id, units):
+            raise LedgerError("idempotency_conflict")
+        return {"migration_id": migration_id, "credit_entry_id": prior[3],
+                "units": units, "legacy_after_units": 0, "replayed": True}
+    if not conn.execute("""SELECT 1 FROM accounts a JOIN wallet_links w ON w.account_id=a.id
+        WHERE a.id=? AND a.status='active' AND w.wallet=? AND w.namespace='eip155'
+        AND w.unlinked_at IS NULL""", (account_id, wallet)).fetchone():
+        raise LedgerError("import_wallet_unavailable")
+    rows = conn.execute("SELECT wallet,balance FROM credits WHERE LOWER(wallet)=?", (wallet,)).fetchall()
+    if len(rows) != 1:
+        raise LedgerError("import_balance_changed")
+    try:
+        scaled = Decimal(str(rows[0][1])) * SCALE
+        if not scaled.is_finite() or scaled != units:
+            raise LedgerError("import_balance_changed")
+    except InvalidOperation as exc:
+        raise LedgerError("import_balance_changed") from exc
+    conn.execute("SAVEPOINT account_credit_import")
+    try:
+        changed = conn.execute("UPDATE credits SET balance=0,updated_at=? WHERE wallet=? AND balance=?",
+                               (time.time(), rows[0][0], rows[0][1]))
+        if changed.rowcount != 1:
+            raise LedgerError("import_balance_changed")
+        entry = _apply(conn, account_id, operation="legacy_import",
+            key=f"legacy_import:{migration_id}", resource=migration_id, settled_delta=units,
+            reserved_delta=0, actor=account_id, reason="explicit_wallet_credit_import")
+        # The paired receipt and credit entry must either both be new or both
+        # already exist. A stray matching ledger key must not debit twice.
+        if entry["replayed"]:
+            raise LedgerError("import_ledger_inconsistent")
+        conn.execute("""INSERT INTO account_credit_imports
+            (migration_id,wallet,account_id,units,legacy_delta_units,legacy_after_units,credit_entry_id,created_at)
+            VALUES (?,?,?,?,?,0,?,?)""", (migration_id, wallet, account_id, units, -units,
+                                         entry["entry_id"], time.time()))
+    except Exception:
+        conn.execute("ROLLBACK TO account_credit_import")
+        conn.execute("RELEASE account_credit_import")
+        raise
+    conn.execute("RELEASE account_credit_import")
+    return {"migration_id": migration_id, "credit_entry_id": entry["entry_id"],
+            "units": units, "legacy_after_units": 0, "replayed": False}
 
 
 def settle_sale_in_transaction(conn: sqlite3.Connection, buyer_account_id: str,

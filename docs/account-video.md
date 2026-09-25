@@ -61,6 +61,34 @@ failed decoding, and ownership changes return structured errors without creating
 a derived asset or reserving credits. The web helper aborts on account changes and
 can supply the resulting asset ID directly to the next video request.
 
-Tests: `tests/test_account_video.py` (including real local FFmpeg when installed),
+## Durable clip-chain API
+
+`POST /v2/video-chains` accepts an immutable `template` video request, `total`
+(integer 2–7), and boolean `auto_stitch`, with an account-scoped Idempotency-Key.
+Creation costs no credits. Repeating the same key/body recovers the same chain;
+changing its body conflicts. Its initial seed is stored rather than regenerated
+after a refresh. Raw image URLs, wallet fields, and unrecognized controls cannot
+enter the stored template. Starting image/audio assets must belong to the account.
+
+`GET /v2/video-chains` lists account chains (50 per page, `offset`); GET on
+`/v2/video-chains/<id>` returns the plan and its clip IDs/statuses. Another account
+cannot read, advance, or stop it. This allows a different authenticated browser
+session to recover the plan without relying on localStorage.
+
+`POST /v2/video-chains/<id>/next` returns the current clip while it is running.
+After success it derives the private last frame, increments the stored seed, and
+submits the next image-to-video job through the shared account validation path.
+The per-clip request key is deterministic. The clip reference and normal credit
+reservation commit together under the same database lock; a retry cannot reserve
+again or orphan a billed job outside the chain. Failed clips stop advancement.
+When all clips succeed, the API reports `rendered`; this does not mean stitched.
+
+DELETE on the chain stops further submissions. It does not cancel an already
+accepted clip. Stop/ownership/status are rechecked under the enqueue lock, including
+when stopping overlaps last-frame extraction. No new reservation occurs after that
+stop wins the transaction. The front-end chain runner and stitching endpoint remain
+to be implemented; this API alone does not enable the multi-clip control.
+
+Tests: `tests/test_account_video_chains.py`, `tests/test_account_video.py` (including real local FFmpeg when installed),
 `tests/test_account_jobs.py`, `tests/test_platform_v1.py`, and web
 `lib/__tests__/accountJobSubmission.test.ts` and `accountVideoCreate.test.ts`.

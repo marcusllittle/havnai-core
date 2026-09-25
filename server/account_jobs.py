@@ -82,7 +82,7 @@ def previous_request(conn, account_id, request_key, payload):
 
 def enqueue(conn: sqlite3.Connection, account_id: str, *, request_key: str, request_payload: dict,
             model: str, task_type: str, settings: dict, resolved_spec: dict, weight: float,
-            units: int) -> str:
+            units: int, chain=None) -> str:
     if not request_key or len(request_key) > 128:
         raise ValueError("idempotency_key_required")
     digest = hashlib.sha256(json.dumps(request_payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
@@ -107,6 +107,9 @@ def enqueue(conn: sqlite3.Connection, account_id: str, *, request_key: str, requ
             "SELECT 1 FROM account_identity_anchors WHERE account_id=? AND slug=? AND asset_id=?",
             (account_id, settings["identity_anchor_slug"], settings.get("face_asset_id"))).fetchone():
             raise ValueError("identity_anchor_not_found")
+        if chain:
+            import account_video_chains
+            account_video_chains.check_enqueue(conn, account_id, *chain)
         now = time.time()
         job_id = "job-" + uuid.uuid4().hex
         account_ledger.reserve_in_transaction(conn, account_id, units, job_id=job_id)
@@ -117,6 +120,8 @@ def enqueue(conn: sqlite3.Connection, account_id: str, *, request_key: str, requ
             (job_id, account_id, account_id, model, json.dumps(settings), task_type, weight,
              now, now, json.dumps(resolved_spec)))
         conn.execute("INSERT INTO account_job_requests VALUES (?,?,?,?)", (account_id, request_key, digest, job_id))
+        if chain:
+            conn.execute("INSERT INTO account_video_chain_clips VALUES (?,?,?)", (*chain, job_id))
         return job_id
 
 

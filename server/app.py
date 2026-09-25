@@ -72,6 +72,7 @@ import account_auth
 import account_jobs
 import account_anchors
 import account_video
+import account_video_chains
 
 try:
     from eth_account import Account  # type: ignore
@@ -1171,6 +1172,7 @@ def init_db() -> None:
     account_jobs.initialize(conn)
     account_anchors.initialize(conn)
     account_video.initialize(conn)
+    account_video_chains.initialize(conn)
 
 
 init_db()
@@ -5825,6 +5827,50 @@ def account_collection_visibility() -> Any:
     return jsonify({"job_ids": body["job_ids"], "hidden": body["hidden"]})
 
 
+@app.route("/v2/video-chains", methods=["GET", "POST"])
+@app.route("/v2/video-chains/<chain_id>", methods=["GET", "DELETE"])
+@app.route("/v2/video-chains/<chain_id>/next", methods=["POST"])
+def account_video_chain(chain_id=None) -> Any:
+    error = _require_studio_user()
+    if error:
+        return error
+    conn = get_db()
+    try:
+        if not chain_id:
+            if request.method == "POST":
+                return jsonify(account_video_chains.create(conn, g.account_id, request.headers.get("Idempotency-Key", ""), request.get_json(silent=True)))
+            offset = max(0, int(request.args.get("offset", "0")))
+            rows = conn.execute("SELECT id FROM account_video_chains WHERE account_id=? ORDER BY created_at DESC,id DESC LIMIT 50 OFFSET ?", (g.account_id, offset)).fetchall()
+            return jsonify({"chains": [account_video_chains.read(conn, g.account_id, row["id"]) for row in rows]})
+        if request.method == "DELETE":
+            return jsonify(account_video_chains.stop(conn, g.account_id, chain_id))
+        chain = account_video_chains.read(conn, g.account_id, chain_id)
+        if request.method == "GET":
+            return jsonify(chain)
+        if chain["state"] != "active":
+            return jsonify({"chain": chain}), 200 if chain["state"] == "rendered" else 409
+        index = len(chain["jobs"])
+        if index and chain["jobs"][-1]["status"] != "succeeded":
+            return jsonify({"chain": chain, "job": _v1_job_payload(get_job(chain["jobs"][-1]["id"]))})
+        payload = dict(chain["template"])
+        payload["seed"] = (int(payload["seed"]) + index) % (2**32)
+        if index:
+            if not _disk_has_capacity(ASSETS_DIR):
+                return jsonify({"error": "insufficient_storage"}), 507
+            asset = account_video.last_frame(conn, g.account_id, chain["jobs"][-1]["id"], outputs=OUTPUTS_DIR, assets=ASSETS_DIR, max_bytes=ASSET_MAX_BYTES)
+            payload.update(type="image_to_video", source_asset_id=asset["id"])
+        # The chain supplies immutable settings and a deterministic per-clip key.
+        # The clip link and its credit reservation are committed in one transaction.
+        response = app.make_response(_create_studio_job(payload, g.account_id, f"{chain_id}:{index}", chain=(chain_id, index)))
+        if response.status_code == 202:
+            return jsonify({"chain": account_video_chains.read(conn, g.account_id, chain_id), "job": response.get_json()}), 202
+        return response
+    except account_video.VideoInputError as exc:
+        return jsonify({"error": str(exc)}), exc.status
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 422
+
+
 @app.route("/v2/jobs/<job_id>/last-frame", methods=["POST"])
 def account_video_last_frame(job_id: str) -> Any:
     error = _require_studio_user()
@@ -5873,15 +5919,17 @@ def v1_create_job() -> Any:
     auth_error = _require_studio_user()
     if auth_error:
         return auth_error
-    payload = request.get_json(silent=True) or {}
+    return _create_studio_job(request.get_json(silent=True) or {}, getattr(g, "account_id", None), request.headers.get("Idempotency-Key", ""))
+
+
+def _create_studio_job(payload, account_id, request_key, chain=None) -> Any:
     if not isinstance(payload, dict):
         return jsonify({"error": "invalid_payload"}), 422
-    account_id = getattr(g, "account_id", None)
     if account_id and any(key in payload for key in ("wallet", "account_id", "owner_account_id")):
         return jsonify({"error": "identity_is_session_owned"}), 422
     if account_id:
         try:
-            previous_id = account_jobs.previous_request(get_db(), account_id, request.headers.get("Idempotency-Key", ""), payload)
+            previous_id = account_jobs.previous_request(get_db(), account_id, request_key, payload)
         except (ValueError, account_ledger.LedgerError) as exc:
             return jsonify({"error": str(exc)}), 409 if str(exc) == "idempotency_conflict" else 404 if str(exc) == "job_not_found" else 422
         if previous_id:
@@ -6101,9 +6149,11 @@ def v1_create_job() -> Any:
     if account_id:
         try:
             units = account_jobs.cost_units(credits.resolve_credit_cost(selected_model, task_type), int(settings.get("batch_size", 1)))
-            job_id = account_jobs.enqueue(get_db(), account_id, request_key=request.headers.get("Idempotency-Key", ""),
+            job_id = account_jobs.enqueue(get_db(), account_id, request_key=request_key,
                 request_payload=payload, model=selected_model, task_type=task_type, settings=settings,
-                resolved_spec=resolved_spec, weight=weight, units=units)
+                resolved_spec=resolved_spec, weight=weight, units=units, chain=chain)
+        except account_video.VideoInputError as exc:
+            return jsonify({"error": str(exc)}), exc.status
         except (ValueError, account_ledger.LedgerError) as exc:
             return jsonify({"error": str(exc)}), 409 if str(exc) in {"idempotency_conflict", "insufficient_credits"} else 422
         return jsonify(_v1_job_payload(get_job(job_id) or {})), 202

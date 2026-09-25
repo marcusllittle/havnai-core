@@ -3,6 +3,7 @@ import hashlib
 import json
 import secrets
 import time
+from urllib.parse import urlsplit
 from decimal import Decimal, InvalidOperation
 
 import account_identity
@@ -33,6 +34,11 @@ def initialize(conn):
         CREATE TRIGGER IF NOT EXISTS account_import_snapshot_no_delete
             BEFORE DELETE ON account_import_snapshots BEGIN
                 SELECT RAISE(ABORT, 'import snapshot is immutable'); END;
+        CREATE TABLE IF NOT EXISTS account_import_challenges (
+            id TEXT PRIMARY KEY, snapshot_id TEXT NOT NULL UNIQUE REFERENCES account_import_snapshots(id),
+            origin TEXT NOT NULL, chain_id INTEGER NOT NULL, message TEXT NOT NULL,
+            expires_at REAL NOT NULL, used_at REAL
+        );
     """)
 
 
@@ -48,6 +54,18 @@ def _rows(conn, query, args):
     cursor = conn.execute(query, args)
     names = [column[0] for column in cursor.description]
     return [dict(zip(names, row)) for row in cursor.fetchall()]
+
+
+def _job_digest(conn, job_id):
+    return _digest({
+        "job": _rows(conn, "SELECT * FROM jobs WHERE id=?", (job_id,)),
+        "listings": _rows(conn, "SELECT * FROM gallery_listings WHERE job_id=? ORDER BY id", (job_id,)),
+        "artifacts": _rows(conn, "SELECT * FROM artifacts WHERE job_id=? ORDER BY id", (job_id,)),
+    })
+
+
+def _credit_digest(conn, wallet):
+    return _digest(_rows(conn, "SELECT * FROM credits WHERE LOWER(wallet)=? ORDER BY wallet", (wallet,)))
 
 
 def prepare(conn, principal, link_id, request_key, selection):
@@ -89,17 +107,10 @@ def prepare(conn, principal, link_id, request_key, selection):
         # bind state even when an edit leaves the public summary unchanged.
         jobs = []
         for job in inventory["jobs"]:
-            job_id = job["id"]
-            state = {
-                "job": _rows(conn, "SELECT * FROM jobs WHERE id=?", (job_id,)),
-                "listings": _rows(conn, "SELECT * FROM gallery_listings WHERE job_id=? ORDER BY id", (job_id,)),
-                "artifacts": _rows(conn, "SELECT * FROM artifacts WHERE job_id=? ORDER BY id", (job_id,)),
-            }
-            jobs.append({**job, "state_digest": _digest(state)})
+            jobs.append({**job, "state_digest": _job_digest(conn, job["id"])})
         credits = None
         if include_credits:
-            state = _rows(conn, "SELECT * FROM credits WHERE LOWER(wallet)=? ORDER BY wallet", (inventory["wallet"],))
-            credits = {**inventory["credits"], "state_digest": _digest(state)}
+            credits = {**inventory["credits"], "state_digest": _credit_digest(conn, inventory["wallet"])}
         now = time.time()
         snapshot = {"version": 1, "id": "import_" + secrets.token_hex(24),
                     "account_id": account, "link_id": link_id, "wallet": inventory["wallet"],
@@ -133,6 +144,90 @@ def load(conn, principal, snapshot_id):
     with conn:
         account = account_identity._account(conn, principal)
         return _load(conn, account, account_identity._session_hash(principal), snapshot_id)
+
+
+def revalidate_in_transaction(conn, principal, snapshot_id):
+    """Caller must hold BEGIN IMMEDIATE through eventual proof consumption/transfer.
+
+    Only the selected inventory is checked. This does not expand selection or
+    certify the as-yet unsupported publication/reference migration dependencies.
+    """
+    if not conn.in_transaction:
+        raise RuntimeError("import revalidation requires a write transaction")
+    account = account_identity._account(conn, principal)
+    snapshot = _load(conn, account, account_identity._session_hash(principal), snapshot_id)
+    ids = [job["id"] for job in snapshot["jobs"]]
+    inventory = _preview(conn, account, snapshot["link_id"], limit=100, selected=ids)
+    if (inventory["wallet"] != snapshot["wallet"] or inventory["total"] != len(ids)
+            or inventory["eligible_count"] != len(ids)):
+        raise MigrationError("import_snapshot_changed", 409)
+    try:
+        if any(_job_digest(conn, job["id"]) != job["state_digest"] for job in snapshot["jobs"]):
+            raise MigrationError("import_snapshot_changed", 409)
+        if snapshot["credits"] is not None:
+            if (inventory["credits"]["exclusion"] is not None
+                    or inventory["credits"]["available_units"] != snapshot["credits"]["available_units"]
+                    or _credit_digest(conn, snapshot["wallet"]) != snapshot["credits"]["state_digest"]):
+                raise MigrationError("import_snapshot_changed", 409)
+    except MigrationError:
+        raise
+    except (TypeError, ValueError) as exc:
+        # Non-finite legacy numbers or malformed state must never be treated as
+        # an unchanged selection.
+        raise MigrationError("import_snapshot_changed", 409) from exc
+    return snapshot
+
+
+def issue_challenge(conn, principal, snapshot_id, *, origin, chain_id):
+    """Issue a separate EIP-191 message; a link signature cannot authorize import.
+
+    The HTTP adapter must enforce recent authentication and its Origin allowlist.
+    No execution endpoint is enabled until all migration dependencies are covered.
+    """
+    if not isinstance(origin, str):
+        raise MigrationError("invalid_origin", 403)
+    try:
+        parsed = urlsplit(origin)
+    except ValueError as exc:
+        raise MigrationError("invalid_origin", 403) from exc
+    secure = parsed.scheme == "https" or (parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"})
+    if (not secure or not parsed.netloc or parsed.username or parsed.password or parsed.path
+            or parsed.query or parsed.fragment or any(c.isspace() for c in origin)):
+        raise MigrationError("invalid_origin", 403)
+    if type(chain_id) is not int or chain_id not in {1, 11155111}:
+        raise MigrationError("unsupported_chain")
+    if conn.in_transaction:
+        raise RuntimeError("import challenge requires an idle connection")
+    conn.execute("BEGIN IMMEDIATE")
+    with conn:
+        snapshot = revalidate_in_transaction(conn, principal, snapshot_id)
+        existing = conn.execute("""SELECT id,origin,chain_id,message,expires_at,used_at
+            FROM account_import_challenges WHERE snapshot_id=?""", (snapshot_id,)).fetchone()
+        if existing:
+            if existing[1] != origin or existing[2] != chain_id:
+                raise MigrationError("import_challenge_context_changed", 409)
+            if existing[5] is not None or existing[4] <= time.time():
+                raise MigrationError("invalid_import_challenge", 409)
+            return {"challenge_id": existing[0], "message": existing[3], "expires_at": existing[4]}
+        nonce = secrets.token_hex(32)
+        expires = snapshot["expires_at"]
+        credits = snapshot["credits"]["available_units"] if snapshot["credits"] else 0
+        message = "\n".join([
+            "HavnAI legacy content import authorization", f"origin: {origin}",
+            f"account_id: {snapshot['account_id']}", f"wallet: {snapshot['wallet']}",
+            f"chain_id: {chain_id}", "purpose: legacy_import", f"link_id: {snapshot['link_id']}",
+            f"session_binding: {snapshot['session_binding']}", f"snapshot_id: {snapshot_id}",
+            f"snapshot_digest: {snapshot['digest']}", f"nonce: {nonce}",
+            f"job_ids: {_json([job['id'] for job in snapshot['jobs']])}",
+            f"credit_units: {credits}", f"credit_scale: {account_ledger.SCALE}",
+            f"expires_at: {expires:.6f}",
+            "Authorize only this unchanged selection to move from the linked wallet to this account.",
+            "No on-chain tokens, rewards, or unselected content are transferred.",
+        ])
+        conn.execute("""INSERT INTO account_import_challenges
+            (id,snapshot_id,origin,chain_id,message,expires_at) VALUES (?,?,?,?,?,?)""",
+            (nonce, snapshot_id, origin, chain_id, message, expires))
+        return {"challenge_id": nonce, "message": message, "expires_at": expires}
 
 
 def preview(conn, account, link_id, *, limit=50, offset=0):

@@ -232,3 +232,86 @@ def test_snapshot_allows_independent_jobs_and_credit_scope(inventory):
     assert jobs.json["credits"] is None and jobs.json["scope"] == ["generation_history"]
     rejected = harness.client.post(PREPARE, headers={**headers, "Idempotency-Key": "bad-credits"}, json=SELECTION)
     assert rejected.status_code == 409 and rejected.json["error"]["code"] == "import_credits_require_review"
+
+
+def challenge_request(harness, headers, snapshot):
+    return harness.client.post("/v2/account/import-snapshots/" + snapshot["id"] + "/challenge",
+        headers={**headers, "Origin": "https://joinhavn.io"}, json={"chain_id": 11155111})
+
+
+def test_import_challenge_binds_selection_and_reuses_nonce_without_transfer(inventory):
+    harness, headers, account, _ = inventory
+    snapshot = harness.client.post(PREPARE, headers=headers, json=SELECTION).json
+    response = challenge_request(harness, headers, snapshot)
+    assert response.status_code == 201, response.json
+    challenge = response.json
+    for field in ("purpose: legacy_import", "origin: https://joinhavn.io", "chain_id: 11155111",
+                  "account_id: " + account, "wallet: " + WALLET, "snapshot_digest: " + snapshot["digest"],
+                  "session_binding: " + snapshot["session_binding"], 'job_ids: ["01-ready","05-purchased"]',
+                  "credit_units: 2125", "credit_scale: 1000", "nonce: " + challenge["challenge_id"]):
+        assert field in challenge["message"]
+    assert challenge["expires_at"] == snapshot["expires_at"]
+    assert challenge_request(harness, headers, snapshot).json == challenge
+    with app.app.app_context():
+        conn = app.get_db()
+        assert conn.execute("SELECT COUNT(*) FROM account_import_challenges").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM account_wallet_challenges").fetchone()[0] == 0
+        assert conn.execute("SELECT balance FROM credits WHERE wallet=?", (WALLET,)).fetchone()[0] == 2.125
+        assert conn.execute("SELECT owner_account_id FROM jobs WHERE id='01-ready'").fetchone()[0] is None
+
+
+@pytest.mark.parametrize("mutation", [
+    "UPDATE jobs SET data='{}' WHERE id='01-ready'",
+    "UPDATE jobs SET status='running' WHERE id='01-ready'",
+    "UPDATE gallery_listings SET title='Changed' WHERE job_id='05-purchased'",
+    "UPDATE gallery_listings SET owner_wallet='0x2222222222222222222222222222222222222222' WHERE job_id='05-purchased'",
+    "UPDATE credits SET balance=balance+1",
+    "UPDATE credits SET updated_at=updated_at+1",
+    "UPDATE credits SET balance=1.00001",
+    "INSERT INTO artifacts(id,job_id,kind,filename,content_type,path,size_bytes,sha256,created_at) VALUES ('new-artifact','01-ready','image','new.png','image/png','/private/new.png',1,'abc',1)",
+])
+def test_changed_snapshot_cannot_issue_or_recover_confirmation(inventory, mutation):
+    harness, headers, _, _ = inventory
+    snapshot = harness.client.post(PREPARE, headers=headers, json=SELECTION).json
+    assert challenge_request(harness, headers, snapshot).status_code == 201
+    with app.app.app_context():
+        conn = app.get_db()
+        with conn:
+            conn.execute(mutation)
+    response = challenge_request(harness, headers, snapshot)
+    assert response.status_code == 409
+    assert response.json["error"]["code"] == "import_snapshot_changed"
+
+
+def test_unselected_changes_do_not_expand_or_invalidate_confirmation(inventory):
+    harness, headers, _, _ = inventory
+    snapshot = harness.client.post(PREPARE, headers=headers, json={**SELECTION, "include_credits": False}).json
+    with app.app.app_context():
+        conn = app.get_db()
+        with conn:
+            conn.execute("UPDATE jobs SET status='completed',data='{}' WHERE id='02-running'")
+            conn.execute("UPDATE credits SET balance=balance+1")
+    response = challenge_request(harness, headers, snapshot)
+    assert response.status_code == 201
+    assert "02-running" not in response.json["message"]
+    assert "credit_units: 0" in response.json["message"]
+
+
+def test_challenge_enforces_session_origin_recent_auth_and_chain(inventory, keys):
+    harness, headers, _, other_headers = inventory
+    snapshot = harness.client.post(PREPARE, headers=headers, json=SELECTION).json
+    path = "/v2/account/import-snapshots/" + snapshot["id"] + "/challenge"
+    assert challenge_request(harness, other_headers, snapshot).status_code == 404
+    for claims, status in [({"sid": "another-session"}, 404), ({"fva": [6, -1]}, 403)]:
+        assert challenge_request(harness, {**headers, "Authorization": token(keys, **claims)}, snapshot).status_code == status
+    assert harness.client.post(path, headers=headers, json={"chain_id": 11155111}).status_code == 403
+    assert harness.client.post(path, headers={**headers, "Origin": "https://evil.example"}, json={"chain_id": 11155111}).status_code == 403
+    for body in ({"chain_id": True}, {"chain_id": "11155111"}, {"chain_id": 137}, {"chain_id": 1, "digest": "spoof"}):
+        assert harness.client.post(path, headers={**headers, "Origin": "https://joinhavn.io"}, json=body).status_code == 422
+    assert challenge_request(harness, headers, snapshot).status_code == 201
+    assert harness.client.post(path, headers={**headers, "Origin": "https://joinhavn.io"}, json={"chain_id": 1}).status_code == 409
+    with app.app.app_context():
+        conn = app.get_db()
+        with conn:
+            conn.execute("UPDATE wallet_links SET unlinked_at=2 WHERE id='link-import'")
+    assert challenge_request(harness, headers, snapshot).status_code == 404

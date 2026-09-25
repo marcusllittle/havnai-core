@@ -167,6 +167,18 @@ atomic transfer and rollback/compensation controls below are still required befo
 enabling execution. Snapshot hashes currently cover only the stated inventory;
 publication, playlist, reference and workflow dependencies remain pending.
 
+`POST /v2/account/import-snapshots/:id/challenge` accepts only `{chain_id}` and
+requires recent account authentication plus an allowlisted request Origin. It
+rechecks the selected job/listing/artifact rows, current ownership, active link,
+and any selected credit balance under a write lock before issuing a distinct
+`legacy_import` message. Changed selections return 409; the user must prepare a
+new snapshot. The message binds the snapshot digest, exact job IDs and credit
+units, account/session/wallet/link, origin, network and expiry. Its nonce is
+stable for retries of that snapshot and cannot be reused with a different
+network or origin. Unselected jobs and balances never enlarge the selection.
+This is the confirmation foundation only: signature consumption and transfer
+execution are not exposed, and no frontend requests this signature yet.
+
 Migration is a separate **Import existing wallet content** action after linking.
 Proof of the wallet alone is insufficient if a resource already belongs to an
 account. Never trust the creator wallet as proof of current gallery ownership.

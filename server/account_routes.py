@@ -73,6 +73,18 @@ def create_blueprint(get_db: Callable[[], sqlite3.Connection], rate_limit: Calla
     def wallet_import_snapshot(snapshot_id):
         return jsonify(account_import.load(get_db(), g.account_principal, snapshot_id))
 
+    @api.post("/account/import-snapshots/<snapshot_id>/challenge")
+    @authenticate(recent=True)
+    def wallet_import_challenge(snapshot_id):
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict) or set(data) != {"chain_id"}:
+            return fail("invalid_payload", 422)
+        origin = request.headers.get("Origin", "")
+        if origin not in account_auth.AuthConfig.from_environment().authorized_parties:
+            return fail("invalid_origin", 403)
+        return jsonify(account_import.issue_challenge(get_db(), g.account_principal, snapshot_id,
+            origin=origin, chain_id=data["chain_id"])), 201
+
     @api.get("/account/wallet-links/<link_id>/import-preview")
     @authenticate()
     def wallet_import_preview(link_id):

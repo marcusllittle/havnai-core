@@ -294,6 +294,27 @@ account. Never trust the creator wallet as proof of current gallery ownership.
 Back up the database and verify a restore before migration rollout. Dry-run the
 preview against a copy first. No automatic full-database backfill from wallet links.
 
+`scripts/account_restore_drill.py --source /path/to/coordinator.sqlite3 --output
+/private/existing-parent/new-drill-directory` uses SQLite's online backup API to
+capture committed WAL data through a read-only source connection. It compresses
+the snapshot, restores it to a separate file, compares SHA-256 digests and table
+counts, and requires integrity and foreign-key checks to pass before writing
+`report.json`. It refuses existing output directories; it never restores over a
+running database. Run on a private Linux filesystem (directory mode 0700, files
+0600); this report contains table counts but no row values or credentials.
+Database copies still contain private application data and must remain private.
+
+On 2026-09-25 the isolated local account-preview database passed this drill with
+71 tables and matching snapshot/restore SHA-256
+`110b7bff81551d3a6009e48cda8ec85966ec6ccac36f521b33e080fe0323cf98`.
+Local evidence is in
+`/home/marcus/.local/state/havnai/account-preview/restore-drill-20260925-1137/report.json`.
+The import restore test additionally executes a real signed import and an
+idempotent retry on a restored fixture database, verifies both balances and the
+receipt, and proves source ownership, balances and unused challenge remain intact.
+This is local database evidence only: production backup/restore, media-file
+backup and external payment/provider reconciliation still require verification.
+
 ## Cross-repository API v2
 
 Paths below define the target core API, proxied through `/api` on web. Account,

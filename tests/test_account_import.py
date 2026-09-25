@@ -320,20 +320,23 @@ def test_challenge_enforces_session_origin_recent_auth_and_chain(inventory, keys
     assert challenge_request(harness, headers, snapshot).status_code == 404
 
 
-@pytest.mark.parametrize("version", [1, 2, 3])
+@pytest.mark.parametrize("version", [1, 2, 3, 4])
 def test_older_selection_retry_preserves_original_digest_expiry_and_scope(inventory, version):
     harness, headers, account, _ = inventory
     current = harness.client.post(PREPARE, headers=headers, json=SELECTION).json
-    stored = {key: value for key, value in current.items() if key not in {"digest", "transfer_authorized", "playlists", "workflows"}}
+    stored = {key: value for key, value in current.items() if key not in {"digest", "transfer_authorized", "playlists", "workflows", "likes", "saves"}}
     stored.update(version=version, id=f"old-snapshot-{version}")
     old_selection = {"link_id": stored["link_id"], "job_ids": sorted(SELECTION["job_ids"]), "include_credits": True}
     if version == 1:
         stored.pop("publications")
     else:
         old_selection["publication_ids"] = []
-    if version == 3:
+    if version >= 3:
         stored["playlists"] = []
         old_selection["playlist_ids"] = []
+    if version == 4:
+        stored["workflows"] = []
+        old_selection["workflow_ids"] = []
     digest = account_import._digest(stored)
     with app.app.app_context():
         conn = app.get_db()
@@ -345,12 +348,14 @@ def test_older_selection_retry_preserves_original_digest_expiry_and_scope(invent
                     stored["created_at"], stored["expires_at"]))
     headers = {**headers, "Idempotency-Key": "older-key"}
     expected = {**stored, "digest": digest, "transfer_authorized": False}
-    for selection in (SELECTION, {**SELECTION, "publication_ids": [], "playlist_ids": [], "workflow_ids": []}):
+    for selection in (SELECTION, {**SELECTION, "publication_ids": [], "playlist_ids": [], "workflow_ids": [], "like_ids": [], "save_ids": []}):
         response = harness.client.post(PREPARE, headers=headers, json=selection)
         assert response.status_code == 201, response.json
         assert response.json == expected
     for selection in ({**SELECTION, "include_credits": False},
                       {**SELECTION, "workflow_ids": ["1"]},
+                      {**SELECTION, "like_ids": ["new-like"]},
+                      {**SELECTION, "save_ids": ["new-save"]},
                       {**SELECTION, "playlist_ids": ["new-playlist"]},
                       {**SELECTION, "publication_ids": ["new-song"]},
                       {**SELECTION, "job_ids": ["01-ready"]}):

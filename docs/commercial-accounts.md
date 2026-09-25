@@ -33,10 +33,10 @@ ownership state. Execution transfers creator/current-owner account columns in th
 same transaction as proof consumption and receipt/audit creation, preserving
 the original wallet, configuration and publication status. Unselected workflows
 stay legacy-owned. Changed records reject the old proof, and receipt failure
-rolls back ownership and signature consumption. Versions 1–3 keep their original
-snapshot/digest on retries with empty workflow selections. Web import selection,
-proof validation and receipt display still need workflow integration before
-enabling imports.
+rolls back ownership and signature consumption. Versions 1–4 keep their original
+snapshot/digest on retries with empty newly-supported selections. Web import
+selection, proof validation and receipt display support workflows. Imports remain
+disabled pending the other migration and rollout requirements.
 
 HavnAI owns an immutable `acct_<uuid>` account ID. A managed authentication
 provider proves a user identity; its verified `(issuer, subject)` maps uniquely to
@@ -169,7 +169,7 @@ The read-only first stage is available at `GET
 /v2/account/wallet-links/:link_id/import-preview?limit=50&offset=0`. It requires
 the signed-in account's active EVM wallet link and reads a consistent database
 snapshot. Its current scope is generation history, dependent music publications,
-selected playlists, workflow templates and available legacy credits; save and reference inventories
+selected playlists, workflow templates, song likes/saves and available legacy credits; reference inventories
 still need their own dependency checks. No resource or balance changes during
 this preview. Publication summaries accompany the current page of jobs, with a
 flag when the bounded 100-publication selection limit is exceeded.
@@ -179,7 +179,7 @@ It does not expose prompts, source paths or another account's identity. Legacy
 credit amounts that exceed bounds or require rounding are marked for review.
 The preview is informational. `POST /v2/account/wallet-links/:link_id/import-snapshots`
 now persists an immutable, five-minute selection using an `Idempotency-Key` and
-`{job_ids: [...], include_credits: boolean, publication_ids?: [...], playlist_ids?: [...], workflow_ids?: [...]}`. It requires recent account
+`{job_ids: [...], include_credits: boolean, publication_ids?: [...], playlist_ids?: [...], workflow_ids?: [...], like_ids?: [...], save_ids?: [...]}`. It requires recent account
 authentication, accepts at most 100 distinct eligible jobs, and rejects the whole
 selection if any job is unavailable. Credits are separately opt-in. The digest
 binds the account, current session, wallet link, exact selection, expiry, and
@@ -188,15 +188,28 @@ filesystem paths are not copied into the snapshot. Retrying the same key and
 selection returns the original snapshot, never refreshed inventory; changed
 selection returns 409. `GET /v2/account/import-snapshots/:id` is restricted to the
 original account session and still-active link; expired snapshots return 409.
-Retries of version 1–3 selections normalize missing optional fields as empty
+Retries of version 1–4 selections normalize missing optional fields as empty
 selections for comparison only. They return the original snapshot and never
 rewrite its digest, extend its expiry or add newly supported resource types.
 Neither endpoint changes ownership or balances, and `transfer_authorized` remains
 false. Fresh import proof, dependency revalidation under the execution write lock,
 atomic transfer and transactional rollback are implemented below. Audit-driven
 reversal/compensation and production verification remain required before enabling
-execution. Snapshot hashes cover only the stated inventory; reference and saved
-engagement dependencies remain pending.
+execution. Snapshot hashes cover only the stated inventory; reference asset
+dependencies remain pending.
+
+Version-5 snapshots support explicit `like_ids` and `save_ids` (publication IDs,
+at most 100 distinct IDs each). These move only the wallet's selected listening
+preferences, never the songs or their jobs. Review hides unpublished song titles
+and excludes unpublished/missing songs or ambiguous case-variant wallet records.
+The digest binds the source preference/date, destination preference/date and
+publication state; a changed source or target invalidates the confirmation.
+Execution preserves the original date for new account preferences, keeps an
+existing account preference unchanged, deletes the corresponding wallet row,
+and recomputes public like counts to avoid counting a merged preference twice.
+These changes, proof consumption and the import receipt commit together. Web
+selection/proof/receipt integration for likes and saves remains required before
+enabling this new scope.
 
 `POST /v2/account/import-snapshots/:id/challenge` accepts only `{chain_id}` and
 requires recent account authentication plus an allowlisted request Origin. It

@@ -316,3 +316,38 @@ def test_challenge_enforces_session_origin_recent_auth_and_chain(inventory, keys
         with conn:
             conn.execute("UPDATE wallet_links SET unlinked_at=2 WHERE id='link-import'")
     assert challenge_request(harness, headers, snapshot).status_code == 404
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_older_selection_retry_preserves_original_digest_expiry_and_scope(inventory, version):
+    harness, headers, account, _ = inventory
+    current = harness.client.post(PREPARE, headers=headers, json=SELECTION).json
+    stored = {key: value for key, value in current.items() if key not in {"digest", "transfer_authorized", "playlists"}}
+    stored.update(version=version, id=f"old-snapshot-{version}")
+    old_selection = {"link_id": stored["link_id"], "job_ids": sorted(SELECTION["job_ids"]), "include_credits": True}
+    if version == 1:
+        stored.pop("publications")
+    else:
+        old_selection["publication_ids"] = []
+    digest = account_import._digest(stored)
+    with app.app.app_context():
+        conn = app.get_db()
+        with conn:
+            conn.execute("""INSERT INTO account_import_snapshots
+                (id,account_id,link_id,session_hash,request_key,selection_hash,snapshot_json,digest,created_at,expires_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?)""", (stored["id"], account, stored["link_id"], stored["session_binding"],
+                    "older-key", account_import._digest(old_selection), account_import._json(stored), digest,
+                    stored["created_at"], stored["expires_at"]))
+    headers = {**headers, "Idempotency-Key": "older-key"}
+    expected = {**stored, "digest": digest, "transfer_authorized": False}
+    for selection in (SELECTION, {**SELECTION, "publication_ids": [], "playlist_ids": []}):
+        response = harness.client.post(PREPARE, headers=headers, json=selection)
+        assert response.status_code == 201, response.json
+        assert response.json == expected
+    for selection in ({**SELECTION, "include_credits": False},
+                      {**SELECTION, "playlist_ids": ["new-playlist"]},
+                      {**SELECTION, "publication_ids": ["new-song"]},
+                      {**SELECTION, "job_ids": ["01-ready"]}):
+        conflict = harness.client.post(PREPARE, headers=headers, json=selection)
+        assert conflict.status_code == 409 and conflict.json["error"]["code"] == "idempotency_conflict"
+    assert harness.client.get("/v2/account/import-snapshots/" + stored["id"], headers=headers).json == expected

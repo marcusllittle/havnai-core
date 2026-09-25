@@ -176,13 +176,23 @@ def prepare(conn, principal, link_id, request_key, selection):
     with conn:
         account = account_identity._account(conn, principal)
         session = account_identity._session_hash(principal)
-        previous = conn.execute("""SELECT id,selection_hash,session_hash FROM account_import_snapshots
+        previous = conn.execute("""SELECT id,selection_hash,session_hash,snapshot_json FROM account_import_snapshots
             WHERE account_id=? AND request_key=?""", (account, request_key)).fetchone()
         if previous:
             if previous[2] != session:
                 raise MigrationError("import_snapshot_not_found", 404)
             if previous[1] != selection_hash:
-                raise MigrationError("idempotency_conflict", 409)
+                # Older selection hashes predate optional publication/playlist
+                # keys. Compare the original immutable selection with explicit
+                # empty defaults; never rewrite its digest, expiry or proof.
+                stored = json.loads(previous[3])
+                normalized = _digest({"link_id": stored["link_id"],
+                    "job_ids": sorted(job["id"] for job in stored["jobs"]),
+                    "include_credits": stored["credits"] is not None,
+                    "publication_ids": sorted(pub["id"] for pub in stored.get("publications", [])),
+                    "playlist_ids": sorted(playlist["id"] for playlist in stored.get("playlists", []))})
+                if stored["version"] not in {1, 2} or normalized != selection_hash:
+                    raise MigrationError("idempotency_conflict", 409)
             return _load(conn, account, session, previous[0])
         inventory = _preview(conn, account, link_id, limit=100, selected=ids)
         if inventory["total"] != len(ids) or inventory["eligible_count"] != len(ids):

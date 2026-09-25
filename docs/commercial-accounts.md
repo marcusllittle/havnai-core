@@ -163,6 +163,9 @@ filesystem paths are not copied into the snapshot. Retrying the same key and
 selection returns the original snapshot, never refreshed inventory; changed
 selection returns 409. `GET /v2/account/import-snapshots/:id` is restricted to the
 original account session and still-active link; expired snapshots return 409.
+Retries of version 1/2 selections normalize missing optional fields as empty
+selections for comparison only. They return the original snapshot and never
+rewrite its digest, extend its expiry or add newly supported resource types.
 Neither endpoint changes ownership or balances, and `transfer_authorized` remains
 false. Fresh import proof, dependency revalidation under the execution write lock,
 atomic transfer and rollback/compensation controls below are still required before

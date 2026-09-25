@@ -164,3 +164,14 @@ The user clarified that the requested opening, corrected-watermark and no-MetaMa
 checks had already passed for the Collection images. Those browser checks are now
 accepted; do not ask the user to repeat them. Download, publication/management and
 recovery of an in-progress generation after reload remain separate checks.
+
+## First real account-funded music job
+
+Job `job-b7dba0f9d4954d538d89607faaf607a0` completed successfully using
+`ace_step_1_5_turbo`: 30 seconds, instrumental, 8 inference steps. The isolated
+preview's ledger shows its 1,000-unit reservation captured. The user confirmed
+playback worked, while reporting lower perceived quality than their usual setup.
+The ACE-Step adapter matches the main core checkout byte-for-byte; this does not
+establish equivalent prompts, service configuration or generation quality.
+No account music publication existed at this check. Publish/unpublish, anonymous
+playback and retained private access after unpublishing remain to be verified.

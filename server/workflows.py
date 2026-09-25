@@ -49,6 +49,13 @@ def init_workflow_tables(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE workflow_registry ADD COLUMN tags TEXT DEFAULT '[]'")
     if "usage_count" not in columns:
         conn.execute("ALTER TABLE workflow_registry ADD COLUMN usage_count INTEGER DEFAULT 0")
+    for name in ("creator_account_id", "owner_account_id"):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE workflow_registry ADD COLUMN {name} TEXT REFERENCES accounts(id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS workflow_account_owner ON workflow_registry(owner_account_id, updated_at)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS account_workflow_requests (
+        account_id TEXT NOT NULL REFERENCES accounts(id), request_key TEXT NOT NULL,
+        payload TEXT NOT NULL, result TEXT NOT NULL, PRIMARY KEY(account_id, request_key))""")
     conn.commit()
 
 
@@ -83,7 +90,7 @@ def get_workflow(workflow_id: int) -> Optional[Dict[str, Any]]:
     """Get a workflow by ID."""
     conn = get_db()
     row = conn.execute(
-        "SELECT * FROM workflow_registry WHERE id = ?", (workflow_id,)
+        "SELECT * FROM workflow_registry WHERE id = ? AND owner_account_id IS NULL", (workflow_id,)
     ).fetchone()
     if not row:
         return None
@@ -102,7 +109,7 @@ def update_workflow(
     """Update a workflow.  Only the creator can update their workflow."""
     conn = get_db()
     existing = conn.execute(
-        "SELECT creator_wallet FROM workflow_registry WHERE id = ?", (workflow_id,)
+        "SELECT creator_wallet FROM workflow_registry WHERE id = ? AND owner_account_id IS NULL", (workflow_id,)
     ).fetchone()
     if not existing:
         return None
@@ -136,8 +143,8 @@ def update_workflow(
     params.append(workflow_id)
 
     conn.execute(
-        f"UPDATE workflow_registry SET {', '.join(updates)} WHERE id = ?",
-        params,
+        f"UPDATE workflow_registry SET {', '.join(updates)} WHERE id = ? AND owner_account_id IS NULL AND creator_wallet = ?",
+        params + [creator_wallet],
     )
     conn.commit()
     log_event("Workflow updated", workflow_id=workflow_id)
@@ -154,7 +161,7 @@ def list_workflows(
 ) -> Dict[str, Any]:
     """List workflows with optional filters and pagination."""
     conn = get_db()
-    conditions: List[str] = []
+    conditions: List[str] = ["owner_account_id IS NULL"]
     params: List[Any] = []
 
     if published_only:
@@ -202,7 +209,7 @@ def publish_workflow(workflow_id: int, creator_wallet: str) -> Optional[Dict[str
     """Publish a workflow to the marketplace."""
     conn = get_db()
     existing = conn.execute(
-        "SELECT creator_wallet FROM workflow_registry WHERE id = ?", (workflow_id,)
+        "SELECT creator_wallet FROM workflow_registry WHERE id = ? AND owner_account_id IS NULL", (workflow_id,)
     ).fetchone()
     if not existing:
         return None
@@ -210,8 +217,8 @@ def publish_workflow(workflow_id: int, creator_wallet: str) -> Optional[Dict[str
         return None  # Unauthorized
 
     conn.execute(
-        "UPDATE workflow_registry SET published = 1, updated_at = ? WHERE id = ?",
-        (time.time(), workflow_id),
+        "UPDATE workflow_registry SET published = 1, updated_at = ? WHERE id = ? AND owner_account_id IS NULL AND creator_wallet = ?",
+        (time.time(), workflow_id, creator_wallet),
     )
     conn.commit()
     log_event("Workflow published", workflow_id=workflow_id, wallet=creator_wallet)
@@ -227,7 +234,7 @@ def browse_marketplace(
 ) -> Dict[str, Any]:
     """Browse published workflows in the marketplace."""
     conn = get_db()
-    conditions = ["published = 1"]
+    conditions = ["published = 1", "owner_account_id IS NULL"]
     params: List[Any] = []
 
     if search:
@@ -280,7 +287,7 @@ def increment_usage(workflow_id: int) -> None:
     """Increment the usage counter for a workflow."""
     conn = get_db()
     conn.execute(
-        "UPDATE workflow_registry SET usage_count = usage_count + 1 WHERE id = ?",
+        "UPDATE workflow_registry SET usage_count = usage_count + 1 WHERE id = ? AND owner_account_id IS NULL",
         (workflow_id,),
     )
     conn.commit()

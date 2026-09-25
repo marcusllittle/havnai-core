@@ -7,11 +7,22 @@ checkout/receipts, job/asset APIs, account music publication/libraries/playlists
 account Video Studio, image/face-swap generation, private saved face references,
 durable video sequences/stitching, account marketplace trading, and account-owned visual collections are implemented on
 the feature branch. Development Google sign-in has been verified. Production
-rollout, content migration, workflow-registry ownership, reference-sheet video
+rollout, content migration, workflow UI integration, reference-sheet video
 support, and live paid acceptance remain.
 Those require HAVN-19 through HAVN-23 and the evidence below.
 
 ## Decision and trust boundary
+
+Account workflows now have additive immutable-creator/current-owner account
+columns. `/v2/account/workflows` supports authenticated creation (with an
+idempotency key) and paginated private listing. Per-ID GET/PATCH/DELETE requires
+the current account; writes recheck provider/session/account status under a write
+lock. Payloads cannot set ownership, and config/tags/text are bounded. PATCH
+explicitly publishes or unpublishes. Guest `/v2/workflows` list/detail exposes only
+published templates owned by active accounts and omits account/wallet identity.
+Legacy workflow routes exclude all account-owned rows from reads and writes.
+The existing wallet workflow inventory is unchanged and is not automatically
+imported. Templates UI integration and explicit legacy workflow migration remain.
 
 HavnAI owns an immutable `acct_<uuid>` account ID. A managed authentication
 provider proves a user identity; its verified `(issuer, subject)` maps uniquely to

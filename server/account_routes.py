@@ -16,6 +16,7 @@ import account_payments
 import account_lifecycle
 import account_marketplace
 import account_import
+import account_workflows
 import stripe
 
 
@@ -65,6 +66,43 @@ def create_blueprint(get_db: Callable[[], sqlite3.Connection], rate_limit: Calla
 
     def imports_enabled():
         return os.environ.get("HAVNAI_ACCOUNT_IMPORT_ENABLED", "") == "1"
+
+    @api.errorhandler(account_workflows.WorkflowError)
+    def workflow_error(exc):
+        return fail(str(exc), exc.status)
+
+    @api.get("/workflows")
+    @api.get("/workflows/<int:workflow_id>")
+    def public_workflows(workflow_id=None):
+        if not rate_limit(f"workflow-read:{request.remote_addr}", limit=120):
+            return fail("rate_limited", 429)
+        try:
+            limit, offset = int(request.args.get("limit", "50")), int(request.args.get("offset", "0"))
+        except ValueError:
+            return fail("invalid_pagination", 422)
+        return jsonify(account_workflows.public(get_db(), workflow_id, limit=limit, offset=offset))
+
+    @api.route("/account/workflows", methods=["GET", "POST"])
+    @authenticate()
+    def account_workflow_collection():
+        if request.method == "POST":
+            return jsonify(account_workflows.create(get_db(), g.account_principal,
+                request.headers.get("Idempotency-Key", ""), request.get_json(silent=True))), 201
+        try:
+            limit, offset = int(request.args.get("limit", "50")), int(request.args.get("offset", "0"))
+        except ValueError:
+            return fail("invalid_pagination", 422)
+        return jsonify(account_workflows.listing(get_db(), g.account_id, limit, offset))
+
+    @api.route("/account/workflows/<int:workflow_id>", methods=["GET", "PATCH", "DELETE"])
+    @authenticate()
+    def account_workflow_item(workflow_id):
+        if request.method == "PATCH":
+            return jsonify(account_workflows.update(get_db(), g.account_principal, workflow_id, request.get_json(silent=True)))
+        if request.method == "DELETE":
+            account_workflows.delete(get_db(), g.account_principal, workflow_id)
+            return Response(status=204)
+        return jsonify(account_workflows.owned(get_db(), g.account_id, workflow_id))
 
     @api.get("/account/import-capabilities")
     @authenticate()

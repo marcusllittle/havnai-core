@@ -103,3 +103,8 @@ def test_additive_schema_preserves_legacy_workflows(setup):
         assert any(row["id"] == legacy["id"] for row in app.workflows.browse_marketplace()["workflows"])
     assert harness.client.get("/v2/account/workflows", headers=headers).json["total"] == 0
     assert harness.client.get(f'/v2/account/workflows/{legacy["id"]}', headers=headers).status_code == 404
+    assert harness.client.get("/v2/workflows?search=Updated").json["total"] == 1
+    assert harness.client.get("/v2/workflows?search=missing").json["total"] == 0
+    assert harness.client.get("/v2/workflows?category=Video").json["total"] == 0
+    assert harness.client.get(f'/v2/workflows/{legacy["id"]}').status_code == 200
+    assert harness.client.get("/v2/workflows?search=" + "x" * 257).status_code == 422

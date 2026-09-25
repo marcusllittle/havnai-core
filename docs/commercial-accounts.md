@@ -7,7 +7,7 @@ checkout/receipts, job/asset APIs, account music publication/libraries/playlists
 account Video Studio, image/face-swap generation, private saved face references,
 durable video sequences/stitching, account marketplace trading, and account-owned visual collections are implemented on
 the feature branch. Development Google sign-in has been verified. Production
-rollout, content migration, workflow UI integration, reference-sheet video
+rollout, content migration, reference-sheet video
 support, and live paid acceptance remain.
 Those require HAVN-19 through HAVN-23 and the evidence below.
 
@@ -19,10 +19,14 @@ idempotency key) and paginated private listing. Per-ID GET/PATCH/DELETE requires
 the current account; writes recheck provider/session/account status under a write
 lock. Payloads cannot set ownership, and config/tags/text are bounded. PATCH
 explicitly publishes or unpublishes. Guest `/v2/workflows` list/detail exposes only
-published templates owned by active accounts and omits account/wallet identity.
+published templates owned by active accounts plus published legacy templates,
+and omits account/wallet identity. Search/category filters and pagination are
+server-side. Unpublished legacy records are excluded from this public API.
 Legacy workflow routes exclude all account-owned rows from reads and writes.
 The existing wallet workflow inventory is unchanged and is not automatically
-imported. Templates UI integration and explicit legacy workflow migration remain.
+imported. The web branch integrates saving, editing, explicit publication,
+unpublishing, deletion and private template application without a wallet. Real
+signed-in browser acceptance and explicit legacy workflow migration remain.
 
 HavnAI owns an immutable `acct_<uuid>` account ID. A managed authentication
 provider proves a user identity; its verified `(issuer, subject)` maps uniquely to

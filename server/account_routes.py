@@ -80,7 +80,8 @@ def create_blueprint(get_db: Callable[[], sqlite3.Connection], rate_limit: Calla
             limit, offset = int(request.args.get("limit", "50")), int(request.args.get("offset", "0"))
         except ValueError:
             return fail("invalid_pagination", 422)
-        return jsonify(account_workflows.public(get_db(), workflow_id, limit=limit, offset=offset))
+        return jsonify(account_workflows.public(get_db(), workflow_id, limit=limit, offset=offset,
+            search=request.args.get("search", "").strip(), category=request.args.get("category", "").strip()))
 
     @api.route("/account/workflows", methods=["GET", "POST"])
     @authenticate()

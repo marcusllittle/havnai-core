@@ -53,19 +53,28 @@ def owned(conn, account, workflow_id):
     return dto(row)
 
 
-def public(conn, workflow_id=None, *, limit=50, offset=0):
+def public(conn, workflow_id=None, *, limit=50, offset=0, search="", category=""):
     if type(limit) is not int or not 1 <= limit <= 100 or type(offset) is not int or not 0 <= offset <= 1000000:
         raise WorkflowError("invalid_pagination")
-    query = "FROM workflow_registry w JOIN accounts a ON a.id=w.owner_account_id WHERE w.published=1 AND a.status='active'"
+    if len(search) > 256 or len(category) > 80:
+        raise WorkflowError("invalid_workflow_filter")
+    query = "FROM workflow_registry w LEFT JOIN accounts a ON a.id=w.owner_account_id WHERE w.published=1 AND (w.owner_account_id IS NULL OR a.status='active')"
+    params = []
+    if search:
+        query += " AND (w.name LIKE ? OR w.description LIKE ?)"
+        params.extend([f"%{search}%", f"%{search}%"])
+    if category:
+        query += " AND w.category=?"
+        params.append(category)
     if workflow_id is not None:
-        row = conn.execute("SELECT w.* " + query + " AND w.id=?", (workflow_id,)).fetchone()
+        row = conn.execute("SELECT w.* " + query + " AND w.id=?", [*params, workflow_id]).fetchone()
         if row is None:
             raise WorkflowError("workflow_not_found", 404)
         return dto(row)
     conn.execute("BEGIN")
     with conn:
-        total = conn.execute("SELECT COUNT(*) " + query).fetchone()[0]
-        rows = conn.execute("SELECT w.* " + query + " ORDER BY w.updated_at DESC,w.id DESC LIMIT ? OFFSET ?", (limit, offset)).fetchall()
+        total = conn.execute("SELECT COUNT(*) " + query, params).fetchone()[0]
+        rows = conn.execute("SELECT w.* " + query + " ORDER BY w.updated_at DESC,w.id DESC LIMIT ? OFFSET ?", [*params, limit, offset]).fetchall()
         return {"workflows": [dto(row) for row in rows], "total": total, "limit": limit, "offset": offset}
 
 

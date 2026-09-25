@@ -172,3 +172,90 @@ def test_real_concurrent_signature_retries_share_one_receipt(ready):
         assert conn.execute("SELECT COUNT(*) FROM account_import_receipts").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM account_credit_imports").fetchone()[0] == 1
         assert account_ledger.balance(conn, ready[2])["settled_units"] == 12125
+
+
+@pytest.fixture
+def imported_artwork(ready):
+    from PIL import Image
+    harness, headers, account, signer, _, _, _, principal = ready
+    with app.app.app_context():
+        path = app.OUTPUTS_DIR / "legacy-import.png"
+        Image.new("RGB", (24, 24), "blue").save(path)
+        conn = app.get_db()
+        with conn:
+            conn.execute("""INSERT INTO artifacts
+                (id,job_id,kind,filename,content_type,path,size_bytes,sha256,created_at)
+                VALUES ('legacy-artifact','01-ready','image','legacy-import.png','image/png',?,?,'fixture',1)""",
+                (str(path), path.stat().st_size))
+    snapshot = harness.client.post(PREPARE, headers={**headers, "Idempotency-Key": "with-artifact"}, json=SELECTION).json
+    challenge = challenge_request(harness, headers, snapshot).json
+    signature = signer.sign_message(encode_defunct(text=challenge["message"])).signature.hex()
+    proof = harness, headers, account, signer, snapshot, challenge, signature, principal
+    execute(proof)
+    return proof
+
+
+def test_imported_artwork_can_publish_sell_and_relist_without_fictitious_generation_charge(imported_artwork, keys):
+    harness, headers, seller, _, snapshot, _, _, _ = imported_artwork
+    body = {"job_id": "01-ready", "artifact_id": "legacy-artifact", "title": "Imported blue", "price_units": 500}
+    listed = harness.client.post("/v2/marketplace/listings", headers=headers, json=body)
+    assert listed.status_code == 201, listed.json
+    listing_id = listed.json["listing_id"]
+    assert harness.client.get(f"/v2/marketplace/listings/{listing_id}/preview").status_code == 200
+    original = "/v2/artifacts/legacy-artifact/content"
+    assert harness.client.get(original, headers=headers).status_code == 200
+    assert harness.client.get("/static/outputs/legacy-import.png").status_code == 404
+    buyer_headers = {"Authorization": token(keys, sub="buyer", sid="buyer-session"), "Idempotency-Key": "buy-import"}
+    buyer = harness.client.get("/v2/account", headers=buyer_headers).json["id"]
+    with app.app.app_context():
+        conn = app.get_db()
+        conn.execute("BEGIN IMMEDIATE")
+        with conn:
+            account_ledger.fund_in_transaction(conn, buyer, 1000, payment_id="buyer-checkout")
+    sold = harness.client.post(f"/v2/marketplace/listings/{listing_id}/purchase", headers=buyer_headers,
+                              json={"expected_price_units": 500})
+    assert sold.status_code == 200, sold.json
+    assert harness.client.get(original, headers=buyer_headers).status_code == 200
+    assert harness.client.get(original, headers=headers).status_code == 404
+    relisted = harness.client.post("/v2/marketplace/listings", headers={**buyer_headers, "Idempotency-Key": "relist"}, json=body)
+    assert relisted.status_code == 201, relisted.json
+    with app.app.app_context():
+        conn = app.get_db()
+        assert conn.execute("SELECT COUNT(*) FROM account_credit_reservations WHERE job_id='01-ready'").fetchone()[0] == 0
+        assert tuple(conn.execute("SELECT creator_account_id,owner_account_id FROM jobs WHERE id='01-ready'").fetchone()) == (seller, buyer)
+        assert tuple(conn.execute("SELECT snapshot_id,account_id FROM account_import_job_transfers WHERE job_id='01-ready'").fetchone()) == (snapshot["id"], seller)
+
+
+def test_import_provenance_cannot_override_uncaptured_account_charge(imported_artwork):
+    harness, headers, account, _, _, _, _, _ = imported_artwork
+    with app.app.app_context():
+        conn = app.get_db()
+        conn.execute("BEGIN IMMEDIATE")
+        with conn:
+            account_ledger.reserve_in_transaction(conn, account, 1000, job_id="01-ready")
+    body = {"job_id": "01-ready", "artifact_id": "legacy-artifact", "title": "Imported blue", "price_units": 500}
+    response = harness.client.post("/v2/marketplace/listings", headers=headers, json=body)
+    assert response.status_code == 409 and response.json["error"]["code"] == "marketplace_unsettled"
+
+
+def test_import_job_provenance_is_immutable_and_initialization_replays_safely(imported_artwork):
+    import sqlite3
+    with app.app.app_context():
+        conn = app.get_db()
+        account_import.initialize(conn)
+        assert conn.execute("SELECT COUNT(*) FROM account_import_job_transfers").fetchone()[0] == 2
+        for query in ("DELETE FROM account_import_job_transfers", "UPDATE account_import_job_transfers SET creator_wallet='forged'"):
+            with pytest.raises(sqlite3.IntegrityError, match="immutable"), conn:
+                conn.execute(query)
+
+
+def test_older_signed_receipts_backfill_provenance_without_wallet_inference(imported_artwork):
+    with app.app.app_context():
+        conn = app.get_db()
+        before = [tuple(row) for row in conn.execute("SELECT * FROM account_import_job_transfers ORDER BY job_id")]
+        # Simulate upgrading the prior schema, which has signed receipts but no
+        # indexed transfer table. This is confined to the temporary test DB.
+        conn.execute("DROP TABLE account_import_job_transfers")
+        account_import.initialize(conn)
+        assert [tuple(row) for row in conn.execute("SELECT * FROM account_import_job_transfers ORDER BY job_id")] == before
+        assert conn.execute("SELECT COUNT(*) FROM account_import_job_transfers WHERE job_id='08-failed'").fetchone()[0] == 0

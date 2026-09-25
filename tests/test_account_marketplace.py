@@ -57,6 +57,17 @@ def listing(case):
     return response.json["listing_id"]
 
 
+def test_owner_assignment_without_charge_or_signed_import_is_not_publishable(market_case):
+    harness, headers, _, _, _, body, _ = market_case
+    with app.app.app_context():
+        conn = app.get_db()
+        with conn:
+            conn.execute("DELETE FROM account_credit_reservations WHERE job_id=?", (body["job_id"],))
+    response = harness.client.post("/v2/marketplace/listings", headers=headers, json=body)
+    assert response.status_code == 409
+    assert response.json["error"]["code"] == "marketplace_unsettled"
+
+
 def test_sale_transfers_private_access_once_and_preserves_creator(market_case):
     harness, seller_headers, buyer_headers, seller, buyer, body, url = market_case
     listing_id = listing(market_case)

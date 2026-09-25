@@ -51,7 +51,30 @@ def initialize(conn):
         CREATE TRIGGER IF NOT EXISTS account_import_receipt_immutable_delete
             BEFORE DELETE ON account_import_receipts BEGIN
                 SELECT RAISE(ABORT, 'import receipt is immutable'); END;
+        CREATE TABLE IF NOT EXISTS account_import_job_transfers (
+            snapshot_id TEXT NOT NULL REFERENCES account_import_receipts(snapshot_id),
+            job_id TEXT NOT NULL REFERENCES jobs(id),
+            account_id TEXT NOT NULL REFERENCES accounts(id),
+            previous_owner_wallet TEXT NOT NULL, creator_wallet TEXT,
+            PRIMARY KEY(snapshot_id,job_id)
+        );
+        CREATE INDEX IF NOT EXISTS account_import_job_lookup ON account_import_job_transfers(job_id);
+        CREATE TRIGGER IF NOT EXISTS account_import_job_no_update
+            BEFORE UPDATE ON account_import_job_transfers BEGIN
+                SELECT RAISE(ABORT, 'import job provenance is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS account_import_job_no_delete
+            BEFORE DELETE ON account_import_job_transfers BEGIN
+                SELECT RAISE(ABORT, 'import job provenance is immutable'); END;
     """)
+    # Receipts predate the indexed per-job provenance table. Backfill only the
+    # server-authored transfer records, never infer imports from wallet links.
+    with conn:
+        conn.execute("""INSERT OR IGNORE INTO account_import_job_transfers
+            (snapshot_id,job_id,account_id,previous_owner_wallet,creator_wallet)
+            SELECT r.snapshot_id,json_extract(j.value,'$.id'),r.account_id,
+                   json_extract(j.value,'$.previous_owner_wallet'),json_extract(j.value,'$.creator_wallet')
+            FROM account_import_receipts r,json_each(r.receipt_json,'$.jobs') j
+            JOIN jobs existing ON existing.id=json_extract(j.value,'$.id')""")
 
 
 def _json(value):
@@ -321,6 +344,8 @@ def execute(conn, principal, snapshot_id, *, challenge_id, signature, origin, ch
                    "credit_receipt": credit_receipt, "created_at": now}
         conn.execute("INSERT INTO account_import_receipts VALUES (?,?,?,?,?)",
                      (snapshot_id, account, challenge_id, _json(receipt), now))
+        conn.executemany("INSERT INTO account_import_job_transfers VALUES (?,?,?,?,?)",
+            [(snapshot_id, job["id"], account, job["previous_owner_wallet"], job["creator_wallet"]) for job in transferred])
         conn.execute("INSERT INTO account_audit_events VALUES (?,?,?,?,?,?)",
                      (secrets.token_hex(16), account, session, "legacy_import", snapshot_id, now))
         return receipt

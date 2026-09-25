@@ -103,8 +103,14 @@ def create(conn, account, key, body):
         # swaps and other task types are not silently made tradable by account auth.
         if job["task_type"] != "IMAGE_GEN" or platform_v1.canonical_job_state(job["status"]) != "succeeded":
             raise MarketplaceError("marketplace_ineligible", 409)
-        captured = conn.execute("SELECT 1 FROM account_credit_reservations WHERE job_id=? AND state='captured'", (job["id"],)).fetchone()
-        if not captured:
+        reservation = conn.execute("SELECT state FROM account_credit_reservations WHERE job_id=?", (job["id"],)).fetchone()
+        imported = conn.execute("""SELECT 1 FROM account_import_job_transfers t
+            JOIN account_import_receipts r ON r.snapshot_id=t.snapshot_id AND r.account_id=t.account_id
+            WHERE t.job_id=? LIMIT 1""", (job["id"],)).fetchone()
+        # An imported legacy creation has no account-generation charge. Its
+        # signed import receipt establishes provenance across subsequent resales.
+        # An existing uncaptured reservation still blocks publication.
+        if (reservation and reservation[0] != "captured") or (not reservation and not imported):
             raise MarketplaceError("marketplace_unsettled", 409)
         _artifact(conn, job["id"], body["artifact_id"])
         if conn.execute("SELECT 1 FROM gallery_listings WHERE job_id=? AND listed=1 AND sold=0 AND owner_account_id IS NOT NULL", (job["id"],)).fetchone():

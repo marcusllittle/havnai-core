@@ -190,8 +190,18 @@ Receipt failure rolls back proof consumption, ownership and both balances.
 This implementation currently refuses jobs with any music publication dependency
 and selected balances with legacy Stripe history; publication selection and
 payment/refund provenance must be handled explicitly before enabling those cases.
-Reference assets, playlists, saves, imported-job marketplace publication and
-audit-driven reversal remain migration integration work, not completed behavior.
+Reference assets, playlists, saves and audit-driven reversal remain migration
+integration work, not completed behavior.
+
+Each transferred job now has immutable indexed provenance in
+`account_import_job_transfers`, linked to its signed import receipt. Startup can
+backfill these rows from existing receipts, but never from wallet links or an
+inferred owner. Completed imported image creations may be published and resold
+through the account marketplace using this provenance instead of a nonexistent
+account-generation charge. An existing reserved/released account charge still
+blocks listing. Tests exercise real image previews, private original downloads,
+sale and resale, original creator attribution, denial of the seller's access
+after sale, and denial of legacy static access after import.
 
 The internal `account_ledger.import_legacy_in_transaction` settlement primitive
 moves the exact, positive available legacy balance to account credits in a

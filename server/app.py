@@ -70,6 +70,7 @@ import account_payments
 import account_routes
 import account_auth
 import account_jobs
+import account_anchors
 
 try:
     from eth_account import Account  # type: ignore
@@ -1167,6 +1168,7 @@ def init_db() -> None:
     account_ledger.initialize(conn)
     account_payments.initialize(conn)
     account_jobs.initialize(conn)
+    account_anchors.initialize(conn)
 
 
 init_db()
@@ -5820,6 +5822,32 @@ def account_collection_visibility() -> Any:
     return jsonify({"job_ids": body["job_ids"], "hidden": body["hidden"]})
 
 
+@app.route("/v2/account/identity-anchors", methods=["GET"])
+def account_anchor_list() -> Any:
+    error = _require_studio_user()
+    if error:
+        return error
+    rows = get_db().execute("SELECT slug,display_name,asset_id,created_at FROM account_identity_anchors WHERE account_id=? ORDER BY created_at DESC,slug", (g.account_id,)).fetchall()
+    return jsonify({"anchors": [dict(row) for row in rows]})
+
+
+@app.route("/v2/account/identity-anchors/<slug>", methods=["PUT", "DELETE"])
+def account_anchor_write(slug: str) -> Any:
+    error = _require_studio_user()
+    if error:
+        return error
+    if request.method == "DELETE":
+        conn = get_db()
+        with conn:
+            conn.execute("DELETE FROM account_identity_anchors WHERE account_id=? AND slug=?", (g.account_id, slug))
+        # Removing a saved reference does not remove assets used by existing jobs.
+        return "", 204
+    try:
+        return jsonify(account_anchors.save(get_db(), g.account_id, slug, request.get_json(silent=True)))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 409 if str(exc) == "identity_anchor_slug_exists" else 404 if str(exc) == "asset_not_found" else 422
+
+
 @app.route("/v2/jobs", methods=["POST"])
 @app.route("/v1/jobs", methods=["POST"])
 def v1_create_job() -> Any:
@@ -5877,6 +5905,13 @@ def v1_create_job() -> Any:
     elif not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid_wallet"}), 400
 
+    anchor_asset = anchor_slug = None
+    if account_id:
+        try:
+            prompt, anchor_asset, anchor_slug = account_anchors.resolve(get_db(), account_id, prompt, job_type,
+                payload.get("face_asset_id") or payload.get("reference_face_url"))
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 404 if str(exc) == "identity_anchor_not_found" else 400
     settings: Dict[str, Any] = {
         "v1_type": job_type,
         "prompt": prompt,
@@ -5887,7 +5922,9 @@ def v1_create_job() -> Any:
                          (payload.get("source_audio_asset_id") if job_type == "text_to_music" else "") or "").strip()
     reference_asset_id = str(payload.get("reference_asset_id") or "").strip()
     mask_asset_id = str(payload.get("mask_asset_id") or "").strip()
-    face_asset_id = str(payload.get("face_asset_id") or "").strip()
+    face_asset_id = str(anchor_asset or payload.get("face_asset_id") or "").strip()
+    if anchor_slug:
+        settings["identity_anchor_slug"] = anchor_slug
     for asset_id, expected_kind in (
         (source_asset_id, "image"),
         (audio_asset_id, "audio"),

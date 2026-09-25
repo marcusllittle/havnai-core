@@ -4,9 +4,10 @@ Contract version: 1. Work item: HAVN-18, under [HAVN-11](https://havnai.atlassia
 
 Status: account authentication/lifecycle, wallet-link API, integer ledger, account
 checkout/receipts, job/asset APIs, account music publication/libraries/playlists,
-and account Video Studio are implemented on
+account Video Studio, image/face-swap generation, private saved face references,
+and account-owned visual collections are implemented on
 the feature branch. Development Google sign-in has been verified. Production
-rollout, content migration, image studio/library integration, marketplace/workflow
+rollout, content migration, marketplace/advanced video workflow
 ownership, and live paid acceptance remain.
 Those require HAVN-19 through HAVN-23 and the evidence below.
 

@@ -103,6 +103,10 @@ def enqueue(conn: sqlite3.Connection, account_id: str, *, request_key: str, requ
             if asset_id and not conn.execute("SELECT 1 FROM assets WHERE id=? AND owner_account_id=? AND kind=?",
                                               (asset_id, account_id, kind)).fetchone():
                 raise ValueError("asset_not_found")
+        if settings.get("identity_anchor_slug") and not conn.execute(
+            "SELECT 1 FROM account_identity_anchors WHERE account_id=? AND slug=? AND asset_id=?",
+            (account_id, settings["identity_anchor_slug"], settings.get("face_asset_id"))).fetchone():
+            raise ValueError("identity_anchor_not_found")
         now = time.time()
         job_id = "job-" + uuid.uuid4().hex
         account_ledger.reserve_in_transaction(conn, account_id, units, job_id=job_id)

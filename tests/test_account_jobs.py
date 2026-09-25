@@ -40,6 +40,85 @@ def create(harness, headers, **extra):
         json={"type": "image", "model": platform_fixture.IMAGE_MODEL, "prompt": "A blue sky", **extra})
 
 
+def test_account_anchor_ownership_retry_and_generation_survive_anchor_removal(platform, keys):
+    harness, headers, alice = platform
+    asset = harness.client.post("/v2/assets", headers=headers,
+        data={"kind": "image", "file": (io.BytesIO(b"face"), "face.png")}).json
+    bob = {"Authorization": token(keys, sub="user_bob", sid="sess_bob")}
+    url = "/v2/account/identity-anchors/my-face"
+    body = {"asset_id": asset["id"], "display_name": "My face"}
+    assert harness.client.put(url, headers=bob, json=body).status_code == 404
+    assert harness.client.put(url, headers=harness.owner_headers, json=body).status_code == 401
+    for _ in range(2):
+        assert harness.client.put(url, headers=headers, json=body).status_code == 200
+    assert harness.client.put(url, headers=headers, json={**body, "display_name": "Overwrite"}).status_code == 409
+    assert harness.client.get("/v2/account/identity-anchors", headers=bob).json == {"anchors": []}
+    assert harness.client.delete(url, headers=bob).status_code == 204
+    assert len(harness.client.get("/v2/account/identity-anchors", headers=headers).json["anchors"]) == 1
+    response = create(harness, headers, prompt="[IDENTITY ANCHOR: my-face] A blue coast")
+    assert response.status_code == 202, response.json
+    assert response.json["resolved_spec"]["parameters"]["prompt"] == "A blue coast"
+    assert response.json["resolved_spec"]["parameters"]["face_asset_id"] == asset["id"]
+    assert harness.client.delete(url, headers=headers).status_code == 204
+    assert harness.client.get(asset["content_url"], headers=headers).status_code == 200
+    retry = create(harness, headers, prompt="[IDENTITY ANCHOR: my-face] A blue coast")
+    assert retry.json["id"] == response.json["id"]
+    fresh = create(harness, {**headers, "Idempotency-Key": "another"}, prompt="[IDENTITY ANCHOR: my-face] A blue coast")
+    assert fresh.status_code == 404
+    assert harness.client.get("/v2/account/credits", headers=headers).json["reserved_units"] == 1000
+
+
+@pytest.mark.parametrize("prompt,extra", [
+    ("[IDENTITY ANCHOR] a face", {}),
+    ("[IDENTITY ANCHOR: missing] a face", {}),
+    ("[IDENTITY ANCHOR: one] [IDENTITY ANCHOR: two] a face", {}),
+    ("[IDENTITY ANCHOR: one]", {}),
+    ("[IDENTITY ANCHOR: one] a face", {"face_asset_id": "other"}),
+    ("[IDENTITY ANCHOR: one] a face", {"type": "text_to_music", "model": platform_fixture.MUSIC_MODEL}),
+])
+def test_invalid_account_anchors_never_enqueue_or_reserve(platform, prompt, extra):
+    harness, headers, _ = platform
+    assert create(harness, headers, prompt=prompt, **extra).status_code in {400, 404}
+    assert harness.client.get("/v2/account/credits", headers=headers).json["reserved_units"] == 0
+
+
+def test_anchor_ownership_is_rechecked_during_atomic_enqueue(platform):
+    harness, headers, account = platform
+    asset = harness.client.post("/v2/assets", headers=headers,
+        data={"kind": "image", "file": (io.BytesIO(b"face"), "face.png")}).json
+    with app.app.app_context():
+        with pytest.raises(ValueError, match="identity_anchor_not_found"):
+            account_jobs.enqueue(app.get_db(), account, request_key="anchor-race", request_payload={},
+                model=platform_fixture.IMAGE_MODEL, task_type="IMAGE_GEN",
+                settings={"face_asset_id": asset["id"], "identity_anchor_slug": "removed"},
+                resolved_spec={}, weight=1, units=1000)
+    assert harness.client.get("/v2/account/credits", headers=headers).json["reserved_units"] == 0
+
+
+@pytest.mark.parametrize("body", [None, [], {}, {"asset_id": "x", "display_name": ""},
+    {"asset_id": "x", "display_name": "Face", "wallet": "0xspoof"},
+    {"asset_id": [], "display_name": "Face"}, {"asset_id": "x", "display_name": "f" * 101}])
+def test_account_anchor_payload_validation(platform, body):
+    harness, headers, _ = platform
+    assert harness.client.put("/v2/account/identity-anchors/face", headers=headers, json=body).status_code == 422
+
+
+def test_account_anchor_same_slug_does_not_share_ownership(platform, keys):
+    harness, headers, _ = platform
+    bob = {"Authorization": token(keys, sub="user_bob", sid="sess_bob")}
+    ids = []
+    for auth in (headers, bob):
+        asset = harness.client.post("/v2/assets", headers=auth,
+            data={"kind": "image", "file": (io.BytesIO(b"face"), "face.png")}).json
+        ids.append(asset["id"])
+        response = harness.client.put("/v2/account/identity-anchors/pilot", headers=auth,
+            json={"asset_id": asset["id"], "display_name": "Pilot"})
+        assert response.status_code == 200
+    assert ids[0] != ids[1]
+    assert harness.client.delete("/v2/account/identity-anchors/pilot", headers=bob).status_code == 204
+    assert harness.client.get("/v2/account/identity-anchors", headers=headers).json["anchors"][0]["asset_id"] == ids[0]
+
+
 def test_revoked_session_cannot_recover_or_submit_studio_jobs(platform):
     harness, headers, _ = platform
     created = create(harness, headers)

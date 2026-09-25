@@ -68,6 +68,17 @@ def test_account_generation_retry_and_recovery_without_wallet(platform):
     assert conflict.json["error"]["code"] == "idempotency_conflict"
 
 
+def test_lost_response_retry_recovers_before_changed_model_configuration(platform, monkeypatch):
+    harness, headers, _ = platform
+    first = create(harness, headers)
+    assert first.status_code == 202
+    monkeypatch.setattr(app, "get_model_config", lambda name: None)
+    retry = create(harness, headers)
+    assert retry.status_code == 202
+    assert retry.json["id"] == first.json["id"]
+    assert harness.client.get("/v2/account/credits", headers=headers).json["reserved_units"] == 1000
+
+
 def test_guest_different_account_and_legacy_routes_cannot_access(platform, keys):
     harness, headers, _ = platform
     job = create(harness, headers).json

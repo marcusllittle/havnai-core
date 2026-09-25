@@ -41,6 +41,23 @@ def cost_units(cost, batch_size=1) -> int:
         raise ValueError("invalid_generation_price") from exc
 
 
+def previous_request(conn, account_id, request_key, payload):
+    """Recover a submitted intent before revalidating mutable model/asset state."""
+    if not request_key or len(request_key) > 128:
+        raise ValueError("idempotency_key_required")
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    row = conn.execute("""SELECT r.payload_hash,r.job_id,j.owner_account_id
+        FROM account_job_requests r JOIN jobs j ON j.id=r.job_id WHERE r.account_id=? AND r.request_key=?""",
+        (account_id, request_key)).fetchone()
+    if row:
+        if row[2] != account_id:
+            raise ValueError("job_not_found")
+        if row[0] != digest:
+            raise account_ledger.LedgerError("idempotency_conflict")
+        return row[1]
+    return None
+
+
 def enqueue(conn: sqlite3.Connection, account_id: str, *, request_key: str, request_payload: dict,
             model: str, task_type: str, settings: dict, resolved_spec: dict, weight: float,
             units: int) -> str:

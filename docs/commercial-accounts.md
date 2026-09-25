@@ -2,9 +2,10 @@
 
 Contract version: 1. Work item: HAVN-18, under [HAVN-11](https://havnai.atlassian.net/browse/HAVN-11).
 
-Status: account authentication, wallet-link API, integer ledger and account-owned
-job/asset APIs implemented on the feature branch. Production sign-in, content
-migration, publication/library integration and account checkout are not complete.
+Status: account authentication/lifecycle, wallet-link API, integer ledger, account
+checkout/receipts, job/asset APIs, and account music publication are implemented on
+the feature branch. Development Google sign-in has been verified. Production
+rollout, content migration, library/playlist integration and live paid acceptance remain.
 Those require HAVN-19 through HAVN-23 and the evidence below.
 
 ## Decision and trust boundary
@@ -301,9 +302,13 @@ artifact bytes rather than running a GPU generation.
 Private account jobs are excluded from legacy wallet history and the public job
 feed. Old per-job/result routes and direct static artifact URLs cannot bypass
 account authorization. The account artifact endpoint currently requires bearer
-authentication; browser media integration is still required.
+authentication; the web account-media route verifies the Clerk cookie session,
+forwards a short-lived bearer token, and streams audio ranges with private/no-store
+headers. It never forwards the browser cookie or a shared owner credential to core.
 
-Provider token validation bounds session lifetime to 120 seconds. Revocation can
-therefore lag until expiry; provider user suspension/deletion webhook integration
-is still required before launch. The feature branch has not been deployed to the
-coordinator, and no live account, wallet link, asset, credit, or payment was changed.
+Provider token validation bounds session lifetime to 120 seconds. Verified Clerk
+lifecycle delivery can revoke access earlier; see `docs/account-lifecycle.md` for
+ordering, deletion tombstones, and the remaining live-delivery acceptance gate.
+The feature branch has not been deployed to the production coordinator. Local
+development accounts and isolated preview data have been used for verification;
+production wallet links, assets, credits, and payments have not been migrated.

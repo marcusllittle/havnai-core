@@ -5479,6 +5479,65 @@ def account_artifact_content(artifact_id: str) -> Any:
     return send_file(path, mimetype=row["content_type"], download_name=row["filename"], conditional=True)
 
 
+@app.route("/v2/music/publications", methods=["GET", "POST"])
+def account_music_publications() -> Any:
+    error = _require_studio_user()
+    if error:
+        return error
+    if request.method == "GET":
+        rows = get_db().execute("""SELECT * FROM music_publications
+            WHERE owner_account_id=? AND state='published' ORDER BY published_at DESC LIMIT 100""",
+            (g.account_id,)).fetchall()
+        return jsonify({"publications": [music_discover.publication_to_dict(row, include_internal=True) for row in rows]})
+    data = request.get_json(silent=True)
+    if (not isinstance(data, dict) or set(data) - {"job_id", "artifact_id", "title", "style", "tags"}
+            or not isinstance(data.get("job_id"), str) or not isinstance(data.get("title"), str)
+            or not data["title"].strip() or len(data["title"]) > 120
+            or ("artifact_id" in data and not isinstance(data["artifact_id"], str))
+            or ("style" in data and (not isinstance(data["style"], str) or len(data["style"]) > 160))
+            or ("tags" in data and (not isinstance(data["tags"], list) or len(data["tags"]) > 8
+                or any(not isinstance(tag, str) or len(tag) > 32 for tag in data["tags"])))):
+        return jsonify({"error": "invalid_payload"}), 422
+    result = music_discover.publish_song(job_id=data["job_id"], creator_account_id=g.account_id,
+        artifact_id=data.get("artifact_id"), title=data["title"], style=data.get("style", ""), tags=data.get("tags"))
+    if not result["ok"]:
+        return jsonify({"error": result["error"]}), 404 if result["error"] == "job_not_found" else 422
+    return jsonify(result["publication"]), 200 if result["publication"].get("already_published") else 201
+
+
+@app.route("/v2/music/publications/<publication_id>", methods=["DELETE"])
+def account_unpublish_music(publication_id: str) -> Any:
+    error = _require_studio_user()
+    if error:
+        return error
+    conn = get_db()
+    conn.execute("BEGIN IMMEDIATE")
+    with conn:
+        row = conn.execute("SELECT id FROM music_publications WHERE id=? AND owner_account_id=?",
+                           (publication_id, g.account_id)).fetchone()
+        if not row:
+            return jsonify({"error": "publication_not_found"}), 404
+        conn.execute("UPDATE music_publications SET state='unpublished',updated_at=? WHERE id=? AND owner_account_id=?",
+                     (unix_now(), publication_id, g.account_id))
+    return jsonify({"id": publication_id, "state": "unpublished"})
+
+
+@app.route("/music/creators/<profile_id>", methods=["GET"])
+def account_public_music_creator(profile_id: str) -> Any:
+    conn = get_db()
+    profile = conn.execute("SELECT account_id,display_name,id FROM account_public_profiles WHERE id=?", (profile_id,)).fetchone()
+    if not profile:
+        return jsonify({"error": "creator_not_found"}), 404
+    sort = request.args.get("sort", "newest")
+    order = {"popular": "play_count DESC,like_count DESC,published_at DESC", "liked": "like_count DESC,play_count DESC,published_at DESC"}.get(sort, "published_at DESC")
+    rows = conn.execute(f"SELECT * FROM music_publications WHERE creator_account_id=? AND state='published' ORDER BY {order} LIMIT 100",
+                        (profile["account_id"],)).fetchall()
+    return jsonify({"wallet": "", "profile_id": profile["id"], "display_name": profile["display_name"],
+                    "publications": [music_discover.publication_to_dict(row) for row in rows], "playlists": [],
+                    "track_count": len(rows), "play_count": sum(row["play_count"] for row in rows),
+                    "like_count": sum(row["like_count"] for row in rows), "sort": sort})
+
+
 @app.route("/v2/assets", methods=["POST"])
 @app.route("/v1/assets", methods=["POST"])
 def v1_create_asset() -> Any:
@@ -5599,6 +5658,13 @@ def v1_create_job() -> Any:
     account_id = getattr(g, "account_id", None)
     if account_id and any(key in payload for key in ("wallet", "account_id", "owner_account_id")):
         return jsonify({"error": "identity_is_session_owned"}), 422
+    if account_id:
+        try:
+            previous_id = account_jobs.previous_request(get_db(), account_id, request.headers.get("Idempotency-Key", ""), payload)
+        except (ValueError, account_ledger.LedgerError) as exc:
+            return jsonify({"error": str(exc)}), 409 if str(exc) == "idempotency_conflict" else 404 if str(exc) == "job_not_found" else 422
+        if previous_id:
+            return jsonify(_v1_job_payload(get_job(previous_id) or {})), 202
     job_type = str(payload.get("type") or "").strip().lower()
     if job_type not in {"image", "image_to_video", "text_to_music"}:
         return jsonify({"error": "invalid_job_type"}), 400

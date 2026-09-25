@@ -6,6 +6,8 @@ import hashlib
 import json
 import sqlite3
 import time
+import uuid
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 
@@ -135,29 +137,51 @@ def init_music_discover_tables(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_music_playlist_items_publication ON music_playlist_items(publication_id)"
     )
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(music_publications)")}
+    for column in ("creator_account_id", "owner_account_id"):
+        if column not in columns:
+            conn.execute(f"ALTER TABLE music_publications ADD COLUMN {column} TEXT REFERENCES accounts(id)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS account_public_profiles (
+        id TEXT PRIMARY KEY, account_id TEXT NOT NULL UNIQUE REFERENCES accounts(id),
+        display_name TEXT NOT NULL, created_at REAL NOT NULL)""")
+    conn.execute("CREATE INDEX IF NOT EXISTS music_publications_account ON music_publications(owner_account_id,state)")
     conn.commit()
 
 
 def publish_song(
     *,
     job_id: str,
-    creator_wallet: str,
+    creator_wallet: str = "",
     title: str,
     style: str = "",
     tags: Optional[List[str]] = None,
+    creator_account_id: Optional[str] = None,
+    artifact_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     conn = get_db()
+    conn.execute("BEGIN IMMEDIATE")
+    with conn:
+        return _publish_song(job_id=job_id, creator_wallet=creator_wallet, title=title,
+            style=style, tags=tags, creator_account_id=creator_account_id, artifact_id=artifact_id)
+
+
+def _publish_song(*, job_id, creator_wallet, title, style, tags, creator_account_id, artifact_id):
+    conn = get_db()
     wallet = creator_wallet.strip().lower()
-    if not WALLET_REGEX.match(wallet):
+    if not creator_account_id and not WALLET_REGEX.match(wallet):
         return {"ok": False, "error": "invalid_wallet"}
 
     job = conn.execute(
-        "SELECT id, wallet, model, task_type, status, resolved_spec FROM jobs WHERE id=?",
+        "SELECT id, wallet, model, task_type, status, resolved_spec, creator_account_id, owner_account_id FROM jobs WHERE id=?",
         (job_id,),
     ).fetchone()
     if not job:
         return {"ok": False, "error": "job_not_found"}
-    if str(job["wallet"] or "").strip().lower() != wallet:
+    if creator_account_id:
+        if job["owner_account_id"] != creator_account_id:
+            return {"ok": False, "error": "job_not_found"}
+        wallet = ""
+    elif job["owner_account_id"] or str(job["wallet"] or "").strip().lower() != wallet:
         return {"ok": False, "error": "not_your_job"}
     if str(job["task_type"] or "").upper() != "MUSIC_GEN":
         return {"ok": False, "error": "not_music_job"}
@@ -168,13 +192,15 @@ def publish_song(
         """
         SELECT id, kind, filename, content_type, path, metadata
         FROM artifacts
-        WHERE job_id=? AND kind='audio'
+        WHERE job_id=? AND kind='audio' AND (? IS NULL OR id=?)
         ORDER BY created_at ASC
         LIMIT 1
         """,
-        (job_id,),
+        (job_id, artifact_id, artifact_id),
     ).fetchone()
     if not artifact or not artifact_url(str(artifact["path"] or "")):
+        return {"ok": False, "error": "audio_artifact_required"}
+    if creator_account_id and not Path(artifact["path"]).is_file():
         return {"ok": False, "error": "audio_artifact_required"}
 
     existing = conn.execute(
@@ -194,7 +220,7 @@ def publish_song(
     resolved = _parse_json(job["resolved_spec"])
     params = _parse_json(resolved.get("parameters"))
     metadata = _parse_json(artifact["metadata"])
-    clean_title = _clean_title(title, params.get("prompt") or job_id)
+    clean_title = _clean_title(title, "Untitled HavnAI Song" if creator_account_id else params.get("prompt") or job_id)
     clean_style = _clean_style(style or params.get("style") or "")
     clean_tags = _clean_tags(tags if tags is not None else _tags_from_style(clean_style))
     now = time.time()
@@ -210,8 +236,8 @@ def publish_song(
         INSERT INTO music_publications (
             id, job_id, audio_artifact_id, creator_wallet, title, style, tags,
             duration, bpm, song_key, instrumental, model, cover_art_seed, state,
-            play_count, like_count, published_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'published', 0, 0, ?, ?)
+            play_count, like_count, published_at, updated_at, creator_account_id, owner_account_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'published', 0, 0, ?, ?, ?, ?)
         """,
         (
             publication_id,
@@ -229,9 +255,15 @@ def publish_song(
             cover_seed,
             now,
             now,
+            (job["creator_account_id"] or creator_account_id) if creator_account_id else None,
+            creator_account_id,
         ),
     )
-    conn.commit()
+    if creator_account_id:
+        for account_id in {creator_account_id, job["creator_account_id"] or creator_account_id}:
+            profile_id = "creator_" + uuid.uuid4().hex
+            conn.execute("INSERT OR IGNORE INTO account_public_profiles VALUES (?,?,?,?)",
+                         (profile_id, account_id, "Creator " + profile_id[-6:], now))
     log_event("Music publication created", publication_id=publication_id, job_id=job_id, wallet=wallet)
     publication = get_publication(
         publication_id,
@@ -249,7 +281,7 @@ def unpublish_song(publication_id: str, creator_wallet: str) -> Dict[str, Any]:
         """
         UPDATE music_publications
            SET state='unpublished', updated_at=?
-         WHERE id=? AND creator_wallet=? AND state='published'
+         WHERE id=? AND creator_wallet=? AND owner_account_id IS NULL AND state='published'
         """,
         (time.time(), publication_id, wallet),
     )
@@ -822,6 +854,12 @@ def publication_to_dict(
         "published_at": row["published_at"],
         "updated_at": row["updated_at"],
     }
+    if row["creator_account_id"]:
+        profile = conn.execute("SELECT id,display_name FROM account_public_profiles WHERE account_id=?",
+                               (row["creator_account_id"],)).fetchone()
+        publication.update({"creator_wallet": "", "creator": profile["display_name"] if profile else "HavnAI creator",
+                            "creator_profile_id": profile["id"] if profile else None,
+                            "creator_url": f"/creator/{profile['id']}" if profile else "/discover"})
     if include_internal:
         publication.update(
             {

@@ -7,6 +7,7 @@ Neither redirect parameters nor webhook object snapshots can grant credits.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import sqlite3
 import time
@@ -31,6 +32,11 @@ class PaymentError(ValueError):
         self.status = status
 
 
+def catalog_version(config):
+    document = [PACKAGES, "usd", ledger.SCALE, config.terms_version, config.terms_url, config.refund_url]
+    return hashlib.sha256(json.dumps(document, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 @dataclass(frozen=True)
 class Config:
     secret_key: str
@@ -38,6 +44,8 @@ class Config:
     origin: str
     terms_version: str
     enabled: bool = False
+    terms_url: str = ""
+    refund_url: str = ""
 
     @classmethod
     def from_environment(cls):
@@ -45,7 +53,9 @@ class Config:
                    os.getenv("STRIPE_ACCOUNT_WEBHOOK_SECRET", "").strip(),
                    os.getenv("HAVNAI_CHECKOUT_ORIGIN", "").strip().rstrip("/"),
                    os.getenv("HAVNAI_CREDIT_TERMS_VERSION", "").strip(),
-                   os.getenv("HAVNAI_ACCOUNT_CHECKOUT_ENABLED", "").lower() in {"1", "true"})
+                   os.getenv("HAVNAI_ACCOUNT_CHECKOUT_ENABLED", "").lower() in {"1", "true"},
+                   os.getenv("HAVNAI_CREDIT_TERMS_URL", "").strip(),
+                   os.getenv("HAVNAI_CREDIT_REFUND_URL", "").strip())
 
     @property
     def livemode(self):
@@ -55,12 +65,19 @@ class Config:
         if not self.secret_key.startswith(("sk_test_", "sk_live_", "rk_test_", "rk_live_")) or not self.webhook_secret:
             raise PaymentError("account_payments_not_configured", 503)
         if checkout:
-            parts = urlsplit(self.origin)
-            local = parts.scheme == "http" and parts.hostname in {"localhost", "127.0.0.1", "::1"}
-            if (not self.enabled or not self.terms_version or not parts.hostname or parts.path
-                    or parts.query or parts.fragment or parts.username or parts.password
-                    or not (parts.scheme == "https" or (local and not self.livemode))):
+            if (not self.enabled or not self.terms_version or not self.valid_url(self.origin, origin_only=True)
+                    or not self.valid_url(self.terms_url) or not self.valid_url(self.refund_url)):
                 raise PaymentError("account_checkout_not_configured", 503)
+
+    def valid_url(self, url, *, origin_only=False):
+        try:
+            parts = urlsplit(url)
+            local = parts.scheme == "http" and parts.hostname in {"localhost", "127.0.0.1", "::1"} and not self.livemode
+            return bool(parts.hostname and not parts.username and not parts.password
+                        and (parts.scheme == "https" or local)
+                        and (not origin_only or not (parts.path or parts.query or parts.fragment)))
+        except ValueError:
+            return False
 
 
 def initialize(conn):
@@ -72,6 +89,7 @@ def initialize(conn):
             request_key TEXT NOT NULL, package_id TEXT NOT NULL,
             units INTEGER NOT NULL CHECK(units>0), price_cents INTEGER NOT NULL CHECK(price_cents>0),
             currency TEXT NOT NULL, terms_version TEXT NOT NULL, livemode INTEGER NOT NULL,
+            terms_url TEXT NOT NULL DEFAULT '', refund_url TEXT NOT NULL DEFAULT '', catalog_version TEXT NOT NULL DEFAULT '',
             checkout_params TEXT NOT NULL, session_id TEXT UNIQUE, checkout_url TEXT,
             payment_id TEXT UNIQUE, state TEXT NOT NULL DEFAULT 'pending',
             revision INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL, updated_at REAL NOT NULL,
@@ -81,7 +99,8 @@ def initialize(conn):
             id INTEGER PRIMARY KEY AUTOINCREMENT, purchase_id TEXT NOT NULL REFERENCES account_purchases(id),
             payment_id TEXT NOT NULL UNIQUE, account_id TEXT NOT NULL REFERENCES accounts(id),
             price_cents INTEGER NOT NULL, currency TEXT NOT NULL, units INTEGER NOT NULL,
-            terms_version TEXT NOT NULL, created_at REAL NOT NULL
+            terms_version TEXT NOT NULL, created_at REAL NOT NULL,
+            terms_url TEXT NOT NULL DEFAULT '', refund_url TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS account_payment_adjustments (
             id INTEGER PRIMARY KEY AUTOINCREMENT, purchase_id TEXT NOT NULL REFERENCES account_purchases(id),
@@ -102,6 +121,14 @@ def initialize(conn):
         CREATE TRIGGER IF NOT EXISTS account_adjustments_no_delete BEFORE DELETE ON account_payment_adjustments
             BEGIN SELECT RAISE(ABORT,'payment adjustments are append-only'); END;
     """)
+    # Additive migration: old receipts retain unknown policy URLs rather than
+    # retroactively claiming they accepted today's links.
+    for table in ("account_purchases", "account_payment_receipts"):
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for column in ("terms_url", "refund_url", "catalog_version") if table == "account_purchases" else ("terms_url", "refund_url"):
+            if column not in columns:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+    conn.commit()
 
 
 def _row(conn, purchase_id):
@@ -127,13 +154,11 @@ def _require_database_mode(conn, config):
         raise PaymentError("payment_database_mode_mismatch", 503)
 
 
-def create_checkout(conn, account_id, *, package_id, request_key, terms_version, config):
+def create_checkout(conn, account_id, *, package_id, request_key, terms_version, quote_version, config):
     config.require(checkout=True)
     if not isinstance(request_key, str) or not 16 <= len(request_key) <= 128:
         raise PaymentError("invalid_idempotency_key")
     package = next((p for p in PACKAGES if p["id"] == package_id), None)
-    if not package or terms_version != config.terms_version:
-        raise PaymentError("invalid_package_or_terms")
     now = time.time()
     conn.execute("BEGIN IMMEDIATE")
     with conn:
@@ -142,10 +167,12 @@ def create_checkout(conn, account_id, *, package_id, request_key, terms_version,
                                 (account_id, request_key)).fetchone()
         if existing:
             purchase = _row(conn, existing[0])
-            if (purchase["package_id"] != package_id or purchase["terms_version"] != terms_version
+            if (purchase["package_id"] != package_id or purchase["terms_version"] != terms_version or purchase["catalog_version"] != quote_version
                     or bool(purchase["livemode"]) != config.livemode):
                 raise PaymentError("idempotency_conflict", 409)
         else:
+            if not package or terms_version != config.terms_version or quote_version != catalog_version(config):
+                raise PaymentError("pricing_changed", 409)
             purchase_id = "pur_" + uuid.uuid4().hex
             metadata = {"havnai_purchase": purchase_id, "surface": "account_v2"}
             params = {"mode": "payment", "payment_method_types": ["card"],
@@ -157,9 +184,9 @@ def create_checkout(conn, account_id, *, package_id, request_key, terms_version,
                       "cancel_url": config.origin + "/pricing?purchase=" + purchase_id}
             conn.execute("""INSERT INTO account_purchases
                 (id,account_id,request_key,package_id,units,price_cents,currency,terms_version,livemode,
-                 checkout_params,created_at,updated_at) VALUES (?,?,?,?,?,?,'usd',?,?,?,?,?)""",
+                 checkout_params,created_at,updated_at,terms_url,refund_url,catalog_version) VALUES (?,?,?,?,?,?,'usd',?,?,?,?,?,?,?,?)""",
                 (purchase_id, account_id, request_key, package_id, package["units"], package["price_cents"],
-                 terms_version, int(config.livemode), json.dumps(params), now, now))
+                 terms_version, int(config.livemode), json.dumps(params), now, now, config.terms_url, config.refund_url, quote_version))
             purchase = _row(conn, purchase_id)
     if purchase["session_id"]:
         return {"purchase_id": purchase["id"], "checkout_url": purchase["checkout_url"], "state": purchase["state"]}
@@ -246,9 +273,9 @@ def reconcile(conn, purchase_id, payment_id, *, config):
             if not receipt:
                 ledger.fund_in_transaction(conn, purchase["account_id"], purchase["units"], payment_id=payment_id)
                 conn.execute("""INSERT INTO account_payment_receipts
-                    (purchase_id,payment_id,account_id,price_cents,currency,units,terms_version,created_at)
-                    VALUES (?,?,?,?,?,?,?,?)""", (purchase_id, payment_id, purchase["account_id"], purchase["price_cents"],
-                    purchase["currency"], purchase["units"], purchase["terms_version"], time.time()))
+                    (purchase_id,payment_id,account_id,price_cents,currency,units,terms_version,created_at,terms_url,refund_url)
+                    VALUES (?,?,?,?,?,?,?,?,?,?)""", (purchase_id, payment_id, purchase["account_id"], purchase["price_cents"],
+                    purchase["currency"], purchase["units"], purchase["terms_version"], time.time(), purchase["terms_url"], purchase["refund_url"]))
             reversed_cents = min(purchase["price_cents"], refunded + disputed)
             retained = purchase["units"] * (purchase["price_cents"] - reversed_cents) // purchase["price_cents"]
             previous = conn.execute("""SELECT retained_units,refunded_cents,disputed_cents,evidence
@@ -310,12 +337,12 @@ def receipt(conn, account_id, purchase_id):
     purchase = _row(conn, purchase_id)
     if not purchase or purchase["account_id"] != account_id:
         raise PaymentError("purchase_not_found", 404)
-    paid = conn.execute("""SELECT id,price_cents,currency,units,terms_version,created_at FROM account_payment_receipts
+    paid = conn.execute("""SELECT id,price_cents,currency,units,terms_version,created_at,terms_url,refund_url FROM account_payment_receipts
         WHERE purchase_id=? AND account_id=?""", (purchase_id, account_id)).fetchone()
     adjustments = conn.execute("""SELECT refunded_cents,disputed_cents,retained_units,settled_delta,created_at
         FROM account_payment_adjustments WHERE purchase_id=? ORDER BY id""", (purchase_id,)).fetchall()
     return {"purchase_id": purchase_id, "state": purchase["state"], "scale": ledger.SCALE,
-            "receipt": dict(zip(["id", "price_cents", "currency", "units", "terms_version", "created_at"], paid)) if paid else None,
+            "receipt": dict(zip(["id", "price_cents", "currency", "units", "terms_version", "created_at", "terms_url", "refund_url"], paid)) if paid else None,
             "adjustments": [dict(zip(["refunded_cents", "disputed_cents", "retained_units", "settled_delta", "created_at"], row)) for row in adjustments]}
 
 

@@ -10,6 +10,7 @@ import json
 import sqlite3
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -35,7 +36,8 @@ def env(tmp_path, monkeypatch):
     payments.initialize(conn)
     alice = identity.ensure_account(conn, identity.VerifiedPrincipal("issuer", "alice", "sess"))
     bob = identity.ensure_account(conn, identity.VerifiedPrincipal("issuer", "bob", "sess"))
-    cfg = payments.Config("sk_test_fake", "whsec_test", "https://joinhavn.io", "credits-v1", True)
+    cfg = payments.Config("sk_test_fake", "whsec_test", "https://joinhavn.io", "credits-v1", True,
+                          "https://joinhavn.io/terms/credits-v1", "https://joinhavn.io/refunds/credits-v1")
     create = Mock(return_value={"id": "cs_1", "url": "https://checkout.stripe.com/c/pay/cs_1", "livemode": False})
     monkeypatch.setattr(payments.stripe.checkout.Session, "create", create)
     intent = {"id": "pi_1", "object": "payment_intent", "metadata": {}, "livemode": False,
@@ -55,7 +57,8 @@ def env(tmp_path, monkeypatch):
 
 
 def checkout(env, **overrides):
-    args = {"package_id": "starter", "request_key": "request-key-alice-1", "terms_version": "credits-v1", "config": env["cfg"]}
+    args = {"package_id": "starter", "request_key": "request-key-alice-1", "terms_version": "credits-v1",
+            "quote_version": payments.catalog_version(env["cfg"]), "config": env["cfg"]}
     args.update(overrides)
     result = payments.create_checkout(env["conn"], env["alice"], **args)
     env["intent"]["metadata"] = {"havnai_purchase": result["purchase_id"], "surface": "account_v2"}
@@ -228,7 +231,8 @@ def test_lost_event_ack_retries_without_duplicate_funding(env):
 
 def test_test_and_live_purchases_cannot_share_balances(env):
     checkout(env)
-    live = payments.Config("sk_live_fake", "whsec_test", "https://joinhavn.io", "credits-v1", True)
+    live = payments.Config("sk_live_fake", "whsec_test", "https://joinhavn.io", "credits-v1", True,
+                           env["cfg"].terms_url, env["cfg"].refund_url)
     with pytest.raises(payments.PaymentError, match="database_mode_mismatch"):
         checkout(env, request_key="another-request-key", config=live)
 
@@ -263,7 +267,7 @@ def test_http_checkout_uses_verified_account_and_receipts_are_private(env, keys,
     app = Flask(__name__)
     app.register_blueprint(account_routes.create_blueprint(lambda: env["conn"], lambda *a, **kw: True))
     client = app.test_client()
-    body = {"package_id": "starter", "terms_version": "credits-v1"}
+    body = {"package_id": "starter", "terms_version": "credits-v1", "catalog_version": payments.catalog_version(env["cfg"])}
     assert client.post("/v2/account/checkout", json=body).status_code == 401
     headers = {"Authorization": token(keys), "Idempotency-Key": "http-checkout-key-1"}
     assert client.post("/v2/account/checkout", json={**body, "account_id": env["bob"]}, headers=headers).status_code == 422
@@ -276,3 +280,50 @@ def test_http_checkout_uses_verified_account_and_receipts_are_private(env, keys,
     assert client.get("/v2/account/purchases", headers=bob).json["purchases"] == []
     assert client.get("/v2/account/purchases", headers=headers).headers["Cache-Control"] == "private, no-store"
     assert client.get("/v2/account/ledger?before=" + "9" * 100, headers=headers).status_code == 422
+
+
+@pytest.mark.parametrize("field,value", [("terms_url", ""), ("refund_url", ""), ("terms_url", "javascript:alert(1)"),
+    ("refund_url", "https://user:password@example.com/refunds"), ("origin", "https://example.com/path"), ("origin", "https://[broken")])
+def test_checkout_requires_published_safe_policy_urls(env, field, value):
+    with pytest.raises(payments.PaymentError, match="not_configured"):
+        checkout(env, config=replace(env["cfg"], **{field: value}))
+    env["create"].assert_not_called()
+
+
+def test_stale_catalog_is_rejected_before_purchase_or_provider_mutation(env):
+    with pytest.raises(payments.PaymentError, match="pricing_changed"):
+        checkout(env, quote_version="old-catalog")
+    env["create"].assert_not_called()
+    assert env["conn"].execute("SELECT COUNT(*) FROM account_purchases").fetchone()[0] == 0
+
+
+def test_original_price_and_policy_are_kept_when_retrying_after_catalog_change(env):
+    env["create"].side_effect = TimeoutError("response lost")
+    with pytest.raises(TimeoutError):
+        checkout(env)
+    original = env["create"].call_args
+    updated = replace(env["cfg"], terms_version="terms-v2", terms_url="https://joinhavn.io/terms/v2")
+    env["create"].side_effect = None
+    purchase = checkout(env, config=updated)
+    assert env["create"].call_args == original
+    payments.reconcile(env["conn"], purchase, "pi_1", config=updated)
+    receipt = payments.receipt(env["conn"], env["alice"], purchase)["receipt"]
+    assert receipt["terms_version"] == "credits-v1"
+    assert receipt["terms_url"] == env["cfg"].terms_url
+    assert receipt["refund_url"] == env["cfg"].refund_url
+
+
+def test_additive_policy_migration_does_not_rewrite_old_receipts(env):
+    purchase = checkout(env)
+    reconcile(env, purchase)
+    for table in ("account_purchases", "account_payment_receipts"):
+        for column in ("terms_url", "refund_url"):
+            env["conn"].execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+    env["conn"].execute("ALTER TABLE account_purchases DROP COLUMN catalog_version")
+    env["conn"].commit()
+    payments.initialize(env["conn"])
+    receipt = payments.receipt(env["conn"], env["alice"], purchase)["receipt"]
+    assert receipt["terms_version"] == "credits-v1"
+    assert receipt["terms_url"] == ""
+    assert receipt["refund_url"] == ""
+    assert ledger.balance(env["conn"], env["alice"])["available_units"] == 50_000

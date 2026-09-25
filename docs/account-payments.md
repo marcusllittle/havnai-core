@@ -2,7 +2,7 @@
 
 This branch implements account Checkout, provider reconciliation, account receipts,
 and refund/dispute ledger adjustments. It is not a completed production rollout:
-Clerk configuration, account pricing UI, approved terms/refund policy, and a real
+production Clerk configuration, approved terms/refund policy, and a real
 Stripe sandbox acceptance run are still required before enabling Checkout.
 
 ## Boundary and configuration
@@ -10,7 +10,8 @@ Stripe sandbox acceptance run are still required before enabling Checkout.
 The account payment path is separate from legacy wallet payments. It never uses a
 wallet address or owner token to identify a buyer. POST `/v2/account/checkout`
 requires a verified account bearer token, a stable `Idempotency-Key` (16–128
-characters), and exactly `{ "package_id": "starter", "terms_version": "..." }`.
+characters), and exactly
+`{ "package_id": "starter", "terms_version": "...", "catalog_version": "..." }`.
 Core selects price, USD currency, credit units, and return URLs. Client-supplied
 account IDs, credit quantities, prices, and return URLs are rejected.
 
@@ -21,6 +22,8 @@ STRIPE_SECRET_KEY=<existing Stripe project's server key>
 STRIPE_ACCOUNT_WEBHOOK_SECRET=<signing secret for the v2 webhook endpoint>
 HAVNAI_CHECKOUT_ORIGIN=https://joinhavn.io
 HAVNAI_CREDIT_TERMS_VERSION=<approved published policy revision>
+HAVNAI_CREDIT_TERMS_URL=https://joinhavn.io/<published-credit-terms>
+HAVNAI_CREDIT_REFUND_URL=https://joinhavn.io/<published-refund-policy>
 HAVNAI_ACCOUNT_CHECKOUT_ENABLED=false
 ```
 
@@ -41,6 +44,14 @@ availability is at GET `/v2/credit-packages`; account history is at GET
 
 ## Integrity rules
 
+- The public catalog includes a version covering prices, quantities, currency,
+  and policy revision/URLs. A new purchase with an outdated version returns
+  `pricing_changed` before creating a purchase or contacting Stripe. The buyer
+  must reload and review the new quote. Replaying an existing idempotency key
+  retains its original quote even after the catalog changes.
+- Persist the accepted terms and refund URLs on purchases and paid receipts.
+  Existing receipts without those fields retain empty URLs; migration must not
+  substitute today's policies for an unknown historical agreement.
 - Persist purchase, server-selected amount/quantity, accepted terms revision,
   and exact Checkout parameters **before** making the Stripe create request.
   Retry using the persisted purchase's Stripe idempotency key and exact parameters.

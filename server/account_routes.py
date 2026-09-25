@@ -99,18 +99,22 @@ def create_blueprint(get_db: Callable[[], sqlite3.Connection], rate_limit: Calla
         except account_payments.PaymentError:
             available = False
         return jsonify({"packages": account_payments.PACKAGES, "currency": "usd", "scale": account_ledger.SCALE,
-                        "checkout_available": available, "terms_version": config.terms_version})
+                        "checkout_available": available, "terms_version": config.terms_version,
+                        "catalog_version": account_payments.catalog_version(config),
+                        "terms_url": config.terms_url if config.valid_url(config.terms_url) else None,
+                        "refund_url": config.refund_url if config.valid_url(config.refund_url) else None})
 
     @api.post("/account/checkout")
     @authenticate()
     def checkout():
         data = request.get_json(silent=True)
-        if not isinstance(data, dict) or set(data) != {"package_id", "terms_version"}:
+        if not isinstance(data, dict) or set(data) != {"package_id", "terms_version", "catalog_version"}:
             return fail("invalid_payload", 422)
         if not rate_limit(f"checkout:{g.account_id}", limit=10):
             return fail("rate_limited", 429)
         result = account_payments.create_checkout(get_db(), g.account_id, package_id=data["package_id"],
             terms_version=data["terms_version"], request_key=request.headers.get("Idempotency-Key", ""),
+            quote_version=data["catalog_version"],
             config=account_payments.Config.from_environment())
         return jsonify(result), 201
 

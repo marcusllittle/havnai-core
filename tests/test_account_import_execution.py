@@ -75,6 +75,39 @@ def test_signature_from_another_wallet_is_not_authorization(ready):
         execute(ready, signature=signature)
 
 
+def test_imported_job_never_grants_its_private_source_assets(ready, keys, tmp_path):
+    """Client-supplied legacy owner labels and job references are not ownership proof."""
+    import json
+    harness, headers, account, signer, _, _, _, principal = ready
+    other = harness.client.get("/v2/account", headers={"Authorization": token(keys, sub="asset-owner", sid="asset-session")}).json["id"]
+    with app.app.app_context():
+        conn = app.get_db()
+        with conn:
+            for identifier, owner in (("legacy-source", None), ("foreign-source", other)):
+                path = tmp_path / (identifier + ".png")
+                path.write_bytes(b"private source")
+                conn.execute("""INSERT INTO assets
+                    (id,owner,kind,filename,content_type,path,size_bytes,sha256,created_at,owner_account_id)
+                    VALUES (?,?,'image','source.png','image/png',?,14,'fixture',1,?)""",
+                    (identifier, signer.address.lower(), str(path), owner))
+            conn.execute("UPDATE jobs SET data=? WHERE id='01-ready'", (json.dumps({
+                "init_image_asset_id": "legacy-source", "face_asset_id": "foreign-source"}),))
+    snapshot = harness.client.post(PREPARE, headers={**headers, "Idempotency-Key": "source-boundary"}, json=SELECTION).json
+    challenge = challenge_request(harness, headers, snapshot).json
+    signature = signer.sign_message(encode_defunct(text=challenge["message"])).signature.hex()
+    result = execute((harness, headers, account, signer, snapshot, challenge, signature, principal))
+    assert {row["id"] for row in result["jobs"]} == {"01-ready", "05-purchased"}
+    assert harness.client.get("/v2/jobs/01-ready", headers=headers).status_code == 200
+    for identifier in ("legacy-source", "foreign-source"):
+        assert harness.client.get(f"/v2/assets/{identifier}/content", headers=headers).status_code == 404
+        assert harness.client.put("/v2/account/identity-anchors/reclaimed", headers=headers,
+            json={"asset_id": identifier, "display_name": "Not mine"}).status_code == 404
+    with app.app.app_context():
+        conn = app.get_db()
+        assert conn.execute("SELECT owner_account_id FROM assets WHERE id='legacy-source'").fetchone()[0] is None
+        assert conn.execute("SELECT owner_account_id FROM assets WHERE id='foreign-source'").fetchone()[0] == other
+
+
 def test_mutation_between_signature_recovery_and_write_lock_is_rejected(ready, monkeypatch):
     recover = Account.recover_message
 

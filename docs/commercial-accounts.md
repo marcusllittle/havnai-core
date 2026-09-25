@@ -195,8 +195,17 @@ Neither endpoint changes ownership or balances, and `transfer_authorized` remain
 false. Fresh import proof, dependency revalidation under the execution write lock,
 atomic transfer and transactional rollback are implemented below. Audit-driven
 reversal/compensation and production verification remain required before enabling
-execution. Snapshot hashes cover only the stated inventory; reference asset
-dependencies remain pending.
+execution. Snapshot hashes cover only the stated inventory. Legacy source uploads
+use a client-supplied `assets.owner` label under shared studio authorization; that
+label is not proof of wallet ownership. Neither a matching label nor a reference
+from an imported job can transfer the source asset. Re-upload source images through
+authenticated `/v2/assets`, then recreate saved face references through the account
+anchor API. These new assets belong only to the signed-in account. Legacy saved
+anchor records/files remain untouched; automatic reference import is unsupported
+until an independently verified ownership/provenance path exists. Importing a
+completed creation does not require importing its inputs. Tests prove imported
+jobs remain readable while their legacy/other-account source assets cannot be
+read or reused as account anchors.
 
 Version-5 snapshots support explicit `like_ids` and `save_ids` (publication IDs,
 at most 100 distinct IDs each). These move only the wallet's selected listening
@@ -207,9 +216,10 @@ publication state; a changed source or target invalidates the confirmation.
 Execution preserves the original date for new account preferences, keeps an
 existing account preference unchanged, deletes the corresponding wallet row,
 and recomputes public like counts to avoid counting a merged preference twice.
-These changes, proof consumption and the import receipt commit together. Web
-selection/proof/receipt integration for likes and saves remains required before
-enabling this new scope.
+These changes, proof consumption and the import receipt commit together. The web
+panel supports selection, merge explanations, exact proof validation and receipt
+display for likes and saves. Real signed-in acceptance remains required before
+enabling imports.
 
 `POST /v2/account/import-snapshots/:id/challenge` accepts only `{chain_id}` and
 requires recent account authentication plus an allowlisted request Origin. It

@@ -111,6 +111,7 @@ VERSION_FILE = BASE_DIR / "VERSION"
 LORA_STORAGE_DIR = Path(os.getenv("HAVNAI_LORA_STORAGE_DIR", "/mnt/d/havnai-storage/models/loras"))
 
 CREATOR_TASK_TYPE = "IMAGE_GEN"
+VISUAL_JOB_TYPES = {"image", "image_gen", "face_swap", "image_to_video", "video_gen", "ltx_video_gen", "animatediff"}
 IMAGE_JOB_FIELDS = ("steps", "guidance", "width", "height", "sampler", "seed", "reference_face_url",
                     "source_asset_id", "mask_asset_id", "face_asset_id", "img2img_strength", "preserve_reference_aspect")
 
@@ -5401,6 +5402,9 @@ def _v1_job_payload(job: Dict[str, Any]) -> Dict[str, Any]:
         "model": job.get("model"),
         "wallet": job.get("wallet"),
         "owner_account_id": job.get("owner_account_id"),
+        "collection_hidden": bool(job.get("owner_account_id") and get_db().execute(
+            "SELECT 1 FROM account_collection_hidden WHERE account_id=? AND job_id=?",
+            (job.get("owner_account_id"), job.get("id"))).fetchone()),
         "node_id": job.get("node_id"),
         "attempt_id": job.get("attempt_id"),
         "created_at": job.get("timestamp"),
@@ -5731,10 +5735,14 @@ def v1_list_jobs() -> Any:
         return jsonify({"error": "invalid_limit"}), 400
     requested_type = str(request.args.get("type") or "").strip().lower()
     requested_status = str(request.args.get("status") or "").strip().lower()
+    collection = request.args.get("collection") == "1" and bool(getattr(g, "account_id", None))
     conditions = ["owner_account_id IS ?"]
     params: List[Any] = [getattr(g, "account_id", None)]
+    if collection:
+        conditions.append("NOT EXISTS (SELECT 1 FROM account_collection_hidden h WHERE h.account_id=jobs.owner_account_id AND h.job_id=jobs.id)")
     if requested_type:
-        aliases = {"image_to_video": ["ltx_video_gen", "video_gen", "animatediff"], "text_to_music": ["music_gen"]}.get(requested_type, [])
+        aliases = {"image_to_video": ["ltx_video_gen", "video_gen", "animatediff"], "text_to_music": ["music_gen"],
+                   "visual": sorted(VISUAL_JOB_TYPES), "visual_image": ["image", "image_gen", "face_swap"]}.get(requested_type, [])
         types = [requested_type, *aliases]
         placeholders = ",".join("?" for _ in types)
         conditions.append(f"""(LOWER(TRIM(task_type)) IN ({placeholders}) OR
@@ -5747,10 +5755,24 @@ def v1_list_jobs() -> Any:
             params.extend([old, new])
         states = list(platform_v1.CANONICAL_JOB_STATES)
         canonical += f" WHEN {raw_status} IN ({','.join('?' for _ in states)}) THEN {raw_status} ELSE 'failed' END"
-        params.extend([*states, requested_status])
-        conditions.append(f"({canonical})=?")
+        params.extend(states)
+        if requested_status == "active":
+            conditions.append(f"({canonical}) IN ('queued','leased','running','uploading','cancelling')")
+        else:
+            params.append(requested_status)
+            conditions.append(f"({canonical})=?")
+    search = str(request.args.get("search") or "").strip().lower()[:500]
+    if search:
+        pattern = "%" + search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        conditions.append("""(LOWER(id) LIKE ? ESCAPE '\\' OR LOWER(model) LIKE ? ESCAPE '\\' OR
+            LOWER(CASE WHEN json_valid(data) THEN json_extract(data,'$.prompt') ELSE data END) LIKE ? ESCAPE '\\')""")
+        params.extend([pattern, pattern, pattern])
+    where = " AND ".join(conditions)
+    total = get_db().execute(f"SELECT COUNT(*) FROM jobs WHERE {where}", params).fetchone()[0]
+    direction = "ASC" if request.args.get("sort") == "oldest" else "DESC"
+    ordering = f"timestamp {direction},id {direction}" if collection else "COALESCE(updated_at, timestamp) DESC,id DESC"
     rows = get_db().execute(
-        f"SELECT * FROM jobs WHERE {' AND '.join(conditions)} ORDER BY COALESCE(updated_at, timestamp) DESC,id DESC LIMIT ? OFFSET ?",
+        f"SELECT * FROM jobs WHERE {where} ORDER BY {ordering} LIMIT ? OFFSET ?",
         [*params, limit, offset],
     ).fetchall()
     jobs = []
@@ -5763,14 +5785,39 @@ def v1_list_jobs() -> Any:
                 compatible_types.add("image_to_video")
             if raw_task_type == "music_gen":
                 compatible_types.add("text_to_music")
+            if compatible_types & VISUAL_JOB_TYPES:
+                compatible_types.add("visual")
+            if compatible_types & {"image", "image_gen", "face_swap"}:
+                compatible_types.add("visual_image")
             if requested_type not in compatible_types:
                 continue
-        if requested_status and payload["status"] != requested_status:
+        if requested_status == "active" and payload["status"] not in {"queued", "leased", "running", "uploading", "cancelling"}:
+            continue
+        if requested_status and requested_status != "active" and payload["status"] != requested_status:
             continue
         jobs.append(payload)
         if len(jobs) >= limit:
             break
-    return jsonify({"jobs": jobs, "count": len(jobs)})
+    return jsonify({"jobs": jobs, "count": len(jobs), "total": total})
+
+
+@app.route("/v2/account/collection", methods=["PUT"])
+def account_collection_visibility() -> Any:
+    error = _require_studio_user()
+    if error:
+        return error
+    body = request.get_json(silent=True)
+    if (not isinstance(body, dict) or set(body) != {"job_ids", "hidden"}
+        or not isinstance(body["hidden"], bool) or not isinstance(body["job_ids"], list)
+        or not 1 <= len(body["job_ids"]) <= 5000
+        or any(not isinstance(item, str) or not item or len(item) > 128 for item in body["job_ids"])
+        or len(set(body["job_ids"])) != len(body["job_ids"])):
+        return jsonify({"error": "invalid_payload"}), 422
+    try:
+        account_jobs.set_collection_hidden(get_db(), g.account_id, body["job_ids"], body["hidden"])
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
+    return jsonify({"job_ids": body["job_ids"], "hidden": body["hidden"]})
 
 
 @app.route("/v2/jobs", methods=["POST"])

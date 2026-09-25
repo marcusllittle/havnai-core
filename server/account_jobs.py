@@ -28,7 +28,29 @@ def initialize(conn: sqlite3.Connection) -> None:
             job_id TEXT NOT NULL UNIQUE REFERENCES jobs(id),
             PRIMARY KEY(account_id,request_key)
         );
+        CREATE TABLE IF NOT EXISTS account_collection_hidden (
+            account_id TEXT NOT NULL REFERENCES accounts(id),
+            job_id TEXT NOT NULL REFERENCES jobs(id),
+            hidden_at REAL NOT NULL,
+            PRIMARY KEY(account_id,job_id)
+        );
     """)
+
+
+def set_collection_hidden(conn: sqlite3.Connection, account_id: str, job_ids: list[str], hidden: bool) -> None:
+    conn.execute("BEGIN IMMEDIATE")
+    with conn:
+        placeholders = ",".join("?" for _ in job_ids)
+        owned = conn.execute(f"SELECT id FROM jobs WHERE owner_account_id=? AND id IN ({placeholders})",
+                             [account_id, *job_ids]).fetchall()
+        if len(owned) != len(job_ids):
+            raise ValueError("job_not_found")
+        if hidden:
+            conn.executemany("INSERT OR IGNORE INTO account_collection_hidden VALUES (?,?,?)",
+                             [(account_id, job_id, time.time()) for job_id in job_ids])
+        else:
+            conn.executemany("DELETE FROM account_collection_hidden WHERE account_id=? AND job_id=?",
+                             [(account_id, job_id) for job_id in job_ids])
 
 
 def cost_units(cost, batch_size=1) -> int:

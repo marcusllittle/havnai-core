@@ -398,3 +398,49 @@ def test_invalid_face_swap_controls_do_not_charge(platform, control):
     assert response.status_code == 400
     assert response.json["error"]["code"] == "invalid_face_swap_settings"
     assert harness.client.get("/v2/account/credits", headers=headers).json["reserved_units"] == 0
+
+
+def test_collection_hiding_is_durable_owned_idempotent_and_does_not_remove_history(platform, keys):
+    harness, headers, _ = platform
+    job = create(harness, headers).json
+    original_balance = harness.client.get("/v2/account/credits", headers=headers).json
+    body = {"job_ids": [job["id"]], "hidden": True}
+    bob = {"Authorization": token(keys, sub="user_bob", sid="sess_bob")}
+    assert harness.client.put("/v2/account/collection", headers=bob, json=body).status_code == 404
+    for _ in range(2):
+        assert harness.client.put("/v2/account/collection", headers=headers, json=body).status_code == 200
+    # A different browser session still sees the account preference.
+    other_session = {"Authorization": token(keys, sid="sess_second_browser")}
+    assert harness.client.get("/v2/jobs?collection=1&type=visual", headers=other_session).json["total"] == 0
+    assert harness.client.get("/v2/jobs?type=visual", headers=headers).json["total"] == 1
+    assert harness.client.get(f"/v2/jobs/{job['id']}", headers=headers).json["collection_hidden"] is True
+    mixed = {"job_ids": [job["id"], "missing-job"], "hidden": False}
+    assert harness.client.put("/v2/account/collection", headers=headers, json=mixed).status_code == 404
+    assert harness.client.get(f"/v2/jobs/{job['id']}", headers=headers).json["collection_hidden"] is True
+    assert harness.client.put("/v2/account/collection", headers=headers, json={**body, "hidden": False}).status_code == 200
+    assert harness.client.get("/v2/jobs?collection=1&type=visual", headers=headers).json["total"] == 1
+    assert harness.client.get("/v2/account/credits", headers=headers).json == original_balance
+
+
+def test_collection_query_filters_before_pagination_and_searches_all_owned_jobs(platform):
+    harness, headers, account = platform
+    with app.app.app_context():
+        conn = app.get_db()
+        for index in range(65):
+            visual = index < 55
+            conn.execute("""INSERT INTO jobs(id,wallet,model,data,task_type,status,timestamp,updated_at,creator_account_id,owner_account_id,weight)
+                VALUES (?,'','fixture',?,?,?,?,?,?,?,1)""", (f"collection-{index:03d}",
+                '{"v1_type":"face_swap","prompt":"100% blue_sky"}' if visual else '{"v1_type":"text_to_music","prompt":"a song"}',
+                "FACE_SWAP" if visual else "MUSIC_GEN", "running" if index == 54 else "completed", index, 1000-index, account, account))
+        conn.commit()
+    first = harness.client.get("/v2/jobs?collection=1&type=visual&limit=50", headers=headers).json
+    assert first["total"] == 55
+    assert first["jobs"][0]["id"] == "collection-054"
+    second = harness.client.get("/v2/jobs?collection=1&type=visual&limit=50&offset=50", headers=headers).json
+    assert len(second["jobs"]) == 5
+    assert not {job["id"] for job in first["jobs"]} & {job["id"] for job in second["jobs"]}
+    found = harness.client.get("/v2/jobs?collection=1&type=visual_image&search=100%25%20blue_sky&status=active", headers=headers).json
+    assert found["total"] == 1
+    assert found["jobs"][0]["id"] == "collection-054"
+    oldest = harness.client.get("/v2/jobs?collection=1&type=visual&sort=oldest&limit=1", headers=headers).json
+    assert oldest["jobs"][0]["id"] == "collection-000"

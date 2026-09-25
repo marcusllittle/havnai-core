@@ -169,7 +169,7 @@ The read-only first stage is available at `GET
 /v2/account/wallet-links/:link_id/import-preview?limit=50&offset=0`. It requires
 the signed-in account's active EVM wallet link and reads a consistent database
 snapshot. Its current scope is generation history, dependent music publications,
-selected playlists and available legacy credits; save, reference and workflow inventories
+selected playlists, workflow templates and available legacy credits; save and reference inventories
 still need their own dependency checks. No resource or balance changes during
 this preview. Publication summaries accompany the current page of jobs, with a
 flag when the bounded 100-publication selection limit is exceeded.
@@ -179,7 +179,7 @@ It does not expose prompts, source paths or another account's identity. Legacy
 credit amounts that exceed bounds or require rounding are marked for review.
 The preview is informational. `POST /v2/account/wallet-links/:link_id/import-snapshots`
 now persists an immutable, five-minute selection using an `Idempotency-Key` and
-`{job_ids: [...], include_credits: boolean, publication_ids?: [...], playlist_ids?: [...]}`. It requires recent account
+`{job_ids: [...], include_credits: boolean, publication_ids?: [...], playlist_ids?: [...], workflow_ids?: [...]}`. It requires recent account
 authentication, accepts at most 100 distinct eligible jobs, and rejects the whole
 selection if any job is unavailable. Credits are separately opt-in. The digest
 binds the account, current session, wallet link, exact selection, expiry, and
@@ -188,14 +188,15 @@ filesystem paths are not copied into the snapshot. Retrying the same key and
 selection returns the original snapshot, never refreshed inventory; changed
 selection returns 409. `GET /v2/account/import-snapshots/:id` is restricted to the
 original account session and still-active link; expired snapshots return 409.
-Retries of version 1/2 selections normalize missing optional fields as empty
+Retries of version 1–3 selections normalize missing optional fields as empty
 selections for comparison only. They return the original snapshot and never
 rewrite its digest, extend its expiry or add newly supported resource types.
 Neither endpoint changes ownership or balances, and `transfer_authorized` remains
 false. Fresh import proof, dependency revalidation under the execution write lock,
-atomic transfer and rollback/compensation controls below are still required before
-enabling execution. Snapshot hashes currently cover only the stated inventory;
-reference and workflow dependencies remain pending.
+atomic transfer and transactional rollback are implemented below. Audit-driven
+reversal/compensation and production verification remain required before enabling
+execution. Snapshot hashes cover only the stated inventory; reference and saved
+engagement dependencies remain pending.
 
 `POST /v2/account/import-snapshots/:id/challenge` accepts only `{chain_id}` and
 requires recent account authentication plus an allowlisted request Origin. It
@@ -213,7 +214,10 @@ request Origin, and a supported network. Both challenge issuance and execution
 return 503 unless `HAVNAI_ACCOUNT_IMPORT_ENABLED=1`; receipt recovery remains
 available when execution is disabled. The local preview runner defaults this
 switch off and supports `--enable-imports` for its isolated loopback environment.
-No frontend requests this signature yet. Production enablement still requires the
+The web import panel requests a signature only after explicit review confirmation
+and only when this capability is enabled. It validates every selected resource
+ID, including workflows, and recovers receipts before retrying execution.
+Production enablement still requires the
 backup/restore, migration and rollout checks below.
 
 The internal `account_import.execute` now verifies the stored EIP-191 message,
@@ -344,8 +348,8 @@ backup and external payment/provider reconciliation still require verification.
 
 Paths below define the target core API, proxied through `/api` on web. Account,
 credit balance/ledger, wallet link/unlink, assets, jobs and capabilities routes are
-registered on this branch. Payment, migration and account music routes remain
-implementation work. The identity repository is called by the verified-session
+registered on this branch, together with payment, migration and account music
+routes. The identity repository is called by the verified-session
 adapter, never directly by a client-supplied principal.
 
 | Method/path | Input / result | Authorization |
@@ -353,19 +357,22 @@ adapter, never directly by a client-supplied principal.
 | GET /v2/account | Immutable ID, status, optional public profile, linked wallets and capabilities | Valid session; provision by verified issuer/subject only |
 | GET /v2/account/credits | Integer available/reserved/debt units, scale=1000 | Account |
 | GET /v2/account/ledger | Cursor-paginated immutable ledger entries | Account |
-| GET /v2/account/receipts | Cursor-paginated receipts with status and safe download links | Account |
+| GET /v2/account/purchases and /v2/account/purchases/:id | Purchase history, durable payment receipt and adjustments | Account |
 | GET /v2/account/jobs | Cursor, state filters; only account-owned jobs | Account |
 | POST /v2/jobs | Generation spec and Idempotency-Key; returns durable job ID | Account; atomically reserve credits |
 | GET/PATCH /v2/jobs/:id | Status/recovery or supported operation | Resource owner |
 | POST /v2/music/publications | Artifact ID/title/visibility; no wallet/nonce/amount | Source owner account |
 | GET/POST/PATCH/DELETE /v2/music/library and /v2/music/playlists | Library/save/playlist operations; resource IDs | Account; private resource ACL |
-| POST /v2/payments/checkout | Package ID and Idempotency-Key; hosted checkout URL | Account; server price and allowlisted return URL |
-| POST /v2/payments/webhook | Raw provider event + provider signature | Provider verification only, no account token |
+| POST /v2/account/checkout | Package ID, terms/catalog versions and Idempotency-Key; hosted checkout URL | Account; server price and allowlisted return URL |
+| POST /v2/payments/stripe/webhook | Raw provider event + provider signature | Provider verification only, no account token |
 | POST /v2/account/wallet-challenges | Wallet, chain, link/unlink purpose | Recent account session |
 | POST /v2/account/wallet-links | Challenge ID, EIP-191 signature | Same account/session |
 | DELETE /v2/account/wallet-links/:id | Unlink challenge ID, signature | Same account/session and link owner |
-| POST /v2/account/imports/preview | Active link ID, resource-type selection | Account |
-| POST /v2/account/imports/:id/confirm | Preview digest, bound challenge/signature, Idempotency-Key | Same account/session and active link |
+| GET /v2/account/wallet-links/:id/import-preview | Paginated eligible inventory | Account and active link |
+| POST /v2/account/wallet-links/:id/import-snapshots | Explicit resource IDs, credit opt-in and Idempotency-Key | Recent account session and active link |
+| POST /v2/account/import-snapshots/:id/challenge | Chain ID; returns snapshot-bound signing message | Same recent account/session and active link; rollout enabled |
+| POST /v2/account/import-snapshots/:id/execute | Challenge ID, signature and chain ID | Same recent account/session; rollout enabled |
+| GET /v2/account/import-receipts and /v2/account/import-receipts/:id | Completed imports and immutable receipts | Account |
 
 Public discover, playback, public artwork, published playlists, creator profiles,
 and gallery browse remain anonymous GET/read flows. No page-mount signatures.
@@ -431,8 +438,9 @@ previously hidden. Listing, sales and provenance rows use separate account
 columns; wallet fields remain blank for account activity. Integer price columns
 are authoritative; legacy REAL columns are compatibility mirrors only.
 Account mutations are tested through authenticated HTTP and real database races
-in `tests/test_account_marketplace.py`. The account-aware web marketplace is still
-pending; these backend routes alone do not make the marketplace UI ready.
+in `tests/test_account_marketplace.py`. The web branch includes account browsing,
+purchase, listing, relisting, delisting and receipt UI. Real signed-in marketplace
+acceptance remains outstanding.
 
 Guests can read `GET /v2/marketplace/listings` and `GET
 /v2/marketplace/listings/:id`. Responses use an explicit field allowlist: listing

@@ -5806,6 +5806,17 @@ def v1_create_job() -> Any:
     if not cfg:
         return jsonify({"error": "unknown_model", "model": model_name}), 400
     selected_model = str(cfg.get("name") or model_name)
+    # Validate the manifest task before resolving parameters or reserving credits.
+    # Do not normalize unknown tasks to IMAGE_GEN here: that would admit models
+    # the image worker cannot execute.
+    model_task = str(cfg.get("task_type") or CREATOR_TASK_TYPE).strip().upper()
+    compatible_tasks = {
+        "image": {CREATOR_TASK_TYPE},
+        "image_to_video": {"LTX_VIDEO_GEN", "VIDEO_GEN", "ANIMATEDIFF"},
+        "text_to_music": {"MUSIC_GEN"},
+    }
+    if model_task not in compatible_tasks[job_type]:
+        return jsonify({"error": "model_task_mismatch", "model": selected_model, "type": job_type}), 400
     wallet = str(payload.get("wallet") or "0x0000000000000000000000000000000000000000").lower()
     if account_id:
         wallet = ""

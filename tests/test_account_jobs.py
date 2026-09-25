@@ -79,6 +79,31 @@ def test_lost_response_retry_recovers_before_changed_model_configuration(platfor
     assert harness.client.get("/v2/account/credits", headers=headers).json["reserved_units"] == 1000
 
 
+@pytest.mark.parametrize("job_type,model", [
+    ("image", platform_fixture.MUSIC_MODEL),
+    ("image", platform_fixture.VIDEO_MODEL),
+    ("text_to_music", platform_fixture.IMAGE_MODEL),
+    ("text_to_music", platform_fixture.VIDEO_MODEL),
+    ("image_to_video", platform_fixture.IMAGE_MODEL),
+    ("image_to_video", platform_fixture.MUSIC_MODEL),
+])
+def test_model_task_mismatch_does_not_enqueue_or_reserve_credits(platform, job_type, model):
+    harness, headers, _ = platform
+    for route, auth in (("/v2/jobs", headers), ("/v1/jobs", harness.owner_headers)):
+        response = harness.client.post(route, headers=auth,
+            json={"type": job_type, "model": model, "prompt": "A blue sky"})
+        assert response.status_code == 400
+        error = response.json["error"]
+        assert (error["code"] if isinstance(error, dict) else error) == "model_task_mismatch"
+    assert harness.client.get("/v2/jobs", headers=headers).json["jobs"] == []
+    assert harness.client.get("/v1/jobs", headers=harness.owner_headers).json["jobs"] == []
+    balance = harness.client.get("/v2/account/credits", headers=headers).json
+    assert balance["reserved_units"] == 0
+    assert balance["available_units"] == 10000
+    # A rejected request has no durable submission: correcting its model is safe.
+    assert create(harness, headers).status_code == 202
+
+
 def test_type_and_status_history_filters_run_before_pagination(platform, keys):
     harness, headers, account = platform
     with app.app.app_context():

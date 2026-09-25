@@ -12,6 +12,7 @@ import account_auth
 import account_identity
 import account_ledger
 import account_payments
+import account_lifecycle
 import stripe
 
 
@@ -44,12 +45,23 @@ def create_blueprint(get_db: Callable[[], sqlite3.Connection], rate_limit: Calla
     @api.errorhandler(account_identity.IdentityError)
     def identity_error(exc):
         code = str(exc)
-        status = 403 if code == "account_suspended" else 409 if code == "wallet_already_linked" else 422
+        status = 401 if code == "account_session_revoked" else 403 if code == "account_suspended" else 409 if code == "wallet_already_linked" else 422
         return fail(code, status)
 
     @api.errorhandler(account_payments.PaymentError)
     def payment_error(exc):
         return fail(str(exc), exc.status)
+
+    @api.errorhandler(account_lifecycle.LifecycleError)
+    def lifecycle_error(exc):
+        return fail(str(exc), exc.status)
+
+    @api.post("/auth/clerk/webhook")
+    def clerk_webhook():
+        if request.content_length is not None and request.content_length > 1024 * 1024:
+            return fail("payload_too_large", 413)
+        return jsonify(account_lifecycle.webhook(get_db(), request.get_data(), request.headers,
+            config=account_lifecycle.Config.from_environment()))
 
     @api.errorhandler(stripe.StripeError)
     def provider_error(exc):

@@ -11,6 +11,8 @@ from tests.test_account_auth import keys, token, config
 import app
 import account_auth
 import account_ledger
+import account_lifecycle
+from tests.test_account_lifecycle import signed, CONFIG as lifecycle_config
 import job_helpers
 
 
@@ -33,6 +35,18 @@ def platform(keys, monkeypatch):
 def create(harness, headers, **extra):
     return harness.client.post("/v2/jobs", headers=headers,
         json={"type": "image", "model": platform_fixture.IMAGE_MODEL, "prompt": "A blue sky", **extra})
+
+
+def test_revoked_session_cannot_recover_or_submit_studio_jobs(platform):
+    harness, headers, _ = platform
+    created = create(harness, headers)
+    assert created.status_code == 202
+    payload, proof = signed("session.revoked", {"id": "sess_alice"})
+    with app.app.app_context():
+        account_lifecycle.webhook(app.get_db(), payload, proof, config=lifecycle_config)
+    assert harness.client.get("/v2/account/jobs", headers=headers).status_code == 403
+    assert harness.client.get(f"/v2/jobs/{created.json['id']}", headers=headers).status_code == 403
+    assert create(harness, headers).status_code == 403
 
 
 def test_account_generation_retry_and_recovery_without_wallet(platform):

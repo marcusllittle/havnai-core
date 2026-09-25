@@ -42,6 +42,7 @@ def preview_environment(web_env: Path, data_dir: Path, port: int, web_origin: st
         marker.write_text("HAVN-11 local account preview\n", encoding="utf-8")
     return {
         "CLERK_SECRET_KEY": secret, "CLERK_JWT_KEY": "",
+        "CLERK_WEBHOOK_SIGNING_SECRET": "", "HAVNAI_CLERK_INSTANCE_ID": "",
         "HAVNAI_CLERK_ISSUER": "https://" + host, "HAVNAI_CLERK_AUDIENCE": "havnai-api",
         "HAVNAI_ACCOUNT_ORIGINS": web_origin, "CORS_ORIGINS": web_origin, "PYTHON_DOTENV_DISABLED": "1",
         "HAVNAI_DB_PATH": str(data_dir / "account-preview.sqlite3"),

@@ -1,4 +1,4 @@
-"""Isolated HAVN-18 identity storage; not yet wired to HTTP routes.
+"""Account identity storage used by the commercial account and studio APIs.
 
 Callers MUST supply a provider-verified principal, never request body identity.
 Each operation owns its transaction and requires an otherwise idle connection.
@@ -16,9 +16,11 @@ import uuid
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
+import account_lifecycle
+
 
 class IdentityError(ValueError):
-    """Stable error code for a future HTTP adapter; contains no private identity."""
+    """Stable API error code; contains no private identity."""
 
 
 @dataclass(frozen=True)
@@ -72,6 +74,7 @@ def initialize(conn: sqlite3.Connection) -> None:
             BEFORE DELETE ON account_audit_events BEGIN
                 SELECT RAISE(ABORT, 'account audit is append-only'); END;
     """)
+    account_lifecycle.initialize(conn)
 
 
 def _begin(conn: sqlite3.Connection) -> None:
@@ -92,6 +95,7 @@ def _session_hash(principal: VerifiedPrincipal) -> str:
 
 def _account(conn: sqlite3.Connection, principal: VerifiedPrincipal) -> str:
     _session_hash(principal)
+    _require_provider_access(conn, principal)
     row = conn.execute("""SELECT a.id, a.status FROM accounts a
         JOIN account_identities i ON i.account_id=a.id
         WHERE i.issuer=? AND i.subject=?""", (principal.issuer, principal.subject)).fetchone()
@@ -107,6 +111,7 @@ def ensure_account(conn: sqlite3.Connection, principal: VerifiedPrincipal) -> st
     _session_hash(principal)
     _begin(conn)
     with conn:
+        _require_provider_access(conn, principal)
         existing = conn.execute("SELECT account_id FROM account_identities WHERE issuer=? AND subject=?",
                                 (principal.issuer, principal.subject)).fetchone()
         if existing:
@@ -116,6 +121,12 @@ def ensure_account(conn: sqlite3.Connection, principal: VerifiedPrincipal) -> st
         conn.execute("INSERT INTO account_identities VALUES (?,?,?)",
                      (principal.issuer, principal.subject, account_id))
         return account_id
+
+
+def _require_provider_access(conn, principal):
+    reason = account_lifecycle.blocked_reason(conn, principal)
+    if reason:
+        raise IdentityError(reason)
 
 
 def issue_wallet_challenge(

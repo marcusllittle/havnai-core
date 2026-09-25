@@ -21,6 +21,7 @@ def test_preview_isolates_storage_and_disables_funding(tmp_path):
     assert result["HAVNAI_CLERK_ISSUER"] == "https://preview.clerk.accounts.dev"
     assert result["CLERK_SECRET_KEY"] == "sk_test_fixture"
     assert result["CLERK_JWT_KEY"] == ""
+    assert result["CLERK_WEBHOOK_SIGNING_SECRET"] == result["HAVNAI_CLERK_INSTANCE_ID"] == ""
     assert result["CORS_ORIGINS"] == result["HAVNAI_ACCOUNT_ORIGINS"] == "http://localhost:3100"
     assert Path(result["HAVNAI_DB_PATH"]).parent == directory
     assert result["SERVER_BIND"] == "127.0.0.1"

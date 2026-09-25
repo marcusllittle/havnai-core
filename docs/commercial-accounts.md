@@ -226,6 +226,12 @@ wallet playlists are rejected, and metadata/membership changes invalidate the
 snapshot. Account management survives unlinking the wallet; legacy wallet
 management is denied after import. Integration tests cover private/public reads,
 account updates, other-account denial and unchanged publication ownership.
+Legacy playlist metadata edits, deletion, item addition/removal and reordering
+now hold a write transaction from the ownership check through the final mutation.
+This closes an import race where a wallet could pass the old ownership check and
+then edit an already-transferred account playlist. Separate-connection tests prove
+the ownership write cannot interleave, and failure tests prove multirow edits
+roll back instead of leaving partial membership changes.
 
 Each transferred job now has immutable indexed provenance in
 `account_import_job_transfers`, linked to its signed import receipt. Startup can

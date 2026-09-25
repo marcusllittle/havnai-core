@@ -7,6 +7,7 @@ import json
 import sqlite3
 import time
 import uuid
+from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -621,6 +622,20 @@ def create_playlist(
     return {"ok": True, "playlist": playlist}
 
 
+def _playlist_write(function):
+    """Serialize legacy ownership checks with account imports and all edits."""
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        conn = get_db()
+        if conn.in_transaction:
+            raise RuntimeError("playlist edit requires an idle connection")
+        conn.execute("BEGIN IMMEDIATE")
+        with conn:
+            return function(*args, **kwargs)
+    return wrapped
+
+
+@_playlist_write
 def update_playlist(
     playlist_id: str,
     *,
@@ -656,10 +671,10 @@ def update_playlist(
         f"UPDATE music_playlists SET {', '.join(updates)} WHERE id=? AND owner_wallet=?",
         params,
     )
-    get_db().commit()
     return {"ok": True, "playlist": get_playlist(playlist_id, requester_wallet=wallet)}
 
 
+@_playlist_write
 def delete_playlist(playlist_id: str, *, owner_wallet: str) -> Dict[str, Any]:
     wallet = owner_wallet.strip().lower()
     row = _owner_playlist_row(playlist_id, wallet)
@@ -668,11 +683,11 @@ def delete_playlist(playlist_id: str, *, owner_wallet: str) -> Dict[str, Any]:
     conn = get_db()
     conn.execute("DELETE FROM music_playlist_items WHERE playlist_id=?", (playlist_id,))
     conn.execute("DELETE FROM music_playlists WHERE id=? AND owner_wallet=?", (playlist_id, wallet))
-    conn.commit()
     log_event("Music playlist deleted", playlist_id=playlist_id, wallet=wallet)
     return {"ok": True}
 
 
+@_playlist_write
 def add_playlist_item(playlist_id: str, publication_id: str, *, owner_wallet: str) -> Dict[str, Any]:
     wallet = owner_wallet.strip().lower()
     if not _owner_playlist_row(playlist_id, wallet):
@@ -694,10 +709,10 @@ def add_playlist_item(playlist_id: str, publication_id: str, *, owner_wallet: st
         (playlist_id, publication_id, position, now),
     )
     conn.execute("UPDATE music_playlists SET updated_at=? WHERE id=?", (now, playlist_id))
-    conn.commit()
     return {"ok": True, "playlist": get_playlist(playlist_id, requester_wallet=wallet)}
 
 
+@_playlist_write
 def remove_playlist_item(playlist_id: str, publication_id: str, *, owner_wallet: str) -> Dict[str, Any]:
     wallet = owner_wallet.strip().lower()
     if not _owner_playlist_row(playlist_id, wallet):
@@ -709,10 +724,10 @@ def remove_playlist_item(playlist_id: str, publication_id: str, *, owner_wallet:
     )
     _compact_playlist_positions(conn, playlist_id)
     conn.execute("UPDATE music_playlists SET updated_at=? WHERE id=?", (time.time(), playlist_id))
-    conn.commit()
     return {"ok": True, "playlist": get_playlist(playlist_id, requester_wallet=wallet)}
 
 
+@_playlist_write
 def reorder_playlist_items(playlist_id: str, publication_ids: List[str], *, owner_wallet: str) -> Dict[str, Any]:
     wallet = owner_wallet.strip().lower()
     if not _owner_playlist_row(playlist_id, wallet):
@@ -743,7 +758,6 @@ def reorder_playlist_items(playlist_id: str, publication_ids: List[str], *, owne
             (index, playlist_id, publication_id),
         )
     conn.execute("UPDATE music_playlists SET updated_at=? WHERE id=?", (now, playlist_id))
-    conn.commit()
     return {"ok": True, "playlist": get_playlist(playlist_id, requester_wallet=wallet)}
 
 

@@ -43,7 +43,9 @@ class MusicDiscoverTestCase(unittest.TestCase):
                 assigned_at REAL,
                 completed_at REAL,
                 invite_code TEXT,
-                resolved_spec TEXT
+                resolved_spec TEXT,
+                creator_account_id TEXT,
+                owner_account_id TEXT
             )
             """
         )
@@ -141,10 +143,12 @@ class MusicDiscoverTestCase(unittest.TestCase):
         self.assertEqual(wrong_wallet["error"], "not_your_job")
 
         self.conn.execute("UPDATE jobs SET status='running' WHERE id='job-1'")
+        self.conn.commit()
         incomplete = music_discover.publish_song(job_id="job-1", creator_wallet=WALLET, title="Nope")
         self.assertEqual(incomplete["error"], "job_not_completed")
 
         self.conn.execute("UPDATE jobs SET status='succeeded', task_type='IMAGE_GEN' WHERE id='job-1'")
+        self.conn.commit()
         non_music = music_discover.publish_song(job_id="job-1", creator_wallet=WALLET, title="Nope")
         self.assertEqual(non_music["error"], "not_music_job")
 

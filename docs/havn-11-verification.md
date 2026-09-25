@@ -34,7 +34,7 @@ production database/media restore readiness.
 | --- | --- |
 | Conventional production credit funding | Actual sandbox purchase, webhook funding, immutable receipt, decline, refund and missed-webhook recovery are verified below. Production configuration, an actual production payment path, and approved published terms/pricing/refund policy remain open. |
 | Refund correctness in service | Actual Stripe sandbox refund, duplicate delivery and repeated provider reconciliation are verified below. Production acceptance remains open; dispute and cancellation coverage still relies on mocked provider calls. |
-| Generate/recover/publish/manage without MetaMask | Two real account-funded GPU images completed, and the user confirmed both appear in Collection. Opening them without wallet prompts, reload recovery, publication/management and supported music/video browser flows still need evidence. Unit/API tests alone are insufficient. |
+| Generate/recover/publish/manage without MetaMask | Two real account-funded GPU images completed. The user confirmed Collection visibility, successful opening, the corrected watermark and no MetaMask prompts. Publication/management, generation recovery after reload and supported music/video browser flows still need evidence. Unit/API tests alone are insufficient. |
 | Optional wallet linkage | Real wallet recent-auth link/unlink/import acceptance; confirm ordinary account navigation never prompts. |
 | Legacy association and launch | Signed selective migration now includes song likes/saves and workflows. Source uploads have an explicit account re-upload path because legacy labels do not establish ownership. Legacy Stripe credit provenance, audited reversal/compensation, production backup/restore and migration review remain rollout gates. Import execution remains disabled by default. |
 | Production authentication | Clerk production configuration and lifecycle webhook delivery/revocation evidence. Earlier user-confirmed development Google sign-in is not production proof. |
@@ -159,3 +159,8 @@ their visibility in the signed-in account's collection, but does not by itself
 establish a refresh, successful opening/download, absence of wallet prompts, or
 publication. Those checks remain distinct from the completed generation and
 credit-capture evidence above.
+
+The user clarified that the requested opening, corrected-watermark and no-MetaMask
+checks had already passed for the Collection images. Those browser checks are now
+accepted; do not ask the user to repeat them. Download, publication/management and
+recovery of an in-progress generation after reload remain separate checks.

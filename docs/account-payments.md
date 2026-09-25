@@ -34,6 +34,25 @@ staging coordinator/database and Clerk development application. Changing the
 Stripe key to live does not convert test credit balances into paid balances.
 Disabling checkout does not disable webhook processing or refund reconciliation.
 
+For the isolated local account preview, pass `--sandbox-payments-env /private/path/payments.env`
+to `scripts/account_preview.py` alongside its existing `--web-env` argument.
+The private file must contain `STRIPE_SECRET_KEY` (test key only),
+`STRIPE_ACCOUNT_WEBHOOK_SECRET` (the local sandbox listener's signing secret),
+and explicit `HAVNAI_CREDIT_TERMS_VERSION`, `HAVNAI_CREDIT_TERMS_URL`, and
+`HAVNAI_CREDIT_REFUND_URL` values. Both policy URLs must point to actual pages on
+the same local web origin. Sandbox test policies do not approve commercial terms.
+The helper allows only these settings, fixes Checkout's origin to the local web
+origin, rejects live keys before creating preview storage, and leaves legacy
+Stripe/HAI funding disabled. Without this flag, all payment credentials are cleared
+and Checkout remains disabled. Never put this private file in Git or chat.
+
+Forward the sandbox's Stripe events to the preview's
+`http://127.0.0.1:5101/v2/payments/stripe/webhook` using Stripe CLI. CLI browser
+authorization enables CLI requests/listening; the Python application's Stripe SDK
+still needs its own sandbox server key. A successful CLI login alone does not
+configure account Checkout or prove funding. Keep the listener running during
+acceptance and verify the signed webhook, account receipt and ledger afterward.
+
 Configure a direct-account Stripe webhook endpoint for
 `/v2/payments/stripe/webhook` with the events listed in
 `server/account_payments.py:EVENT_TYPES`. The raw request body and Stripe signature

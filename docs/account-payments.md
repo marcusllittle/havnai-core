@@ -154,10 +154,13 @@ lost acknowledgements, failed/cancelled payments, wrong binding, cross-account
 receipt access, refunds after spending, dispute wins, stale reconciliation,
 rollback, receipt immutability, expiration, recovery, and mode isolation.
 
-Production evidence still requires configured Clerk sign-in, an actual Stripe
-sandbox purchase, verified webhook delivery, account funding/receipt visibility,
-a real refund, and account-funded generation/publication. No test count is a
-substitute for that complete flow.
+The local preview has verified development Clerk sign-in, actual Stripe sandbox
+purchase and refund, webhook funding and receipt visibility, decline handling,
+missed-webhook recovery, and two real account-funded GPU images visible in
+Collection. See `docs/havn-11-verification.md` for evidence and its limits.
+Production Clerk configuration, conventional production funding, approved
+commercial policies, and remaining browser publication/management acceptance
+are still open. Sandbox evidence does not prove production readiness.
 
 References: [Stripe idempotency](https://docs.stripe.com/api/idempotent_requests),
 [dispute states](https://docs.stripe.com/api/disputes/object),

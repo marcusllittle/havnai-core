@@ -32,9 +32,9 @@ production database/media restore readiness.
 
 | Requirement | Evidence still needed |
 | --- | --- |
-| Conventional production credit funding | Sandbox account/key and local webhook listener are now configured privately. A provider read confirmed the expected account and `livemode=false`; the local catalog reports checkout available. Actual checkout/webhook/receipt/ledger acceptance is pending. Production configuration and approved published terms/pricing/refund policy remain open. |
-| Refund correctness in service | Actual Stripe sandbox refund and repeated provider reconciliation now verified below. Production and missed-webhook acceptance remain open; regression-suite provider calls are mocked. |
-| Generate/recover/publish/manage without MetaMask | Signed-in browser acceptance against real generation workers for supported media, including reload recovery and private library/publication checks. Unit/API tests alone are insufficient. |
+| Conventional production credit funding | Actual sandbox purchase, webhook funding, immutable receipt, decline, refund and missed-webhook recovery are verified below. Production configuration, an actual production payment path, and approved published terms/pricing/refund policy remain open. |
+| Refund correctness in service | Actual Stripe sandbox refund, duplicate delivery and repeated provider reconciliation are verified below. Production acceptance remains open; dispute and cancellation coverage still relies on mocked provider calls. |
+| Generate/recover/publish/manage without MetaMask | Two real account-funded GPU images completed, and the user confirmed both appear in Collection. Opening them without wallet prompts, reload recovery, publication/management and supported music/video browser flows still need evidence. Unit/API tests alone are insufficient. |
 | Optional wallet linkage | Real wallet recent-auth link/unlink/import acceptance; confirm ordinary account navigation never prompts. |
 | Legacy association and launch | Signed selective migration now includes song likes/saves and workflows. Source uploads have an explicit account re-upload path because legacy labels do not establish ownership. Legacy Stripe credit provenance, audited reversal/compensation, production backup/restore and migration review remain rollout gates. Import execution remains disabled by default. |
 | Production authentication | Clerk production configuration and lifecycle webhook delivery/revocation evidence. Earlier user-confirmed development Google sign-in is not production proof. |
@@ -153,3 +153,9 @@ and zero reserved units after the two successful images. The original job's priv
 API and artifact URL returned 401 without authentication; legacy result and static
 output URLs returned 404. These checks do not substitute for another-account
 browser access tests or the pending Collection refresh/publication acceptance.
+
+The user subsequently confirmed that both images are in Collection. This verifies
+their visibility in the signed-in account's collection, but does not by itself
+establish a refresh, successful opening/download, absence of wallet prompts, or
+publication. Those checks remain distinct from the completed generation and
+credit-capture evidence above.

@@ -1195,7 +1195,7 @@ astra_gen.init_astra_gen_tables(get_db())
 astra_receipts.init_receipt_tables(get_db())
 merkle_batches.init_merkle_tables(get_db())
 payout_claims.init_payout_claim_tables(get_db())
-app.register_blueprint(account_routes.create_blueprint(get_db, rate_limit))
+app.register_blueprint(account_routes.create_blueprint(get_db, rate_limit, outputs_dir=lambda: OUTPUTS_DIR))
 
 # Optional: clear database and in-memory state on startup for a fresh dashboard
 if RESET_ON_STARTUP:

@@ -6,7 +6,7 @@ import uuid
 from functools import wraps
 from typing import Callable
 
-from flask import Blueprint, g, jsonify, request
+from flask import Blueprint, Response, g, jsonify, request
 
 import account_auth
 import account_identity
@@ -17,7 +17,7 @@ import account_marketplace
 import stripe
 
 
-def create_blueprint(get_db: Callable[[], sqlite3.Connection], rate_limit: Callable[..., bool]) -> Blueprint:
+def create_blueprint(get_db: Callable[[], sqlite3.Connection], rate_limit: Callable[..., bool], *, outputs_dir=None) -> Blueprint:
     api = Blueprint("commercial_accounts", __name__, url_prefix="/v2")
 
     def authenticate(*, recent=False):
@@ -64,6 +64,33 @@ def create_blueprint(get_db: Callable[[], sqlite3.Connection], rate_limit: Calla
             request.headers.get("Idempotency-Key", ""), request.get_json(silent=True))
         return jsonify(result), 201
 
+    @api.get("/marketplace/listings")
+    def marketplace_browse():
+        if not rate_limit(f"marketplace-read:{request.remote_addr}", limit=120):
+            return fail("rate_limited", 429)
+        try:
+            limit, offset = int(request.args.get("limit", "24")), int(request.args.get("offset", "0"))
+        except ValueError:
+            return fail("invalid_pagination", 422)
+        return jsonify(account_marketplace.browse(get_db(), search=request.args.get("search", ""),
+            category=request.args.get("category", ""), sort=request.args.get("sort", "newest"), limit=limit, offset=offset))
+
+    @api.get("/marketplace/listings/<int:listing_id>")
+    def marketplace_detail(listing_id):
+        if not rate_limit(f"marketplace-read:{request.remote_addr}", limit=120):
+            return fail("rate_limited", 429)
+        return jsonify(account_marketplace.detail(get_db(), listing_id))
+
+    @api.get("/marketplace/listings/<int:listing_id>/preview")
+    def marketplace_preview(listing_id):
+        if not rate_limit(f"marketplace-preview:{request.remote_addr}", limit=60):
+            return fail("rate_limited", 429)
+        if outputs_dir is None:
+            return fail("preview_unavailable", 503)
+        response = Response(account_marketplace.preview(get_db(), listing_id, outputs_dir=outputs_dir()), mimetype="image/jpeg")
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
+
     @api.post("/marketplace/listings/<int:listing_id>/purchase")
     @authenticate()
     def marketplace_purchase(listing_id):
@@ -78,6 +105,17 @@ def create_blueprint(get_db: Callable[[], sqlite3.Connection], rate_limit: Calla
     def marketplace_delist(listing_id):
         account_marketplace.delist(get_db(), g.account_id, listing_id)
         return "", 204
+
+    @api.get("/account/marketplace/listings")
+    @api.get("/account/marketplace/receipts")
+    @authenticate()
+    def account_marketplace_history():
+        try:
+            limit, offset = int(request.args.get("limit", "24")), int(request.args.get("offset", "0"))
+        except ValueError:
+            return fail("invalid_pagination", 422)
+        read = account_marketplace.receipts if request.path.endswith("/receipts") else account_marketplace.account_listings
+        return jsonify(read(get_db(), g.account_id, limit=limit, offset=offset))
 
     @api.errorhandler(account_lifecycle.LifecycleError)
     def lifecycle_error(exc):

@@ -4,17 +4,28 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from PIL import Image, ImageDraw, PngImagePlugin
 
 from tests.test_account_jobs import platform, keys, token, create
 import app
 import account_marketplace as market
 import account_ledger
+import account_auth
 import job_helpers
 
 
 @pytest.fixture
-def market_case(platform, keys):
+def market_case(platform, keys, monkeypatch):
     harness, seller_headers, seller = platform
+    auth_diagnostic = {}
+    authenticate = account_auth.authenticate_request
+
+    def observed_auth(*args, **kwargs):
+        result = authenticate(*args, **kwargs)
+        auth_diagnostic["reason"] = str(result.reason)
+        return result
+
+    monkeypatch.setattr(account_auth, "authenticate_request", observed_auth)
     buyer_headers = {"Authorization": token(keys, sub="buyer", sid="buyer-session"), "Idempotency-Key": "buy-one"}
     buyer = harness.client.get("/v2/account", headers=buyer_headers).json["id"]
     with app.app.app_context():
@@ -24,7 +35,7 @@ def market_case(platform, keys):
         with conn:
             account_ledger.fund_in_transaction(conn, buyer, 10000, payment_id="buyer-paid")
     response = create(harness, seller_headers)
-    assert response.status_code == 202, response.json
+    assert response.status_code == 202, (response.json, auth_diagnostic)
     job = response.json
     with app.app.app_context():
         attempt = job_helpers.assign_job_to_node(job["id"], "node-test")
@@ -208,3 +219,153 @@ def test_account_identity_is_required_and_payload_cannot_replace_it(market_case)
     conflict = harness.client.post(url, headers=buyer_headers, json={"expected_price_units": 4000})
     assert conflict.status_code == 409
     assert conflict.json["error"]["code"] == "idempotency_conflict"
+
+
+def preview_image(case):
+    with app.app.app_context():
+        row = app.get_db().execute("SELECT path FROM artifacts WHERE id=?", (case[5]["artifact_id"],)).fetchone()
+    metadata = PngImagePlugin.PngInfo()
+    metadata.add_text("prompt", "private generation prompt")
+    image = Image.new("RGB", (1200, 900), "blue")
+    image.save(row[0], pnginfo=metadata)
+    return Path(row[0])
+
+
+def test_guest_catalog_exposes_only_listing_metadata_and_reduced_preview(market_case):
+    harness, headers, _, _, _, body, private_url = market_case
+    path = preview_image(market_case)
+    listing_id = listing(market_case)
+    response = harness.client.get("/v2/marketplace/listings")
+    assert response.status_code == 200
+    assert response.json["total"] == 1
+    item = response.json["listings"][0]
+    assert set(item) == {"id", "title", "description", "category", "asset_type", "model", "price_units", "created_at", "scale", "status", "preview_url"}
+    assert item["price_units"] == 3000 and item["scale"] == 1000
+    assert harness.client.get(f"/v2/marketplace/listings/{listing_id}?wallet=anything").json == item
+    preview = harness.client.get(item["preview_url"])
+    assert preview.status_code == 200
+    assert preview.content_type == "image/jpeg"
+    assert preview.headers["Cache-Control"] == "private, no-store"
+    assert preview.headers["X-Content-Type-Options"] == "nosniff"
+    with Image.open(io.BytesIO(preview.data)) as image:
+        assert image.size == (640, 480)
+        assert "prompt" not in image.info
+        assert not image.getexif()
+        assert image.getpixel((0, 479)) != image.getpixel((0, 0))
+    assert b"private generation prompt" not in preview.data
+    assert preview.data != path.read_bytes()
+    assert harness.client.get(private_url).status_code == 401
+    assert harness.client.get(private_url, headers=headers).data == path.read_bytes()
+    assert harness.client.get(f"/v2/jobs/{body['job_id']}").status_code == 401
+
+
+def test_catalog_search_is_literal_and_pagination_counts_active_rows(market_case):
+    harness, headers, _, _, _, body, _ = market_case
+    changed = {**body, "title": "100% blue_sky", "category": "art"}
+    response = harness.client.post("/v2/marketplace/listings", headers=headers, json=changed)
+    listing_id = response.json["listing_id"]
+    assert harness.client.get("/v2/marketplace/listings?search=blue_sky&category=art&sort=price_low").json["total"] == 1
+    assert harness.client.get("/v2/marketplace/listings?search=blue%25").json["total"] == 0
+    assert harness.client.get("/v2/marketplace/listings?category=other").json["total"] == 0
+    page = harness.client.get("/v2/marketplace/listings?offset=1&limit=1").json
+    assert page["total"] == 1 and page["listings"] == []
+    assert harness.client.delete(f"/v2/marketplace/listings/{listing_id}", headers=headers).status_code == 204
+    assert harness.client.get("/v2/marketplace/listings").json["total"] == 0
+    assert harness.client.get(f"/v2/marketplace/listings/{listing_id}").status_code == 404
+    assert harness.client.get(f"/v2/marketplace/listings/{listing_id}/preview").status_code == 404
+
+
+@pytest.mark.parametrize("query", ["limit=0", "offset=-1", "limit=101", "limit=no", "offset=1000001", "sort=sql"])
+def test_catalog_rejects_invalid_query(market_case, query):
+    assert market_case[0].client.get("/v2/marketplace/listings?" + query).status_code == 422
+
+
+def test_purchase_and_suspension_remove_public_preview(market_case):
+    harness, _, buyer_headers, seller, _, _, _ = market_case
+    preview_image(market_case)
+    listing_id = listing(market_case)
+    url = f"/v2/marketplace/listings/{listing_id}"
+    with app.app.app_context():
+        conn = app.get_db()
+        with conn:
+            conn.execute("UPDATE accounts SET status='suspended' WHERE id=?", (seller,))
+    assert harness.client.get(url).status_code == 404
+    assert harness.client.get(url + "/preview").status_code == 404
+    assert harness.client.get("/v2/marketplace/listings").json["total"] == 0
+    with app.app.app_context():
+        conn = app.get_db()
+        with conn:
+            conn.execute("UPDATE accounts SET status='active' WHERE id=?", (seller,))
+    assert harness.client.post(url + "/purchase", headers=buyer_headers, json={"expected_price_units": 3000}).status_code == 200
+    assert harness.client.get(url + "/preview").status_code == 404
+
+
+def test_preview_rechecks_delist_during_encoding(market_case, monkeypatch):
+    harness, headers, _, _, _, _, _ = market_case
+    preview_image(market_case)
+    listing_id = listing(market_case)
+    original = ImageDraw.Draw
+
+    def delist_during_render(*args, **kwargs):
+        with app.app.app_context():
+            conn = app.get_db()
+            with conn:
+                conn.execute("UPDATE gallery_listings SET listed=0 WHERE id=?", (listing_id,))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(ImageDraw, "Draw", delist_during_render)
+    assert harness.client.get(f"/v2/marketplace/listings/{listing_id}/preview").status_code == 404
+
+
+def test_preview_never_serves_invalid_or_external_files(market_case, tmp_path):
+    harness, _, _, _, _, body, _ = market_case
+    listing_id = listing(market_case)
+    route = f"/v2/marketplace/listings/{listing_id}/preview"
+    assert harness.client.get(route).status_code == 409  # fixture is not a decodable image
+    external = tmp_path / "outside.png"
+    Image.new("RGB", (64, 64), "red").save(external)
+    with app.app.app_context():
+        conn = app.get_db()
+        with conn:
+            conn.execute("UPDATE artifacts SET path=? WHERE id=?", (str(external), body["artifact_id"]))
+    assert harness.client.get(route).status_code == 409
+
+
+def test_private_listing_and_receipt_views_follow_ownership_without_losing_history(market_case, keys):
+    harness, seller_headers, buyer_headers, seller, buyer, body, _ = market_case
+    listing_id = listing(market_case)
+    owned_url = "/v2/account/marketplace/listings"
+    receipts_url = "/v2/account/marketplace/receipts"
+    for url in (owned_url, receipts_url):
+        assert harness.client.get(url).status_code == 401
+        assert harness.client.get(url, headers=harness.owner_headers).status_code == 401
+    owned = harness.client.get(owned_url, headers=seller_headers).json
+    assert owned["total"] == 1
+    assert owned["listings"][0]["owner_account_id"] == seller
+    assert owned["listings"][0]["status"] == "active"
+    assert harness.client.get(owned_url, headers=buyer_headers).json["total"] == 0
+    assert harness.client.post(f"/v2/marketplace/listings/{listing_id}/purchase", headers=buyer_headers,
+                               json={"expected_price_units": 3000}).status_code == 200
+    assert harness.client.get(owned_url, headers=seller_headers).json["listings"] == []
+    bought = harness.client.get(owned_url, headers=buyer_headers).json["listings"][0]
+    assert bought["owner_account_id"] == buyer and bought["creator_account_id"] == seller
+    assert bought["status"] == "sold" and bought["preview_url"] is None
+    assert harness.client.get(bought["original_url"], headers=buyer_headers).status_code == 200
+    for headers, direction in ((seller_headers, "sale"), (buyer_headers, "purchase")):
+        response = harness.client.get(receipts_url, headers=headers)
+        receipt = response.json["receipts"][0]
+        assert response.headers["Cache-Control"] == "private, no-store"
+        assert receipt["direction"] == direction and receipt["price_units"] == 3000
+        ledger = harness.client.get("/v2/account/ledger", headers=headers).json
+        assert receipt["ledger_entry_id"] in {entry["id"] for entry in ledger["entries"]}
+        assert response.json["total"] == 1
+        assert "original_url" not in receipt and "artifact_id" not in receipt
+    stranger = {"Authorization": token(keys, sub="stranger", sid="stranger-session")}
+    assert harness.client.get(receipts_url + "?account_id=" + buyer, headers=stranger).json["total"] == 0
+    page = harness.client.get(receipts_url + "?limit=1&offset=1", headers=buyer_headers).json
+    assert page["total"] == 1 and page["receipts"] == []
+    relisted = harness.client.post("/v2/marketplace/listings", headers={**buyer_headers, "Idempotency-Key": "resell"}, json=body)
+    assert relisted.status_code == 201
+    own = harness.client.get(owned_url, headers=buyer_headers).json
+    assert own["total"] == 1 and own["listings"][0]["id"] == relisted.json["listing_id"]
+    assert harness.client.get(receipts_url, headers=seller_headers).json["total"] == 1

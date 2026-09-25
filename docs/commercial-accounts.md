@@ -249,9 +249,30 @@ previously hidden. Listing, sales and provenance rows use separate account
 columns; wallet fields remain blank for account activity. Integer price columns
 are authoritative; legacy REAL columns are compatibility mirrors only.
 Account mutations are tested through authenticated HTTP and real database races
-in `tests/test_account_marketplace.py`. Public previews/catalog reads and the
-account-aware web marketplace are still pending; these backend routes alone do
-not make the marketplace UI ready.
+in `tests/test_account_marketplace.py`. The account-aware web marketplace is still
+pending; these backend routes alone do not make the marketplace UI ready.
+
+Guests can read `GET /v2/marketplace/listings` and `GET
+/v2/marketplace/listings/:id`. Responses use an explicit field allowlist: listing
+copy, model, integer price, creation time and preview URL. They omit prompts,
+source assets, internal account IDs, job IDs and original-file URLs. Browse supports
+literal search, category, stable sorting and bounded offset pagination. Only
+active listings whose job owner matches an active account appear publicly.
+
+`GET /v2/marketplace/listings/:id/preview` renders a JPEG at most 640 pixels per
+side, with a visible preview label and no source metadata. It reads only image
+artifacts inside the coordinator output directory and bounds source bytes/pixels.
+The endpoint checks publication and ownership again after encoding. It returns
+no-store/nosniff responses and closes on delisting, sale or account suspension.
+Already downloaded previews cannot be recalled; private originals continue to
+require current-owner authentication.
+
+Authenticated `GET /v2/account/marketplace/listings` returns the current owner's
+latest listing per job, including sold/delisted items and authenticated artifact
+links. `GET /v2/account/marketplace/receipts` returns that account's purchase/sale
+history with immutable ledger entry references. Both paginate, ignore supplied
+account identifiers and remain private/no-store; sale history persists after
+ownership changes.
 
 Legacy gallery access now excludes any job with an account owner, even when an
 old wallet listing, sale or ownership log still exists. This applies to browse

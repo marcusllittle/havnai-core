@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 from pathlib import Path
 import time
 import uuid
+import warnings
 
 import account_ledger
 import platform_v1
@@ -171,3 +173,132 @@ def delist(conn, account, listing_id):
         if not row:
             raise MarketplaceError("listing_not_found", 404)
         conn.execute("UPDATE gallery_listings SET listed=0,updated_at=? WHERE id=?", (time.time(), listing_id))
+
+
+_PUBLIC_FROM = """FROM gallery_listings l JOIN jobs j ON j.id=l.job_id
+    JOIN accounts owner ON owner.id=j.owner_account_id
+    WHERE l.owner_account_id=j.owner_account_id AND owner.status='active'
+    AND l.listed=1 AND l.sold=0 AND l.price_units IS NOT NULL"""
+
+
+def _public_listing(row):
+    # An explicit allowlist prevents prompt, source assets, paths and internal
+    # account identifiers from appearing in public catalog responses.
+    return {**{key: row[key] for key in ("id", "title", "description", "category", "asset_type", "model", "price_units", "created_at")},
+            "scale": account_ledger.SCALE, "status": "active",
+            "preview_url": f"/v2/marketplace/listings/{row['id']}/preview"}
+
+
+def browse(conn, *, search="", category="", sort="newest", limit=24, offset=0):
+    if not isinstance(search, str) or len(search) > 200 or not isinstance(category, str) or len(category) > 100:
+        raise MarketplaceError("invalid_search")
+    orders = {"newest": "l.created_at DESC,l.id DESC", "oldest": "l.created_at,l.id",
+              "price_low": "l.price_units,l.id DESC", "price_high": "l.price_units DESC,l.id DESC"}
+    if sort not in orders or type(limit) is not int or not 1 <= limit <= 100 or type(offset) is not int or not 0 <= offset <= 1000000:
+        raise MarketplaceError("invalid_pagination")
+    where, params = _PUBLIC_FROM, []
+    if search.strip():
+        escaped = search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        where += " AND (l.title LIKE ? ESCAPE '\\' OR l.description LIKE ? ESCAPE '\\' OR l.model LIKE ? ESCAPE '\\')"
+        params.extend([f"%{escaped}%"] * 3)
+    if category:
+        where += " AND l.category=?"
+        params.append(category)
+    total = conn.execute("SELECT COUNT(*) " + where, params).fetchone()[0]
+    rows = conn.execute("SELECT l.* " + where + " ORDER BY " + orders[sort] + " LIMIT ? OFFSET ?", [*params, limit, offset]).fetchall()
+    return {"listings": [_public_listing(row) for row in rows], "total": total, "limit": limit, "offset": offset, "sort": sort}
+
+
+def detail(conn, listing_id):
+    row = conn.execute("SELECT l.* " + _PUBLIC_FROM + " AND l.id=?", (listing_id,)).fetchone()
+    if not row:
+        raise MarketplaceError("listing_not_found", 404)
+    return _public_listing(row)
+
+
+def account_listings(conn, account, *, limit=24, offset=0):
+    _pagination(limit, offset)
+    where = """FROM gallery_listings l JOIN jobs j ON j.id=l.job_id
+        WHERE j.owner_account_id=? AND l.owner_account_id=?
+        AND l.id=(SELECT MAX(latest.id) FROM gallery_listings latest
+                  WHERE latest.job_id=l.job_id AND latest.owner_account_id IS NOT NULL)"""
+    params = (account, account)
+    total = conn.execute("SELECT COUNT(*) " + where, params).fetchone()[0]
+    rows = conn.execute("SELECT l.* " + where + " ORDER BY l.updated_at DESC,l.id DESC LIMIT ? OFFSET ?", (*params, limit, offset)).fetchall()
+    listings = []
+    for row in rows:
+        item = _public_listing(row)
+        item.update({"status": "active" if row["listed"] and not row["sold"] else "sold" if row["sold"] else "delisted",
+                     "job_id": row["job_id"], "artifact_id": row["artifact_id"],
+                     "owner_account_id": account, "creator_account_id": row["creator_account_id"],
+                     "original_url": f"/v2/artifacts/{row['artifact_id']}/content"})
+        # The public preview endpoint closes when a listing is sold/delisted.
+        if item["status"] != "active":
+            item["preview_url"] = None
+        listings.append(item)
+    return {"listings": listings, "total": total, "limit": limit, "offset": offset}
+
+
+def _pagination(limit, offset):
+    if type(limit) is not int or not 1 <= limit <= 100 or type(offset) is not int or not 0 <= offset <= 1000000:
+        raise MarketplaceError("invalid_pagination")
+
+
+def receipts(conn, account, *, limit=24, offset=0):
+    _pagination(limit, offset)
+    where = """FROM account_credit_sales s JOIN gallery_sales g ON g.account_sale_id=s.sale_id
+        JOIN gallery_listings l ON l.id=g.listing_id
+        WHERE s.buyer_account_id=? OR s.seller_account_id=?"""
+    total = conn.execute("SELECT COUNT(*) " + where, (account, account)).fetchone()[0]
+    rows = conn.execute("SELECT s.*,g.listing_id,l.job_id,l.title " + where + " ORDER BY s.created_at DESC,s.sale_id DESC LIMIT ? OFFSET ?",
+                        (account, account, limit, offset)).fetchall()
+    return {"receipts": [{"id": row["sale_id"], "listing_id": row["listing_id"], "job_id": row["job_id"],
+                          "title": row["title"], "price_units": row["units"], "scale": account_ledger.SCALE,
+                          "direction": "purchase" if row["buyer_account_id"] == account else "sale",
+                          "ledger_entry_id": row["debit_entry_id"] if row["buyer_account_id"] == account else row["credit_entry_id"],
+                          "created_at": row["created_at"]} for row in rows],
+            "total": total, "limit": limit, "offset": offset}
+
+
+def preview(conn, listing_id, *, outputs_dir):
+    row = conn.execute("SELECT l.* " + _PUBLIC_FROM + " AND l.id=?", (listing_id,)).fetchone()
+    if not row:
+        raise MarketplaceError("listing_not_found", 404)
+    source = conn.execute("SELECT path,content_type FROM artifacts WHERE id=? AND job_id=? AND kind='image'",
+                          (row["artifact_id"], row["job_id"])).fetchone()
+    if not source or source["content_type"] not in {"image/png", "image/jpeg", "image/webp"}:
+        raise MarketplaceError("preview_unavailable", 409)
+    try:
+        from PIL import Image, ImageDraw, ImageOps
+    except ImportError as exc:
+        raise MarketplaceError("preview_unavailable", 503) from exc
+    try:
+        path = Path(source["path"]).resolve()
+        if not path.is_relative_to(Path(outputs_dir).resolve()) or path.stat().st_size > 32 * 1024 * 1024:
+            raise MarketplaceError("preview_unavailable", 409)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(path) as original:
+                if original.width * original.height > 20_000_000:
+                    raise MarketplaceError("preview_unavailable", 409)
+                image = ImageOps.exif_transpose(original)
+                image.thumbnail((640, 640))
+                # A fresh RGB canvas deliberately drops EXIF, text and profiles.
+                clean = Image.new("RGB", image.size, "#101820")
+                if "A" in image.getbands():
+                    clean.paste(image.convert("RGB"), mask=image.getchannel("A"))
+                else:
+                    clean.paste(image.convert("RGB"))
+                draw = ImageDraw.Draw(clean)
+                draw.rectangle((0, max(0, clean.height - 24), clean.width, clean.height), fill="#101820")
+                draw.text((8, max(0, clean.height - 19)), "HavnAI preview", fill="white")
+                output = io.BytesIO()
+                clean.save(output, format="JPEG", quality=80)
+    except (OSError, ValueError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise MarketplaceError("preview_unavailable", 409) from exc
+    # Encoding happens without a write lock. Recheck publication/ownership before
+    # releasing bytes, including delists and purchases during image processing.
+    current = conn.execute("SELECT l.artifact_id,l.owner_account_id " + _PUBLIC_FROM + " AND l.id=?", (listing_id,)).fetchone()
+    if not current or tuple(current) != (row["artifact_id"], row["owner_account_id"]):
+        raise MarketplaceError("listing_not_found", 404)
+    return output.getvalue()

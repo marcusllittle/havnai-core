@@ -245,6 +245,40 @@ def load(conn, principal, snapshot_id):
         return _load(conn, account, account_identity._session_hash(principal), snapshot_id)
 
 
+def receipt(conn, principal, snapshot_id):
+    """Durable result belongs to the account, independently of the old proof/link."""
+    if conn.in_transaction:
+        raise RuntimeError("import receipt read requires an idle connection")
+    conn.execute("BEGIN")
+    with conn:
+        account = account_identity._account(conn, principal)
+        row = conn.execute("SELECT receipt_json FROM account_import_receipts WHERE snapshot_id=? AND account_id=?",
+                           (snapshot_id, account)).fetchone()
+        if not row:
+            raise MigrationError("import_receipt_not_found", 404)
+        return {"receipt": json.loads(row[0]), "scale": account_ledger.SCALE}
+
+
+def receipts(conn, principal, *, limit=50, offset=0):
+    if type(limit) is not int or not 1 <= limit <= 100 or type(offset) is not int or not 0 <= offset <= 1000000:
+        raise MigrationError("invalid_pagination")
+    if conn.in_transaction:
+        raise RuntimeError("import receipts read requires an idle connection")
+    conn.execute("BEGIN")
+    with conn:
+        account = account_identity._account(conn, principal)
+        total = conn.execute("SELECT COUNT(*) FROM account_import_receipts WHERE account_id=?", (account,)).fetchone()[0]
+        rows = conn.execute("""SELECT receipt_json FROM account_import_receipts WHERE account_id=?
+            ORDER BY created_at DESC,snapshot_id DESC LIMIT ? OFFSET ?""", (account, limit, offset)).fetchall()
+        summaries = []
+        for row in rows:
+            value = json.loads(row[0])
+            summaries.append({"id": value["id"], "created_at": value["created_at"],
+                "job_count": len(value["jobs"]), "publication_count": len(value.get("publication_ids", [])),
+                "playlist_count": len(value.get("playlist_ids", [])), "credit_units": value["credit_units"]})
+        return {"receipts": summaries, "total": total, "limit": limit, "offset": offset, "scale": account_ledger.SCALE}
+
+
 def revalidate_in_transaction(conn, principal, snapshot_id):
     """Caller must hold BEGIN IMMEDIATE through eventual proof consumption/transfer.
 

@@ -192,6 +192,14 @@ attribution; importing a purchased job never makes its buyer the original creato
 Legacy job/gallery access is denied once account ownership is assigned. Signed
 retries return the original receipt, including under concurrent execution.
 Receipt failure rolls back proof consumption, ownership and both balances.
+`GET /v2/account/import-receipts/:snapshot_id` recovers a completed import's
+durable result using ordinary account authentication, without a new wallet
+signature or recent-login requirement. It survives snapshot expiry, wallet
+unlinking and a new session for the same account. Pending/unknown imports and
+other accounts' receipts return 404. `GET /v2/account/import-receipts` returns
+paginated summaries with resource counts and integer credit units. Both are
+private/no-store and reject suspended accounts. These reads never execute or
+repeat a transfer; they are the recovery source for a lost completion response.
 Publication dependencies now require explicit `publication_ids` (at most 100)
 alongside their selected jobs. Preparation rejects incomplete selections, other
 wallets' publications, existing account owners and mismatched audio artifacts.

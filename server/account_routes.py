@@ -73,6 +73,20 @@ def create_blueprint(get_db: Callable[[], sqlite3.Connection], rate_limit: Calla
     def wallet_import_snapshot(snapshot_id):
         return jsonify(account_import.load(get_db(), g.account_principal, snapshot_id))
 
+    @api.get("/account/import-receipts/<snapshot_id>")
+    @authenticate()
+    def wallet_import_receipt(snapshot_id):
+        return jsonify(account_import.receipt(get_db(), g.account_principal, snapshot_id))
+
+    @api.get("/account/import-receipts")
+    @authenticate()
+    def wallet_import_receipts():
+        try:
+            limit, offset = int(request.args.get("limit", "50")), int(request.args.get("offset", "0"))
+        except ValueError:
+            return fail("invalid_pagination", 422)
+        return jsonify(account_import.receipts(get_db(), g.account_principal, limit=limit, offset=offset))
+
     @api.post("/account/import-snapshots/<snapshot_id>/challenge")
     @authenticate(recent=True)
     def wallet_import_challenge(snapshot_id):

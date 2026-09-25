@@ -111,6 +111,8 @@ VERSION_FILE = BASE_DIR / "VERSION"
 LORA_STORAGE_DIR = Path(os.getenv("HAVNAI_LORA_STORAGE_DIR", "/mnt/d/havnai-storage/models/loras"))
 
 CREATOR_TASK_TYPE = "IMAGE_GEN"
+IMAGE_JOB_FIELDS = ("steps", "guidance", "width", "height", "sampler", "seed", "reference_face_url",
+                    "source_asset_id", "mask_asset_id", "face_asset_id", "img2img_strength", "preserve_reference_aspect")
 
 SUPPORTED_LORA_EXTS = {".safetensors", ".ckpt", ".pt", ".bin"}
 
@@ -2854,7 +2856,7 @@ def _extract_reference_face_url(payload: Dict[str, Any]) -> str:
 def _image_job_requires_reference_face(payload_or_settings: Any) -> bool:
     if not isinstance(payload_or_settings, dict):
         return False
-    return bool(_extract_reference_face_url(payload_or_settings))
+    return bool(_extract_reference_face_url(payload_or_settings) or payload_or_settings.get("face_asset_id"))
 
 
 def _resolve_confidence(default_sources: Dict[str, str]) -> str:
@@ -3957,7 +3959,7 @@ def get_creator_tasks() -> Any:
                         if isinstance(parsed_loras, list):
                             loras = [item for item in parsed_loras if item]
                         # Forward per-image overrides stored in job settings.
-                        for key in ("steps", "guidance", "width", "height", "sampler", "seed", "reference_face_url"):
+                        for key in IMAGE_JOB_FIELDS:
                             if key not in parsed:
                                 continue
                             value = parsed.get(key)
@@ -3968,7 +3970,7 @@ def get_creator_tasks() -> Any:
                                     image_overrides[key] = int(value)
                                 except (TypeError, ValueError):
                                     continue
-                            elif key == "guidance":
+                            elif key in {"guidance", "img2img_strength"}:
                                 try:
                                     image_overrides[key] = float(value)
                                 except (TypeError, ValueError):
@@ -3977,7 +3979,9 @@ def get_creator_tasks() -> Any:
                                 value_str = str(value).strip()
                                 if value_str:
                                     image_overrides[key] = value_str
-                            elif key == "reference_face_url":
+                            elif key == "preserve_reference_aspect":
+                                image_overrides[key] = value is True
+                            elif key in {"reference_face_url", "source_asset_id", "mask_asset_id", "face_asset_id"}:
                                 value_str = str(value).strip()
                                 if value_str:
                                     image_overrides[key] = value_str
@@ -4067,7 +4071,7 @@ def get_creator_tasks() -> Any:
             }
             if task_payload["type"].upper() == CREATOR_TASK_TYPE:
                 # Forward generation overrides for image tasks only.
-                for key in ("steps", "guidance", "width", "height", "sampler", "seed", "reference_face_url"):
+                for key in IMAGE_JOB_FIELDS:
                     if key in task and task[key] is not None:
                         task_payload[key] = task[key]
             # If this is a WAN I2V video job, attempt to expose structured settings to the node
@@ -5832,10 +5836,14 @@ def v1_create_job() -> Any:
     audio_asset_id = str(payload.get("audio_asset_id") or
                          (payload.get("source_audio_asset_id") if job_type == "text_to_music" else "") or "").strip()
     reference_asset_id = str(payload.get("reference_asset_id") or "").strip()
+    mask_asset_id = str(payload.get("mask_asset_id") or "").strip()
+    face_asset_id = str(payload.get("face_asset_id") or "").strip()
     for asset_id, expected_kind in (
         (source_asset_id, "image"),
         (audio_asset_id, "audio"),
         (reference_asset_id, "audio"),
+        (mask_asset_id, "image"),
+        (face_asset_id, "image"),
     ):
         if not asset_id:
             continue
@@ -5887,11 +5895,36 @@ def v1_create_job() -> Any:
         pipeline = str(cfg.get("pipeline") or "").lower()
         task_type = "LTX_VIDEO_GEN" if _is_ltx_video_config(cfg) else "VIDEO_GEN"
     else:
+        if account_id and any(payload.get(key) for key in ("init_image", "init_image_url", "inpaint_mask", "reference_face_url")):
+            return jsonify({"error": "owned_image_asset_required"}), 400
+        if mask_asset_id and not source_asset_id:
+            return jsonify({"error": "source_image_required"}), 400
+        if face_asset_id and (source_asset_id or "sdxl" not in str(cfg.get("pipeline") or "").lower()):
+            return jsonify({"error": "invalid_face_conditioning"}), 400
         resolved_defaults, sources = resolve_image_defaults(cfg, payload, RUNTIME_PROFILE)
         settings.update(resolved_defaults)
         settings["defaults_source"] = {"image": sources}
         if payload.get("seed") is not None:
-            settings["seed"] = int(payload["seed"])
+            try:
+                seed = int(payload["seed"])
+                if isinstance(payload["seed"], bool) or str(seed) != str(payload["seed"]) or not -1 <= seed <= 2**32 - 1:
+                    raise ValueError()
+                settings["seed"] = seed
+            except (ValueError, TypeError, OverflowError):
+                return jsonify({"error": "invalid_seed"}), 400
+        if source_asset_id:
+            try:
+                strength = float(payload.get("img2img_strength", 0.75))
+                if not math.isfinite(strength) or not 0 < strength <= 1 or int(settings["steps"] * strength) < 1:
+                    raise ValueError()
+            except (ValueError, TypeError, OverflowError):
+                return jsonify({"error": "invalid_image_strength"}), 400
+            settings.update(source_asset_id=source_asset_id, img2img_strength=strength,
+                            preserve_reference_aspect=payload.get("preserve_reference_aspect") is True)
+        if mask_asset_id:
+            settings["mask_asset_id"] = mask_asset_id
+        if face_asset_id:
+            settings["face_asset_id"] = face_asset_id
         if payload.get("sampler"):
             settings["sampler"] = str(payload["sampler"])
         if isinstance(payload.get("loras"), list):
@@ -5903,7 +5936,7 @@ def v1_create_job() -> Any:
             "task_type": "image",
             "model": {"id": selected_model},
             "engine": {"backend": "diffusers"},
-            "parameters": {key: settings.get(key) for key in ("seed", "steps", "guidance", "width", "height", "sampler") if settings.get(key) is not None},
+            "parameters": {key: settings.get(key) for key in IMAGE_JOB_FIELDS if settings.get(key) is not None},
         }
         task_type = CREATOR_TASK_TYPE
 

@@ -2662,6 +2662,12 @@ def execute_task(task: Dict[str, Any]) -> None:
         source_asset_id = str(task.get("source_asset_id") or "").strip()
         if source_asset_id:
             task["init_image"] = str(_download_task_asset(source_asset_id, task_id, "source"))
+        mask_asset_id = str(task.get("mask_asset_id") or "").strip()
+        if mask_asset_id:
+            task["inpaint_mask"] = str(_download_task_asset(mask_asset_id, task_id, "mask"))
+        face_asset_id = str(task.get("face_asset_id") or "").strip()
+        if face_asset_id:
+            task["reference_face_url"] = str(_download_task_asset(face_asset_id, task_id, "face"))
         audio_asset_id = str(task.get("audio_asset_id") or "").strip()
         if audio_asset_id:
             task["audio_input"] = str(_download_task_asset(audio_asset_id, task_id, "audio"))
@@ -2717,7 +2723,7 @@ def execute_task(task: Dict[str, Any]) -> None:
                     job_settings = prompt_raw
                     prompt = str(job_settings.get("prompt") or prompt)
                     negative_prompt = str(job_settings.get("negative_prompt") or negative_prompt)
-                elif isinstance(prompt_raw, str) and prompt_raw.strip().startswith("{"):
+                elif isinstance(prompt_raw, str) and prompt_raw.strip().startswith("{") and not task.get("resolved_spec"):
                     job_settings = json.loads(prompt_raw)
                     if isinstance(job_settings, dict):
                         prompt = str(job_settings.get("prompt") or prompt)
@@ -2730,7 +2736,8 @@ def execute_task(task: Dict[str, Any]) -> None:
                 log(f"Failed to parse job settings: {exc}", prefix="⚠️", task_id=task_id)
             # Merge coordinator-sent overrides even when prompt is plain text.
             if isinstance(task, dict):
-                for key in ("steps", "guidance", "width", "height", "sampler", "seed", "reference_face_url"):
+                for key in ("steps", "guidance", "width", "height", "sampler", "seed", "reference_face_url",
+                            "init_image", "inpaint_mask", "img2img_strength", "preserve_reference_aspect"):
                     value = task.get(key)
                     if value is None or value == "":
                         continue
@@ -3592,10 +3599,9 @@ def run_image_generation(
     generation_ms = 0
     output_path = OUTPUTS_DIR / f"{task_id}.png"
 
-    width = IMAGE_WIDTH
-    height = IMAGE_HEIGHT
     use_img2img = False
     init_image_raw: Optional[str] = None
+    mask_image_raw: Optional[str] = None
     img2img_strength = 0.75
     reference_face_url = ""
     reference_face_used = False
@@ -3611,20 +3617,22 @@ def run_image_generation(
     cancel_event = job_settings.get("_cancel_event") if isinstance(job_settings, dict) else None
     return_b64 = bool(job_settings.get("_return_b64", True)) if isinstance(job_settings, dict) else True
     if job_settings and isinstance(job_settings, dict):
-        try:
-            width = int(job_settings.get("width", width) or width)
-            height = int(job_settings.get("height", height) or height)
-        except (TypeError, ValueError):
-            pass
         init_image_raw = job_settings.get("init_image") or job_settings.get("init_image_url")
+        mask_image_raw = job_settings.get("inpaint_mask")
         reference_face_url = str(job_settings.get("reference_face_url") or "").strip()
         use_img2img = bool(init_image_raw)
         try:
-            img2img_strength = float(job_settings.get("img2img_strength", 0.75) or 0.75)
+            img2img_strength = float(job_settings.get("img2img_strength", 0.75))
         except (TypeError, ValueError):
-            img2img_strength = 0.75
+            img2img_strength = float("nan")
 
     try:
+        if mask_image_raw and not use_img2img:
+            raise RuntimeError("An edit mask requires a source image")
+        if use_img2img and (FAST_PREVIEW or torch is None or diffusers is None):
+            raise RuntimeError("Image refinement requires the full diffusers runtime")
+        if use_img2img and (not math.isfinite(img2img_strength) or not 0 < img2img_strength <= 1):
+            raise RuntimeError("Image refinement strength must be greater than zero and at most one")
         if reference_face_url and (FAST_PREVIEW or torch is None or diffusers is None):
             raise RuntimeError("Reference face requires the full diffusers runtime and cannot run in fast preview mode")
         if reference_face_url and (Image is None or np is None or cv2 is None or FaceAnalysis is None):
@@ -3758,32 +3766,39 @@ def run_image_generation(
                         _release_image_pipeline(pipe)
             else:
                 init_pil = None
-                if use_img2img and init_image_raw:
-                    try:
-                        from PIL import Image as _PILImage
-                        if init_image_raw.startswith("data:"):
-                            b64_part = init_image_raw.split(",", 1)[-1]
-                            img_bytes = base64.b64decode(b64_part)
-                            init_pil = _PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
-                        elif init_image_raw.startswith(("http://", "https://", "/")):
-                            img_resp = requests.get(init_image_raw, timeout=30)
-                            img_resp.raise_for_status()
-                            init_pil = _PILImage.open(io.BytesIO(img_resp.content)).convert("RGB")
-                        elif os.path.isfile(init_image_raw):
-                            init_pil = _PILImage.open(init_image_raw).convert("RGB")
-                        else:
-                            img_bytes = base64.b64decode(init_image_raw)
-                            init_pil = _PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
-                        if init_pil:
-                            init_pil = init_pil.resize((width, height))
-                            log(f"Init image loaded for img2img (strength={img2img_strength})", prefix="🖼️")
-                    except Exception as exc:
-                        log(f"Failed to load init image, falling back to txt2img: {exc}", prefix="⚠️")
-                        init_pil = None
+                mask_pil = None
+                conditioning: Dict[str, Any] = {}
+                if use_img2img:
+                    init_pil, source_error = load_image_source_with_error(init_image_raw)
+                    if init_pil is None:
+                        raise RuntimeError(f"Cannot load refinement source: {source_error}")
+                    if job_settings.get("preserve_reference_aspect") is True:
+                        source_w, source_h = init_pil.size
+                        smallest_scale = 256 / min(source_w, source_h)
+                        largest_scale = 1536 / max(source_w, source_h)
+                        if smallest_scale > largest_scale:
+                            raise RuntimeError("Source aspect ratio exceeds supported image dimensions")
+                        scale = max(smallest_scale, min(largest_scale, img_w / source_w, img_h / source_h))
+                        img_w = max(256, min(1536, round(source_w * scale / 8) * 8))
+                        img_h = max(256, min(1536, round(source_h * scale / 8) * 8))
+                        resolved_width, resolved_height = img_w, img_h
+                    if mask_image_raw:
+                        mask_pil, mask_error = load_image_source_with_error(mask_image_raw)
+                        if mask_pil is None:
+                            raise RuntimeError(f"Cannot load edit mask: {mask_error}")
+                        if abs((mask_pil.width / mask_pil.height) / (init_pil.width / init_pil.height) - 1) > 0.02:
+                            raise RuntimeError("Edit mask aspect ratio must match the source image")
+                        mask_pil = mask_pil.convert("L").resize((img_w, img_h), Image.Resampling.NEAREST)
+                    init_pil = init_pil.resize((img_w, img_h), Image.Resampling.LANCZOS)
+                    conditioning = {"image": init_pil, "strength": img2img_strength}
+                    if mask_pil is not None:
+                        conditioning["mask_image"] = mask_pil
+                    if int(steps * img2img_strength) < 1:
+                        raise RuntimeError("Image refinement strength is too low for the selected steps")
 
                 pipe_mode = "img2img" if init_pil is not None else "txt2img"
                 log(f"Preparing {pipe_mode} pipeline…", prefix="ℹ️", device=device)
-                transient_pipeline = bool(lora_entries) or IMAGE_PIPELINE_CACHE_SIZE <= 0
+                transient_pipeline = use_img2img or bool(lora_entries) or IMAGE_PIPELINE_CACHE_SIZE <= 0
                 pipe: Optional[Any] = None
                 try:
                     if transient_pipeline:
@@ -3796,6 +3811,14 @@ def run_image_generation(
                         )
                     if not pipeline_cache_hit:
                         log(f"Pipeline ready in {pipeline_load_ms}ms", prefix="✅")
+                    if use_img2img:
+                        # Conversion shares components. Use a transient base so LoRAs,
+                        # scheduler and offload hooks cannot alter the text-only cache.
+                        converter_name = "AutoPipelineForInpainting" if mask_pil is not None else "AutoPipelineForImage2Image"
+                        converter = getattr(diffusers, converter_name, None)
+                        if converter is None:
+                            raise RuntimeError(f"Installed diffusers does not support {converter_name}")
+                        pipe = converter.from_pipe(pipe)
                     if lora_entries and pipe is not None:
                         loaded_loras, lora_load_ms = _apply_explicit_loras(pipe, entry, lora_entries)
                     if pipe is None:
@@ -3815,6 +3838,7 @@ def run_image_generation(
                             generator=generator,
                             height=img_h,
                             width=img_w,
+                            **conditioning,
                             **_pipeline_cancel_kwargs(pipe, cancel_event),
                         )
                     generation_ms = int((time.time() - gen_t0) * 1000)

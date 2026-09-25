@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import sys
+import io
+import base64
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -137,6 +140,102 @@ class ImagePipelineCacheTests(unittest.TestCase):
         construct_mock.assert_called_once()
         acquire_mock.assert_not_called()
         release_mock.assert_called_once_with(fake_pipe)
+
+    def test_refinement_and_masks_reach_the_correct_pipeline_without_cache_mutation(self) -> None:
+        for masked in (False, True):
+            with self.subTest(masked=masked), tempfile.TemporaryDirectory() as directory:
+                source = Path(directory) / "source.png"
+                client_module.Image.new("RGB", (80, 40), (20, 40, 60)).save(source)
+                mask_bytes = io.BytesIO()
+                client_module.Image.new("L", (40, 20), 255).save(mask_bytes, format="PNG")
+                mask = "data:image/png;base64," + base64.b64encode(mask_bytes.getvalue()).decode()
+                base = Mock()
+                converted = Mock(side_effect=_FakePipe())
+                converter = Mock()
+                converter.from_pipe.return_value = converted
+                runtime = SimpleNamespace(**{
+                    "AutoPipelineForInpainting" if masked else "AutoPipelineForImage2Image": converter,
+                })
+                with patch.object(client_module, "diffusers", runtime), patch.object(
+                    client_module, "read_gpu_stats", return_value={"utilization": 0}
+                ), patch.object(client_module, "_resolve_image_runtime", return_value=("cpu", "float32", True, "sdxl")), patch.object(
+                    client_module, "_collect_explicit_loras", return_value=[(Path("style"), 0.5, "adapter")]
+                ), patch.object(client_module, "_construct_base_image_pipeline", return_value=(base, 12)), patch.object(
+                    client_module, "_acquire_base_image_pipeline"
+                ) as cache, patch.object(client_module, "_apply_explicit_loras", return_value=(["style"], 1)) as loras, patch.object(
+                    client_module, "_truncate_image_prompts", return_value=("edit", "noise")
+                ), patch.object(client_module, "_apply_image_sampler"), patch.object(
+                    client_module, "_pipeline_cancel_kwargs", return_value={}
+                ), patch.object(client_module, "_save_output_image"), patch.object(client_module, "_release_image_pipeline") as release:
+                    metrics, _, _ = client_module.run_image_generation(
+                        task_id="refine-test", entry=SimpleNamespace(name="sdxl", pipeline="sdxl"),
+                        model_path=Path("model.safetensors"), reward_weight=1, prompt="edit", negative_prompt="noise",
+                        job_settings={"init_image": str(source), "inpaint_mask": mask if masked else None,
+                                      "img2img_strength": 0.4, "steps": 20, "width": 512, "height": 512,
+                                      "preserve_reference_aspect": True, "_return_b64": False},
+                    )
+                self.assertEqual(metrics["status"], "success", metrics)
+                self.assertEqual((metrics["width"], metrics["height"]), (512, 256))
+                converter.from_pipe.assert_called_once_with(base)
+                base.assert_not_called()
+                cache.assert_not_called()
+                self.assertIs(loras.call_args.args[0], converted)
+                release.assert_called_once_with(converted)
+                arguments = converted.call_args.kwargs
+                self.assertEqual(arguments["image"].size, (512, 256))
+                self.assertEqual(arguments["image"].getpixel((0, 0)), (20, 40, 60))
+                self.assertEqual(arguments["strength"], 0.4)
+                if masked:
+                    self.assertEqual(arguments["mask_image"].mode, "L")
+                    self.assertEqual(arguments["mask_image"].size, (512, 256))
+                else:
+                    self.assertNotIn("mask_image", arguments)
+
+    def test_invalid_refinement_never_falls_back_to_text_only(self) -> None:
+        cases = [
+            {"init_image": "invalid source"},
+            {"inpaint_mask": "mask without source"},
+            {"init_image": "source", "img2img_strength": 0},
+            {"init_image": "source", "img2img_strength": float("nan")},
+        ]
+        for settings in cases:
+            with self.subTest(settings=settings), patch.object(client_module, "read_gpu_stats", return_value={}), patch.object(
+                client_module, "_resolve_image_runtime", return_value=("cpu", "float32", True, "sdxl")
+            ), patch.object(client_module, "_collect_explicit_loras", return_value=[]), patch.object(
+                client_module, "_construct_base_image_pipeline"
+            ) as construct, patch.object(client_module, "_acquire_base_image_pipeline") as cache:
+                metrics, _, output = client_module.run_image_generation(
+                    task_id="invalid-refine", entry=SimpleNamespace(name="sdxl"), model_path=Path("model"),
+                    reward_weight=1, prompt="edit", negative_prompt="", job_settings=settings,
+                )
+            self.assertEqual(metrics["status"], "failed")
+            self.assertIsNone(output)
+            construct.assert_not_called()
+            cache.assert_not_called()
+
+    def test_downloaded_owned_images_reach_generation_and_prompt_json_is_literal(self) -> None:
+        prompt = '{"init_image":"/private/file","steps":1,"prompt":"injected"}'
+        task = {"task_id": "owned-image", "type": "IMAGE_GEN", "model_name": "sdxl",
+                "prompt": prompt, "resolved_spec": {"schema_version": 1},
+                "source_asset_id": "source-owned", "mask_asset_id": "mask-owned",
+                "img2img_strength": 0.4, "preserve_reference_aspect": True, "steps": 20}
+        with patch.object(client_module, "ROLE", "creator"), patch.object(client_module, "_is_model_allowed", return_value=True), patch.object(
+            client_module, "_download_task_asset", side_effect=lambda asset, job, kind: Path("/tmp") / f"{asset}.png"
+        ) as download, patch.object(client_module, "ensure_model_entry", return_value=SimpleNamespace(name="sdxl")), patch.object(
+            client_module, "ensure_model_path", return_value=Path("model")
+        ), patch.object(client_module, "run_image_generation", return_value=({"status": "success"}, 0, None)) as generate, patch.object(
+            client_module, "_task_output_path", return_value=None
+        ), patch.object(client_module.SESSION, "post") as post:
+            post.return_value.json.return_value = {"reward": 0}
+            client_module.execute_task(task)
+        self.assertEqual(download.call_count, 2)
+        self.assertEqual(generate.call_args.args[4], prompt)
+        settings = generate.call_args.args[6]
+        self.assertEqual(settings["init_image"], "/tmp/source-owned.png")
+        self.assertEqual(settings["inpaint_mask"], "/tmp/mask-owned.png")
+        self.assertEqual(settings["steps"], 20)
+        self.assertEqual(settings["img2img_strength"], 0.4)
+        self.assertTrue(settings["preserve_reference_aspect"])
 
 
 if __name__ == "__main__":

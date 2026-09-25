@@ -30,7 +30,7 @@ def _image_job_requires_reference_face(raw_data: Any) -> bool:
         return False
     if not isinstance(parsed, dict):
         return False
-    value = parsed.get("reference_face_url")
+    value = parsed.get("reference_face_url") or parsed.get("face_asset_id")
     return isinstance(value, str) and bool(value.strip())
 
 

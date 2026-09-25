@@ -249,3 +249,75 @@ def test_source_assets_and_worker_artifacts_are_private(platform, keys):
     assert harness.client.get(url).status_code == 401
     assert harness.client.get(url, headers=bob).status_code == 404
     assert harness.client.get(url, headers=headers).data == b"private-result"
+
+
+def test_owned_image_refinement_survives_enqueue_and_worker_claim(platform):
+    harness, headers, _ = platform
+    assets = [harness.client.post("/v2/assets", headers=headers,
+        data={"kind": "image", "file": (io.BytesIO(b"private-image"), name)}).json["id"]
+        for name in ("source.png", "mask.png")]
+    response = create(harness, headers, source_asset_id=assets[0], mask_asset_id=assets[1],
+                      img2img_strength=0.4, preserve_reference_aspect=True, seed=42)
+    assert response.status_code == 202, response.json
+    task = harness._claim(response.json["id"])
+    for field, expected in {"source_asset_id": assets[0], "mask_asset_id": assets[1],
+                            "img2img_strength": 0.4, "preserve_reference_aspect": True, "seed": 42}.items():
+        assert task[field] == expected
+        assert task["resolved_spec"]["parameters"][field] == expected
+    assert "init_image" not in task
+
+
+@pytest.mark.parametrize("field", ["source_asset_id", "mask_asset_id", "face_asset_id"])
+def test_foreign_image_conditioning_is_rejected(platform, keys, field):
+    harness, headers, _ = platform
+    bob = {"Authorization": token(keys, sub="user_bob", sid="sess_bob")}
+    asset = harness.client.post("/v2/assets", headers=bob,
+        data={"kind": "image", "file": (io.BytesIO(b"private-image"), "source.png")}).json
+    response = create(harness, headers, **{field: asset["id"]})
+    assert response.status_code == 400
+    assert response.json["error"]["code"] == "invalid_asset"
+    assert harness.client.get("/v2/account/credits", headers=headers).json["reserved_units"] == 0
+
+
+@pytest.mark.parametrize("field", ["init_image", "init_image_url", "inpaint_mask", "reference_face_url"])
+def test_account_images_require_owned_assets_instead_of_raw_worker_sources(platform, field):
+    harness, headers, _ = platform
+    response = create(harness, headers, **{field: "http://127.0.0.1/private-source"})
+    assert response.status_code == 400
+    assert response.json["error"]["code"] == "owned_image_asset_required"
+    assert harness.client.get("/v2/account/credits", headers=headers).json["reserved_units"] == 0
+
+
+@pytest.mark.parametrize("seed", ["invalid", True, 2.5, {}, -2, 2**32])
+def test_invalid_image_seed_is_rejected_before_charging(platform, seed):
+    harness, headers, _ = platform
+    response = create(harness, headers, seed=seed)
+    assert response.status_code == 400
+    assert response.json["error"]["code"] == "invalid_seed"
+    assert harness.client.get("/v2/account/credits", headers=headers).json["reserved_units"] == 0
+
+
+@pytest.mark.parametrize("strength", [0, -1, 1.1, "invalid", None, 0.001])
+def test_invalid_refinement_strength_is_rejected_before_charging(platform, strength):
+    harness, headers, _ = platform
+    asset = harness.client.post("/v2/assets", headers=headers,
+        data={"kind": "image", "file": (io.BytesIO(b"source"), "source.png")}).json
+    response = create(harness, headers, source_asset_id=asset["id"], img2img_strength=strength)
+    assert response.status_code == 400
+    assert response.json["error"]["code"] == "invalid_image_strength"
+    assert harness.client.get("/v2/account/credits", headers=headers).json["reserved_units"] == 0
+
+
+def test_owned_face_reference_requires_a_face_capable_worker(platform):
+    harness, headers, _ = platform
+    asset = harness.client.post("/v2/assets", headers=headers,
+        data={"kind": "image", "file": (io.BytesIO(b"face"), "face.png")}).json
+    response = create(harness, headers, face_asset_id=asset["id"])
+    assert response.status_code == 202
+    harness._register_node()
+    with app.app.app_context():
+        assert job_helpers.fetch_next_job_for_node("node-test") is None
+    app.NODES["node-test"]["supports"].append("face_swap")
+    task = harness.client.get("/tasks/creator?node_id=node-test", headers=harness.node_headers).json["tasks"][0]
+    assert task["task_id"] == response.json["id"]
+    assert task["face_asset_id"] == asset["id"]

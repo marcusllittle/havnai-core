@@ -176,8 +176,22 @@ new snapshot. The message binds the snapshot digest, exact job IDs and credit
 units, account/session/wallet/link, origin, network and expiry. Its nonce is
 stable for retries of that snapshot and cannot be reused with a different
 network or origin. Unselected jobs and balances never enlarge the selection.
-This is the confirmation foundation only: signature consumption and transfer
-execution are not exposed, and no frontend requests this signature yet.
+Signature consumption and transfer execution are not exposed by an HTTP route,
+and no frontend requests this signature yet.
+
+The internal `account_import.execute` now verifies the stored EIP-191 message,
+rechecks account/session/proof context under a write lock, consumes the nonce,
+assigns selected job ownership, settles selected credits and writes an immutable
+receipt plus audit event in one transaction. It preserves original wallet
+attribution; importing a purchased job never makes its buyer the original creator.
+Legacy job/gallery access is denied once account ownership is assigned. Signed
+retries return the original receipt, including under concurrent execution.
+Receipt failure rolls back proof consumption, ownership and both balances.
+This implementation currently refuses jobs with any music publication dependency
+and selected balances with legacy Stripe history; publication selection and
+payment/refund provenance must be handled explicitly before enabling those cases.
+Reference assets, playlists, saves, imported-job marketplace publication and
+audit-driven reversal remain migration integration work, not completed behavior.
 
 The internal `account_ledger.import_legacy_in_transaction` settlement primitive
 moves the exact, positive available legacy balance to account credits in a

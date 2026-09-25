@@ -1,4 +1,4 @@
-"""Inventory and immutable selection snapshots. Neither operation transfers assets."""
+"""Explicit legacy import inventory, confirmation and internal atomic execution."""
 import hashlib
 import json
 import secrets
@@ -39,6 +39,18 @@ def initialize(conn):
             origin TEXT NOT NULL, chain_id INTEGER NOT NULL, message TEXT NOT NULL,
             expires_at REAL NOT NULL, used_at REAL
         );
+        CREATE TABLE IF NOT EXISTS account_import_receipts (
+            snapshot_id TEXT PRIMARY KEY REFERENCES account_import_snapshots(id),
+            account_id TEXT NOT NULL REFERENCES accounts(id),
+            challenge_id TEXT NOT NULL UNIQUE REFERENCES account_import_challenges(id),
+            receipt_json TEXT NOT NULL, created_at REAL NOT NULL
+        );
+        CREATE TRIGGER IF NOT EXISTS account_import_receipt_immutable_update
+            BEFORE UPDATE ON account_import_receipts BEGIN
+                SELECT RAISE(ABORT, 'import receipt is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS account_import_receipt_immutable_delete
+            BEFORE DELETE ON account_import_receipts BEGIN
+                SELECT RAISE(ABORT, 'import receipt is immutable'); END;
     """)
 
 
@@ -228,6 +240,90 @@ def issue_challenge(conn, principal, snapshot_id, *, origin, chain_id):
             (id,snapshot_id,origin,chain_id,message,expires_at) VALUES (?,?,?,?,?,?)""",
             (nonce, snapshot_id, origin, chain_id, message, expires))
         return {"challenge_id": nonce, "message": message, "expires_at": expires}
+
+
+def execute(conn, principal, snapshot_id, *, challenge_id, signature, origin, chain_id):
+    """Internal signed transfer; not exposed by an HTTP route during rollout.
+
+    The adapter must enforce recent authentication and an allowlisted Origin.
+    Jobs with publication dependencies and balances with legacy Stripe history
+    are refused until their explicit migration/provenance flows are implemented.
+    """
+    from eth_account import Account
+    from eth_account.messages import encode_defunct
+
+    if (not isinstance(challenge_id, str) or not isinstance(signature, str)
+            or len(signature) > 1024 or type(chain_id) is not int):
+        raise MigrationError("invalid_import_proof")
+    if conn.in_transaction:
+        raise RuntimeError("import execution requires an idle connection")
+    # Verify the actual stored message, never a message/digest supplied by a client.
+    row = conn.execute("""SELECT c.message,s.account_id,s.session_hash,s.snapshot_json,c.origin,c.chain_id
+        FROM account_import_challenges c JOIN account_import_snapshots s ON s.id=c.snapshot_id
+        WHERE c.id=? AND s.id=?""", (challenge_id, snapshot_id)).fetchone()
+    account = account_identity._account(conn, principal)
+    session = account_identity._session_hash(principal)
+    if not row or row[1] != account or row[2] != session or row[4] != origin or row[5] != chain_id:
+        raise MigrationError("invalid_import_proof")
+    try:
+        signer = Account.recover_message(encode_defunct(text=row[0]), signature=signature)
+    except Exception as exc:
+        raise MigrationError("invalid_import_signature") from exc
+    if signer.lower() != json.loads(row[3])["wallet"]:
+        raise MigrationError("invalid_import_signature")
+    conn.execute("BEGIN IMMEDIATE")
+    with conn:
+        # Revocation/suspension and persisted proof context can change while the
+        # ECDSA recovery runs. Recheck under the same lock as ownership and money.
+        account_identity._account(conn, principal)
+        current = conn.execute("""SELECT message,origin,chain_id,expires_at,used_at FROM account_import_challenges
+            WHERE id=? AND snapshot_id=?""", (challenge_id, snapshot_id)).fetchone()
+        if not current or tuple(current[:3]) != (row[0], origin, chain_id):
+            raise MigrationError("invalid_import_proof")
+        prior = conn.execute("SELECT receipt_json FROM account_import_receipts WHERE snapshot_id=? AND account_id=? AND challenge_id=?",
+                             (snapshot_id, account, challenge_id)).fetchone()
+        if prior:
+            return json.loads(prior[0])
+        if current[4] is not None or current[3] <= time.time():
+            raise MigrationError("invalid_import_challenge", 409)
+        snapshot = revalidate_in_transaction(conn, principal, snapshot_id)
+        ids = [job["id"] for job in snapshot["jobs"]]
+        for job_id in ids:
+            if conn.execute("SELECT 1 FROM music_publications WHERE job_id=? LIMIT 1", (job_id,)).fetchone():
+                raise MigrationError("import_publication_migration_required", 409)
+        if snapshot["credits"] is not None and conn.execute(
+                "SELECT 1 FROM stripe_payments WHERE LOWER(wallet)=? LIMIT 1", (snapshot["wallet"],)).fetchone():
+            raise MigrationError("import_payment_provenance_required", 409)
+        now = time.time()
+        consumed = conn.execute("UPDATE account_import_challenges SET used_at=? WHERE id=? AND used_at IS NULL AND expires_at>?",
+                                (now, challenge_id, now))
+        if consumed.rowcount != 1:
+            raise MigrationError("invalid_import_challenge", 409)
+        transferred = []
+        for job_id in ids:
+            before = conn.execute("SELECT wallet,creator_account_id FROM jobs WHERE id=?", (job_id,)).fetchone()
+            # Keep the original wallet attribution. A purchaser must not become
+            # the creator simply by importing a previously purchased creation.
+            creator = before[1] or (account if str(before[0] or "").lower() == snapshot["wallet"] else None)
+            changed = conn.execute("UPDATE jobs SET owner_account_id=?,creator_account_id=? WHERE id=? AND owner_account_id IS NULL",
+                                   (account, creator, job_id))
+            if changed.rowcount != 1:
+                raise MigrationError("import_snapshot_changed", 409)
+            transferred.append({"id": job_id, "previous_owner_wallet": snapshot["wallet"],
+                                "creator_wallet": before[0], "owner_account_id": account})
+        credit_receipt = None
+        units = snapshot["credits"]["available_units"] if snapshot["credits"] else 0
+        if units:
+            credit_receipt = account_ledger.import_legacy_in_transaction(conn, account, snapshot["wallet"],
+                                                                       units, migration_id=snapshot_id)
+        receipt = {"id": snapshot_id, "account_id": account, "wallet": snapshot["wallet"],
+                   "digest": snapshot["digest"], "jobs": transferred, "credit_units": units,
+                   "credit_receipt": credit_receipt, "created_at": now}
+        conn.execute("INSERT INTO account_import_receipts VALUES (?,?,?,?,?)",
+                     (snapshot_id, account, challenge_id, _json(receipt), now))
+        conn.execute("INSERT INTO account_audit_events VALUES (?,?,?,?,?,?)",
+                     (secrets.token_hex(16), account, session, "legacy_import", snapshot_id, now))
+        return receipt
 
 
 def preview(conn, account, link_id, *, limit=50, offset=0):

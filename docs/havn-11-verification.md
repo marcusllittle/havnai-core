@@ -104,3 +104,11 @@ the duplicate refund events added no deductions. Balance remained zero, with one
 funding entry, one adjustment and the original receipt. This is an explicit local
 redelivery test using actual provider event data, not evidence of Stripe's automatic
 retry scheduling. Failed-payment and missed-webhook acceptance still remain open.
+
+At 16:53 local time the user confirmed Stripe declined the test card. The
+`payment_intent.payment_failed` notification returned HTTP 200. Purchase
+`pur_ac02734d062849e4a2a1e938812fc760` remained pending/retryable, with no new paid
+receipt or ledger entry. Available/settled/reserved balances remained zero and the
+original refunded receipt was unchanged. This verifies actual sandbox decline
+handling, rather than only a mocked provider failure. Missed-webhook recovery and
+account-funded generation remain open.

@@ -144,3 +144,12 @@ at `static/HavnAI-logo.png` and included in distributed node bundles. All 11 bun
 tests pass, including logo byte preservation. Existing immutable generation
 artifacts were not overwritten; new renders can use the packaged logo. Refresh
 recovery and publication still need separate acceptance evidence.
+
+The next browser-submitted image, `job-91bd7785b31b4f3cbb9460e22e7dbe8f`, completed
+on the same worker at 17:48 with 45.7 seconds of generation. Direct inspection of
+the saved output confirmed the packaged HavnAI logo replaced the text fallback.
+Its one-credit reservation was captured once; the account had 48,000 settled units
+and zero reserved units after the two successful images. The original job's private
+API and artifact URL returned 401 without authentication; legacy result and static
+output URLs returned 404. These checks do not substitute for another-account
+browser access tests or the pending Collection refresh/publication acceptance.

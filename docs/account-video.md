@@ -1,6 +1,6 @@
 # Account video: implementation and remaining work
 
-HAVN-11 Video Studio and single-clip Create use owned uploads and durable `/v2/jobs`
+HAVN-11 Video Studio and Create use owned uploads and durable `/v2/jobs`
 submissions with a persisted idempotency key. Recovery and private result playback
 use the account session. Public wallet-era jobs are not silently imported.
 
@@ -35,10 +35,9 @@ discards a pending intent only for explicit pre-enqueue validation errors, allow
 the user to correct their request. Ambiguous failures retain the original intent.
 
 These coordinator limits are not a guarantee that every video model supports every
-combination. Live GPU verification is outstanding. Reference-sheet workflows and
-the frontend clip-chain runner still need account integration. Create
-explicitly blocks account multi-clip/reference-sheet submissions until those are
-connected; single clips are available. This does not complete the full video scope.
+combination. Live GPU verification and reference-sheet workflows remain outstanding.
+Create supports single clips and 2–7-clip account sequences. It still explicitly
+blocks reference-sheet submissions until that runtime path is connected.
 
 ## Private continuation input
 
@@ -85,8 +84,21 @@ When all clips succeed, the API reports `rendered`; this does not mean stitched.
 DELETE on the chain stops further submissions. It does not cancel an already
 accepted clip. Stop/ownership/status are rechecked under the enqueue lock, including
 when stopping overlaps last-frame extraction. No new reservation occurs after that
-stop wins the transaction. The front-end chain runner remains to be implemented;
-this API alone does not enable the multi-clip control.
+stop wins the transaction.
+
+Create's Total clips and automatic merge controls now use this API for accounts.
+The client saves a chain-creation intent before submitting it, reuses the key and
+uploaded starting image after a lost response, and leaves the durable plan on the
+server. It polls each accepted clip before advancing. Account change/unmount aborts
+the local runner and prevents subsequent submissions from that browser.
+
+Saved video sequences lists account plans on demand, with pagination and explicit
+resume/stop/result actions. Merely opening Create or its recovery list does not
+submit remaining clips. Resume reads the server state, so another device can resume
+without copying localStorage. Stop remaining clips commits the server stop before
+aborting the local runner; the accepted clip keeps running. Merge failures leave
+the rendered sequence available for a later retry. Foreign account responses are
+rejected before advancing or displaying private results.
 
 ## Private merged results
 
@@ -111,3 +123,5 @@ reports `complete`; `rendered` means clips are ready but have not been merged.
 Tests: `tests/test_account_video_stitch.py`, `tests/test_account_video_chains.py`, `tests/test_account_video.py` (including real local FFmpeg when installed),
 `tests/test_account_jobs.py`, `tests/test_platform_v1.py`, and web
 `lib/__tests__/accountJobSubmission.test.ts` and `accountVideoCreate.test.ts`.
+Frontend sequence coverage: `accountVideoChains.test.ts`, `AccountVideoSequences.test.tsx`,
+and `AccountCreate.test.tsx` (two clips through merging and stop during a running clip).

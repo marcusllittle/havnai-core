@@ -48,7 +48,7 @@ def read(conn, account, chain_id):
         raise VideoInputError("video_chain_not_found", 404)
     if output:
         state = "complete"
-    return {"id": row["id"], "template": json.loads(row["template"]), "total": row["total"],
+    return {"id": row["id"], "owner_account_id": account, "template": json.loads(row["template"]), "total": row["total"],
             "auto_stitch": bool(row["auto_stitch"]), "state": state, "created_at": row["created_at"], "jobs": jobs,
             "result_job_id": output["job_id"] if output else None, "result_artifact_id": output["artifact_id"] if output else None}
 

@@ -20,6 +20,10 @@ def initialize(conn):
             chain_id TEXT NOT NULL REFERENCES account_video_chains(id),
             clip_index INTEGER NOT NULL, job_id TEXT NOT NULL UNIQUE REFERENCES jobs(id),
             PRIMARY KEY(chain_id,clip_index));
+        CREATE TABLE IF NOT EXISTS account_video_chain_outputs (
+            chain_id TEXT PRIMARY KEY REFERENCES account_video_chains(id),
+            job_id TEXT NOT NULL UNIQUE REFERENCES jobs(id),
+            artifact_id TEXT NOT NULL UNIQUE REFERENCES artifacts(id));
     """)
     conn.commit()
 
@@ -39,8 +43,14 @@ def read(conn, account, chain_id):
             state = "failed"
         elif len(jobs) == row["total"] and all(job["status"] == "succeeded" for job in jobs):
             state = "rendered"
+    output = conn.execute("SELECT o.job_id,o.artifact_id,j.owner_account_id FROM account_video_chain_outputs o JOIN jobs j ON j.id=o.job_id WHERE o.chain_id=?", (chain_id,)).fetchone()
+    if output and output["owner_account_id"] != account:
+        raise VideoInputError("video_chain_not_found", 404)
+    if output:
+        state = "complete"
     return {"id": row["id"], "template": json.loads(row["template"]), "total": row["total"],
-            "auto_stitch": bool(row["auto_stitch"]), "state": state, "created_at": row["created_at"], "jobs": jobs}
+            "auto_stitch": bool(row["auto_stitch"]), "state": state, "created_at": row["created_at"], "jobs": jobs,
+            "result_job_id": output["job_id"] if output else None, "result_artifact_id": output["artifact_id"] if output else None}
 
 
 def create(conn, account, request_key, body):

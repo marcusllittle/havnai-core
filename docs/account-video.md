@@ -35,9 +35,8 @@ discards a pending intent only for explicit pre-enqueue validation errors, allow
 the user to correct their request. Ambiguous failures retain the original intent.
 
 These coordinator limits are not a guarantee that every video model supports every
-combination. Live GPU verification is outstanding. Reference-sheet workflows,
-multi-clip orchestration,
-stitched artifacts, and chain recovery still need account integration. Create
+combination. Live GPU verification is outstanding. Reference-sheet workflows and
+the frontend clip-chain runner still need account integration. Create
 explicitly blocks account multi-clip/reference-sheet submissions until those are
 connected; single clips are available. This does not complete the full video scope.
 
@@ -86,9 +85,29 @@ When all clips succeed, the API reports `rendered`; this does not mean stitched.
 DELETE on the chain stops further submissions. It does not cancel an already
 accepted clip. Stop/ownership/status are rechecked under the enqueue lock, including
 when stopping overlaps last-frame extraction. No new reservation occurs after that
-stop wins the transaction. The front-end chain runner and stitching endpoint remain
-to be implemented; this API alone does not enable the multi-clip control.
+stop wins the transaction. The front-end chain runner remains to be implemented;
+this API alone does not enable the multi-clip control.
 
-Tests: `tests/test_account_video_chains.py`, `tests/test_account_video.py` (including real local FFmpeg when installed),
+## Private merged results
+
+`POST /v2/video-chains/<id>/stitch` requires all planned clips to have succeeded and
+remain owned by the account. FFprobe validates compatible video/audio streams;
+FFmpeg then concatenates the clips in chain order without re-encoding. Mismatched
+stream formats fail explicitly, leaving all originals intact. Local tests exercise
+both silent and audio-bearing MP4 clips. Missing tools return a structured error.
+
+The result is a completed, zero-cost `video_stitch` job with a private video artifact.
+Its resolved spec and artifact metadata record the chain and source job/artifact
+IDs. It appears in the account Collection and plays through the existing private
+artifact route. Its output directory is denied on public static routes, including
+before the artifact row is inserted. Intermediate merge files are outside web roots.
+
+The chain has one output record. Retries return the same job; interleaved merges
+converge on one record and clean up discarded files. Source ownership and artifact
+identity are checked again before publishing the result. No credit reservation is
+made for stitching, and source clips remain unchanged. A chain with a merged result
+reports `complete`; `rendered` means clips are ready but have not been merged.
+
+Tests: `tests/test_account_video_stitch.py`, `tests/test_account_video_chains.py`, `tests/test_account_video.py` (including real local FFmpeg when installed),
 `tests/test_account_jobs.py`, `tests/test_platform_v1.py`, and web
 `lib/__tests__/accountJobSubmission.test.ts` and `accountVideoCreate.test.ts`.

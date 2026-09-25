@@ -73,6 +73,7 @@ import account_jobs
 import account_anchors
 import account_video
 import account_video_chains
+import account_video_stitch
 
 try:
     from eth_account import Account  # type: ignore
@@ -114,7 +115,7 @@ VERSION_FILE = BASE_DIR / "VERSION"
 LORA_STORAGE_DIR = Path(os.getenv("HAVNAI_LORA_STORAGE_DIR", "/mnt/d/havnai-storage/models/loras"))
 
 CREATOR_TASK_TYPE = "IMAGE_GEN"
-VISUAL_JOB_TYPES = {"image", "image_gen", "face_swap", "image_to_video", "text_to_video", "video_gen", "ltx_video_gen", "animatediff"}
+VISUAL_JOB_TYPES = {"image", "image_gen", "face_swap", "image_to_video", "text_to_video", "video_stitch", "video_gen", "ltx_video_gen", "animatediff"}
 IMAGE_JOB_FIELDS = ("steps", "guidance", "width", "height", "sampler", "seed", "reference_face_url",
                     "source_asset_id", "mask_asset_id", "face_asset_id", "img2img_strength", "preserve_reference_aspect")
 
@@ -5456,6 +5457,8 @@ def protect_account_content_from_legacy_routes() -> Optional[Any]:
     if request.endpoint == "static":
         filename = str((request.view_args or {}).get("filename", ""))
         path = str((STATIC_DIR / filename).resolve())
+        if filename.startswith("outputs/private-chains/") or Path(path).is_relative_to((OUTPUTS_DIR / "private-chains").resolve()):
+            return jsonify({"error": "artifact_not_found"}), 404
         conn = get_db()
         # Also protect the brief interval between a worker writing a file and
         # inserting its artifact row, using the durable job ID in the path.
@@ -5748,7 +5751,7 @@ def v1_list_jobs() -> Any:
     if collection:
         conditions.append("NOT EXISTS (SELECT 1 FROM account_collection_hidden h WHERE h.account_id=jobs.owner_account_id AND h.job_id=jobs.id)")
     if requested_type:
-        aliases = {"image_to_video": ["ltx_video_gen", "video_gen", "animatediff"], "text_to_music": ["music_gen"],
+        aliases = {"image_to_video": ["ltx_video_gen", "video_gen", "animatediff", "video_stitch"], "text_to_music": ["music_gen"],
                    "visual": sorted(VISUAL_JOB_TYPES), "visual_image": ["image", "image_gen", "face_swap"]}.get(requested_type, [])
         types = [requested_type, *aliases]
         placeholders = ",".join("?" for _ in types)
@@ -5788,7 +5791,7 @@ def v1_list_jobs() -> Any:
         if requested_type:
             raw_task_type = str(row["task_type"] or "").strip().lower()
             compatible_types = {str(payload["type"]), raw_task_type}
-            if raw_task_type in {"ltx_video_gen", "video_gen", "animatediff"}:
+            if raw_task_type in {"ltx_video_gen", "video_gen", "animatediff", "video_stitch"}:
                 compatible_types.add("image_to_video")
             if raw_task_type == "music_gen":
                 compatible_types.add("text_to_music")
@@ -5830,6 +5833,7 @@ def account_collection_visibility() -> Any:
 @app.route("/v2/video-chains", methods=["GET", "POST"])
 @app.route("/v2/video-chains/<chain_id>", methods=["GET", "DELETE"])
 @app.route("/v2/video-chains/<chain_id>/next", methods=["POST"])
+@app.route("/v2/video-chains/<chain_id>/stitch", methods=["POST"])
 def account_video_chain(chain_id=None) -> Any:
     error = _require_studio_user()
     if error:
@@ -5847,8 +5851,13 @@ def account_video_chain(chain_id=None) -> Any:
         chain = account_video_chains.read(conn, g.account_id, chain_id)
         if request.method == "GET":
             return jsonify(chain)
+        if request.path.endswith("/stitch"):
+            if not _disk_has_capacity(OUTPUTS_DIR):
+                return jsonify({"error": "insufficient_storage"}), 507
+            job_id = account_video_stitch.stitch(conn, g.account_id, chain_id, outputs=OUTPUTS_DIR, max_bytes=ARTIFACT_MAX_BYTES)
+            return jsonify({"chain": account_video_chains.read(conn, g.account_id, chain_id), "job": _v1_job_payload(get_job(job_id))})
         if chain["state"] != "active":
-            return jsonify({"chain": chain}), 200 if chain["state"] == "rendered" else 409
+            return jsonify({"chain": chain}), 200 if chain["state"] in {"rendered", "complete"} else 409
         index = len(chain["jobs"])
         if index and chain["jobs"][-1]["status"] != "succeeded":
             return jsonify({"chain": chain, "job": _v1_job_payload(get_job(chain["jobs"][-1]["id"]))})

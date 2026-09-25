@@ -32,7 +32,7 @@ production database/media restore readiness.
 
 | Requirement | Evidence still needed |
 | --- | --- |
-| Conventional production credit funding | Correct Stripe account, private test/live configuration, approved published terms/pricing/refund policy, real checkout and verified webhook/receipt/ledger evidence. Local repositories contain no Stripe setup; account/dashboard identification has been requested. |
+| Conventional production credit funding | Sandbox account/key and local webhook listener are now configured privately. A provider read confirmed the expected account and `livemode=false`; the local catalog reports checkout available. Actual checkout/webhook/receipt/ledger acceptance is pending. Production configuration and approved published terms/pricing/refund policy remain open. |
 | Refund correctness in service | Real provider refund and missed-webhook recovery, with account balance/receipt verification. Current provider calls in tests are mocked. |
 | Generate/recover/publish/manage without MetaMask | Signed-in browser acceptance against real generation workers for supported media, including reload recovery and private library/publication checks. Unit/API tests alone are insufficient. |
 | Optional wallet linkage | Real wallet recent-auth link/unlink/import acceptance; confirm ordinary account navigation never prompts. |
@@ -57,3 +57,16 @@ build do not satisfy it. Broader automatic source-reference migration is not
 promised: the documented re-upload route preserves the verified ownership boundary.
 The operational gates above still apply before activating migration in production;
 they are not evidence that a rollout has occurred.
+
+## Local sandbox setup checkpoint
+
+Core `3ca7cce` adds explicit test-only preview configuration; its 17 preview tests
+pass. On 2026-09-25 the isolated loopback preview was restarted with that option,
+using a private environment outside Git. The sandbox key's Stripe account matched
+the CLI-authorized account, and Stripe's balance endpoint returned `livemode=false`.
+The listener forwards only direct-account events to the v2 webhook endpoint.
+GET `http://localhost:3100/api/v2/credit-packages` reports checkout available and
+the explicit `sandbox-2026-09-25` policy. This proves configuration, not funding.
+The development-only web policy is not commercial terms and returns 404 outside
+development. The user is performing browser acceptance in their regular browser
+because Google rejected the automation browser. No production service was changed.

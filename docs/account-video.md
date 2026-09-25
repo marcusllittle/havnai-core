@@ -36,10 +36,31 @@ the user to correct their request. Ambiguous failures retain the original intent
 
 These coordinator limits are not a guarantee that every video model supports every
 combination. Live GPU verification is outstanding. Reference-sheet workflows,
-multi-clip continuation, private last-frame extraction,
+multi-clip orchestration,
 stitched artifacts, and chain recovery still need account integration. Create
 explicitly blocks account multi-clip/reference-sheet submissions until those are
 connected; single clips are available. This does not complete the full video scope.
 
-Tests: `tests/test_account_jobs.py`, `tests/test_platform_v1.py`, and web
-`lib/__tests__/accountJobSubmission.test.ts`.
+## Private continuation input
+
+`POST /v2/jobs/<job_id>/last-frame` requires an owned, successful job with a stored
+video artifact. Core validates that its path is inside the outputs directory,
+extracts the last frame into a private image asset, and returns its ID/kind/hash.
+There is no credit charge for this derivation. A new video job using that asset
+uses the normal generation reservation. No public image URL is returned.
+
+The account/artifact pair uniquely identifies the derived asset. Retries reuse
+it. Concurrent extraction results converge on one saved asset; unused temporary
+files are cleaned up. Ownership and artifact identity are checked again in the
+save transaction after decoding. The uploaded image belongs to the current account
+and is subject to the same download/reuse authorization as other private inputs.
+
+FFmpeg decodes a local MP4/MOV container with network protocols disabled, a bounded
+60-second subprocess timeout, and no shell. Missing tooling, incomplete videos,
+failed decoding, and ownership changes return structured errors without creating
+a derived asset or reserving credits. The web helper aborts on account changes and
+can supply the resulting asset ID directly to the next video request.
+
+Tests: `tests/test_account_video.py` (including real local FFmpeg when installed),
+`tests/test_account_jobs.py`, `tests/test_platform_v1.py`, and web
+`lib/__tests__/accountJobSubmission.test.ts` and `accountVideoCreate.test.ts`.

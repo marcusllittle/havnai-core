@@ -71,6 +71,7 @@ import account_routes
 import account_auth
 import account_jobs
 import account_anchors
+import account_video
 
 try:
     from eth_account import Account  # type: ignore
@@ -1169,6 +1170,7 @@ def init_db() -> None:
     account_payments.initialize(conn)
     account_jobs.initialize(conn)
     account_anchors.initialize(conn)
+    account_video.initialize(conn)
 
 
 init_db()
@@ -5821,6 +5823,22 @@ def account_collection_visibility() -> Any:
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 404
     return jsonify({"job_ids": body["job_ids"], "hidden": body["hidden"]})
+
+
+@app.route("/v2/jobs/<job_id>/last-frame", methods=["POST"])
+def account_video_last_frame(job_id: str) -> Any:
+    error = _require_studio_user()
+    if error:
+        return error
+    if not _disk_has_capacity(ASSETS_DIR):
+        return jsonify({"error": "insufficient_storage"}), 507
+    try:
+        return jsonify(account_video.last_frame(get_db(), g.account_id, job_id,
+            outputs=OUTPUTS_DIR, assets=ASSETS_DIR, max_bytes=ASSET_MAX_BYTES))
+    except account_video.VideoInputError as exc:
+        return jsonify({"error": str(exc)}), exc.status
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 413
 
 
 @app.route("/v2/account/identity-anchors", methods=["GET"])

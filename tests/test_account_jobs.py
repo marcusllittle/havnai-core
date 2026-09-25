@@ -267,6 +267,24 @@ def test_owned_image_refinement_survives_enqueue_and_worker_claim(platform):
     assert "init_image" not in task
 
 
+def test_image_history_preserves_prompt_loras_and_sfw_controls(platform, monkeypatch):
+    harness, headers, _ = platform
+    monkeypatch.setattr(app, "SFW_NEGATIVE_PROMPT", "sfw-negative-fixture")
+    response = create(harness, headers, negative_prompt="blur", sfw_mode=True,
+                      loras=[{"name": "style", "weight": 0.5}])
+    assert response.status_code == 202
+    parameters = response.json["resolved_spec"]["parameters"]
+    assert parameters["prompt"] == "A blue sky"
+    assert parameters["sfw_mode"] is True
+    assert "blur" in parameters["negative_prompt"]
+    assert "sfw-negative-fixture" in parameters["negative_prompt"]
+    assert parameters["loras"] == [{"name": "style", "weight": 0.5}]
+    task = harness._claim(response.json["id"])
+    assert task["prompt"] == parameters["prompt"]
+    assert task["negative_prompt"] == parameters["negative_prompt"]
+    assert task["loras"] == parameters["loras"]
+
+
 @pytest.mark.parametrize("field", ["source_asset_id", "mask_asset_id", "face_asset_id"])
 def test_foreign_image_conditioning_is_rejected(platform, keys, field):
     harness, headers, _ = platform

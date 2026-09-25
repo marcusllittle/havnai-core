@@ -5903,6 +5903,12 @@ def v1_create_job() -> Any:
             return jsonify({"error": "invalid_face_conditioning"}), 400
         resolved_defaults, sources = resolve_image_defaults(cfg, payload, RUNTIME_PROFILE)
         settings.update(resolved_defaults)
+        settings["sfw_mode"] = payload.get("sfw_mode") is True
+        settings["negative_prompt"] = _merge_negative_prompts(
+            settings["negative_prompt"], str(cfg.get("negative_prompt_default") or ""),
+            get_pipeline_negative(str(cfg.get("pipeline") or "sd15").lower()),
+            NO_WATERMARK_NEGATIVE, SFW_NEGATIVE_PROMPT if settings["sfw_mode"] else "",
+        )
         settings["defaults_source"] = {"image": sources}
         if payload.get("seed") is not None:
             try:
@@ -5936,7 +5942,7 @@ def v1_create_job() -> Any:
             "task_type": "image",
             "model": {"id": selected_model},
             "engine": {"backend": "diffusers"},
-            "parameters": {key: settings.get(key) for key in IMAGE_JOB_FIELDS if settings.get(key) is not None},
+            "parameters": {key: settings.get(key) for key in (*IMAGE_JOB_FIELDS, "prompt", "negative_prompt", "sfw_mode", "loras") if settings.get(key) is not None},
         }
         task_type = CREATOR_TASK_TYPE
 

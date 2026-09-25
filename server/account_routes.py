@@ -14,6 +14,7 @@ import account_ledger
 import account_payments
 import account_lifecycle
 import account_marketplace
+import account_import
 import stripe
 
 
@@ -56,6 +57,32 @@ def create_blueprint(get_db: Callable[[], sqlite3.Connection], rate_limit: Calla
     @api.errorhandler(account_marketplace.MarketplaceError)
     def marketplace_error(exc):
         return fail(str(exc), exc.status)
+
+    @api.errorhandler(account_import.MigrationError)
+    def import_error(exc):
+        return fail(str(exc), exc.status)
+
+    @api.post("/account/wallet-links/<link_id>/import-snapshots")
+    @authenticate(recent=True)
+    def wallet_import_prepare(link_id):
+        return jsonify(account_import.prepare(get_db(), g.account_principal, link_id,
+            request.headers.get("Idempotency-Key", ""), request.get_json(silent=True))), 201
+
+    @api.get("/account/import-snapshots/<snapshot_id>")
+    @authenticate()
+    def wallet_import_snapshot(snapshot_id):
+        return jsonify(account_import.load(get_db(), g.account_principal, snapshot_id))
+
+    @api.get("/account/wallet-links/<link_id>/import-preview")
+    @authenticate()
+    def wallet_import_preview(link_id):
+        try:
+            limit, offset = int(request.args.get("limit", "50")), int(request.args.get("offset", "0"))
+            return jsonify(account_import.preview(get_db(), g.account_id, link_id, limit=limit, offset=offset))
+        except account_import.MigrationError as exc:
+            return fail(str(exc), exc.status)
+        except ValueError:
+            return fail("invalid_pagination", 422)
 
     @api.post("/marketplace/listings")
     @authenticate()

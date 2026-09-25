@@ -65,6 +65,7 @@ import account_playlists
 import music_sessions
 import network_status
 import account_identity
+import account_import
 import account_ledger
 import account_payments
 import account_routes
@@ -1168,6 +1169,7 @@ def init_db() -> None:
     platform_v1.migrate(conn)
     conn.commit()
     account_identity.initialize(conn)
+    account_import.initialize(conn)
     account_ledger.initialize(conn)
     account_payments.initialize(conn)
     account_jobs.initialize(conn)

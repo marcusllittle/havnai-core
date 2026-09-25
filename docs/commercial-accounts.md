@@ -140,6 +140,33 @@ a different account gives no rights over anything already migrated.
 
 ## Explicit legacy migration
 
+The read-only first stage is available at `GET
+/v2/account/wallet-links/:link_id/import-preview?limit=50&offset=0`. It requires
+the signed-in account's active EVM wallet link and reads a consistent database
+snapshot. Its current scope is generation history and available legacy credits;
+publication, playlist, save, reference and workflow inventories still need their
+own dependency checks. No resource or balance changes during this preview.
+It resolves current gallery ownership, excludes active listings, non-final jobs
+and account-owned resources, and supplies bounded pagination with global counts.
+It does not expose prompts, source paths or another account's identity. Legacy
+credit amounts that exceed bounds or require rounding are marked for review.
+The preview is informational. `POST /v2/account/wallet-links/:link_id/import-snapshots`
+now persists an immutable, five-minute selection using an `Idempotency-Key` and
+`{job_ids: [...], include_credits: boolean}`. It requires recent account
+authentication, accepts at most 100 distinct eligible jobs, and rejects the whole
+selection if any job is unavailable. Credits are separately opt-in. The digest
+binds the account, current session, wallet link, exact selection, expiry, and
+hashes of the selected job/listing/artifact and credit rows. Private prompts and
+filesystem paths are not copied into the snapshot. Retrying the same key and
+selection returns the original snapshot, never refreshed inventory; changed
+selection returns 409. `GET /v2/account/import-snapshots/:id` is restricted to the
+original account session and still-active link; expired snapshots return 409.
+Neither endpoint changes ownership or balances, and `transfer_authorized` remains
+false. Fresh import proof, dependency revalidation under the execution write lock,
+atomic transfer and rollback/compensation controls below are still required before
+enabling execution. Snapshot hashes currently cover only the stated inventory;
+publication, playlist, reference and workflow dependencies remain pending.
+
 Migration is a separate **Import existing wallet content** action after linking.
 Proof of the wallet alone is insufficient if a resource already belongs to an
 account. Never trust the creator wallet as proof of current gallery ownership.

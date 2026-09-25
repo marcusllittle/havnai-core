@@ -12,6 +12,7 @@ import app
 import account_auth
 import account_ledger
 import account_lifecycle
+import account_jobs
 from tests.test_account_lifecycle import signed, CONFIG as lifecycle_config
 import job_helpers
 
@@ -158,6 +159,55 @@ def test_cancellation_releases_reservation_once(platform):
     balance = harness.client.get("/v2/account/credits", headers=headers).json
     assert balance["available_units"] == 10000
     assert balance["reserved_units"] == 0
+
+
+@pytest.mark.parametrize("field", ["audio_asset_id", "source_audio_asset_id", "reference_asset_id"])
+@pytest.mark.parametrize("source", ["other_account", "missing", "wrong_kind"])
+def test_music_source_spellings_enforce_account_ownership_and_kind(platform, keys, field, source):
+    harness, headers, _ = platform
+    owner_headers = ({"Authorization": token(keys, sub="user_bob", sid="sess_bob")}
+                     if source == "other_account" else headers)
+    kind = "image" if source == "wrong_kind" else "audio"
+    upload = harness.client.post("/v2/assets", headers=owner_headers,
+        data={"kind": kind, "file": (io.BytesIO(b"private-source"), "source.png" if kind == "image" else "source.wav")})
+    assert upload.status_code == 201
+    response = harness.client.post("/v2/jobs", headers=headers, json={
+        "type": "text_to_music", "model": platform_fixture.MUSIC_MODEL,
+        "prompt": "A song", field: "missing-asset" if source == "missing" else upload.json["id"],
+    })
+    assert response.status_code == 400
+    assert response.json["error"]["code"] == "invalid_asset"
+    assert harness.client.get("/v2/jobs", headers=headers).json["jobs"] == []
+    assert harness.client.get("/v2/account/credits", headers=headers).json["reserved_units"] == 0
+
+
+def test_owned_music_source_alias_resolves_and_replays(platform):
+    harness, headers, _ = platform
+    asset = harness.client.post("/v2/assets", headers=headers,
+        data={"kind": "audio", "file": (io.BytesIO(b"own-audio"), "source.wav")}).json
+    body = {"type": "text_to_music", "model": platform_fixture.MUSIC_MODEL,
+            "prompt": "A song", "source_audio_asset_id": asset["id"]}
+    first = harness.client.post("/v2/jobs", headers=headers, json=body)
+    assert first.status_code == 202, first.json
+    assert first.json["resolved_spec"]["parameters"]["audio_asset_id"] == asset["id"]
+    assert harness.client.post("/v2/jobs", headers=headers, json=body).json["id"] == first.json["id"]
+
+
+@pytest.mark.parametrize("source", ["other_account", "wrong_kind", "missing"])
+def test_enqueue_checks_resolved_assets_under_transaction(platform, keys, source):
+    harness, headers, account = platform
+    bob = {"Authorization": token(keys, sub="user_bob", sid="sess_bob")}
+    kind = "image" if source == "wrong_kind" else "audio"
+    asset = harness.client.post("/v2/assets", headers=bob if source == "other_account" else headers,
+        data={"kind": kind, "file": (io.BytesIO(b"private-source"), "source.png" if kind == "image" else "source.wav")}).json
+    asset_id = "missing-asset" if source == "missing" else asset["id"]
+    with app.app.app_context():
+        with pytest.raises(ValueError, match="asset_not_found"):
+            account_jobs.enqueue(app.get_db(), account, request_key="resolved-source-test",
+                request_payload={"source_audio_asset_id": asset_id},
+                model=platform_fixture.MUSIC_MODEL, task_type="MUSIC_GEN",
+                settings={"audio_asset_id": asset_id}, resolved_spec={}, weight=1, units=1000)
+    assert harness.client.get("/v2/account/credits", headers=headers).json["reserved_units"] == 0
 
 
 def test_actual_worker_completion_captures_account_charge_once(platform):

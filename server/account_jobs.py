@@ -72,11 +72,13 @@ def enqueue(conn: sqlite3.Connection, account_id: str, *, request_key: str, requ
             if previous[0] != digest:
                 raise account_ledger.LedgerError("idempotency_conflict")
             return str(previous[1])
-        # Recheck source ownership under the same lock used for enqueuing.
-        for field in ("source_asset_id", "audio_asset_id", "reference_asset_id"):
-            asset_id = request_payload.get(field)
-            if asset_id and not conn.execute("SELECT 1 FROM assets WHERE id=? AND owner_account_id=?",
-                                              (asset_id, account_id)).fetchone():
+        # Check the resolved inputs the worker will consume, not raw request
+        # spellings: resolvers may accept aliases for these asset fields.
+        # Ownership and kind must still match while holding the enqueue lock.
+        for field, kind in (("source_asset_id", "image"), ("audio_asset_id", "audio"), ("reference_asset_id", "audio")):
+            asset_id = settings.get(field)
+            if asset_id and not conn.execute("SELECT 1 FROM assets WHERE id=? AND owner_account_id=? AND kind=?",
+                                              (asset_id, account_id, kind)).fetchone():
                 raise ValueError("asset_not_found")
         now = time.time()
         job_id = "job-" + uuid.uuid4().hex

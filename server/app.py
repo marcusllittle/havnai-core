@@ -5829,7 +5829,8 @@ def v1_create_job() -> Any:
         "negative_prompt": str(payload.get("negative_prompt") or "").strip(),
     }
     source_asset_id = str(payload.get("source_asset_id") or "").strip()
-    audio_asset_id = str(payload.get("audio_asset_id") or "").strip()
+    audio_asset_id = str(payload.get("audio_asset_id") or
+                         (payload.get("source_audio_asset_id") if job_type == "text_to_music" else "") or "").strip()
     reference_asset_id = str(payload.get("reference_asset_id") or "").strip()
     for asset_id, expected_kind in (
         (source_asset_id, "image"),

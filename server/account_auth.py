@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import logging
 import time
 from dataclasses import dataclass
 from urllib.parse import urlsplit
@@ -11,6 +12,9 @@ from clerk_backend_api.security import authenticate_request
 from clerk_backend_api.security.types import AuthenticateRequestOptions
 
 from account_identity import VerifiedPrincipal
+
+logger = logging.getLogger(__name__)
+CLOCK_SKEW_SECONDS = 5
 
 
 class AccountAuthError(ValueError):
@@ -53,17 +57,21 @@ def verify_bearer(authorization: str, *, config: AuthConfig,
         raise AccountAuthError("account_required")
     try:
         result = authenticate_request(
-            httpx.Request("GET", "https://account-api.invalid/", headers={"Authorization": authorization}),
+            httpx.Request("GET", "https://account-api.invalid/", headers={"Authorization": f"Bearer {parts[1]}"}),
             AuthenticateRequestOptions(
                 jwt_key=config.jwt_key or None, secret_key=config.secret_key or None,
                 audience=config.audience, authorized_parties=list(config.authorized_parties),
-                accepts_token=["session_token"], clock_skew_in_ms=0,
+                accepts_token=["session_token"], clock_skew_in_ms=CLOCK_SKEW_SECONDS * 1000,
             ),
         )
     except Exception as exc:
         # Do not expose provider/transport exceptions or accidentally provision users.
         raise AccountAuthError("account_auth_unavailable", 503) from exc
     if not result.is_signed_in or not result.payload:
+        # Only enum names are logged, never tokens, keys, claims or provider error
+        # bodies. This distinguishes expiry/key/clock failures during operations.
+        reason = getattr(result.reason, "name", "UNKNOWN")
+        logger.info("Account session rejected by provider: %s", reason)
         raise AccountAuthError("invalid_account_session")
     claims = result.payload
     now = time.time()
@@ -72,8 +80,12 @@ def verify_bearer(authorization: str, *, config: AuthConfig,
             or not isinstance(claims.get("sub"), str) or not claims["sub"].strip()
             or not isinstance(claims.get("sid"), str) or not claims["sid"].strip()
             or any(type(claims.get(k)) not in (int, float) for k in ("iat", "nbf", "exp"))
-            or not claims["nbf"] <= now < claims["exp"] or claims["iat"] > now
+            # Tolerate small backwards clock corrections/issuer differences for
+            # issuance only. Expiry is still strict despite the SDK's leeway.
+            or not claims["nbf"] <= now + CLOCK_SKEW_SECONDS or not now < claims["exp"]
+            or not claims["iat"] <= now + CLOCK_SKEW_SECONDS
             or claims["exp"] - claims["iat"] > 120):
+        logger.info("Account session rejected by local claim policy")
         raise AccountAuthError("invalid_account_session")
     if recent:
         # Clerk's fva is minutes since factor verification, not token refresh.

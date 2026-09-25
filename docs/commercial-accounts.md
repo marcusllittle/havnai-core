@@ -5,10 +5,10 @@ Contract version: 1. Work item: HAVN-18, under [HAVN-11](https://havnai.atlassia
 Status: account authentication/lifecycle, wallet-link API, integer ledger, account
 checkout/receipts, job/asset APIs, account music publication/libraries/playlists,
 account Video Studio, image/face-swap generation, private saved face references,
-and account-owned visual collections are implemented on
+durable video sequences/stitching, account marketplace trading, and account-owned visual collections are implemented on
 the feature branch. Development Google sign-in has been verified. Production
-rollout, content migration, marketplace/advanced video workflow
-ownership, and live paid acceptance remain.
+rollout, content migration, workflow-registry ownership, reference-sheet video
+support, and live paid acceptance remain.
 Those require HAVN-19 through HAVN-23 and the evidence below.
 
 ## Decision and trust boundary
@@ -33,6 +33,17 @@ Keys come only from the configured issuer, never a URL supplied by a token.
 Provider failures fail closed. Provider suspension/deletion events disable the
 local account; privileged operations require a freshly authenticated session.
 The adapter must bound revocation delay and document it before launch.
+
+The auth adapter allows up to five seconds of issuer/server clock difference for
+`iat` and `nbf`, but independently enforces strict `exp` expiry, the 120-second
+maximum token lifetime, and the existing five-minute factor-verification limit
+for privileged actions. A local regression reproduced a roughly two-second
+backward clock correction after a token was minted; zero leeway had rejected
+that valid session. Deterministic tests cover that correction, the five-second
+boundary, rejection beyond it, strict expiry and unchanged recent-auth checks.
+Bearer scheme casing is normalized before provider verification. Rejection logs
+contain only provider reason enum names or a fixed local-policy message, never
+tokens, keys or identity claims.
 
 Account APIs do not accept the shared `HAVNAI_OWNER_TOKEN`, the studio access key,
 music read tokens, a bare wallet address, or arbitrary `X-Account-ID` headers as

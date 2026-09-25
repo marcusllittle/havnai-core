@@ -1,6 +1,8 @@
 import sqlite3
 import sys
 import time
+from datetime import datetime
+from types import SimpleNamespace
 from pathlib import Path
 
 import jwt
@@ -39,6 +41,60 @@ def config(keys):
 def test_real_signature_validates_without_network(keys):
     principal = account_auth.verify_bearer(token(keys), config=config(keys), recent=True)
     assert principal.subject == "user_alice"
+
+
+@pytest.mark.parametrize("scheme", ["bearer", "BEARER", "bEaReR"])
+def test_bearer_scheme_is_case_insensitive(keys, scheme):
+    header = token(keys).replace("Bearer", scheme, 1)
+    assert account_auth.verify_bearer(header, config=config(keys)).subject == "user_alice"
+
+
+def test_auth_diagnostics_never_log_tokens_keys_or_claims(keys, caplog):
+    secret_subject = "user_private_diagnostic_subject"
+    header = token(keys, exp=1, sub=secret_subject)
+    with caplog.at_level("INFO", logger="account_auth"):
+        with pytest.raises(account_auth.AccountAuthError):
+            account_auth.verify_bearer(header, config=config(keys))
+    assert "TOKEN_EXPIRED" in caplog.text
+    assert header not in caplog.text and header.split()[1] not in caplog.text
+    assert secret_subject not in caplog.text and keys[1] not in caplog.text
+
+
+@pytest.mark.parametrize("ahead,accepted", [(2, True), (5, True), (6, False)])
+def test_small_backwards_clock_correction_does_not_invalidate_fresh_session(keys, monkeypatch, ahead, accepted):
+    now = int(time.time())
+    header = token(keys, iat=now + ahead, nbf=now + ahead, exp=now + ahead + 60)
+
+    class FrozenClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.fromtimestamp(now, tz=tz)
+
+    monkeypatch.setattr(jwt.api_jwt, "datetime", FrozenClock)
+    monkeypatch.setattr(account_auth, "time", SimpleNamespace(time=lambda: now))
+    if accepted:
+        assert account_auth.verify_bearer(header, config=config(keys)).subject == "user_alice"
+    else:
+        with pytest.raises(account_auth.AccountAuthError):
+            account_auth.verify_bearer(header, config=config(keys))
+
+
+def test_clock_tolerance_never_extends_expiry_or_recent_authentication(keys, monkeypatch):
+    now = int(time.time())
+    expired = token(keys, iat=now - 60, nbf=now - 60, exp=now)
+    stale_factor = token(keys, iat=now + 2, nbf=now + 2, exp=now + 62, fva=[6, -1])
+
+    class FrozenClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.fromtimestamp(now, tz=tz)
+
+    monkeypatch.setattr(jwt.api_jwt, "datetime", FrozenClock)
+    monkeypatch.setattr(account_auth, "time", SimpleNamespace(time=lambda: now))
+    with pytest.raises(account_auth.AccountAuthError, match="invalid_account_session"):
+        account_auth.verify_bearer(expired, config=config(keys))
+    with pytest.raises(account_auth.AccountAuthError, match="reauthentication_required"):
+        account_auth.verify_bearer(stale_factor, config=config(keys), recent=True)
 
 
 @pytest.mark.parametrize("claims", [

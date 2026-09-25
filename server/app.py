@@ -9087,17 +9087,17 @@ def api_gallery_create_listing() -> Any:
 
     conn = get_db()
     job_row = conn.execute(
-        "SELECT wallet, status, model, data, task_type FROM jobs WHERE id = ?",
+        "SELECT wallet, status, model, data, task_type, owner_account_id FROM jobs WHERE id = ?",
         (job_id,),
     ).fetchone()
-    if not job_row:
+    if not job_row or job_row["owner_account_id"]:
         return jsonify({"error": "job_not_found"}), 404
 
     request_wallet = wallet
     job_wallet = str(job_row["wallet"] or "").strip().lower()
     current_owner = str(gallery.get_asset_owner(job_id) or "").strip().lower()
 
-    is_job_creator = job_wallet == request_wallet
+    is_job_creator = not current_owner and job_wallet == request_wallet
     is_current_owner = bool(current_owner) and current_owner == request_wallet
 
     if not is_job_creator and not is_current_owner:
@@ -9145,17 +9145,22 @@ def api_gallery_create_listing() -> Any:
         except (json.JSONDecodeError, TypeError):
             pass
 
-    result = gallery.create_listing(
-        job_id=job_id,
-        seller_wallet=request_wallet,
-        title=title,
-        price_credits=price_credits,
-        description=description,
-        category=category,
-        asset_type=asset_type,
-        model=model,
-        prompt=prompt,
-    )
+    try:
+        result = gallery.create_listing(
+            job_id=job_id,
+            seller_wallet=request_wallet,
+            title=title,
+            price_credits=price_credits,
+            description=description,
+            category=category,
+            asset_type=asset_type,
+            model=model,
+            prompt=prompt,
+        )
+    except ValueError as exc:
+        if str(exc) != "account_owned_job":
+            raise
+        return jsonify({"error": "job_not_found"}), 404
 
     if canonical_metadata:
         result["model_key"] = canonical_metadata.get("model_key")
@@ -9364,14 +9369,19 @@ def api_gallery_relist() -> Any:
     description = str(data.get("description", "")).strip()[:2000]
     category = str(data.get("category", "")).strip()
 
-    result = gallery.relist_owned_asset(
-        job_id=job_id,
-        owner_wallet=wallet,
-        title=title,
-        price_credits=price_credits,
-        description=description,
-        category=category,
-    )
+    try:
+        result = gallery.relist_owned_asset(
+            job_id=job_id,
+            owner_wallet=wallet,
+            title=title,
+            price_credits=price_credits,
+            description=description,
+            category=category,
+        )
+    except ValueError as exc:
+        if str(exc) != "account_owned_job":
+            raise
+        return jsonify({"error": "job_not_found"}), 404
     if not result.get("ok"):
         return jsonify({"error": result.get("error", "relist_failed")}), 400
     return jsonify(result.get("listing", {})), 201

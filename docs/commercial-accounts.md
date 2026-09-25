@@ -233,6 +233,15 @@ API integration is still pending; the ledger primitive alone does not enable
 account purchases. `tests/test_account_ledger.py` covers receipt replay/conflicts,
 concurrent purchases, reserved balances, seller failure and outer rollback.
 
+Legacy gallery access now excludes any job with an account owner, even when an
+old wallet listing, sale or ownership log still exists. This applies to browse
+counts/results, details, downloads, wallet collections/history and mutations.
+Listing inserts recheck account ownership in the write statement; purchases check
+under their write lock. Historical wallet rows remain intact for migration audit.
+The original wallet creator also cannot use the listing endpoint to reclaim an
+asset already sold to another wallet. Backend reliability tests cover these
+boundaries, including ownership changing between the initial check and insert.
+
 Checkout persists an immutable server-priced purchase intent before contacting
 Stripe, uses a stable provider idempotency key, and survives a crash between API
 success and local persistence through reconciliation. Never use client-supplied

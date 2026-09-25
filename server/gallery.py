@@ -31,6 +31,13 @@ build_result_payload: Callable[[str], Optional[Dict[str, Any]]]
 resolve_job_metadata: Callable[[str], Optional[Dict[str, Any]]]
 
 
+def _account_owned_job(conn: sqlite3.Connection, job_id: str) -> bool:
+    """Account ownership overrides all historical wallet listing records."""
+    return bool(conn.execute(
+        "SELECT 1 FROM jobs WHERE id=? AND owner_account_id IS NOT NULL", (job_id,)
+    ).fetchone())
+
+
 def init_gallery_tables(conn: sqlite3.Connection) -> None:
     """Create gallery tables if they don't exist."""
     conn.execute(
@@ -124,6 +131,9 @@ def create_listing(
     conn = get_db()
     now = time.time()
 
+    if _account_owned_job(conn, job_id):
+        raise ValueError("account_owned_job")
+
     # Prevent duplicate active listings for the same job. Sold rows stay in the
     # table for history and should not block a fresh relist.
     existing = conn.execute(
@@ -140,12 +150,16 @@ def create_listing(
         INSERT INTO gallery_listings
             (job_id, seller_wallet, owner_wallet, title, description, price_credits,
              category, asset_type, model, prompt, listed, sold, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?
+        WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE id=? AND owner_account_id IS NOT NULL)
         """,
         (job_id, seller_wallet, seller_wallet, title, description, price_credits,
-         category, asset_type, model, prompt, now, now),
+         category, asset_type, model, prompt, now, now, job_id),
     )
 
+    if cursor.rowcount != 1:
+        conn.rollback()
+        raise ValueError("account_owned_job")
     listing_id = cursor.lastrowid
 
     # Record the mint event in ownership log
@@ -171,6 +185,8 @@ def get_listing(listing_id: int) -> Optional[Dict[str, Any]]:
     ).fetchone()
     if not row:
         return None
+    if _account_owned_job(conn, row["job_id"]):
+        return None
     return _listing_to_dict(row)
 
 
@@ -178,7 +194,10 @@ def delist(listing_id: int, owner_wallet: str) -> bool:
     """Remove a listing (current owner only).  Returns True if delisted."""
     conn = get_db()
     cur = conn.execute(
-        "UPDATE gallery_listings SET listed = 0, updated_at = ? WHERE id = ? AND owner_wallet = ? AND listed = 1",
+        """UPDATE gallery_listings SET listed = 0, updated_at = ?
+        WHERE id = ? AND owner_wallet = ? AND listed = 1
+        AND NOT EXISTS (SELECT 1 FROM jobs WHERE jobs.id=gallery_listings.job_id
+                        AND jobs.owner_account_id IS NOT NULL)""",
         (time.time(), listing_id, owner_wallet),
     )
     conn.commit()
@@ -198,7 +217,9 @@ def browse_gallery(
 ) -> Dict[str, Any]:
     """Browse listed (unsold) gallery items."""
     conn = get_db()
-    conditions = ["listed = 1", "sold = 0"]
+    conditions = ["listed = 1", "sold = 0", """NOT EXISTS
+        (SELECT 1 FROM jobs WHERE jobs.id=gallery_listings.job_id
+         AND jobs.owner_account_id IS NOT NULL)"""]
     params: List[Any] = []
 
     if search:
@@ -260,6 +281,9 @@ def purchase_listing(listing_id: int, buyer_wallet: str, *, settle_credits: bool
             conn.rollback()
             return {"ok": False, "error": "listing_not_found"}
         listing = dict(row)
+        if _account_owned_job(conn, listing["job_id"]):
+            conn.rollback()
+            return {"ok": False, "error": "listing_not_found"}
         previous_owner = str(listing["owner_wallet"] or listing["seller_wallet"]).lower()
         price = float(listing["price_credits"])
         if not math.isfinite(price) or price <= 0 or (expected_price is not None and price != expected_price):
@@ -309,6 +333,9 @@ def relist_owned_asset(
     """
     conn = get_db()
 
+    if _account_owned_job(conn, job_id):
+        return {"ok": False, "error": "not_owner"}
+
     # Verify ownership: find the most recent listing for this job where owner_wallet matches
     ownership_row = conn.execute(
         """
@@ -340,12 +367,16 @@ def relist_owned_asset(
         INSERT INTO gallery_listings
             (job_id, seller_wallet, owner_wallet, title, description, price_credits,
              category, asset_type, model, prompt, listed, sold, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?
+        WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE id=? AND owner_account_id IS NOT NULL)
         """,
         (job_id, owner_wallet, owner_wallet, title, description, price_credits,
-         category, asset_type, model, prompt, now, now),
+         category, asset_type, model, prompt, now, now, job_id),
     )
 
+    if cursor.rowcount != 1:
+        conn.rollback()
+        raise ValueError("account_owned_job")
     listing_id = cursor.lastrowid
 
     # Log re-list event
@@ -372,12 +403,14 @@ def get_owned_assets(wallet: str) -> List[Dict[str, Any]]:
                       ORDER BY latest.updated_at DESC, latest.id DESC LIMIT 1)
            ORDER BY gl.updated_at DESC, gl.id DESC""", (wallet.strip().lower(),)
     ).fetchall()
-    return [_listing_to_dict(row) for row in rows]
+    return [_listing_to_dict(row) for row in rows if not _account_owned_job(conn, row["job_id"])]
 
 
 def get_ownership_history(job_id: str) -> List[Dict[str, Any]]:
     """Get the full ownership provenance chain for an asset."""
     conn = get_db()
+    if _account_owned_job(conn, job_id):
+        return []
     rows = conn.execute(
         """
         SELECT * FROM gallery_ownership_log
@@ -392,6 +425,8 @@ def get_ownership_history(job_id: str) -> List[Dict[str, Any]]:
 def get_asset_owner(job_id: str) -> Optional[str]:
     """Return the current owner wallet for a given job_id, or None if never listed."""
     conn = get_db()
+    if _account_owned_job(conn, job_id):
+        return None
     row = conn.execute(
         """
         SELECT owner_wallet FROM gallery_listings
@@ -418,7 +453,7 @@ def seller_listings(wallet: str, include_sold: bool = False) -> List[Dict[str, A
             "SELECT * FROM gallery_listings WHERE seller_wallet = ? AND listed = 1 ORDER BY created_at DESC",
             (wallet,),
         ).fetchall()
-    return [_listing_to_dict(row) for row in rows]
+    return [_listing_to_dict(row) for row in rows if not _account_owned_job(conn, row["job_id"])]
 
 
 def buyer_purchases(wallet: str) -> List[Dict[str, Any]]:
@@ -436,6 +471,8 @@ def buyer_purchases(wallet: str) -> List[Dict[str, Any]]:
     ).fetchall()
     purchases: List[Dict[str, Any]] = []
     for row in rows:
+        if _account_owned_job(conn, row["job_id"]):
+            continue
         purchase = dict(row)
         purchases.append(_attach_result_urls(purchase))
     return purchases

@@ -478,8 +478,10 @@ def test_invalid_image_seed_is_rejected_before_charging(platform, seed):
 @pytest.mark.parametrize("strength", [0, -1, 1.1, "invalid", None, 0.001])
 def test_invalid_refinement_strength_is_rejected_before_charging(platform, strength):
     harness, headers, _ = platform
-    asset = harness.client.post("/v2/assets", headers=headers,
-        data={"kind": "image", "file": (io.BytesIO(b"source"), "source.png")}).json
+    uploaded = harness.client.post("/v2/assets", headers=headers,
+        data={"kind": "image", "file": (io.BytesIO(b"source"), "source.png")})
+    assert uploaded.status_code == 201, uploaded.json
+    asset = uploaded.json
     response = create(harness, headers, source_asset_id=asset["id"], img2img_strength=strength)
     assert response.status_code == 400
     assert response.json["error"]["code"] == "invalid_image_strength"

@@ -129,6 +129,80 @@ class BackendReliabilityTests(unittest.TestCase):
         self.assertEqual(api.gallery.relist_owned_asset("asset", BUYER, "Invalid", 5)["error"], "not_owner")
         self.assertEqual(len(api.gallery.get_owned_assets(NEXT_BUYER)), 1)
 
+    def test_account_ownership_overrides_every_legacy_gallery_surface(self):
+        first = api.gallery.create_listing("migrated", SELLER, "Private", 3, prompt="private prompt")
+        api.gallery.purchase_listing(first["id"], BUYER)
+        active = api.gallery.relist_owned_asset("migrated", BUYER, "Resale", 4)["listing"]
+        public = api.gallery.create_listing("public", SELLER, "Public", 2)
+        db = api.get_db()
+        with db:
+            db.execute("INSERT INTO accounts(id,created_at) VALUES ('acct_owner',?)", (time.time(),))
+            db.execute("""INSERT INTO jobs
+                (id,wallet,model,task_type,weight,status,timestamp,owner_account_id,creator_account_id)
+                VALUES ('migrated',?,'model','IMAGE_GEN',1,'completed',?,'acct_owner','acct_owner')""",
+                (SELLER, time.time()))
+        for listing in (first, active):
+            self.assertIsNone(api.gallery.get_listing(listing["id"]))
+            self.assertEqual(self.client.get(f"/gallery/listings/{listing['id']}").status_code, 404)
+            self.assertEqual(self.client.get(
+                f"/gallery/listings/{listing['id']}/download?wallet={BUYER}").status_code, 404)
+        result = api.gallery.browse_gallery(limit=1)
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["listings"][0]["id"], public["id"])
+        self.assertEqual(api.gallery.get_owned_assets(BUYER), [])
+        self.assertEqual(api.gallery.buyer_purchases(BUYER), [])
+        self.assertEqual(api.gallery.seller_listings(BUYER, include_sold=True), [])
+        self.assertEqual(api.gallery.get_ownership_history("migrated"), [])
+        self.assertIsNone(api.gallery.get_asset_owner("migrated"))
+        self.assertFalse(api.gallery.delist(active["id"], BUYER))
+        self.assertEqual(api.gallery.relist_owned_asset("migrated", BUYER, "Steal", 1)["error"], "not_owner")
+        with self.assertRaisesRegex(ValueError, "account_owned_job"):
+            api.gallery.create_listing("migrated", SELLER, "Reclaim", 1)
+        api.credits.deposit_credits(NEXT_BUYER, 10)
+        self.assertEqual(api.gallery.purchase_listing(active["id"], NEXT_BUYER,
+                         settle_credits=True)["error"], "listing_not_found")
+        self.assertEqual(api.credits.get_credit_balance(NEXT_BUYER), 10)
+        self.assertEqual(db.execute("SELECT owner_account_id FROM jobs WHERE id='migrated'").fetchone()[0], "acct_owner")
+        self.assertEqual(db.execute("SELECT COUNT(*) FROM gallery_sales").fetchone()[0], 1)
+
+    def test_listing_insert_rechecks_account_ownership_after_initial_check(self):
+        db = api.get_db()
+        with db:
+            db.execute("INSERT INTO accounts(id,created_at) VALUES ('acct_owner',?)", (time.time(),))
+            db.execute("""INSERT INTO jobs (id,wallet,model,task_type,weight,status,timestamp)
+                VALUES ('racing',?,'model','IMAGE_GEN',1,'completed',?)""", (SELLER, time.time()))
+        original = api.gallery.create_listing("racing", SELLER, "Original", 3)
+        api.gallery.delist(original["id"], SELLER)
+
+        def migrated_after_read(conn, job_id):
+            with conn:
+                conn.execute("UPDATE jobs SET owner_account_id='acct_owner' WHERE id=?", (job_id,))
+            return False
+
+        for operation in (api.gallery.create_listing, api.gallery.relist_owned_asset):
+            with self.subTest(operation=operation.__name__):
+                with db:
+                    db.execute("UPDATE jobs SET owner_account_id=NULL WHERE id='racing'")
+                with patch.object(api.gallery, "_account_owned_job", side_effect=migrated_after_read):
+                    with self.assertRaisesRegex(ValueError, "account_owned_job"):
+                        operation("racing", SELLER, "Racing listing", 4)
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM gallery_listings").fetchone()[0], 1)
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM gallery_ownership_log").fetchone()[0], 1)
+
+    def test_original_creator_cannot_reclaim_a_sold_job_via_create_listing(self):
+        db = api.get_db()
+        with db:
+            db.execute("""INSERT INTO jobs (id,wallet,model,task_type,weight,status,timestamp)
+                VALUES ('sold-job',?,'model','IMAGE_GEN',1,'completed',?)""", (SELLER, time.time()))
+        listing = api.gallery.create_listing("sold-job", SELLER, "Original", 3)
+        api.gallery.purchase_listing(listing["id"], BUYER)
+        with patch.object(api, "_verify_wallet_signature", return_value=(True, None)):
+            response = self.client.post("/gallery/listings", json={
+                "job_id": "sold-job", "wallet": SELLER, "price_credits": 2,
+                "nonce": "verified-test-nonce", "signature": "verified-test-signature"})
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(api.gallery.get_asset_owner("sold-job"), BUYER)
+
     def test_network_routes_return_real_empty_state_without_mutation(self):
         for path in ["/v1/network/summary", "/v1/network/control-plane"]:
             response = self.client.get(path)

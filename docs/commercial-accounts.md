@@ -143,8 +143,8 @@ a different account gives no rights over anything already migrated.
 The read-only first stage is available at `GET
 /v2/account/wallet-links/:link_id/import-preview?limit=50&offset=0`. It requires
 the signed-in account's active EVM wallet link and reads a consistent database
-snapshot. Its current scope is generation history, dependent music publications
-and available legacy credits; playlist, save, reference and workflow inventories
+snapshot. Its current scope is generation history, dependent music publications,
+selected playlists and available legacy credits; save, reference and workflow inventories
 still need their own dependency checks. No resource or balance changes during
 this preview. Publication summaries accompany the current page of jobs, with a
 flag when the bounded 100-publication selection limit is exceeded.
@@ -154,7 +154,7 @@ It does not expose prompts, source paths or another account's identity. Legacy
 credit amounts that exceed bounds or require rounding are marked for review.
 The preview is informational. `POST /v2/account/wallet-links/:link_id/import-snapshots`
 now persists an immutable, five-minute selection using an `Idempotency-Key` and
-`{job_ids: [...], include_credits: boolean, publication_ids?: [...]}`. It requires recent account
+`{job_ids: [...], include_credits: boolean, publication_ids?: [...], playlist_ids?: [...]}`. It requires recent account
 authentication, accepts at most 100 distinct eligible jobs, and rejects the whole
 selection if any job is unavailable. Credits are separately opt-in. The digest
 binds the account, current session, wallet link, exact selection, expiry, and
@@ -167,7 +167,7 @@ Neither endpoint changes ownership or balances, and `transfer_authorized` remain
 false. Fresh import proof, dependency revalidation under the execution write lock,
 atomic transfer and rollback/compensation controls below are still required before
 enabling execution. Snapshot hashes currently cover only the stated inventory;
-playlist, reference and workflow dependencies remain pending.
+reference and workflow dependencies remain pending.
 
 `POST /v2/account/import-snapshots/:id/challenge` accepts only `{chain_id}` and
 requires recent account authentication plus an allowlisted request Origin. It
@@ -201,8 +201,20 @@ An account creator profile is created when needed. Legacy wallet unpublish is
 denied afterward; account listing, profile display, playback and unpublish are
 covered by integration tests. Selected balances with legacy Stripe history still
 require explicit payment/refund provenance handling before enabling those cases.
-Reference assets, playlists, saves and audit-driven reversal remain migration
+Reference assets, saves and audit-driven reversal remain migration
 integration work, not completed behavior.
+
+Version 3 snapshots support up to 100 explicit playlist IDs, independently of
+jobs, publications and credits. The preview includes a separately counted playlist
+page using the same limit/offset. Review records title, sharing setting, ordered
+publication IDs and a digest of playlist metadata and membership. The signature
+binds those playlist IDs. Execution transfers only playlist ownership, preserving
+track references/order, sharing, descriptions and URLs; it does not transfer the
+referenced songs unless they are separately selected. Account-owned or foreign
+wallet playlists are rejected, and metadata/membership changes invalidate the
+snapshot. Account management survives unlinking the wallet; legacy wallet
+management is denied after import. Integration tests cover private/public reads,
+account updates, other-account denial and unchanged publication ownership.
 
 Each transferred job now has immutable indexed provenance in
 `account_import_job_transfers`, linked to its signed import receipt. Startup can

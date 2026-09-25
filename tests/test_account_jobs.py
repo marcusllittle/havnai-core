@@ -161,6 +161,43 @@ def test_account_video_controls_survive_enqueue_claim_and_retry(platform):
     assert retry.json["id"] == first.json["id"]
 
 
+def test_text_video_requires_an_advertised_capability_and_no_source(platform):
+    harness, headers, _ = platform
+    body = {"type": "text_to_video", "model": platform_fixture.VIDEO_MODEL, "prompt": "Clouds drifting", "sfw_mode": True}
+    rejected = harness.client.post("/v2/jobs", headers=headers, json=body)
+    assert rejected.status_code == 400
+    assert rejected.json["error"]["code"] == "mode_unsupported_by_model"
+    assert harness.client.get("/v2/account/credits", headers=headers).json["reserved_units"] == 0
+    app.MANIFEST_MODELS[platform_fixture.VIDEO_MODEL]["capabilities"].append("text_to_video")
+    created = harness.client.post("/v2/jobs", headers=headers, json=body)
+    assert created.status_code == 202, created.json
+    assert created.json["type"] == "text_to_video"
+    spec = created.json["resolved_spec"]
+    assert spec["task_type"] == "text_to_video"
+    assert spec["parameters"]["prompt"] == "Clouds drifting"
+    assert spec["parameters"]["sfw_mode"] is True
+    assert app.SFW_NEGATIVE_PROMPT in spec["parameters"]["negative_prompt"]
+    assert spec["parameters"]["source_asset_id"] is None
+    assert harness.client.get("/v2/jobs?collection=1&type=visual", headers=headers).json["jobs"][0]["id"] == created.json["id"]
+    task = harness._claim(created.json["id"])
+    assert task["type"] == "LTX_VIDEO_GEN"
+    assert not task.get("source_asset_id")
+    assert task["prompt"] == "Clouds drifting"
+    assert app.SFW_NEGATIVE_PROMPT in task["negative_prompt"]
+    assert harness.client.post("/v2/jobs", headers=headers, json=body).json["id"] == created.json["id"]
+
+
+@pytest.mark.parametrize("field", ["init_image", "init_image_url", "reference_image", "reference_image_url", "audio_input"])
+def test_account_video_rejects_raw_input_paths(platform, field):
+    harness, headers, _ = platform
+    app.MANIFEST_MODELS[platform_fixture.VIDEO_MODEL]["capabilities"].append("text_to_video")
+    response = harness.client.post("/v2/jobs", headers=headers, json={"type": "text_to_video", "model": platform_fixture.VIDEO_MODEL,
+        "prompt": "Clouds", field: "/private/operator/path"})
+    assert response.status_code == 400
+    assert response.json["error"]["code"] == "owned_video_asset_required"
+    assert harness.client.get("/v2/account/credits", headers=headers).json["reserved_units"] == 0
+
+
 def test_revoked_session_cannot_recover_or_submit_studio_jobs(platform):
     harness, headers, _ = platform
     created = create(harness, headers)

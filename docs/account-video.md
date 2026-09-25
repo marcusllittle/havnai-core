@@ -1,8 +1,21 @@
 # Account video: implementation and remaining work
 
-HAVN-11 Video Studio uses owned image/audio uploads and durable `/v2/jobs`
+HAVN-11 Video Studio and single-clip Create use owned uploads and durable `/v2/jobs`
 submissions with a persisted idempotency key. Recovery and private result playback
 use the account session. Public wallet-era jobs are not silently imported.
+
+Create chooses `image_to_video` when a starting image is supplied and
+`text_to_video` otherwise. Core requires a manifest `text_to_video` capability for
+the latter; image-only models fail before reservation. Text-only jobs reject a
+source image rather than ignoring it. Raw input paths/URLs are rejected for account
+video jobs. Source images go through private uploads, and safe-content negatives
+are included when requested. The resolved spec retains the prompt and input asset
+IDs for owned history/recovery. The worker task type matches the model task type.
+
+Create stores its pending video intent separately from Video Studio. A retry uses
+the original request body/key and uploaded asset, even if the response was lost.
+Account change/unmount aborts requests; recovery and collection saves are scoped to
+the account. Create workflow presets populate the numeric controls sent to core.
 
 The image-to-video resolver preserves and validates numeric controls before credit
 reservation. Steps are integral 1–150, guidance 0–20, FPS integral 8–30, and frames
@@ -22,10 +35,11 @@ discards a pending intent only for explicit pre-enqueue validation errors, allow
 the user to correct their request. Ambiguous failures retain the original intent.
 
 These coordinator limits are not a guarantee that every video model supports every
-combination. Live GPU verification is outstanding. Create's legacy video controls,
-reference-sheet workflows, multi-clip continuation, private last-frame extraction,
-stitched artifacts, and chain recovery still need account integration; they are
-not replaced by the narrower Video Studio flow.
+combination. Live GPU verification is outstanding. Reference-sheet workflows,
+multi-clip continuation, private last-frame extraction,
+stitched artifacts, and chain recovery still need account integration. Create
+explicitly blocks account multi-clip/reference-sheet submissions until those are
+connected; single clips are available. This does not complete the full video scope.
 
 Tests: `tests/test_account_jobs.py`, `tests/test_platform_v1.py`, and web
 `lib/__tests__/accountJobSubmission.test.ts`.

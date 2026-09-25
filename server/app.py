@@ -112,7 +112,7 @@ VERSION_FILE = BASE_DIR / "VERSION"
 LORA_STORAGE_DIR = Path(os.getenv("HAVNAI_LORA_STORAGE_DIR", "/mnt/d/havnai-storage/models/loras"))
 
 CREATOR_TASK_TYPE = "IMAGE_GEN"
-VISUAL_JOB_TYPES = {"image", "image_gen", "face_swap", "image_to_video", "video_gen", "ltx_video_gen", "animatediff"}
+VISUAL_JOB_TYPES = {"image", "image_gen", "face_swap", "image_to_video", "text_to_video", "video_gen", "ltx_video_gen", "animatediff"}
 IMAGE_JOB_FIELDS = ("steps", "guidance", "width", "height", "sampler", "seed", "reference_face_url",
                     "source_asset_id", "mask_asset_id", "face_asset_id", "img2img_strength", "preserve_reference_aspect")
 
@@ -4113,6 +4113,7 @@ def get_creator_tasks() -> Any:
                         "init_image",
                         "strength",
                         "scheduler",
+                        "source_asset_id",
                     ):
                         if key in ad_settings and ad_settings[key] is not None:
                             task_payload[key] = ad_settings[key]
@@ -5868,9 +5869,9 @@ def v1_create_job() -> Any:
         if previous_id:
             return jsonify(_v1_job_payload(get_job(previous_id) or {})), 202
     job_type = str(payload.get("type") or "").strip().lower()
-    if job_type not in {"image", "face_swap", "image_to_video", "text_to_music"}:
+    if job_type not in {"image", "face_swap", "image_to_video", "text_to_video", "text_to_music"}:
         return jsonify({"error": "invalid_job_type"}), 400
-    if job_type == "image_to_video" and not VIDEO_V2_ENABLED:
+    if job_type in {"image_to_video", "text_to_video"} and not VIDEO_V2_ENABLED:
         return jsonify({"error": "feature_disabled", "feature": "video_v2"}), 404
     prompt = str(payload.get("prompt") or "").strip()
     if not prompt and job_type not in {"text_to_music", "face_swap"}:
@@ -5878,6 +5879,7 @@ def v1_create_job() -> Any:
 
     default_model = (
         "ltx23_wangp_distilled" if job_type == "image_to_video"
+        else "ltx_video_dev" if job_type == "text_to_video"
         else "ace_step_1_5_turbo" if job_type == "text_to_music"
         else "juggernautXL_ragnarokBy"
     )
@@ -5894,11 +5896,14 @@ def v1_create_job() -> Any:
     compatible_tasks = {
         "image": {CREATOR_TASK_TYPE},
         "image_to_video": {"LTX_VIDEO_GEN", "VIDEO_GEN", "ANIMATEDIFF"},
+        "text_to_video": {"LTX_VIDEO_GEN", "VIDEO_GEN", "ANIMATEDIFF"},
         "text_to_music": {"MUSIC_GEN"},
         "face_swap": {CREATOR_TASK_TYPE, "FACE_SWAP"},
     }
     if model_task not in compatible_tasks[job_type]:
         return jsonify({"error": "model_task_mismatch", "model": selected_model, "type": job_type}), 400
+    if job_type == "text_to_video" and "text_to_video" not in (cfg.get("capabilities") or []):
+        return jsonify({"error": "mode_unsupported_by_model", "model": selected_model, "type": job_type}), 400
     wallet = str(payload.get("wallet") or "0x0000000000000000000000000000000000000000").lower()
     if account_id:
         wallet = ""
@@ -5939,6 +5944,8 @@ def v1_create_job() -> Any:
             return jsonify({"error": "invalid_asset", "asset_id": asset_id, "expected_kind": expected_kind}), 400
     if job_type == "image_to_video" and not source_asset_id:
         return jsonify({"error": "source_image_required"}), 400
+    if job_type == "text_to_video" and source_asset_id:
+        return jsonify({"error": "invalid_video_source"}), 400
 
     if job_type == "face_swap":
         if "sdxl" not in str(cfg.get("pipeline") or "").lower():
@@ -5991,7 +5998,9 @@ def v1_create_job() -> Any:
             "engine_model": engine_model,
         })
         task_type = "MUSIC_GEN"
-    elif job_type == "image_to_video":
+    elif job_type in {"image_to_video", "text_to_video"}:
+        if account_id and any(payload.get(key) for key in ("init_image", "init_image_url", "reference_image", "reference_image_url", "audio_input")):
+            return jsonify({"error": "owned_video_asset_required"}), 400
         try:
             resolved_spec = platform_v1.resolve_video_spec(
                 payload,
@@ -6001,7 +6010,11 @@ def v1_create_job() -> Any:
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
         parameters = dict(resolved_spec["parameters"])
+        resolved_spec["task_type"] = job_type
         settings.update(parameters)
+        settings["sfw_mode"] = payload.get("sfw_mode") is True
+        if settings["sfw_mode"]:
+            settings["negative_prompt"] = _merge_negative_prompts(settings["negative_prompt"], SFW_NEGATIVE_PROMPT)
         settings.update({
             "source_asset_id": source_asset_id,
             "audio_asset_id": audio_asset_id or None,
@@ -6010,8 +6023,10 @@ def v1_create_job() -> Any:
             "duration_seconds": resolved_spec["duration_seconds"],
             "timeout": resolved_spec["timeout_seconds"],
         })
+        resolved_spec["parameters"].update({"prompt": prompt, "negative_prompt": settings["negative_prompt"],
+            "sfw_mode": settings["sfw_mode"], "source_asset_id": source_asset_id or None, "audio_asset_id": audio_asset_id or None})
         pipeline = str(cfg.get("pipeline") or "").lower()
-        task_type = "LTX_VIDEO_GEN" if _is_ltx_video_config(cfg) else "VIDEO_GEN"
+        task_type = model_task
     else:
         if account_id and any(payload.get(key) for key in ("init_image", "init_image_url", "inpaint_mask", "reference_face_url")):
             return jsonify({"error": "owned_image_asset_required"}), 400

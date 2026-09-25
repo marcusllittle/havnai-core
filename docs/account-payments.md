@@ -100,10 +100,31 @@ amount, and mode before saving any binding or reconciling credits. A session ID
 alone is never enough to grant credits. Back up the database before operational
 recovery and verify the resulting account receipt and ledger entries afterward.
 
-Alert on failed webhook delivery, prolonged pending purchases, binding mismatch,
-or reconciliation errors. Stripe delivery retries and this recovery command are
-available; scheduled reconciliation/operational alert configuration is still a
-rollout task. Do not acknowledge failures manually without reconciliation.
+For bounded periodic recovery, the same command supports `--batch --limit 25`
+instead of `--purchase`. The limit must be 1–100. It visits purchases in order of
+their last reconciliation check, including already-paid orders so missed refund
+or dispute webhooks can be recovered. It never creates Checkout sessions,
+charges, or refunds. Reconciliation still validates current Stripe state before
+changing any credits. The checks table records attempt time and a fixed outcome,
+so a failed oldest purchase cannot indefinitely starve newer purchases.
+
+The command prints purchase IDs, outcomes and resulting states, never provider
+exception messages. Any rejected/provider-failed/missing-session item produces a
+nonzero exit status after the rest of the batch is attempted. `needs_session`
+requires the single-purchase recovery procedure above; do not create another
+Checkout to guess at the missing payment. Financial receipts and adjustments
+remain append-only; reconciliation check records are operational scheduling state.
+
+Optional `deploy/systemd/havnai-account-payments.service` and `.timer` templates
+run 25 purchases every five minutes using the coordinator's private environment.
+They are repository templates only, not installed or enabled. Deploy the additive
+schema first and verify database backup/restore and a manual sandbox batch before
+enabling the timer. The service timeout bounds a run; already-committed economic
+effects remain idempotent if a process is stopped and retried. Monitor timer/service
+failures (`systemctl status havnai-account-payments.service` and its journal),
+webhook delivery failures and prolonged pending purchases. Tune batch size and
+interval to the purchase volume so paid orders are revisited within the desired
+refund recovery window. External alert delivery remains a rollout task.
 
 ## Evidence and remaining live gate
 

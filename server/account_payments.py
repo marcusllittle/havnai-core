@@ -112,6 +112,9 @@ def initialize(conn):
             event_id TEXT PRIMARY KEY, event_type TEXT NOT NULL, payment_id TEXT, processed_at REAL NOT NULL
         );
         CREATE INDEX IF NOT EXISTS account_purchases_owner ON account_purchases(account_id,created_at);
+        CREATE TABLE IF NOT EXISTS account_payment_reconcile_checks (
+            purchase_id TEXT PRIMARY KEY REFERENCES account_purchases(id),
+            checked_at REAL NOT NULL, outcome TEXT NOT NULL);
         CREATE TRIGGER IF NOT EXISTS account_receipts_no_update BEFORE UPDATE ON account_payment_receipts
             BEGIN SELECT RAISE(ABORT,'payment receipts are append-only'); END;
         CREATE TRIGGER IF NOT EXISTS account_receipts_no_delete BEFORE DELETE ON account_payment_receipts
@@ -387,6 +390,39 @@ def recover_purchase(conn, purchase_id, *, config, session_id=None):
     return _row(conn, purchase_id)["state"]
 
 
+def reconcile_batch(conn, *, config, limit=25):
+    """Bounded round-robin recovery; includes paid orders to catch missed refunds.
+
+    This only retrieves provider state. It never creates a Checkout or refund.
+    Existing reconciliation validates bindings and applies the economic changes.
+    """
+    config.require()
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise PaymentError("invalid_reconciliation_limit")
+    _require_database_mode(conn, config)
+    rows = conn.execute("""SELECT p.id FROM account_purchases p
+        LEFT JOIN account_payment_reconcile_checks c ON c.purchase_id=p.id
+        ORDER BY COALESCE(c.checked_at,0),p.created_at,p.id LIMIT ?""", (limit,)).fetchall()
+    results = []
+    for row in rows:
+        purchase_id = row[0]
+        try:
+            state = recover_purchase(conn, purchase_id, config=config)
+            outcome = "reconciled"
+        except PaymentError as exc:
+            state = None
+            # Fixed diagnostic categories only; never log provider objects or keys.
+            outcome = "needs_session" if str(exc) == "checkout_session_required" else "reconciliation_rejected"
+        except stripe.StripeError:
+            state, outcome = None, "provider_unavailable"
+        with conn:
+            conn.execute("""INSERT INTO account_payment_reconcile_checks VALUES (?,?,?)
+                ON CONFLICT(purchase_id) DO UPDATE SET checked_at=excluded.checked_at,outcome=excluded.outcome""",
+                (purchase_id, time.time(), outcome))
+        results.append({"purchase_id": purchase_id, "outcome": outcome, "state": state})
+    return results
+
+
 if __name__ == "__main__":
     import argparse
     from pathlib import Path
@@ -394,13 +430,24 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Reconcile an account purchase against Stripe without creating a charge.")
     parser.add_argument("--database", required=True)
-    parser.add_argument("--purchase", required=True)
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument("--purchase")
+    target.add_argument("--batch", action="store_true", help="Reconcile a bounded batch, including previously paid purchases")
+    parser.add_argument("--limit", type=int, default=25)
     parser.add_argument("--session", help="Stripe Checkout session id; required only if its creation response was lost")
     args = parser.parse_args()
+    if args.batch and args.session:
+        parser.error("--session requires --purchase")
     connection = sqlite3.connect("file:" + quote(str(Path(args.database).resolve())) + "?mode=rw", uri=True)
     connection.execute("PRAGMA foreign_keys=ON")
     try:
-        print(recover_purchase(connection, args.purchase, session_id=args.session, config=Config.from_environment()))
+        if args.batch:
+            results = reconcile_batch(connection, config=Config.from_environment(), limit=args.limit)
+            print(json.dumps({"results": results}))
+            if any(row["outcome"] != "reconciled" for row in results):
+                raise SystemExit(1)
+        else:
+            print(recover_purchase(connection, args.purchase, session_id=args.session, config=Config.from_environment()))
     except (PaymentError, stripe.StripeError) as exc:
         parser.exit(1, (str(exc) if isinstance(exc, PaymentError) else "payment_provider_unavailable") + "\n")
     finally:

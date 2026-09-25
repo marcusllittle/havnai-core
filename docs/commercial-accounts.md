@@ -143,16 +143,18 @@ a different account gives no rights over anything already migrated.
 The read-only first stage is available at `GET
 /v2/account/wallet-links/:link_id/import-preview?limit=50&offset=0`. It requires
 the signed-in account's active EVM wallet link and reads a consistent database
-snapshot. Its current scope is generation history and available legacy credits;
-publication, playlist, save, reference and workflow inventories still need their
-own dependency checks. No resource or balance changes during this preview.
+snapshot. Its current scope is generation history, dependent music publications
+and available legacy credits; playlist, save, reference and workflow inventories
+still need their own dependency checks. No resource or balance changes during
+this preview. Publication summaries accompany the current page of jobs, with a
+flag when the bounded 100-publication selection limit is exceeded.
 It resolves current gallery ownership, excludes active listings, non-final jobs
 and account-owned resources, and supplies bounded pagination with global counts.
 It does not expose prompts, source paths or another account's identity. Legacy
 credit amounts that exceed bounds or require rounding are marked for review.
 The preview is informational. `POST /v2/account/wallet-links/:link_id/import-snapshots`
 now persists an immutable, five-minute selection using an `Idempotency-Key` and
-`{job_ids: [...], include_credits: boolean}`. It requires recent account
+`{job_ids: [...], include_credits: boolean, publication_ids?: [...]}`. It requires recent account
 authentication, accepts at most 100 distinct eligible jobs, and rejects the whole
 selection if any job is unavailable. Credits are separately opt-in. The digest
 binds the account, current session, wallet link, exact selection, expiry, and
@@ -165,7 +167,7 @@ Neither endpoint changes ownership or balances, and `transfer_authorized` remain
 false. Fresh import proof, dependency revalidation under the execution write lock,
 atomic transfer and rollback/compensation controls below are still required before
 enabling execution. Snapshot hashes currently cover only the stated inventory;
-publication, playlist, reference and workflow dependencies remain pending.
+playlist, reference and workflow dependencies remain pending.
 
 `POST /v2/account/import-snapshots/:id/challenge` accepts only `{chain_id}` and
 requires recent account authentication plus an allowlisted request Origin. It
@@ -187,9 +189,18 @@ attribution; importing a purchased job never makes its buyer the original creato
 Legacy job/gallery access is denied once account ownership is assigned. Signed
 retries return the original receipt, including under concurrent execution.
 Receipt failure rolls back proof consumption, ownership and both balances.
-This implementation currently refuses jobs with any music publication dependency
-and selected balances with legacy Stripe history; publication selection and
-payment/refund provenance must be handled explicitly before enabling those cases.
+Publication dependencies now require explicit `publication_ids` (at most 100)
+alongside their selected jobs. Preparation rejects incomplete selections, other
+wallets' publications, existing account owners and mismatched audio artifacts.
+Version 2 snapshots and confirmation messages include those publication IDs;
+title, audio, state, attribution and ownership are rechecked during execution.
+Engagement counters and their update timestamp are deliberately excluded from
+the content digest. The existing publication rows move to account ownership,
+preserving public links, saved references, publication times and play/like counts.
+An account creator profile is created when needed. Legacy wallet unpublish is
+denied afterward; account listing, profile display, playback and unpublish are
+covered by integration tests. Selected balances with legacy Stripe history still
+require explicit payment/refund provenance handling before enabling those cases.
 Reference assets, playlists, saves and audit-driven reversal remain migration
 integration work, not completed behavior.
 

@@ -141,7 +141,7 @@ def test_publication_dependency_is_not_silently_left_behind(ready):
             conn.execute("""INSERT INTO music_publications
                 (id,job_id,audio_artifact_id,creator_wallet,title,cover_art_seed,published_at,updated_at)
                 VALUES ('pub','01-ready','artifact',?,'A song','seed',1,1)""", (ready[3].address.lower(),))
-    with pytest.raises(account_import.MigrationError, match="import_publication_migration_required"):
+    with pytest.raises(account_import.MigrationError, match="import_publication_selection_required"):
         execute(ready)
     with app.app.app_context():
         assert app.get_db().execute("SELECT used_at FROM account_import_challenges").fetchone()[0] is None

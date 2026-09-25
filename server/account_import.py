@@ -103,6 +103,27 @@ def _credit_digest(conn, wallet):
     return _digest(_rows(conn, "SELECT * FROM credits WHERE LOWER(wallet)=? ORDER BY wallet", (wallet,)))
 
 
+def _publication_selection(conn, job_ids, publication_ids, wallet):
+    rows = _rows(conn, "SELECT * FROM music_publications WHERE job_id IN (" +
+                 ",".join("?" for _ in job_ids) + ") ORDER BY id LIMIT 101", job_ids)
+    if {row["id"] for row in rows} != set(publication_ids):
+        raise MigrationError("import_publication_selection_required", 409)
+    publications = []
+    for row in rows:
+        if (row["owner_account_id"] is not None or row["creator_account_id"] is not None
+                or str(row["creator_wallet"] or "").lower() != wallet):
+            raise MigrationError("import_publication_unavailable", 409)
+        if not conn.execute("SELECT 1 FROM artifacts WHERE id=? AND job_id=? AND kind='audio'",
+                            (row["audio_artifact_id"], row["job_id"])).fetchone():
+            raise MigrationError("import_publication_unavailable", 409)
+        # Listening/liking increments updated_at; those counters remain attached
+        # to the unchanged publication ID and must not invalidate a review.
+        state = {key: value for key, value in row.items() if key not in {"play_count", "like_count", "updated_at"}}
+        publications.append({"id": row["id"], "job_id": row["job_id"], "title": row["title"],
+                             "state": row["state"], "state_digest": _digest(state)})
+    return publications
+
+
 def prepare(conn, principal, link_id, request_key, selection):
     """Persist exactly the selected inventory, without changing ownership/balances.
 
@@ -110,7 +131,8 @@ def prepare(conn, principal, link_id, request_key, selection):
     signed execution must recompute dependencies inside its own write lock.
     """
     if (not isinstance(request_key, str) or not request_key.strip() or len(request_key) > 128
-            or not isinstance(selection, dict) or set(selection) != {"job_ids", "include_credits"}):
+            or not isinstance(selection, dict) or not {"job_ids", "include_credits"} <= set(selection)
+            or set(selection) - {"job_ids", "include_credits", "publication_ids"}):
         raise MigrationError("invalid_import_selection")
     ids, include_credits = selection["job_ids"], selection["include_credits"]
     if (not isinstance(ids, list) or len(ids) > 100 or type(include_credits) is not bool
@@ -118,7 +140,14 @@ def prepare(conn, principal, link_id, request_key, selection):
             or len(set(ids)) != len(ids) or (not ids and not include_credits)):
         raise MigrationError("invalid_import_selection")
     ids = sorted(ids)
-    selection_hash = _digest({"link_id": link_id, "job_ids": ids, "include_credits": include_credits})
+    publication_ids = selection.get("publication_ids", [])
+    if (not isinstance(publication_ids, list) or len(publication_ids) > 100
+            or any(not isinstance(value, str) or not value.strip() or len(value) > 200 for value in publication_ids)
+            or len(set(publication_ids)) != len(publication_ids)):
+        raise MigrationError("invalid_import_selection")
+    publication_ids = sorted(publication_ids)
+    selection_hash = _digest({"link_id": link_id, "job_ids": ids, "include_credits": include_credits,
+                              "publication_ids": publication_ids})
     if conn.in_transaction:
         raise RuntimeError("import preparation requires an idle connection")
     conn.execute("BEGIN IMMEDIATE")
@@ -138,6 +167,7 @@ def prepare(conn, principal, link_id, request_key, selection):
             raise MigrationError("import_selection_unavailable", 409)
         if include_credits and inventory["credits"]["exclusion"] is not None:
             raise MigrationError("import_credits_require_review", 409)
+        publications = _publication_selection(conn, ids, publication_ids, inventory["wallet"])
         # Persist hashes, not private prompts or filesystem paths. Full rows
         # bind state even when an edit leaves the public summary unchanged.
         jobs = []
@@ -147,11 +177,12 @@ def prepare(conn, principal, link_id, request_key, selection):
         if include_credits:
             credits = {**inventory["credits"], "state_digest": _credit_digest(conn, inventory["wallet"])}
         now = time.time()
-        snapshot = {"version": 1, "id": "import_" + secrets.token_hex(24),
+        snapshot = {"version": 2, "id": "import_" + secrets.token_hex(24),
                     "account_id": account, "link_id": link_id, "wallet": inventory["wallet"],
                     "session_binding": session, "created_at": now, "expires_at": now + 300,
-                    "scope": (["generation_history"] if ids else []) + (["available_credits"] if include_credits else []),
-                    "jobs": jobs, "credits": credits}
+                    "scope": (["generation_history"] if ids else []) + (["available_credits"] if include_credits else [])
+                             + (["music_publications"] if publications else []),
+                    "jobs": jobs, "credits": credits, "publications": publications}
         digest = _digest(snapshot)
         conn.execute("""INSERT INTO account_import_snapshots
             (id,account_id,link_id,session_hash,request_key,selection_hash,snapshot_json,digest,created_at,expires_at)
@@ -195,6 +226,10 @@ def revalidate_in_transaction(conn, principal, snapshot_id):
     inventory = _preview(conn, account, snapshot["link_id"], limit=100, selected=ids)
     if (inventory["wallet"] != snapshot["wallet"] or inventory["total"] != len(ids)
             or inventory["eligible_count"] != len(ids)):
+        raise MigrationError("import_snapshot_changed", 409)
+    stored_publications = snapshot.get("publications", [])
+    current_publications = _publication_selection(conn, ids, [pub["id"] for pub in stored_publications], snapshot["wallet"])
+    if current_publications != stored_publications:
         raise MigrationError("import_snapshot_changed", 409)
     try:
         if any(_job_digest(conn, job["id"]) != job["state_digest"] for job in snapshot["jobs"]):
@@ -254,6 +289,7 @@ def issue_challenge(conn, principal, snapshot_id, *, origin, chain_id):
             f"session_binding: {snapshot['session_binding']}", f"snapshot_id: {snapshot_id}",
             f"snapshot_digest: {snapshot['digest']}", f"nonce: {nonce}",
             f"job_ids: {_json([job['id'] for job in snapshot['jobs']])}",
+            f"publication_ids: {_json([pub['id'] for pub in snapshot.get('publications', [])])}",
             f"credit_units: {credits}", f"credit_scale: {account_ledger.SCALE}",
             f"expires_at: {expires:.6f}",
             "Authorize only this unchanged selection to move from the linked wallet to this account.",
@@ -269,8 +305,8 @@ def execute(conn, principal, snapshot_id, *, challenge_id, signature, origin, ch
     """Internal signed transfer; not exposed by an HTTP route during rollout.
 
     The adapter must enforce recent authentication and an allowlisted Origin.
-    Jobs with publication dependencies and balances with legacy Stripe history
-    are refused until their explicit migration/provenance flows are implemented.
+    Publications require explicit selection with their jobs. Balances with legacy
+    Stripe history are refused until their provenance flow is implemented.
     """
     from eth_account import Account
     from eth_account.messages import encode_defunct
@@ -311,9 +347,6 @@ def execute(conn, principal, snapshot_id, *, challenge_id, signature, origin, ch
             raise MigrationError("invalid_import_challenge", 409)
         snapshot = revalidate_in_transaction(conn, principal, snapshot_id)
         ids = [job["id"] for job in snapshot["jobs"]]
-        for job_id in ids:
-            if conn.execute("SELECT 1 FROM music_publications WHERE job_id=? LIMIT 1", (job_id,)).fetchone():
-                raise MigrationError("import_publication_migration_required", 409)
         if snapshot["credits"] is not None and conn.execute(
                 "SELECT 1 FROM stripe_payments WHERE LOWER(wallet)=? LIMIT 1", (snapshot["wallet"],)).fetchone():
             raise MigrationError("import_payment_provenance_required", 409)
@@ -334,13 +367,24 @@ def execute(conn, principal, snapshot_id, *, challenge_id, signature, origin, ch
                 raise MigrationError("import_snapshot_changed", 409)
             transferred.append({"id": job_id, "previous_owner_wallet": snapshot["wallet"],
                                 "creator_wallet": before[0], "owner_account_id": account})
+        for publication in snapshot.get("publications", []):
+            changed = conn.execute("""UPDATE music_publications SET owner_account_id=?,creator_account_id=?
+                WHERE id=? AND owner_account_id IS NULL AND creator_account_id IS NULL AND LOWER(creator_wallet)=?""",
+                (account, account, publication["id"], snapshot["wallet"]))
+            if changed.rowcount != 1:
+                raise MigrationError("import_snapshot_changed", 409)
+        if snapshot.get("publications"):
+            profile_id = "creator_" + secrets.token_hex(16)
+            conn.execute("INSERT OR IGNORE INTO account_public_profiles VALUES (?,?,?,?)",
+                         (profile_id, account, "Creator " + profile_id[-6:], now))
         credit_receipt = None
         units = snapshot["credits"]["available_units"] if snapshot["credits"] else 0
         if units:
             credit_receipt = account_ledger.import_legacy_in_transaction(conn, account, snapshot["wallet"],
                                                                        units, migration_id=snapshot_id)
         receipt = {"id": snapshot_id, "account_id": account, "wallet": snapshot["wallet"],
-                   "digest": snapshot["digest"], "jobs": transferred, "credit_units": units,
+                   "digest": snapshot["digest"], "jobs": transferred,
+                   "publication_ids": [pub["id"] for pub in snapshot.get("publications", [])], "credit_units": units,
                    "credit_receipt": credit_receipt, "created_at": now}
         conn.execute("INSERT INTO account_import_receipts VALUES (?,?,?,?,?)",
                      (snapshot_id, account, challenge_id, _json(receipt), now))
@@ -407,6 +451,17 @@ def _preview(conn, account, link_id, *, limit=50, offset=0, selected=None):
                         (*params, limit, offset)).fetchall()
     jobs = [{"id": row[0], "status": row[1], "type": row[2], "created_at": row[3],
              "eligible": row[4] is None, "exclusion": row[4]} for row in rows]
+    page_ids = [job["id"] for job in jobs]
+    publication_rows = _rows(conn, "SELECT id,job_id,title,state,creator_wallet,creator_account_id,owner_account_id "
+        "FROM music_publications WHERE job_id IN (" + ",".join("?" for _ in page_ids) + ") ORDER BY id LIMIT 101", page_ids)
+    publications = []
+    eligible_jobs = {job["id"] for job in jobs if job["eligible"]}
+    for publication in publication_rows[:100]:
+        owned = (publication["owner_account_id"] is None and publication["creator_account_id"] is None
+                 and str(publication["creator_wallet"] or "").lower() == wallet)
+        publications.append({"id": publication["id"], "job_id": publication["job_id"],
+            "title": publication["title"] if owned else None, "state": publication["state"] if owned else None,
+            "eligible": owned and publication["job_id"] in eligible_jobs})
     balances = conn.execute("SELECT balance FROM credits WHERE LOWER(wallet)=?", (wallet,)).fetchall()
     units, credit_exclusion = 0, None
     if len(balances) > 1:
@@ -424,8 +479,9 @@ def _preview(conn, account, link_id, *, limit=50, offset=0, selected=None):
         except (InvalidOperation, ValueError):
             credit_exclusion = "invalid_wallet_balance"
     return {"link_id": link_id, "wallet": wallet, "read_only": True,
-            "scope": ["generation_history", "available_credits"],
+            "scope": ["generation_history", "available_credits", "music_publications"],
             "jobs": jobs, "total": total, "eligible_count": eligible, "exclusions": exclusions,
+            "publications": publications, "publication_selection_limit_exceeded": len(publication_rows) > 100,
             "limit": limit, "offset": offset,
             "credits": {"available_units": units if credit_exclusion is None else None,
                         "scale": account_ledger.SCALE, "exclusion": credit_exclusion},

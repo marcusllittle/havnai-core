@@ -17,6 +17,7 @@ def inventory(platform, keys):
     with app.app.app_context():
         conn = app.get_db()
         app.gallery.init_gallery_tables(conn)
+        app.music_discover.init_music_discover_tables(conn)
         with conn:
             conn.execute("INSERT INTO wallet_links(id,account_id,wallet,verified_at,linked_at) VALUES ('link-import',?,?,1,1)", (account, WALLET))
             for job_id, wallet, status, owner in [

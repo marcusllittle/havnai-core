@@ -33,7 +33,7 @@ production database/media restore readiness.
 | Requirement | Evidence still needed |
 | --- | --- |
 | Conventional production credit funding | Sandbox account/key and local webhook listener are now configured privately. A provider read confirmed the expected account and `livemode=false`; the local catalog reports checkout available. Actual checkout/webhook/receipt/ledger acceptance is pending. Production configuration and approved published terms/pricing/refund policy remain open. |
-| Refund correctness in service | Real provider refund and missed-webhook recovery, with account balance/receipt verification. Current provider calls in tests are mocked. |
+| Refund correctness in service | Actual Stripe sandbox refund and repeated provider reconciliation now verified below. Production and missed-webhook acceptance remain open; regression-suite provider calls are mocked. |
 | Generate/recover/publish/manage without MetaMask | Signed-in browser acceptance against real generation workers for supported media, including reload recovery and private library/publication checks. Unit/API tests alone are insufficient. |
 | Optional wallet linkage | Real wallet recent-auth link/unlink/import acceptance; confirm ordinary account navigation never prompts. |
 | Legacy association and launch | Signed selective migration now includes song likes/saves and workflows. Source uploads have an explicit account re-upload path because legacy labels do not establish ownership. Legacy Stripe credit provenance, audited reversal/compensation, production backup/restore and migration review remain rollout gates. Import execution remains disabled by default. |
@@ -70,3 +70,27 @@ the explicit `sandbox-2026-09-25` policy. This proves configuration, not funding
 The development-only web policy is not commercial terms and returns 404 outside
 development. The user is performing browser acceptance in their regular browser
 because Google rejected the automation browser. No production service was changed.
+
+## Actual Stripe sandbox purchase and refund
+
+On 2026-09-25 at 16:04 local time, the user's signed-in browser purchased the
+50-credit/$5 sandbox pack. Purchase `pur_df393363413a481dbc37a0472f72676a` reached
+`paid` through the local webhook. Read-only database checks showed 50,000 available
+units, zero reserved/debt units, one `fund` ledger entry and one immutable payment
+receipt with the test policy revision. Two subsequent provider reconciliations
+left all economic records unchanged: no duplicate funding or receipt.
+
+At 16:06, an idempotent full sandbox refund (`re_3UJfMMFWBrjj49xV07gYUnEU`) returned
+`succeeded` for 500 cents. Without manual ledger edits or recovery, a refund webhook
+changed the purchase to `refunded`, balance to zero and added exactly one -50,000
+unit payment adjustment. The original receipt remained intact. Two further provider
+reconciliations retained zero balance and the same two ledger entries.
+
+Concurrent notifications produced one 503 on purchase and two 503s on refund while
+the sibling notifications returned 200 and committed the correct result. The code
+has a retryable revision fence for concurrent provider reads; the listener did not
+capture the 503 response bodies, so that cause is not conclusively established by
+these logs. Explicit failed-event redelivery remains to verify. Browser display of
+the refunded receipt, failed-payment acceptance, missed-webhook recovery and real
+account-funded worker generation remain open. No actual money moved, and this
+sandbox result does not satisfy the required production payment path.

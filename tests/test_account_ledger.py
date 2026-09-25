@@ -152,3 +152,126 @@ def test_mutations_require_transaction_and_ledger_is_immutable(database):
         with pytest.raises(sqlite3.IntegrityError, match="append-only"):
             with conn:
                 conn.execute(sql)
+
+
+def seller_account(conn):
+    return identity.ensure_account(conn, identity.VerifiedPrincipal("issuer", "seller", "session"))
+
+
+def test_sale_receipt_binds_both_accounts_and_price(database):
+    conn, _, buyer = database
+    seller = seller_account(conn)
+    fund(conn, buyer)
+    first = transact(conn, ledger.settle_sale_in_transaction, buyer, seller, 700, sale_id="sale-1")
+    retry = transact(conn, ledger.settle_sale_in_transaction, buyer, seller, 700, sale_id="sale-1")
+    assert retry == {**first, "replayed": True}
+    assert ledger.balance(conn, buyer)["available_units"] == 300
+    assert ledger.balance(conn, seller)["available_units"] == 700
+    for args in [(buyer, seller, 701), (seller, buyer, 700)]:
+        with pytest.raises(ledger.LedgerError, match="idempotency_conflict"):
+            transact(conn, ledger.settle_sale_in_transaction, *args, sale_id="sale-1")
+    assert conn.execute("SELECT COUNT(*) FROM account_credit_sales").fetchone()[0] == 1
+    entries = conn.execute("SELECT settled_delta FROM account_credit_ledger WHERE resource_id='sale-1'").fetchall()
+    assert sorted(row[0] for row in entries) == [-700, 700]
+    for sql in ["DELETE FROM account_credit_sales", "UPDATE account_credit_sales SET units=1"]:
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            with conn:
+                conn.execute(sql)
+
+
+def test_sale_cannot_spend_reserved_generation_credits(database):
+    conn, _, buyer = database
+    seller = seller_account(conn)
+    fund(conn, buyer)
+    transact(conn, ledger.reserve_in_transaction, buyer, 600, job_id="running")
+    with pytest.raises(ledger.LedgerError, match="insufficient_credits"):
+        transact(conn, ledger.settle_sale_in_transaction, buyer, seller, 500, sale_id="sale")
+    assert ledger.balance(conn, buyer)["available_units"] == 400
+    assert ledger.balance(conn, seller)["settled_units"] == 0
+    assert conn.execute("SELECT COUNT(*) FROM account_credit_sales").fetchone()[0] == 0
+
+
+def test_failed_seller_credit_undoes_debit_even_when_caller_catches(database):
+    conn, _, buyer = database
+    seller = seller_account(conn)
+    fund(conn, buyer)
+    fund(conn, seller, ledger.MAX_UNITS, "seller-funding")
+    conn.execute("BEGIN IMMEDIATE")
+    with conn:
+        with pytest.raises(ledger.LedgerError, match="ledger_limit_exceeded"):
+            ledger.settle_sale_in_transaction(conn, buyer, seller, 700, sale_id="sale")
+        assert conn.in_transaction
+    assert ledger.balance(conn, buyer)["settled_units"] == 1000
+    assert ledger.balance(conn, seller)["settled_units"] == ledger.MAX_UNITS
+    assert conn.execute("SELECT COUNT(*) FROM account_credit_ledger WHERE resource_id='sale'").fetchone()[0] == 0
+
+
+def test_sale_rolls_back_with_ownership_failure(database):
+    conn, _, buyer = database
+    seller = seller_account(conn)
+    fund(conn, buyer)
+    with pytest.raises(RuntimeError, match="ownership"):
+        conn.execute("BEGIN IMMEDIATE")
+        with conn:
+            ledger.settle_sale_in_transaction(conn, buyer, seller, 700, sale_id="sale")
+            raise RuntimeError("ownership write failed")
+    assert ledger.balance(conn, buyer)["settled_units"] == 1000
+    assert ledger.balance(conn, seller)["settled_units"] == 0
+    assert conn.execute("SELECT COUNT(*) FROM account_credit_sales").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("mode", ["same_sale", "different_sales"])
+def test_concurrent_sales_are_idempotent_and_cannot_overspend(database, mode):
+    conn, path, buyer = database
+    seller = seller_account(conn)
+    fund(conn, buyer)
+    barrier = threading.Barrier(6)
+
+    def buy(index):
+        db = sqlite3.connect(path, timeout=10)
+        try:
+            barrier.wait(timeout=10)
+            return transact(db, ledger.settle_sale_in_transaction, buyer, seller, 300,
+                            sale_id="shared" if mode == "same_sale" else f"sale-{index}")
+        except ledger.LedgerError as exc:
+            return str(exc)
+        finally:
+            db.close()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+        results = list(pool.map(buy, range(6)))
+    sales = 1 if mode == "same_sale" else 3
+    assert ledger.balance(conn, buyer)["available_units"] == 1000 - sales * 300
+    assert ledger.balance(conn, seller)["available_units"] == sales * 300
+    assert conn.execute("SELECT COUNT(*) FROM account_credit_sales").fetchone()[0] == sales
+    if mode == "same_sale":
+        assert sum(result["replayed"] for result in results) == 5
+    else:
+        assert results.count("insufficient_credits") == 3
+
+
+def test_sale_rejects_self_unknown_and_suspended_accounts(database):
+    conn, _, buyer = database
+    seller = seller_account(conn)
+    fund(conn, buyer)
+    with pytest.raises(RuntimeError, match="transaction"):
+        ledger.settle_sale_in_transaction(conn, buyer, seller, 10, sale_id="sale")
+    with pytest.raises(ledger.LedgerError, match="cannot_buy_own"):
+        transact(conn, ledger.settle_sale_in_transaction, buyer, buyer, 10, sale_id="self")
+    with conn:
+        conn.execute("UPDATE accounts SET status='suspended' WHERE id=?", (seller,))
+    for target in (seller, "missing"):
+        with pytest.raises(ledger.LedgerError, match="sale_account_unavailable"):
+            transact(conn, ledger.settle_sale_in_transaction, buyer, target, 10, sale_id="sale")
+    assert ledger.balance(conn, buyer)["settled_units"] == 1000
+
+
+@pytest.mark.parametrize("units", [0, -1, True, 1.5, float("nan"), "1000", 10**16])
+def test_sale_rejects_invalid_prices_without_moving_credits(database, units):
+    conn, _, buyer = database
+    seller = seller_account(conn)
+    fund(conn, buyer)
+    with pytest.raises(ledger.LedgerError, match="invalid_credit_units"):
+        transact(conn, ledger.settle_sale_in_transaction, buyer, seller, units, sale_id="invalid")
+    assert ledger.balance(conn, buyer)["settled_units"] == 1000
+    assert ledger.balance(conn, seller)["settled_units"] == 0

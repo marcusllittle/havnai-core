@@ -217,6 +217,22 @@ state transition and durable creation/state change commit together. Repeated job
 submission, completion or failure cannot charge/refund twice. Concurrent spends
 use an atomic available-balance condition under the database transaction.
 
+Marketplace settlement now has an internal `settle_sale_in_transaction` primitive.
+It transfers integer units from the buyer's available balance to the seller and
+records paired ledger entries plus an immutable `account_credit_sales` receipt.
+The sale ID binds buyer, seller and price globally; identical retries return the
+same receipt, while changed participants or price conflict. Generation reservations
+remain unavailable to purchases. Both accounts must be active for a new sale.
+Seller-limit failures undo the debit even if the caller catches the exception.
+This preserves the existing marketplace's full-price seller credit rule; it does
+not introduce cash payouts, fees, or wallet-to-account balance conversion.
+
+The marketplace API must validate ownership and price, allocate the sale ID, and
+commit the ownership transfer in that same caller-owned write transaction. That
+API integration is still pending; the ledger primitive alone does not enable
+account purchases. `tests/test_account_ledger.py` covers receipt replay/conflicts,
+concurrent purchases, reserved balances, seller failure and outer rollback.
+
 Checkout persists an immutable server-priced purchase intent before contacting
 Stripe, uses a stable provider idempotency key, and survives a crash between API
 success and local persistence through reconciliation. Never use client-supplied

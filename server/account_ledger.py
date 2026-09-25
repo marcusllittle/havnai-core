@@ -46,12 +46,28 @@ def initialize(conn: sqlite3.Connection) -> None:
             state TEXT NOT NULL CHECK(state IN ('reserved','captured','released')),
             created_at REAL NOT NULL, updated_at REAL NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS account_credit_sales (
+            sale_id TEXT PRIMARY KEY,
+            buyer_account_id TEXT NOT NULL REFERENCES accounts(id),
+            seller_account_id TEXT NOT NULL REFERENCES accounts(id),
+            units INTEGER NOT NULL CHECK(typeof(units)='integer' AND units>0),
+            debit_entry_id INTEGER NOT NULL REFERENCES account_credit_ledger(id),
+            credit_entry_id INTEGER NOT NULL REFERENCES account_credit_ledger(id),
+            created_at REAL NOT NULL,
+            CHECK(buyer_account_id<>seller_account_id)
+        );
         CREATE TRIGGER IF NOT EXISTS account_ledger_no_update
             BEFORE UPDATE ON account_credit_ledger BEGIN
                 SELECT RAISE(ABORT, 'credit ledger is append-only'); END;
         CREATE TRIGGER IF NOT EXISTS account_ledger_no_delete
             BEFORE DELETE ON account_credit_ledger BEGIN
                 SELECT RAISE(ABORT, 'credit ledger is append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS account_sales_no_update
+            BEFORE UPDATE ON account_credit_sales BEGIN
+                SELECT RAISE(ABORT, 'sale receipts are append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS account_sales_no_delete
+            BEFORE DELETE ON account_credit_sales BEGIN
+                SELECT RAISE(ABORT, 'sale receipts are append-only'); END;
     """)
 
 
@@ -110,6 +126,56 @@ def fund_in_transaction(conn: sqlite3.Connection, account_id: str, units: int, *
     _units(units)
     return _apply(conn, account_id, operation="fund", key=f"fund:{payment_id}", resource=payment_id,
                   settled_delta=units, reserved_delta=0, actor=actor, reason="paid_credit_purchase")
+
+
+def settle_sale_in_transaction(conn: sqlite3.Connection, buyer_account_id: str,
+                               seller_account_id: str, units: int, *, sale_id: str) -> dict:
+    """Pair a marketplace debit and seller credit with a durable sale receipt.
+
+    The caller must validate the listing and commit ownership in this same write
+    transaction. This is an internal settlement primitive, not a transfer API.
+    A savepoint prevents a caller that catches an error from retaining half a
+    transfer. A globally unique sale ID binds both participants and the price.
+    """
+    if not conn.in_transaction:
+        raise RuntimeError("sale settlement requires a caller-owned transaction")
+    _units(units)
+    if not isinstance(sale_id, str) or not sale_id.strip() or len(sale_id) > 200:
+        raise LedgerError("invalid_sale_id")
+    if buyer_account_id == seller_account_id:
+        raise LedgerError("cannot_buy_own_listing")
+    existing = conn.execute("""SELECT buyer_account_id,seller_account_id,units,
+        debit_entry_id,credit_entry_id FROM account_credit_sales WHERE sale_id=?""",
+        (sale_id,)).fetchone()
+    if existing:
+        if tuple(existing[:3]) != (buyer_account_id, seller_account_id, units):
+            raise LedgerError("idempotency_conflict")
+        return {"sale_id": sale_id, "debit_entry_id": existing[3],
+                "credit_entry_id": existing[4], "replayed": True}
+    for account_id in (buyer_account_id, seller_account_id):
+        row = conn.execute("SELECT status FROM accounts WHERE id=?", (account_id,)).fetchone()
+        if not row or row[0] != "active":
+            raise LedgerError("sale_account_unavailable")
+    conn.execute("SAVEPOINT account_sale_settlement")
+    try:
+        debit = _apply(conn, buyer_account_id, operation="marketplace_purchase",
+                       key=f"sale_debit:{sale_id}", resource=sale_id, settled_delta=-units,
+                       reserved_delta=0, actor=buyer_account_id, reason="marketplace_purchase",
+                       require_available=units)
+        credit = _apply(conn, seller_account_id, operation="marketplace_sale",
+                        key=f"sale_credit:{sale_id}", resource=sale_id, settled_delta=units,
+                        reserved_delta=0, actor=buyer_account_id, reason="marketplace_sale")
+        conn.execute("""INSERT INTO account_credit_sales
+            (sale_id,buyer_account_id,seller_account_id,units,debit_entry_id,credit_entry_id,created_at)
+            VALUES (?,?,?,?,?,?,?)""", (sale_id, buyer_account_id, seller_account_id, units,
+                                       debit["entry_id"], credit["entry_id"], time.time()))
+    except Exception:
+        conn.execute("ROLLBACK TO account_sale_settlement")
+        conn.execute("RELEASE account_sale_settlement")
+        raise
+    conn.execute("RELEASE account_sale_settlement")
+    return {"sale_id": sale_id, "debit_entry_id": debit["entry_id"],
+            "credit_entry_id": credit["entry_id"], "replayed": False}
 
 
 def reverse_funding_in_transaction(conn: sqlite3.Connection, account_id: str, units: int, *,

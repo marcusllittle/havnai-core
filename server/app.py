@@ -4087,7 +4087,7 @@ def get_creator_tasks() -> Any:
                 if isinstance(ltx2_settings, dict):
                     for key in (
                         "prompt", "negative_prompt", "seed", "steps", "guidance", "width", "height",
-                        "frames", "fps", "init_image", "source_asset_id", "audio_asset_id", "timeout",
+                        "frames", "fps", "init_image", "source_asset_id", "audio_asset_id", "timeout", "strength",
                         "preset", "aspect_ratio", "delivery_width", "delivery_height", "motion_strength",
                     ):
                         if key in ltx2_settings and ltx2_settings[key] is not None:

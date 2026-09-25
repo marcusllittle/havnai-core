@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import secrets
 import sqlite3
@@ -266,6 +267,21 @@ def parse_json_object(value: Any) -> Dict[str, Any]:
     return dict(parsed) if isinstance(parsed, dict) else {}
 
 
+def _video_number(payload, key, default, low, high, *, integer=False, error=None):
+    raw = payload.get(key, default)
+    if raw is None or raw == "":
+        raw = default
+    try:
+        value = float(raw)
+        if isinstance(raw, bool) or not math.isfinite(value) or not low <= value <= high:
+            raise ValueError()
+        if integer and not value.is_integer():
+            raise ValueError()
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(error or f"invalid_video_{key}") from exc
+    return int(value) if integer else value
+
+
 def resolve_video_spec(payload: Mapping[str, Any], *, model: str, backend: str = "auto") -> Dict[str, Any]:
     preset = str(payload.get("preset") or "fast_upscaled").strip().lower()
     aspect = str(payload.get("aspect_ratio") or payload.get("aspect") or "9:16").strip()
@@ -273,30 +289,41 @@ def resolve_video_spec(payload: Mapping[str, Any], *, model: str, backend: str =
         raise ValueError("invalid_preset")
     if aspect not in {"9:16", "16:9"}:
         raise ValueError("invalid_aspect_ratio")
-    try:
-        duration = int(payload.get("duration_seconds") or payload.get("duration") or 5)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("invalid_duration") from exc
+    duration = _video_number({"duration": payload.get("duration_seconds", payload.get("duration", 5))},
+                             "duration", 5, 3, 8, integer=True, error="invalid_duration")
     if duration not in VIDEO_DURATIONS:
         raise ValueError("invalid_duration")
 
-    dimensions = VIDEO_PRESETS[preset][aspect]
-    fps = max(8, min(24, int(payload.get("fps") or 16)))
-    requested_frames = int(payload.get("frames") or (duration * fps + 1))
+    dimensions = dict(VIDEO_PRESETS[preset][aspect])
+    custom_dimensions = payload.get("width") is not None or payload.get("height") is not None
+    if custom_dimensions:
+        if payload.get("width") is None or payload.get("height") is None:
+            raise ValueError("invalid_video_dimensions")
+        for key in ("width", "height"):
+            dimensions[key] = _video_number(payload, key, dimensions[key], 256, 1280, integer=True)
+            if dimensions[key] % 32:
+                raise ValueError("invalid_video_dimensions")
+            dimensions[f"delivery_{key}"] = dimensions[key]
+    fps = _video_number(payload, "fps", 16, 8, 30, integer=True)
+    requested_frames = _video_number(payload, "frames", duration * fps + 1, 9, 257, integer=True)
     # LTX/SANA video pipelines commonly require 8n+1 frame counts.
     frames = max(9, ((requested_frames - 1) // 8) * 8 + 1)
-    seed = payload.get("seed")
-    if seed is None or int(seed) < 0:
+    seed = _video_number(payload, "seed", -1, -1, 2**32 - 1, integer=True, error="invalid_seed")
+    if seed < 0:
         seed = secrets.randbelow(2**31)
+    steps = _video_number(payload, "steps", 8 if preset == "fast_upscaled" else 12, 1, 150, integer=True)
+    guidance = _video_number(payload, "guidance", 1.0 if "distilled" in model.lower() else 3.0, 0, 20)
+    motion = _video_number(payload, "motion_strength", 0.65, 0, 1)
+    strength = _video_number(payload, "strength", 1.0, 0, 1)
 
     return {
         "schema_version": 1,
         "task_type": "image_to_video",
         "model": {"id": model},
         "engine": {"backend": backend},
-        "preset": preset,
-        "aspect_ratio": aspect,
-        "duration_seconds": duration,
+        "preset": "custom" if custom_dimensions else preset,
+        "aspect_ratio": f"{dimensions['width']}:{dimensions['height']}" if custom_dimensions else aspect,
+        "duration_seconds": (frames - 1) / fps,
         "timeout_seconds": VIDEO_TIMEOUT_SECONDS,
         "parameters": {
             "seed": int(seed),
@@ -306,9 +333,10 @@ def resolve_video_spec(payload: Mapping[str, Any], *, model: str, backend: str =
             "delivery_height": int(dimensions["delivery_height"]),
             "frames": frames,
             "fps": fps,
-            "steps": int(payload.get("steps") or (8 if preset == "fast_upscaled" else 12)),
-            "guidance": float(payload.get("guidance") or (1.0 if "distilled" in model.lower() else 3.0)),
-            "motion_strength": float(payload.get("motion_strength") or 0.65),
+            "steps": steps,
+            "guidance": guidance,
+            "motion_strength": motion,
+            **({"strength": strength} if payload.get("strength") is not None else {}),
         },
     }
 

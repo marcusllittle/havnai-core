@@ -119,6 +119,48 @@ def test_account_anchor_same_slug_does_not_share_ownership(platform, keys):
     assert harness.client.get("/v2/account/identity-anchors", headers=headers).json["anchors"][0]["asset_id"] == ids[0]
 
 
+@pytest.mark.parametrize("control,value", [
+    ("frames", 1000000), ("frames", True), ("frames", 1), ("fps", 60), ("fps", "bad"),
+    ("steps", 0), ("steps", 151), ("steps", 3.5), ("guidance", "NaN"),
+    ("guidance", "Infinity"), ("guidance", {}), ("motion_strength", -1),
+    ("strength", 2), ("seed", 2**32), ("seed", -2), ("seed", False),
+    ("duration_seconds", 5.5), ("width", 511), ("width", 999999),
+])
+def test_invalid_video_controls_fail_before_reserving_credits(platform, control, value):
+    harness, headers, _ = platform
+    asset = harness.client.post("/v2/assets", headers=headers,
+        data={"kind": "image", "file": (io.BytesIO(b"image"), "source.png")}).json
+    payload = {"type": "image_to_video", "model": platform_fixture.VIDEO_MODEL, "prompt": "camera move",
+               "source_asset_id": asset["id"], "width": 512, "height": 512, control: value}
+    response = harness.client.post("/v2/jobs", headers=headers, json=payload)
+    assert response.status_code == 400, response.json
+    assert harness.client.get("/v2/jobs", headers=headers).json["count"] == 0
+    assert harness.client.get("/v2/account/credits", headers=headers).json["reserved_units"] == 0
+
+
+def test_account_video_controls_survive_enqueue_claim_and_retry(platform):
+    harness, headers, _ = platform
+    asset = harness.client.post("/v2/assets", headers=headers,
+        data={"kind": "image", "file": (io.BytesIO(b"image"), "source.png")}).json
+    controls = {"width": 640, "height": 512, "fps": 24, "frames": 97, "seed": 0,
+                "steps": 30, "guidance": 0, "motion_strength": 0, "strength": 0.25}
+    payload = {"type": "image_to_video", "model": platform_fixture.VIDEO_MODEL, "prompt": "camera move",
+               "source_asset_id": asset["id"], **controls}
+    first = harness.client.post("/v2/jobs", headers=headers, json=payload)
+    assert first.status_code == 202, first.json
+    params = first.json["resolved_spec"]["parameters"]
+    assert first.json["resolved_spec"]["duration_seconds"] == 4
+    for key, value in controls.items():
+        assert params[key] == value
+    assert params["delivery_width"] == 640
+    assert params["delivery_height"] == 512
+    task = harness._claim(first.json["id"])
+    for key, value in controls.items():
+        assert task[key] == value
+    retry = harness.client.post("/v2/jobs", headers=headers, json=payload)
+    assert retry.json["id"] == first.json["id"]
+
+
 def test_revoked_session_cannot_recover_or_submit_studio_jobs(platform):
     harness, headers, _ = platform
     created = create(harness, headers)

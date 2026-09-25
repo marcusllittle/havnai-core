@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import math
 import credits
+import account_marketplace
 
 import json
 import sqlite3
@@ -114,6 +115,7 @@ def init_gallery_tables(conn: sqlite3.Connection) -> None:
         pass
 
     conn.commit()
+    account_marketplace.initialize(conn)
 
 
 def create_listing(

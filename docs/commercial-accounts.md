@@ -227,11 +227,31 @@ Seller-limit failures undo the debit even if the caller catches the exception.
 This preserves the existing marketplace's full-price seller credit rule; it does
 not introduce cash payouts, fees, or wallet-to-account balance conversion.
 
-The marketplace API must validate ownership and price, allocate the sale ID, and
-commit the ownership transfer in that same caller-owned write transaction. That
-API integration is still pending; the ledger primitive alone does not enable
-account purchases. `tests/test_account_ledger.py` covers receipt replay/conflicts,
+The account marketplace mutation API validates ownership and price, allocates the
+sale ID, and commits the ownership transfer in that same caller-owned write
+transaction. `tests/test_account_ledger.py` covers receipt replay/conflicts,
 concurrent purchases, reserved balances, seller failure and outer rollback.
+
+`POST /v2/marketplace/listings` accepts job/artifact IDs, title, optional description
+and category, and integer `price_units`. The job must belong to the signed-in
+account, have succeeded, have captured its generation reservation, and be an
+`IMAGE_GEN` output (the existing marketplace eligibility rule). The selected
+image artifact must still exist. `POST /v2/marketplace/listings/:id/purchase`
+requires `expected_price_units`. Both operations require an `Idempotency-Key`;
+their account-scoped durable intent records return the original result on retry.
+`DELETE /v2/marketplace/listings/:id` is an idempotent owner-only delist. A buyer
+can relist using the listing creation route with a new key.
+
+Sales transfer the job's account ownership, so artifact download and Collection
+authorization follow the buyer immediately. Creator provenance and source-upload
+ownership stay intact. Purchased jobs reappear in the buyer's Collection even if
+previously hidden. Listing, sales and provenance rows use separate account
+columns; wallet fields remain blank for account activity. Integer price columns
+are authoritative; legacy REAL columns are compatibility mirrors only.
+Account mutations are tested through authenticated HTTP and real database races
+in `tests/test_account_marketplace.py`. Public previews/catalog reads and the
+account-aware web marketplace are still pending; these backend routes alone do
+not make the marketplace UI ready.
 
 Legacy gallery access now excludes any job with an account owner, even when an
 old wallet listing, sale or ownership log still exists. This applies to browse

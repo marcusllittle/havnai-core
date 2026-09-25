@@ -13,6 +13,7 @@ import account_identity
 import account_ledger
 import account_payments
 import account_lifecycle
+import account_marketplace
 import stripe
 
 
@@ -51,6 +52,32 @@ def create_blueprint(get_db: Callable[[], sqlite3.Connection], rate_limit: Calla
     @api.errorhandler(account_payments.PaymentError)
     def payment_error(exc):
         return fail(str(exc), exc.status)
+
+    @api.errorhandler(account_marketplace.MarketplaceError)
+    def marketplace_error(exc):
+        return fail(str(exc), exc.status)
+
+    @api.post("/marketplace/listings")
+    @authenticate()
+    def marketplace_list():
+        result = account_marketplace.create(get_db(), g.account_id,
+            request.headers.get("Idempotency-Key", ""), request.get_json(silent=True))
+        return jsonify(result), 201
+
+    @api.post("/marketplace/listings/<int:listing_id>/purchase")
+    @authenticate()
+    def marketplace_purchase(listing_id):
+        try:
+            return jsonify(account_marketplace.purchase(get_db(), g.account_id, listing_id,
+                request.headers.get("Idempotency-Key", ""), request.get_json(silent=True)))
+        except account_ledger.LedgerError as exc:
+            return fail(str(exc), 409)
+
+    @api.delete("/marketplace/listings/<int:listing_id>")
+    @authenticate()
+    def marketplace_delist(listing_id):
+        account_marketplace.delist(get_db(), g.account_id, listing_id)
+        return "", 204
 
     @api.errorhandler(account_lifecycle.LifecycleError)
     def lifecycle_error(exc):

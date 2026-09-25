@@ -11,6 +11,8 @@ from flask import Blueprint, g, jsonify, request
 import account_auth
 import account_identity
 import account_ledger
+import account_payments
+import stripe
 
 
 def create_blueprint(get_db: Callable[[], sqlite3.Connection], rate_limit: Callable[..., bool]) -> Blueprint:
@@ -45,6 +47,15 @@ def create_blueprint(get_db: Callable[[], sqlite3.Connection], rate_limit: Calla
         status = 403 if code == "account_suspended" else 409 if code == "wallet_already_linked" else 422
         return fail(code, status)
 
+    @api.errorhandler(account_payments.PaymentError)
+    def payment_error(exc):
+        return fail(str(exc), exc.status)
+
+    @api.errorhandler(stripe.StripeError)
+    def provider_error(exc):
+        # Provider exceptions can contain request data. Keep it out of responses.
+        return fail("payment_provider_unavailable", 503)
+
     @api.after_request
     def private(response):
         response.headers["Cache-Control"] = "private, no-store"
@@ -72,10 +83,70 @@ def create_blueprint(get_db: Callable[[], sqlite3.Connection], rate_limit: Calla
             limit = min(100, max(1, int(request.args.get("limit", "30"))))
         except ValueError:
             return fail("invalid_pagination", 422)
+        if not 0 < cursor <= 2**63 - 1:
+            return fail("invalid_pagination", 422)
         rows = get_db().execute("""SELECT id,operation,resource_id,settled_delta,reserved_delta,
             settled_after,reserved_after,reason,created_at FROM account_credit_ledger
             WHERE account_id=? AND id<? ORDER BY id DESC LIMIT ?""", (g.account_id, cursor, limit)).fetchall()
         return jsonify({"entries": [dict(row) for row in rows], "next_cursor": rows[-1]["id"] if len(rows) == limit else None})
+
+    @api.get("/credit-packages")
+    def credit_packages():
+        config = account_payments.Config.from_environment()
+        try:
+            config.require(checkout=True)
+            available = True
+        except account_payments.PaymentError:
+            available = False
+        return jsonify({"packages": account_payments.PACKAGES, "currency": "usd", "scale": account_ledger.SCALE,
+                        "checkout_available": available, "terms_version": config.terms_version})
+
+    @api.post("/account/checkout")
+    @authenticate()
+    def checkout():
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict) or set(data) != {"package_id", "terms_version"}:
+            return fail("invalid_payload", 422)
+        if not rate_limit(f"checkout:{g.account_id}", limit=10):
+            return fail("rate_limited", 429)
+        result = account_payments.create_checkout(get_db(), g.account_id, package_id=data["package_id"],
+            terms_version=data["terms_version"], request_key=request.headers.get("Idempotency-Key", ""),
+            config=account_payments.Config.from_environment())
+        return jsonify(result), 201
+
+    @api.get("/account/purchases")
+    @authenticate()
+    def purchases():
+        # Opaque purchase id cursor preserves ties in creation timestamps.
+        conn = get_db()
+        cursor = request.args.get("before")
+        params = [g.account_id]
+        clause = ""
+        if cursor:
+            previous = conn.execute("SELECT created_at,id FROM account_purchases WHERE id=? AND account_id=?", (cursor, g.account_id)).fetchone()
+            if not previous:
+                return fail("invalid_pagination", 422)
+            clause = " AND (created_at,id)<(?,?)"
+            params.extend(previous)
+        rows = conn.execute("""SELECT id,package_id,units,price_cents,currency,terms_version,state,created_at,updated_at
+            FROM account_purchases WHERE account_id=?""" + clause + " ORDER BY created_at DESC,id DESC LIMIT 30", params).fetchall()
+        return jsonify({"purchases": [dict(row) for row in rows], "scale": account_ledger.SCALE,
+                        "next_cursor": rows[-1]["id"] if len(rows) == 30 else None})
+
+    @api.get("/account/purchases/<purchase_id>")
+    @authenticate()
+    def purchase_receipt(purchase_id):
+        return jsonify(account_payments.receipt(get_db(), g.account_id, purchase_id))
+
+    @api.post("/payments/stripe/webhook")
+    def stripe_webhook():
+        if request.content_length is not None and request.content_length > 1024 * 1024:
+            return fail("payload_too_large", 413)
+        payload = request.get_data()
+        if len(payload) > 1024 * 1024:
+            return fail("payload_too_large", 413)
+        return jsonify(account_payments.webhook(get_db(), payload, request.headers.get("Stripe-Signature", ""),
+            config=account_payments.Config.from_environment()))
 
     @api.post("/account/wallet-challenges")
     @authenticate(recent=True)

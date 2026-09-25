@@ -132,6 +132,33 @@ def reverse_funding_in_transaction(conn: sqlite3.Connection, account_id: str, un
                   settled_delta=-units, reserved_delta=0, actor="stripe", reason=reason)
 
 
+def adjust_payment_in_transaction(conn: sqlite3.Connection, account_id: str, *, payment_id: str,
+                                  target_units: int, adjustment_id: str) -> dict:
+    """Reconcile the retained credit grant, including restoration of won disputes.
+
+    Target is a provider-verified purchase balance, not the user's spendable balance.
+    The caller commits its receipt adjustment in the same write transaction.
+    """
+    if not conn.in_transaction:
+        raise RuntimeError("payment adjustment requires a caller-owned transaction")
+    funding = conn.execute("SELECT settled_delta FROM account_credit_ledger WHERE account_id=? AND operation_key=? AND operation='fund'",
+                           (account_id, f"fund:{payment_id}")).fetchone()
+    if not funding or type(target_units) is not int or not 0 <= target_units <= funding[0]:
+        raise LedgerError("invalid_payment_target")
+    key = f"payment_adjust:{adjustment_id}"
+    reason = f"payment_retained_units:{target_units}"
+    existing = conn.execute("SELECT settled_delta,reason FROM account_credit_ledger WHERE account_id=? AND operation_key=?",
+                            (account_id, key)).fetchone()
+    if existing and existing[1] != reason:
+        raise LedgerError("idempotency_conflict")
+    retained = conn.execute("""SELECT COALESCE(SUM(settled_delta),0) FROM account_credit_ledger
+        WHERE account_id=? AND resource_id=? AND operation IN ('fund','reverse_funding','payment_adjust')""",
+        (account_id, payment_id)).fetchone()[0]
+    delta = existing[0] if existing else target_units - retained
+    return _apply(conn, account_id, operation="payment_adjust", key=key, resource=payment_id,
+                  settled_delta=delta, reserved_delta=0, actor="stripe", reason=reason)
+
+
 def reserve_in_transaction(conn: sqlite3.Connection, account_id: str, units: int, *, job_id: str) -> dict:
     _units(units)
     if not conn.in_transaction:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+import os
 import uuid
 from functools import wraps
 from typing import Callable
@@ -62,6 +63,16 @@ def create_blueprint(get_db: Callable[[], sqlite3.Connection], rate_limit: Calla
     def import_error(exc):
         return fail(str(exc), exc.status)
 
+    def imports_enabled():
+        return os.environ.get("HAVNAI_ACCOUNT_IMPORT_ENABLED", "") == "1"
+
+    @api.get("/account/import-capabilities")
+    @authenticate()
+    def wallet_import_capabilities():
+        return jsonify({"execution_enabled": imports_enabled(),
+                        "scopes": ["generation_history", "available_credits", "music_publications", "music_playlists"],
+                        "legacy_stripe_balance_import": False})
+
     @api.post("/account/wallet-links/<link_id>/import-snapshots")
     @authenticate(recent=True)
     def wallet_import_prepare(link_id):
@@ -90,6 +101,8 @@ def create_blueprint(get_db: Callable[[], sqlite3.Connection], rate_limit: Calla
     @api.post("/account/import-snapshots/<snapshot_id>/challenge")
     @authenticate(recent=True)
     def wallet_import_challenge(snapshot_id):
+        if not imports_enabled():
+            return fail("import_execution_unavailable", 503)
         data = request.get_json(silent=True)
         if not isinstance(data, dict) or set(data) != {"chain_id"}:
             return fail("invalid_payload", 422)
@@ -98,6 +111,26 @@ def create_blueprint(get_db: Callable[[], sqlite3.Connection], rate_limit: Calla
             return fail("invalid_origin", 403)
         return jsonify(account_import.issue_challenge(get_db(), g.account_principal, snapshot_id,
             origin=origin, chain_id=data["chain_id"])), 201
+
+    @api.post("/account/import-snapshots/<snapshot_id>/execute")
+    @authenticate(recent=True)
+    def wallet_import_execute(snapshot_id):
+        if not imports_enabled():
+            return fail("import_execution_unavailable", 503)
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict) or set(data) != {"challenge_id", "signature", "chain_id"}:
+            return fail("invalid_payload", 422)
+        origin = request.headers.get("Origin", "")
+        if origin not in account_auth.AuthConfig.from_environment().authorized_parties:
+            return fail("invalid_origin", 403)
+        if type(data["chain_id"]) is not int or data["chain_id"] not in {1, 11155111}:
+            return fail("unsupported_chain", 422)
+        try:
+            result = account_import.execute(get_db(), g.account_principal, snapshot_id,
+                challenge_id=data["challenge_id"], signature=data["signature"], origin=origin, chain_id=data["chain_id"])
+        except account_ledger.LedgerError as exc:
+            return fail(str(exc), 409)
+        return jsonify({"receipt": result, "scale": account_ledger.SCALE})
 
     @api.get("/account/wallet-links/<link_id>/import-preview")
     @authenticate()

@@ -341,6 +341,7 @@ def issue_challenge(conn, principal, snapshot_id, *, origin, chain_id):
     conn.execute("BEGIN IMMEDIATE")
     with conn:
         snapshot = revalidate_in_transaction(conn, principal, snapshot_id)
+        _require_payment_provenance(conn, snapshot)
         existing = conn.execute("""SELECT id,origin,chain_id,message,expires_at,used_at
             FROM account_import_challenges WHERE snapshot_id=?""", (snapshot_id,)).fetchone()
         if existing:
@@ -370,6 +371,12 @@ def issue_challenge(conn, principal, snapshot_id, *, origin, chain_id):
             (id,snapshot_id,origin,chain_id,message,expires_at) VALUES (?,?,?,?,?,?)""",
             (nonce, snapshot_id, origin, chain_id, message, expires))
         return {"challenge_id": nonce, "message": message, "expires_at": expires}
+
+
+def _require_payment_provenance(conn, snapshot):
+    if snapshot["credits"] is not None and conn.execute(
+            "SELECT 1 FROM stripe_payments WHERE LOWER(wallet)=? LIMIT 1", (snapshot["wallet"],)).fetchone():
+        raise MigrationError("import_payment_provenance_required", 409)
 
 
 def execute(conn, principal, snapshot_id, *, challenge_id, signature, origin, chain_id):
@@ -418,9 +425,7 @@ def execute(conn, principal, snapshot_id, *, challenge_id, signature, origin, ch
             raise MigrationError("invalid_import_challenge", 409)
         snapshot = revalidate_in_transaction(conn, principal, snapshot_id)
         ids = [job["id"] for job in snapshot["jobs"]]
-        if snapshot["credits"] is not None and conn.execute(
-                "SELECT 1 FROM stripe_payments WHERE LOWER(wallet)=? LIMIT 1", (snapshot["wallet"],)).fetchone():
-            raise MigrationError("import_payment_provenance_required", 409)
+        _require_payment_provenance(conn, snapshot)
         now = time.time()
         consumed = conn.execute("UPDATE account_import_challenges SET used_at=? WHERE id=? AND used_at IS NULL AND expires_at>?",
                                 (now, challenge_id, now))

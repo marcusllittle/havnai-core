@@ -130,6 +130,10 @@ def test_legacy_payment_provenance_requires_its_own_migration(ready):
                 VALUES ('historical-checkout',?,'starter',50,500,'completed',1)""", (ready[3].address.lower(),))
     with pytest.raises(account_import.MigrationError, match="import_payment_provenance_required"):
         execute(ready)
+    # Reject before asking the wallet to sign as well, including recovery of a
+    # previously issued challenge after payment history changes.
+    response = challenge_request(ready[0], ready[1], ready[4])
+    assert response.status_code == 409 and response.json["error"]["code"] == "import_payment_provenance_required"
     with app.app.app_context():
         assert app.get_db().execute("SELECT used_at FROM account_import_challenges").fetchone()[0] is None
 

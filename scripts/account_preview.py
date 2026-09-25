@@ -17,7 +17,7 @@ import sys
 from dotenv import dotenv_values
 
 
-def preview_environment(web_env: Path, data_dir: Path, port: int, web_origin: str) -> dict[str, str]:
+def preview_environment(web_env: Path, data_dir: Path, port: int, web_origin: str, *, enable_imports: bool = False) -> dict[str, str]:
     values = dotenv_values(web_env)
     publishable = values.get("NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY") or ""
     secret = values.get("CLERK_SECRET_KEY") or ""
@@ -52,6 +52,7 @@ def preview_environment(web_env: Path, data_dir: Path, port: int, web_origin: st
         "HAVNAI_OWNER_TOKEN": secrets.token_urlsafe(32), "HAVNAI_ADMIN_TOKEN": secrets.token_urlsafe(32),
         "SERVER_JOIN_TOKEN": secrets.token_urlsafe(32),
         "STRIPE_ENABLED": "false", "HAVNAI_ACCOUNT_CHECKOUT_ENABLED": "false",
+        "HAVNAI_ACCOUNT_IMPORT_ENABLED": "1" if enable_imports else "0",
         "STRIPE_SECRET_KEY": "", "STRIPE_WEBHOOK_SECRET": "", "STRIPE_ACCOUNT_WEBHOOK_SECRET": "",
         "HAVNAI_HAI_FUNDING_ENABLED": "0",
         "SERVER_BIND": "127.0.0.1", "SERVER_PORT": str(port),
@@ -64,9 +65,11 @@ def main():
     parser.add_argument("--data-dir", type=Path, default=Path.home() / ".local/state/havnai/account-preview")
     parser.add_argument("--port", type=int, default=5101)
     parser.add_argument("--web-origin", default="http://localhost:3100")
+    parser.add_argument("--enable-imports", action="store_true", help="Enable signed imports only in this isolated local preview")
     args = parser.parse_args()
     try:
-        environment = preview_environment(args.web_env, args.data_dir.resolve(), args.port, args.web_origin)
+        environment = preview_environment(args.web_env, args.data_dir.resolve(), args.port, args.web_origin,
+                                          enable_imports=args.enable_imports)
     except (ValueError, OSError) as exc:
         parser.exit(1, str(exc) + "\n")
     os.environ.update(environment)

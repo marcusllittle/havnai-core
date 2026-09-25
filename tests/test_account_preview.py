@@ -28,11 +28,15 @@ def test_preview_isolates_storage_and_disables_funding(tmp_path):
     assert result["STRIPE_SECRET_KEY"] == result["STRIPE_ACCOUNT_WEBHOOK_SECRET"] == ""
     assert result["STRIPE_ENABLED"] == result["HAVNAI_ACCOUNT_CHECKOUT_ENABLED"] == "false"
     assert result["HAVNAI_HAI_FUNDING_ENABLED"] == "0"
+    assert result["HAVNAI_ACCOUNT_IMPORT_ENABLED"] == "0"
     assert result["PYTHON_DOTENV_DISABLED"] == "1"
     assert list(directory.iterdir()) == [directory / ".havnai-account-preview"]
     # Reusing an explicitly marked preview is allowed; credentials rotate.
     again = preview_environment(source, directory, 5101, "http://localhost:3100")
     assert again["SERVER_JOIN_TOKEN"] != result["SERVER_JOIN_TOKEN"]
+    enabled = preview_environment(source, directory, 5101, "http://localhost:3100", enable_imports=True)
+    assert enabled["HAVNAI_ACCOUNT_IMPORT_ENABLED"] == "1"
+    assert enabled["STRIPE_ENABLED"] == "false"
 
 
 def test_preview_rejects_existing_unmarked_storage(tmp_path):

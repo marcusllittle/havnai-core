@@ -181,8 +181,15 @@ new snapshot. The message binds the snapshot digest, exact job IDs and credit
 units, account/session/wallet/link, origin, network and expiry. Its nonce is
 stable for retries of that snapshot and cannot be reused with a different
 network or origin. Unselected jobs and balances never enlarge the selection.
-Signature consumption and transfer execution are not exposed by an HTTP route,
-and no frontend requests this signature yet.
+`GET /v2/account/import-capabilities` reports whether execution is enabled.
+`POST /v2/account/import-snapshots/:id/execute` now accepts only the challenge ID,
+signature and chain ID. It requires recent account authentication, an allowlisted
+request Origin, and a supported network. Both challenge issuance and execution
+return 503 unless `HAVNAI_ACCOUNT_IMPORT_ENABLED=1`; receipt recovery remains
+available when execution is disabled. The local preview runner defaults this
+switch off and supports `--enable-imports` for its isolated loopback environment.
+No frontend requests this signature yet. Production enablement still requires the
+backup/restore, migration and rollout checks below.
 
 The internal `account_import.execute` now verifies the stored EIP-191 message,
 rechecks account/session/proof context under a write lock, consumes the nonce,

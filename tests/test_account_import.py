@@ -10,7 +10,8 @@ OTHER = "0x" + "2" * 40
 
 
 @pytest.fixture
-def inventory(platform, keys):
+def inventory(platform, keys, monkeypatch):
+    monkeypatch.setenv("HAVNAI_ACCOUNT_IMPORT_ENABLED", "1")
     harness, headers, account = platform
     other_headers = {"Authorization": token(keys, sub="other", sid="other-session")}
     other = harness.client.get("/v2/account", headers=other_headers).json["id"]
@@ -18,6 +19,7 @@ def inventory(platform, keys):
         conn = app.get_db()
         app.gallery.init_gallery_tables(conn)
         app.music_discover.init_music_discover_tables(conn)
+        app.stripe_payments.init_stripe_tables(conn)
         with conn:
             conn.execute("INSERT INTO wallet_links(id,account_id,wallet,verified_at,linked_at) VALUES ('link-import',?,?,1,1)", (account, WALLET))
             for job_id, wallet, status, owner in [

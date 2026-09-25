@@ -5720,13 +5720,32 @@ def v1_list_jobs() -> Any:
     job_helpers.recover_expired_leases()
     try:
         limit = min(50, max(1, int(request.args.get("limit", "20"))))
+        offset = max(0, int(request.args.get("offset", "0")))
     except ValueError:
         return jsonify({"error": "invalid_limit"}), 400
     requested_type = str(request.args.get("type") or "").strip().lower()
     requested_status = str(request.args.get("status") or "").strip().lower()
+    conditions = ["owner_account_id IS ?"]
+    params: List[Any] = [getattr(g, "account_id", None)]
+    if requested_type:
+        aliases = {"image_to_video": ["ltx_video_gen", "video_gen", "animatediff"], "text_to_music": ["music_gen"]}.get(requested_type, [])
+        types = [requested_type, *aliases]
+        placeholders = ",".join("?" for _ in types)
+        conditions.append(f"""(LOWER(TRIM(task_type)) IN ({placeholders}) OR
+            CASE WHEN json_valid(data) THEN json_extract(data,'$.v1_type') END = ?)""")
+        params.extend([*types, requested_type])
+    if requested_status:
+        raw_status = "LOWER(TRIM(COALESCE(NULLIF(status,''),'queued')))"
+        canonical = "CASE " + " ".join(f"WHEN {raw_status}=? THEN ?" for _ in platform_v1.LEGACY_STATE_MAP)
+        for old, new in platform_v1.LEGACY_STATE_MAP.items():
+            params.extend([old, new])
+        states = list(platform_v1.CANONICAL_JOB_STATES)
+        canonical += f" WHEN {raw_status} IN ({','.join('?' for _ in states)}) THEN {raw_status} ELSE 'failed' END"
+        params.extend([*states, requested_status])
+        conditions.append(f"({canonical})=?")
     rows = get_db().execute(
-        "SELECT * FROM jobs WHERE owner_account_id IS ? ORDER BY COALESCE(updated_at, timestamp) DESC LIMIT ?",
-        (getattr(g, "account_id", None), max(limit * 3, limit)),
+        f"SELECT * FROM jobs WHERE {' AND '.join(conditions)} ORDER BY COALESCE(updated_at, timestamp) DESC,id DESC LIMIT ? OFFSET ?",
+        [*params, limit, offset],
     ).fetchall()
     jobs = []
     for row in rows:

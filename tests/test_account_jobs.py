@@ -79,6 +79,27 @@ def test_lost_response_retry_recovers_before_changed_model_configuration(platfor
     assert harness.client.get("/v2/account/credits", headers=headers).json["reserved_units"] == 1000
 
 
+def test_type_and_status_history_filters_run_before_pagination(platform, keys):
+    harness, headers, account = platform
+    with app.app.app_context():
+        conn = app.get_db()
+        for index in range(42):
+            video = index < 2
+            conn.execute("""INSERT INTO jobs(id,wallet,model,data,task_type,status,timestamp,updated_at,creator_account_id,owner_account_id,weight)
+                VALUES (?,'','fixture',?,?,?,?,?,?,?,1)""", (f"history-{index}",
+                '{"v1_type":"image_to_video"}' if video else '{"v1_type":"image"}',
+                "LTX_VIDEO_GEN" if video else "IMAGE_GEN", "completed" if video else "queued", index, index, account, account))
+        conn.commit()
+    # More than the old limit*3 scan window of newer images must not hide old video renders.
+    response = harness.client.get("/v2/jobs?type=image_to_video&status=succeeded&limit=1", headers=headers)
+    assert response.status_code == 200
+    assert [job["id"] for job in response.json["jobs"]] == ["history-1"]
+    response = harness.client.get("/v2/jobs?type=image_to_video&status=succeeded&limit=1&offset=1", headers=headers)
+    assert [job["id"] for job in response.json["jobs"]] == ["history-0"]
+    bob = {"Authorization": token(keys, sub="user_bob", sid="sess_bob")}
+    assert harness.client.get("/v2/jobs?type=image_to_video", headers=bob).json["jobs"] == []
+
+
 def test_guest_different_account_and_legacy_routes_cannot_access(platform, keys):
     harness, headers, _ = platform
     job = create(harness, headers).json

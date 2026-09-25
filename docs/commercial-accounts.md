@@ -3,9 +3,11 @@
 Contract version: 1. Work item: HAVN-18, under [HAVN-11](https://havnai.atlassian.net/browse/HAVN-11).
 
 Status: account authentication/lifecycle, wallet-link API, integer ledger, account
-checkout/receipts, job/asset APIs, and account music publication are implemented on
+checkout/receipts, job/asset APIs, account music publication/libraries/playlists,
+and account Video Studio are implemented on
 the feature branch. Development Google sign-in has been verified. Production
-rollout, content migration, library/playlist integration and live paid acceptance remain.
+rollout, content migration, image studio/library integration, marketplace/workflow
+ownership, and live paid acceptance remain.
 Those require HAVN-19 through HAVN-23 and the evidence below.
 
 ## Decision and trust boundary
@@ -15,8 +17,8 @@ provider proves a user identity; its verified `(issuer, subject)` maps uniquely 
 that account. Email, a connected wallet, request body fields, and environment
 wallet defaults are never account identifiers or authorization evidence.
 
-The provider adapter is separate from the account repository. Clerk is selected;
-its new application and deployment credentials remain outstanding. It supports the
+The provider adapter is separate from the account repository. Clerk development
+sign-in is configured and verified; production configuration remains outstanding. It supports the
 existing Next.js Pages Router and Python backend. No custom password database
 is proposed. Changing providers must preserve account IDs through a separately
 audited, authenticated identity migration; matching email addresses never merges

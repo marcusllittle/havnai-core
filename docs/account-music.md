@@ -29,7 +29,8 @@ omitting source job IDs, artifact IDs, prompts, and account IDs. Direct static U
 for account-owned audio remain blocked even after publication. Legacy wallet
 authorization cannot publish or unpublish account-owned jobs/publications.
 
-The web `/api/account-media/:artifact` route serves authenticated private audio
+The web `/api/account-media/:artifact` route serves authenticated private audio,
+raster images, and video
 with range support, no redirects, no public caching, and no forwarded browser
 cookies/owner tokens. Its verified session token reaches core's per-artifact ACL.
 The player and draft views remount on account changes; saved queues are account

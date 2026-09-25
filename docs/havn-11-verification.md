@@ -126,3 +126,21 @@ The webhook listener was then restarted with its unchanged signing secret and
 confirmed ready. It remains a manually run local listener; no production scheduler
 was enabled. The preview still has zero generation workers, so account-funded
 generation/recovery/publication acceptance is not yet possible there.
+
+## First real account-funded GPU image
+
+The dedicated `havn11-local-3060` worker now runs on the user's RTX 3060 using the
+existing CUDA environment and D-drive models, with separate runtime/output paths
+and loopback preview credentials. The existing production node/coordinator were
+not restarted. Placeholder generation and startup preloading are disabled.
+
+Job `job-97acd6b82a9c46d28436d1151e0c94a3` used `juggernautXL_ragnarokBy`, completed
+on that worker, and captured its 1,000-unit (one credit) reservation. Logs show a
+real Diffusers SDXL pipeline load and 48.7-second generation. The user confirmed
+the image rendered well but reported the wrong watermark. Visual inspection found
+the text fallback: this isolated core checkout lacked the logo and could not use
+the developer-only sibling-web fallback. The exact existing web logo is now stored
+at `static/HavnAI-logo.png` and included in distributed node bundles. All 11 bundle
+tests pass, including logo byte preservation. Existing immutable generation
+artifacts were not overwritten; new renders can use the packaged logo. Refresh
+recovery and publication still need separate acceptance evidence.

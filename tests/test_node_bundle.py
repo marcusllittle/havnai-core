@@ -40,6 +40,13 @@ CAPABILITY_MODULES = [
 
 
 class BundleContentsTests(unittest.TestCase):
+    def test_bundle_carries_logo_without_a_sibling_web_checkout(self) -> None:
+        payload, _ = node_bundle.build_bundle(REPO_ROOT)
+        with tarfile.open(fileobj=io.BytesIO(payload)) as archive:
+            logo = archive.extractfile("static/HavnAI-logo.png").read()
+        self.assertTrue(logo.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertEqual(logo, (REPO_ROOT / "static/HavnAI-logo.png").read_bytes())
+
     def test_bundle_carries_every_capability_module(self) -> None:
         payload, _ = node_bundle.build_bundle(REPO_ROOT)
         with tarfile.open(fileobj=io.BytesIO(payload)) as archive:

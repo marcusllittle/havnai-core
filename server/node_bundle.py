@@ -38,6 +38,7 @@ BUNDLE_FILES: List[str] = [
     "client/requirements-node.txt",
     "client/pipeline_stable_diffusion_xl_instantid.py",
     "client/pipeline_stable_diffusion_xl_instantid_inpaint.py",
+    "static/HavnAI-logo.png",
 ]
 
 BUNDLE_DIRS: List[str] = [

@@ -60,8 +60,15 @@ cover routes support explicitly shared account playlists without exposing the
 account ID. A preserved provenance wallet cannot read a private account playlist
 or manage it. No library operation touches the credit ledger.
 
-The library and playlist frontend still uses legacy wallet APIs; connecting it to
-these account APIs remains required before this is an end-to-end account feature.
+Configured web deployments use these account APIs for music libraries, saves,
+likes, playlists, and editing shared playlists. `POST /v2/music/preferences`
+accepts up to 100 publication IDs and returns only the current account's saved/
+liked flags and public like counts, so public Discover/creator pages can show
+accurate controls without wallet signatures. Unknown/unpublished IDs are omitted.
+The signed-out experience remains public, and private actions offer sign-in.
+Account changes remount private views and discard pending responses. Playlist
+creation IDs persist through the initial add-song action; ambiguous failures
+reuse the same ID. Legacy wallet flows remain only when accounts are unconfigured.
 
 ## Evidence and remaining work
 
@@ -75,7 +82,7 @@ Additional backend tests cover account library isolation, concurrent like/create
 retries, public/private playlist transitions, reorder conflicts, deletion, hidden
 unpublished tracks, and wallet provenance bypass attempts.
 
-Account library/playlist frontend integration, profile editing, migration, and
-the full real-provider paid generation/publication acceptance remain work. The
+Profile editing, migration, and the full real-provider paid generation/publication
+acceptance remain work. The
 isolated preview has no GPU nodes or card checkout; an offline message there is
 expected and is not evidence that live generation has passed.

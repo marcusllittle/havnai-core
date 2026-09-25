@@ -5554,6 +5554,29 @@ def account_music_preference(publication_id: str) -> Any:
     return jsonify(result), 200 if result["ok"] else 404
 
 
+@app.route("/v2/music/preferences", methods=["POST"])
+def account_music_preferences() -> Any:
+    error = _require_studio_user()
+    if error:
+        return error
+    data = request.get_json(silent=True)
+    if (not isinstance(data, dict) or set(data) != {"publication_ids"}
+            or not isinstance(data["publication_ids"], list) or len(data["publication_ids"]) > 100
+            or any(not isinstance(item, str) or len(item) > 128 for item in data["publication_ids"])):
+        return jsonify({"error": "invalid_payload"}), 422
+    ids = list(set(data["publication_ids"]))
+    items = {}
+    if ids:
+        placeholders = ",".join("?" for _ in ids)
+        rows = get_db().execute(f"""SELECT p.id,p.like_count,
+            EXISTS(SELECT 1 FROM account_music_likes l WHERE l.account_id=? AND l.publication_id=p.id) AS liked,
+            EXISTS(SELECT 1 FROM account_music_saves s WHERE s.account_id=? AND s.publication_id=p.id) AS saved
+            FROM music_publications p WHERE p.state='published' AND p.id IN ({placeholders})""",
+            [g.account_id, g.account_id, *ids]).fetchall()
+        items = {row["id"]: {"liked_by_me": bool(row["liked"]), "saved_by_me": bool(row["saved"]), "like_count": row["like_count"]} for row in rows}
+    return jsonify({"preferences": items})
+
+
 @app.route("/v2/music/publications", methods=["GET", "POST"])
 def account_music_publications() -> Any:
     error = _require_studio_user()

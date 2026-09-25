@@ -135,6 +135,15 @@ def test_account_library_is_private_idempotent_and_separate_from_wallet(music, k
     assert library["publications"][0]["saved_by_me"]
     assert library["recent_liked"][0]["liked_by_me"]
     assert library["publications"][0]["like_count"] == 1
+    preference_path = "/v2/music/preferences"
+    assert harness.client.post(preference_path, json={"publication_ids": [publication]}).status_code == 401
+    assert harness.client.post(preference_path, headers=alice, json={"publication_ids": [publication], "wallet": harness.wallet}).status_code == 422
+    assert harness.client.post(preference_path, headers=alice, json={"publication_ids": [publication] * 101}).status_code == 422
+    assert harness.client.post(preference_path, headers=alice, json={"publication_ids": [None]}).status_code == 422
+    assert harness.client.post(preference_path, headers=alice, json={"publication_ids": [publication]}).json["preferences"][publication] == {
+        "liked_by_me": True, "saved_by_me": True, "like_count": 1}
+    assert harness.client.post(preference_path, headers=bob, json={"publication_ids": [publication]}).json["preferences"][publication] == {
+        "liked_by_me": False, "saved_by_me": False, "like_count": 1}
     assert "job-1" not in json.dumps(library)
     assert account not in json.dumps(library)
     assert harness.client.get("/v2/music/library", headers=bob).json["total"] == 0
@@ -147,6 +156,7 @@ def test_account_library_is_private_idempotent_and_separate_from_wallet(music, k
     assert music_discover.list_saved(wallet=harness.wallet)["total"] == 0
     assert harness.client.delete(path, headers=alice).status_code == 200
     assert harness.client.get("/v2/music/library", headers=alice).json["total"] == 0
+    assert harness.client.post(preference_path, headers=alice, json={"publication_ids": [publication]}).json["preferences"] == {}
     assert harness.client.put(f"{path}/save", headers=bob, json={"saved": True}).status_code == 404
     # Users may remove their own stale preference after a creator unpublishes.
     assert harness.client.put(f"{path}/save", headers=alice, json={"saved": False}).status_code == 200

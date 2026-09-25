@@ -94,3 +94,13 @@ these logs. Explicit failed-event redelivery remains to verify. Browser display 
 the refunded receipt, failed-payment acceptance, missed-webhook recovery and real
 account-funded worker generation remain open. No actual money moved, and this
 sandbox result does not satisfy the required production payment path.
+
+The user subsequently confirmed the refreshed account displayed zero available
+credits and the refunded purchase. The three previously failed event IDs were
+retrieved from Stripe and each delivered twice to the local HTTP webhook with a
+fresh signature using the private listener secret. All six requests returned 200.
+The older payment-success notification did not resurrect credits after refund;
+the duplicate refund events added no deductions. Balance remained zero, with one
+funding entry, one adjustment and the original receipt. This is an explicit local
+redelivery test using actual provider event data, not evidence of Stripe's automatic
+retry scheduling. Failed-payment and missed-webhook acceptance still remain open.

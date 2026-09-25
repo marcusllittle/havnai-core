@@ -112,3 +112,17 @@ receipt or ledger entry. Available/settled/reserved balances remained zero and t
 original refunded receipt was unchanged. This verifies actual sandbox decline
 handling, rather than only a mocked provider failure. Missed-webhook recovery and
 account-funded generation remain open.
+
+At 16:57 local time, after deliberately stopping the local Stripe listener, the
+user completed the same previously declined checkout with a successful test card.
+A direct Stripe read confirmed Checkout `complete` / payment `paid` while the
+local purchase remained `pending` and balance zero. A private SQLite backup was
+taken before running the actual `server/account_payments.py --batch --limit 25`
+CLI against the isolated preview. It recovered the purchase to `paid`, created
+one 50,000-unit funding entry and receipt #2, and left the earlier refunded purchase
+unchanged. A second identical CLI run produced no additional economic entries or
+receipts. This verifies actual sandbox missed-webhook recovery and retry safety.
+The webhook listener was then restarted with its unchanged signing secret and
+confirmed ready. It remains a manually run local listener; no production scheduler
+was enabled. The preview still has zero generation workers, so account-funded
+generation/recovery/publication acceptance is not yet possible there.

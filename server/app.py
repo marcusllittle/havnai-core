@@ -1169,6 +1169,7 @@ def init_db() -> None:
     platform_v1.migrate(conn)
     conn.commit()
     account_identity.initialize(conn)
+    workflows.init_workflow_tables(conn)
     account_import.initialize(conn)
     account_ledger.initialize(conn)
     account_payments.initialize(conn)

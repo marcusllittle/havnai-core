@@ -26,7 +26,17 @@ Legacy workflow routes exclude all account-owned rows from reads and writes.
 The existing wallet workflow inventory is unchanged and is not automatically
 imported. The web branch integrates saving, editing, explicit publication,
 unpublishing, deletion and private template application without a wallet. Real
-signed-in browser acceptance and explicit legacy workflow migration remain.
+signed-in browser acceptance remains. Explicit legacy workflow migration now
+supports `workflow_ids` in version-4 snapshots. Review summaries and wallet
+messages name the selected IDs; the digest binds configuration, publication and
+ownership state. Execution transfers creator/current-owner account columns in the
+same transaction as proof consumption and receipt/audit creation, preserving
+the original wallet, configuration and publication status. Unselected workflows
+stay legacy-owned. Changed records reject the old proof, and receipt failure
+rolls back ownership and signature consumption. Versions 1–3 keep their original
+snapshot/digest on retries with empty workflow selections. Web import selection,
+proof validation and receipt display still need workflow integration before
+enabling imports.
 
 HavnAI owns an immutable `acct_<uuid>` account ID. A managed authentication
 provider proves a user identity; its verified `(issuer, subject)` maps uniquely to

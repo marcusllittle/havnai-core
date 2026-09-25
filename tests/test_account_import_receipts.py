@@ -26,7 +26,7 @@ def test_receipt_recovers_after_lost_response_expiry_unlink_and_new_session(read
     summary = harness.client.get(PATH, headers=auth).json
     assert summary["total"] == 1 and summary["scale"] == 1000
     assert summary["receipts"] == [{"id": result["id"], "created_at": result["created_at"],
-        "job_count": 2, "publication_count": 0, "playlist_count": 0, "credit_units": 2125}]
+        "job_count": 2, "publication_count": 0, "playlist_count": 0, "workflow_count": 0, "credit_units": 2125}]
     with app.app.app_context():
         assert app.get_db().execute("SELECT COUNT(*) FROM account_credit_imports").fetchone()[0] == 1
 

@@ -109,7 +109,7 @@ def create_blueprint(get_db: Callable[[], sqlite3.Connection], rate_limit: Calla
     @authenticate()
     def wallet_import_capabilities():
         return jsonify({"execution_enabled": imports_enabled(),
-                        "scopes": ["generation_history", "available_credits", "music_publications", "music_playlists"],
+                        "scopes": ["generation_history", "available_credits", "music_publications", "music_playlists", "workflows"],
                         "legacy_stripe_balance_import": False})
 
     @api.post("/account/wallet-links/<link_id>/import-snapshots")

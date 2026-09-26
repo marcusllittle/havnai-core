@@ -253,6 +253,13 @@ model worker run, or production operations drills required by HAVN-25.
 The isolated coordinator and worker are running the updated lifecycle code;
 live cleanup polling returned HTTP 200 with zero purged creations and preserved
 all eight worker output files. Production was not restarted. Clerk production
-creation remains rejected by the provider's unspecified plan-feature mismatch.
-The workstation's stale hosts override still needs the prepared administrator
-repair before normal canonical API verification can pass.
+creation remains rejected by the provider's plan-feature mismatch; the operator's
+dashboard identifies the enabled paid feature as biometric sign-in. Disabling
+that optional native sign-in method and retrying creation remain pending.
+
+The operator completed the workstation hosts repair. On September 26, normal
+Windows requests (without forced DNS) to `https://api.joinhavn.io/healthz`
+returned `ok: true`, five successful concurrency attempts and no errors;
+`https://api.joinhavn.io/models/list` also returned a models payload. This clears
+the workstation DNS override blocker, but does not prove the separate canonical
+worker heartbeat or production launch acceptance requirements.

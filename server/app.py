@@ -67,6 +67,7 @@ import network_status
 import account_identity
 import account_import
 import account_ledger
+import account_lifecycle
 import account_payments
 import account_routes
 import account_auth
@@ -937,6 +938,77 @@ def require_admin() -> Optional[Tuple[Any, int]]:
     if _authorized(ADMIN_API_TOKEN):
         return None
     return jsonify({"error": "unauthorized", "role": "admin"}), 401
+
+
+def _configured_url(value: str, *, require_origin_only: bool = False) -> bool:
+    try:
+        parts = urlparse(value)
+        return bool(
+            parts.scheme == "https"
+            and parts.hostname
+            and not parts.username
+            and not parts.password
+            and not parts.query
+            and not parts.fragment
+            and (not require_origin_only or not parts.path)
+        )
+    except ValueError:
+        return False
+
+
+def _account_readiness() -> Dict[str, Any]:
+    auth = account_auth.AuthConfig.from_environment()
+    auth_missing: List[str] = []
+    if not _configured_url(auth.issuer, require_origin_only=True):
+        auth_missing.append("HAVNAI_CLERK_ISSUER")
+    if not auth.audience:
+        auth_missing.append("HAVNAI_CLERK_AUDIENCE")
+    if not auth.authorized_parties:
+        auth_missing.append("HAVNAI_ACCOUNT_ORIGINS")
+    if not (auth.secret_key or auth.jwt_key):
+        auth_missing.append("CLERK_SECRET_KEY_OR_CLERK_JWT_KEY")
+
+    lifecycle = account_lifecycle.Config.from_environment()
+    lifecycle_missing: List[str] = []
+    if not _configured_url(lifecycle.issuer, require_origin_only=True):
+        lifecycle_missing.append("HAVNAI_CLERK_ISSUER")
+    if not lifecycle.instance_id.startswith("ins_"):
+        lifecycle_missing.append("HAVNAI_CLERK_INSTANCE_ID")
+    if not lifecycle.signing_secret.startswith("whsec_"):
+        lifecycle_missing.append("CLERK_WEBHOOK_SIGNING_SECRET")
+
+    payments = account_payments.Config.from_environment()
+    payment_missing: List[str] = []
+    if not payments.secret_key.startswith(("sk_test_", "sk_live_", "rk_test_", "rk_live_")):
+        payment_missing.append("STRIPE_SECRET_KEY")
+    if not payments.webhook_secret:
+        payment_missing.append("STRIPE_ACCOUNT_WEBHOOK_SECRET")
+    checkout_missing: List[str] = []
+    if not payments.enabled:
+        checkout_missing.append("HAVNAI_ACCOUNT_CHECKOUT_ENABLED")
+    if not payments.terms_version:
+        checkout_missing.append("HAVNAI_CREDIT_TERMS_VERSION")
+    if not payments.valid_url(payments.origin, origin_only=True):
+        checkout_missing.append("HAVNAI_CHECKOUT_ORIGIN")
+    if not payments.valid_url(payments.terms_url):
+        checkout_missing.append("HAVNAI_CREDIT_TERMS_URL")
+    if not payments.valid_url(payments.refund_url):
+        checkout_missing.append("HAVNAI_CREDIT_REFUND_URL")
+
+    sections = {
+        "auth": {"ready": not auth_missing, "missing": sorted(auth_missing)},
+        "lifecycle_webhook": {"ready": not lifecycle_missing, "missing": sorted(lifecycle_missing)},
+        "payments": {"ready": not payment_missing, "missing": sorted(payment_missing)},
+        "checkout": {"ready": not checkout_missing, "missing": sorted(checkout_missing)},
+    }
+    ready = all(section["ready"] for section in sections.values())
+    return {
+        "schema_version": "account-readiness.v1",
+        "generated_at": iso_now(),
+        "ready": ready,
+        "status": "ready" if ready else "blocked",
+        **sections,
+    }
 
 
 def _disk_has_capacity(path: Path, incoming_bytes: int = 0) -> bool:
@@ -9904,6 +9976,16 @@ def network_alerts_dry_run() -> Any:
         receipt_batches=merkle_batches.list_batches(5),
     )
     response = jsonify(_network_alert_dry_run(summary, control, workers, inject=inject))
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/v1/account/readiness", methods=["GET"])
+def account_readiness() -> Any:
+    auth_error = require_admin()
+    if auth_error:
+        return auth_error
+    response = jsonify(_account_readiness())
     response.headers["Cache-Control"] = "no-store"
     return response
 

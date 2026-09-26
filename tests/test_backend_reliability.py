@@ -236,6 +236,59 @@ class BackendReliabilityTests(unittest.TestCase):
         self.assertTrue(rules["gpu_vram_exhaustion"]["matched"])
         self.assertTrue(rules["gpu_vram_exhaustion"]["dry_run_injected"])
 
+    def test_account_readiness_is_admin_gated_and_redacted(self):
+        api.ADMIN_API_TOKEN = "test-admin-token"
+
+        unauthorized = self.client.get("/v1/account/readiness")
+        self.assertEqual(unauthorized.status_code, 401)
+
+        with patch.dict(api.os.environ, {}, clear=True):
+            response = self.client.get("/v1/account/readiness", headers={"X-HavnAI-Token": "test-admin-token"})
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        payload = response.get_json()
+        self.assertEqual(payload["schema_version"], "account-readiness.v1")
+        self.assertFalse(payload["ready"])
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(payload["auth"]["missing"], [
+            "CLERK_SECRET_KEY_OR_CLERK_JWT_KEY",
+            "HAVNAI_ACCOUNT_ORIGINS",
+            "HAVNAI_CLERK_ISSUER",
+        ])
+        self.assertIn("STRIPE_ACCOUNT_WEBHOOK_SECRET", payload["payments"]["missing"])
+        self.assertIn("HAVNAI_ACCOUNT_CHECKOUT_ENABLED", payload["checkout"]["missing"])
+        self.assertNotIn("sk_", response.get_data(as_text=True))
+        self.assertNotIn("whsec_", response.get_data(as_text=True))
+
+    def test_account_readiness_reports_ready_without_exposing_values(self):
+        api.ADMIN_API_TOKEN = "test-admin-token"
+        env = {
+            "HAVNAI_CLERK_ISSUER": "https://havnai.clerk.accounts.dev",
+            "HAVNAI_CLERK_AUDIENCE": "havnai-api",
+            "HAVNAI_ACCOUNT_ORIGINS": "https://joinhavn.io,https://www.joinhavn.io",
+            "CLERK_SECRET_KEY": "sk_test_private",
+            "HAVNAI_CLERK_INSTANCE_ID": "ins_test",
+            "CLERK_WEBHOOK_SIGNING_SECRET": "whsec_private",
+            "STRIPE_SECRET_KEY": "sk_test_private",
+            "STRIPE_ACCOUNT_WEBHOOK_SECRET": "whsec_private",
+            "HAVNAI_ACCOUNT_CHECKOUT_ENABLED": "1",
+            "HAVNAI_CREDIT_TERMS_VERSION": "credits-v1",
+            "HAVNAI_CHECKOUT_ORIGIN": "https://joinhavn.io",
+            "HAVNAI_CREDIT_TERMS_URL": "https://joinhavn.io/terms/credits-v1",
+            "HAVNAI_CREDIT_REFUND_URL": "https://joinhavn.io/refunds/credits-v1",
+        }
+        with patch.dict(api.os.environ, env, clear=True):
+            response = self.client.get("/v1/account/readiness", headers={"X-HavnAI-Token": "test-admin-token"})
+        payload = response.get_json()
+        self.assertTrue(payload["ready"])
+        self.assertEqual(payload["status"], "ready")
+        for key in ("auth", "lifecycle_webhook", "payments", "checkout"):
+            self.assertTrue(payload[key]["ready"])
+            self.assertEqual(payload[key]["missing"], [])
+        body = response.get_data(as_text=True)
+        for value in {item for item in env.values() if item != "1"}:
+            self.assertNotIn(value, body)
+
     def test_network_counts_legacy_states_expired_claims_and_measured_latency(self):
         db = api.get_db()
         for job_id, state, queued, assigned, completed, lease in [

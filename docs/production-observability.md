@@ -125,6 +125,31 @@ This proves the public liveness/readiness checks were healthy and the metrics
 and dry-run alert surfaces were still admin-gated. It does not replace the
 required final operator-token scrape.
 
+Third refresh on 2026-09-26 at 22:58 UTC used the reproducible collector:
+
+```bash
+python3 scripts/collect_observability_evidence.py
+```
+
+The collector emitted schema `havn-43-observability-evidence.v1` with
+`public_ok=true`, `admin_ok=false`, `passed=false`, health `status=200`,
+healthz `ok=true`, control-plane `health=healthy`, `ready_nodes=1`,
+`queued=0`, `running=0`, `alerts=0`, and missing
+`admin_token_metrics_and_alert_dry_run`. `/metrics` and alert dry-run returned
+HTTP 401 without an admin token. This is expected for a non-operator shell and
+keeps the remaining launch gap explicit.
+
+For final HAVN-43/HAVN-17 evidence, run:
+
+```bash
+HAVNAI_ADMIN_TOKEN=<redacted> python3 scripts/collect_observability_evidence.py
+```
+
+The final run must report `passed=true`, contain no raw token, include the
+required metrics (`havnai_jobs_total`, `havnai_worker_online`, and
+`havnai_output_disk_free_bytes`), and return alert dry-run schema
+`network-alert-dry-run.v1`.
+
 ## Remaining Launch Gaps
 
 - Capture saved dashboard links or screenshots if Jira requires visual evidence

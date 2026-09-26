@@ -266,6 +266,7 @@ redacted response summary.
 | Core liveness | `GET https://api.joinhavn.io/health` | 200, `status=ok`, expected version |
 | Core readiness | `GET https://api.joinhavn.io/healthz` | 200, ready |
 | Control plane | `GET /v1/network/control-plane` with admin token when required | healthy, no critical alerts, ready node present |
+| Monitoring evidence | `HAVNAI_ADMIN_TOKEN=<redacted> python3 scripts/collect_observability_evidence.py` | `passed=true`, required metrics present, alert dry-run schema returned |
 | Model catalog | `GET /models/list` | launch-critical image/video/music models mapped to ready capacity |
 | Public gallery | `GET /gallery/browse?limit=1` | zero unreviewed legacy rows unless explicitly reviewed/opted in |
 | Music Discover | `GET /music/discover` | public-only rows; no private/adult media leaks |

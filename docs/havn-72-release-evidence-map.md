@@ -14,12 +14,12 @@ waived with mitigation.
 | Surface | Current candidate | Evidence | Status |
 | --- | --- | --- | --- |
 | Core baseline | Production `https://api.joinhavn.io` reports `/health` ok, one ready node, empty queue, no control-plane alerts | 2026-09-26 live probes; control-plane schema `network-control-plane.v1` | Healthy but not launch complete |
-| Core no-invite, worker drill, gallery guard | PR #91 `codex/havn-47-mixed-model-drill` at `8171176ba5a737d430ebda644ec57b07c2cb57e4` | PR #91 clean; tests `23 passed, 2 subtests passed`; py_compile passed | Implemented, not deployed |
+| Core no-invite, worker drill, gallery guard | PR #91 `codex/havn-47-mixed-model-drill` at `be0fd43784191d27c14459d6fe7566050807b8a0` | PR #91 clean; tests `23 passed, 2 subtests passed`; mixed-model preflight tests `8 passed`; py_compile passed | Implemented, not deployed |
 | Web no-invite and dashboard preview hardening | PR #108 `codex/havn-web-no-invite-required` at `e28727d2ab9f1a07616a7f861f4e0b43f12c8636` | Focused web tests `17 passed`; `npx tsc --noEmit`; GitHub web checks and Vercel green | Implemented, not deployed |
 | Private content cache hardening | PR #96 `codex/havn-14-cache-isolation` at `84bdb521b671b7ba385076a44bf92d4e5383f625` | Focused/private denial cache tests and broad marketplace/music tests in PR evidence | Implemented, not deployed |
-| Observability snapshot | PR #97 `codex/havn-43-observability-doc-refresh` at `82c47185153c6b9ddb0480d589e4744fbd86fb7c` | `/health`, control-plane, `/metrics`, alert dry-run evidence recorded in PR/Jira | Implemented, pending final token-backed refresh or waiver |
+| Observability snapshot | PR #97 `codex/havn-43-observability-doc-refresh` at `cd1d01c702a4a822cecff58bbdbaa2f9777fe2e8` | `/health`, control-plane, `/metrics`, alert dry-run evidence recorded in PR/Jira | Implemented, pending final token-backed refresh or waiver |
 | Backup/restore repair | PR #93 `codex/havn-44-restore-repair` at `c35f1dfe16a6e10e17a3d779f73ce662b72b99e3` | Restore repair, restore drill, and media sample reports recorded in Jira | Implemented, remote-backup evidence still open |
-| Restart recovery | PR #95 `codex/havn-45-restart-drill` at `88c529412c6d609a21d649cf9d7b97c7070776cb` | Private drill harness and duplicate-charge checks pass | Implemented, live funded-account drill still open |
+| Restart recovery | PR #95 `codex/havn-45-restart-drill` at `8a89d91f35d8d1dc3fda798a85511fb22faec408` | Private drill harness, account preflight, and duplicate-charge checks pass | Implemented, live funded-account drill still open |
 | Astra account/reward core API | PR #94 `codex/havn-56-astra-account-core` at `b21bdf96a2408936f26fe7ce4084394e4eccf128` | Account-auth endpoints, tests, and API contract recorded | Core implemented; Claude owns Astra client acceptance |
 
 ## Gate Matrix
@@ -55,6 +55,15 @@ The command uses only public endpoints. It should fail while live
 `/gallery/browse` returns unreviewed legacy rows. Use `--allow-legacy-gallery`
 only if Marcus has explicitly approved those rows after product-quality review
 and the waiver is recorded in HAVN-72.
+
+Latest live run, 2026-09-26:
+
+- `python3 scripts/launch_public_smoke.py --json` -> exit `1`.
+- Passing checks: `api_health`, `api_healthz`, `control_plane`,
+  `music_discover_public`, web home/create/pricing/support/terms/refunds, and
+  `create_no_invite_copy` with `legacy_prompts=[]`.
+- Failing check: `legacy_gallery_hidden` with
+  `status=200 total=7 allow_legacy_gallery=False`.
 
 ## Current NO-GO Conditions
 

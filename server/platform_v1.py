@@ -137,6 +137,8 @@ def migrate(conn: sqlite3.Connection) -> None:
         "resolved_spec": "TEXT",
         "error_code": "TEXT",
         "updated_at": "REAL",
+        "adult_content": "INTEGER NOT NULL DEFAULT 0",
+        "adult_policy_reason": "TEXT DEFAULT ''",
     }
     for name, declaration in additions.items():
         if name not in columns:
@@ -178,6 +180,13 @@ def migrate(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_artifacts_job_created ON artifacts(job_id, created_at)"
     )
+    artifact_columns = _column_names(conn, "artifacts")
+    for name, declaration in {
+        "adult_content": "INTEGER NOT NULL DEFAULT 0",
+        "adult_policy_reason": "TEXT DEFAULT ''",
+    }.items():
+        if name not in artifact_columns:
+            conn.execute(f"ALTER TABLE artifacts ADD COLUMN {name} {declaration}")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_jobs_lease_expiry ON jobs(status, lease_expires_at)"
     )

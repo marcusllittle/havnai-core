@@ -76,6 +76,7 @@ import account_anchors
 import account_video
 import account_video_chains
 import account_video_stitch
+import adult_content
 
 try:
     from eth_account import Account  # type: ignore
@@ -1086,6 +1087,12 @@ def init_db() -> None:
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
     if "invite_code" not in columns:
         conn.execute("ALTER TABLE jobs ADD COLUMN invite_code TEXT")
+    for name, declaration in {
+        "adult_content": "INTEGER NOT NULL DEFAULT 0",
+        "adult_policy_reason": "TEXT DEFAULT ''",
+    }.items():
+        if name not in columns:
+            conn.execute(f"ALTER TABLE jobs ADD COLUMN {name} {declaration}")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS rewards (
@@ -6441,16 +6448,30 @@ def v1_node_artifact(job_id: str) -> Any:
         return jsonify({"error": str(exc)}), 413
     artifact_id = platform_v1.new_artifact_id()
     conn = get_db()
+    job = conn.execute("SELECT adult_content,adult_policy_reason,model,task_type,data,resolved_spec FROM jobs WHERE id=?", (job_id,)).fetchone()
+    artifact_reason = adult_content.classify(
+        metadata,
+        kind,
+        uploaded.filename,
+        job["adult_policy_reason"] if job else "",
+        job["model"] if job else "",
+        job["task_type"] if job else "",
+        job["data"] if job else "",
+        job["resolved_spec"] if job else "",
+    )
+    inherited_adult = bool(job and job["adult_content"])
+    stored_reason = (artifact_reason or (job["adult_policy_reason"] if inherited_adult and job else "")) or ""
     conn.execute(
         """
         INSERT INTO artifacts (
             id, job_id, attempt_id, kind, filename, content_type, path,
-            size_bytes, sha256, metadata, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            size_bytes, sha256, metadata, created_at, adult_content, adult_policy_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             artifact_id, job_id, attempt_id, kind, destination.name, content_type,
             str(destination), size_bytes, sha256, json.dumps(metadata), unix_now(),
+            1 if inherited_adult or artifact_reason else 0, stored_reason,
         ),
     )
     conn.commit()

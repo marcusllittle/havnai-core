@@ -9,19 +9,31 @@ import uuid
 from decimal import Decimal, InvalidOperation
 
 import account_ledger
+import adult_content
 import artifact_lifecycle
 
 
 def initialize(conn: sqlite3.Connection) -> None:
     artifact_lifecycle.initialize(conn)
     for table, additions in {
-        "jobs": ["creator_account_id", "owner_account_id"],
+        "jobs": {
+            "creator_account_id": "TEXT REFERENCES accounts(id)",
+            "owner_account_id": "TEXT REFERENCES accounts(id)",
+            "adult_content": "INTEGER NOT NULL DEFAULT 0",
+            "adult_policy_reason": "TEXT DEFAULT ''",
+        },
         "assets": ["owner_account_id"],
+        "artifacts": {
+            "adult_content": "INTEGER NOT NULL DEFAULT 0",
+            "adult_policy_reason": "TEXT DEFAULT ''",
+        },
     }.items():
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+            continue
         columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
-        for name in additions:
+        for name, declaration in (additions.items() if isinstance(additions, dict) else ((item, "TEXT REFERENCES accounts(id)") for item in additions)):
             if name not in columns:
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} TEXT REFERENCES accounts(id)")
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
     conn.executescript("""
         CREATE INDEX IF NOT EXISTS jobs_account_history ON jobs(owner_account_id, timestamp DESC);
         CREATE TABLE IF NOT EXISTS account_job_requests (
@@ -116,13 +128,14 @@ def enqueue(conn: sqlite3.Connection, account_id: str, *, request_key: str, requ
             account_video_chains.check_enqueue(conn, account_id, *chain)
         now = time.time()
         job_id = "job-" + uuid.uuid4().hex
+        adult_reason = adult_content.classify(model, task_type, settings, resolved_spec)
         account_ledger.reserve_in_transaction(conn, account_id, units, job_id=job_id)
         conn.execute("""INSERT INTO jobs
             (id,wallet,creator_account_id,owner_account_id,model,data,task_type,weight,status,
-             timestamp,progress,stage,updated_at,resolved_spec)
-            VALUES (?,'',?,?,?,?,?,?,'queued',?,0,'queued',?,?)""",
+             timestamp,progress,stage,updated_at,resolved_spec,adult_content,adult_policy_reason)
+            VALUES (?,'',?,?,?,?,?,?,'queued',?,0,'queued',?,?,?,?)""",
             (job_id, account_id, account_id, model, json.dumps(settings), task_type, weight,
-             now, now, json.dumps(resolved_spec)))
+             now, now, json.dumps(resolved_spec), 1 if adult_reason else 0, adult_reason or ""))
         conn.execute("INSERT INTO account_job_requests VALUES (?,?,?,?)", (account_id, request_key, digest, job_id))
         if chain:
             conn.execute("INSERT INTO account_video_chain_clips VALUES (?,?,?)", (*chain, job_id))

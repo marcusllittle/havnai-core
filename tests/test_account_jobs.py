@@ -229,6 +229,36 @@ def test_account_generation_retry_and_recovery_without_wallet(platform):
     assert conflict.json["error"]["code"] == "idempotency_conflict"
 
 
+def test_adult_account_job_and_artifact_metadata_persist_without_blocking_private_generation(platform):
+    harness, headers, _ = platform
+    created = create(harness, {**headers, "Idempotency-Key": "adult-private"}, prompt="private adult portrait")
+    assert created.status_code == 202, created.json
+    job_id = created.json["id"]
+    task = harness._claim(job_id)
+    uploaded = harness.client.post(
+        f"/v1/node/jobs/{job_id}/artifacts",
+        headers=harness.node_headers,
+        data={
+            "node_id": "node-test",
+            "attempt_id": task["attempt_id"],
+            "kind": "image",
+            "metadata": '{"caption":"adult private artifact"}',
+            "file": (io.BytesIO(b"private adult bytes"), "adult.png"),
+        },
+    )
+    assert uploaded.status_code == 201, uploaded.json
+    with app.app.app_context():
+        conn = app.get_db()
+        job = conn.execute("SELECT adult_content,adult_policy_reason FROM jobs WHERE id=?", (job_id,)).fetchone()
+        artifact = conn.execute(
+            "SELECT adult_content,adult_policy_reason FROM artifacts WHERE id=?",
+            (uploaded.json["id"],),
+        ).fetchone()
+    assert tuple(job) == (1, "adult_content_signal")
+    assert tuple(artifact) == (1, "adult_content_signal")
+    assert harness.client.get(f"/v2/artifacts/{uploaded.json['id']}/content", headers=headers).status_code == 200
+
+
 def test_lost_response_retry_recovers_before_changed_model_configuration(platform, monkeypatch):
     harness, headers, _ = platform
     first = create(harness, headers)

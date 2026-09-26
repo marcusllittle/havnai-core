@@ -8,6 +8,7 @@ import sqlite3
 import time
 import uuid
 import account_jobs
+import adult_content
 from typing import Any, Dict, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -44,16 +45,18 @@ def enqueue_job(
 ) -> str:
     job_id = f"job-{uuid.uuid4().hex[:12]}"
     task_type = (task_type or CREATOR_TASK_TYPE).upper()
+    adult_reason = adult_content.classify(model, task_type, data)
     conn = get_db()
     conn.execute(
         """
         INSERT INTO jobs (
             id, wallet, model, data, task_type, weight, status, node_id,
-            timestamp, invite_code, progress, stage, updated_at
+            timestamp, invite_code, progress, stage, updated_at, adult_content, adult_policy_reason
         )
-        VALUES (?, ?, ?, ?, ?, ?, 'queued', NULL, ?, ?, 0, 'queued', ?)
+        VALUES (?, ?, ?, ?, ?, ?, 'queued', NULL, ?, ?, 0, 'queued', ?, ?, ?)
         """,
-        (job_id, wallet, model, data, task_type, float(weight), time.time(), invite_code, time.time()),
+        (job_id, wallet, model, data, task_type, float(weight), time.time(), invite_code, time.time(),
+         1 if adult_reason else 0, adult_reason or ""),
     )
     conn.commit()
     return job_id

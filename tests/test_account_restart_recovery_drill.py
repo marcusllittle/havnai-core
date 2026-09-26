@@ -64,6 +64,68 @@ def test_execute_requires_restart_command() -> None:
     assert "requires --restart-command" in completed.stderr
 
 
+def test_preflight_requires_account_token() -> None:
+    script = ROOT / "scripts" / "account_restart_recovery_drill.py"
+    completed = subprocess.run(
+        [sys.executable, str(script), "--preflight"],
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode != 0
+    assert "requires --account-token" in completed.stderr
+
+
+def test_preflight_reports_funded_account_without_printing_token(monkeypatch, capsys) -> None:
+    class FakeClient:
+        def __init__(self, base_url: str, account_token: str) -> None:
+            assert base_url == "https://api.example.test"
+            assert account_token == "secret-token"
+
+        def account_preflight(self) -> dict[str, dict[str, object]]:
+            return {
+                "account": {"id": "acct-secret", "status": "active"},
+                "credits": {"available_units": 1200, "reserved_units": 50},
+            }
+
+    monkeypatch.setattr(drill, "AccountClient", FakeClient)
+    decoder = json.JSONDecoder()
+    exit_code = drill.main([
+        "--preflight",
+        "--base-url",
+        "https://api.example.test",
+        "--account-token",
+        "secret-token",
+        "--restart-command",
+        "systemctl restart havnai-coordinator.service",
+    ])
+    stdout = capsys.readouterr().out
+    output_chunks: list[dict[str, object]] = []
+    position = 0
+    while position < len(stdout):
+        stripped = stdout[position:].lstrip()
+        if not stripped:
+            break
+        skipped = len(stdout[position:]) - len(stripped)
+        chunk, offset = decoder.raw_decode(stripped)
+        output_chunks.append(chunk)
+        position += skipped + offset
+
+    assert exit_code == 0
+    plan, preflight = output_chunks
+    assert plan["schema"] == "havn-45-account-restart-recovery-drill-plan.v1"
+    assert preflight["schema"] == "havn-45-account-restart-recovery-drill-preflight.v1"
+    assert preflight["account_id_hash"]
+    assert preflight["account_present"] is True
+    assert preflight["account_status"] == "active"
+    assert preflight["available_units"] == 1200
+    assert preflight["reserved_units"] == 50
+    assert preflight["restart_command_configured"] is True
+    assert preflight["passed"] is True
+    assert "secret-token" not in json.dumps(output_chunks)
+    assert "acct-secret" not in json.dumps(output_chunks)
+
+
 def test_readonly_db_checks_report_duplicate_charge_like_rows(tmp_path: Path) -> None:
     db_path = tmp_path / "ledger.db"
     with sqlite3.connect(db_path) as conn:

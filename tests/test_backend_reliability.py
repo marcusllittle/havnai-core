@@ -26,6 +26,10 @@ class BackendReliabilityTests(unittest.TestCase):
         self.old_path, self.old_conn = api.DB_PATH, api.DB_CONN
         self.old_admin_token = api.ADMIN_API_TOKEN
         self.nodes = copy.deepcopy(api.NODES)
+        self.gallery_env = patch.dict(
+            api.gallery.os.environ, {"HAVNAI_LEGACY_GALLERY_PUBLIC_ENABLED": "1"}
+        )
+        self.gallery_env.start()
         api.NODES.clear()
         api.DB_PATH, api.DB_CONN = Path(self.temp.name) / "test.db", None
         api.init_db()
@@ -41,6 +45,7 @@ class BackendReliabilityTests(unittest.TestCase):
         api.ADMIN_API_TOKEN = self.old_admin_token
         api.NODES.clear()
         api.NODES.update(self.nodes)
+        self.gallery_env.stop()
         self.temp.cleanup()
 
     def fail_credit_insert(self):
@@ -132,10 +137,11 @@ class BackendReliabilityTests(unittest.TestCase):
         self.assertEqual(len(api.gallery.get_owned_assets(NEXT_BUYER)), 1)
 
     def test_account_ownership_overrides_every_legacy_gallery_surface(self):
-        first = api.gallery.create_listing("migrated", SELLER, "Private", 3, prompt="private prompt")
-        api.gallery.purchase_listing(first["id"], BUYER)
-        active = api.gallery.relist_owned_asset("migrated", BUYER, "Resale", 4)["listing"]
-        public = api.gallery.create_listing("public", SELLER, "Public", 2)
+        with patch.dict(api.gallery.os.environ, {"HAVNAI_LEGACY_GALLERY_PUBLIC_ENABLED": "1"}):
+            first = api.gallery.create_listing("migrated", SELLER, "Private", 3, prompt="private prompt")
+            api.gallery.purchase_listing(first["id"], BUYER)
+            active = api.gallery.relist_owned_asset("migrated", BUYER, "Resale", 4)["listing"]
+            public = api.gallery.create_listing("public", SELLER, "Public", 2)
         db = api.get_db()
         with db:
             db.execute("INSERT INTO accounts(id,created_at) VALUES ('acct_owner',?)", (time.time(),))
@@ -143,29 +149,62 @@ class BackendReliabilityTests(unittest.TestCase):
                 (id,wallet,model,task_type,weight,status,timestamp,owner_account_id,creator_account_id)
                 VALUES ('migrated',?,'model','IMAGE_GEN',1,'completed',?,'acct_owner','acct_owner')""",
                 (SELLER, time.time()))
-        for listing in (first, active):
-            self.assertIsNone(api.gallery.get_listing(listing["id"]))
-            self.assertEqual(self.client.get(f"/gallery/listings/{listing['id']}").status_code, 404)
-            self.assertEqual(self.client.get(
-                f"/gallery/listings/{listing['id']}/download?wallet={BUYER}").status_code, 404)
-        result = api.gallery.browse_gallery(limit=1)
-        self.assertEqual(result["total"], 1)
-        self.assertEqual(result["listings"][0]["id"], public["id"])
-        self.assertEqual(api.gallery.get_owned_assets(BUYER), [])
-        self.assertEqual(api.gallery.buyer_purchases(BUYER), [])
-        self.assertEqual(api.gallery.seller_listings(BUYER, include_sold=True), [])
-        self.assertEqual(api.gallery.get_ownership_history("migrated"), [])
-        self.assertIsNone(api.gallery.get_asset_owner("migrated"))
-        self.assertFalse(api.gallery.delist(active["id"], BUYER))
-        self.assertEqual(api.gallery.relist_owned_asset("migrated", BUYER, "Steal", 1)["error"], "not_owner")
-        with self.assertRaisesRegex(ValueError, "account_owned_job"):
-            api.gallery.create_listing("migrated", SELLER, "Reclaim", 1)
-        api.credits.deposit_credits(NEXT_BUYER, 10)
-        self.assertEqual(api.gallery.purchase_listing(active["id"], NEXT_BUYER,
-                         settle_credits=True)["error"], "listing_not_found")
+        with patch.dict(api.gallery.os.environ, {"HAVNAI_LEGACY_GALLERY_PUBLIC_ENABLED": "1"}):
+            for listing in (first, active):
+                self.assertIsNone(api.gallery.get_listing(listing["id"]))
+                self.assertEqual(self.client.get(f"/gallery/listings/{listing['id']}").status_code, 404)
+                self.assertEqual(self.client.get(
+                    f"/gallery/listings/{listing['id']}/download?wallet={BUYER}").status_code, 404)
+            result = api.gallery.browse_gallery(limit=1)
+            self.assertEqual(result["total"], 1)
+            self.assertEqual(result["listings"][0]["id"], public["id"])
+            self.assertEqual(api.gallery.get_owned_assets(BUYER), [])
+            self.assertEqual(api.gallery.buyer_purchases(BUYER), [])
+            self.assertEqual(api.gallery.seller_listings(BUYER, include_sold=True), [])
+            self.assertEqual(api.gallery.get_ownership_history("migrated"), [])
+            self.assertIsNone(api.gallery.get_asset_owner("migrated"))
+            self.assertFalse(api.gallery.delist(active["id"], BUYER))
+            self.assertEqual(api.gallery.relist_owned_asset("migrated", BUYER, "Steal", 1)["error"], "not_owner")
+            with self.assertRaisesRegex(ValueError, "account_owned_job"):
+                api.gallery.create_listing("migrated", SELLER, "Reclaim", 1)
+            api.credits.deposit_credits(NEXT_BUYER, 10)
+            self.assertEqual(api.gallery.purchase_listing(active["id"], NEXT_BUYER,
+                             settle_credits=True)["error"], "listing_not_found")
         self.assertEqual(api.credits.get_credit_balance(NEXT_BUYER), 10)
         self.assertEqual(db.execute("SELECT owner_account_id FROM jobs WHERE id='migrated'").fetchone()[0], "acct_owner")
         self.assertEqual(db.execute("SELECT COUNT(*) FROM gallery_sales").fetchone()[0], 1)
+
+    def test_legacy_gallery_public_surface_can_be_disabled_without_deleting_rows(self):
+        listing = api.gallery.create_listing("legacy-public", SELLER, "Old rough preview", 3)
+        api.credits.deposit_credits(BUYER, 10)
+
+        with patch.dict(api.gallery.os.environ, {}, clear=True):
+            self.assertFalse(api.gallery.legacy_public_gallery_enabled())
+            self.assertEqual(api.gallery.browse_gallery()["total"], 0)
+
+        with patch.dict(api.gallery.os.environ, {"HAVNAI_LEGACY_GALLERY_PUBLIC_ENABLED": "1"}):
+            self.assertTrue(api.gallery.legacy_public_gallery_enabled())
+            self.assertEqual(api.gallery.browse_gallery()["total"], 1)
+
+        with patch.dict(api.gallery.os.environ, {"HAVNAI_LEGACY_GALLERY_PUBLIC_ENABLED": "0"}):
+            self.assertFalse(api.gallery.legacy_public_gallery_enabled())
+            self.assertEqual(api.gallery.browse_gallery()["total"], 0)
+            self.assertIsNone(api.gallery.get_listing(listing["id"]))
+            self.assertFalse(api.gallery.delist(listing["id"], SELLER))
+            self.assertEqual(
+                api.gallery.purchase_listing(listing["id"], BUYER, settle_credits=True)["error"],
+                "listing_not_found",
+            )
+            self.assertEqual(api.gallery.get_owned_assets(SELLER), [])
+            self.assertEqual(api.gallery.seller_listings(SELLER, include_sold=True), [])
+            self.assertEqual(api.gallery.get_ownership_history("legacy-public"), [])
+            self.assertIsNone(api.gallery.get_asset_owner("legacy-public"))
+            self.assertEqual(self.client.get("/gallery/browse").get_json()["total"], 0)
+            self.assertEqual(self.client.get(f"/gallery/listings/{listing['id']}").status_code, 404)
+
+        row = api.get_db().execute("SELECT listed,sold,title FROM gallery_listings WHERE id=?", (listing["id"],)).fetchone()
+        self.assertEqual(tuple(row), (1, 0, "Old rough preview"))
+        self.assertEqual(api.credits.get_credit_balance(BUYER), 10)
 
     def test_listing_insert_rechecks_account_ownership_after_initial_check(self):
         db = api.get_db()

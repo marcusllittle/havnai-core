@@ -10,6 +10,7 @@ import uuid
 import warnings
 
 import account_ledger
+import adult_content
 import artifact_lifecycle
 import platform_v1
 
@@ -23,7 +24,8 @@ class MarketplaceError(ValueError):
 def initialize(conn):
     for table, fields in {
         "gallery_listings": {"owner_account_id": "TEXT REFERENCES accounts(id)", "seller_account_id": "TEXT REFERENCES accounts(id)",
-                             "creator_account_id": "TEXT REFERENCES accounts(id)", "price_units": "INTEGER", "artifact_id": "TEXT REFERENCES artifacts(id)"},
+                             "creator_account_id": "TEXT REFERENCES accounts(id)", "price_units": "INTEGER", "artifact_id": "TEXT REFERENCES artifacts(id)",
+                             "adult_content": "INTEGER NOT NULL DEFAULT 0", "adult_policy_reason": "TEXT DEFAULT ''"},
         "gallery_sales": {"buyer_account_id": "TEXT REFERENCES accounts(id)", "seller_account_id": "TEXT REFERENCES accounts(id)",
                           "price_units": "INTEGER", "account_sale_id": "TEXT REFERENCES account_credit_sales(sale_id)"},
         "gallery_ownership_log": {"from_account_id": "TEXT REFERENCES accounts(id)", "to_account_id": "TEXT REFERENCES accounts(id)", "price_units": "INTEGER"},
@@ -116,13 +118,17 @@ def create(conn, account, key, body):
         if (reservation and reservation[0] != "captured") or (not reservation and not imported):
             raise MarketplaceError("marketplace_unsettled", 409)
         _artifact(conn, job["id"], body["artifact_id"])
+        adult_reason = adult_content.from_job(job, body.get("title"), body.get("description"), body.get("category"))
+        if adult_reason:
+            raise MarketplaceError("adult_content_restricted", 409)
         if conn.execute("SELECT 1 FROM gallery_listings WHERE job_id=? AND listed=1 AND sold=0 AND owner_account_id IS NOT NULL", (job["id"],)).fetchone():
             raise MarketplaceError("already_listed", 409)
         now = time.time()
         listing_id = conn.execute("""INSERT INTO gallery_listings
             (job_id,seller_wallet,owner_wallet,title,description,price_credits,category,asset_type,model,prompt,
-             listed,sold,created_at,updated_at,owner_account_id,seller_account_id,creator_account_id,price_units,artifact_id)
-            VALUES (?,'','',?,?,?,?,'image',?,'',1,0,?,?,?,?,?,?,?)""",
+             listed,sold,created_at,updated_at,owner_account_id,seller_account_id,creator_account_id,price_units,artifact_id,
+             adult_content,adult_policy_reason)
+            VALUES (?,'','',?,?,?,?,'image',?,'',1,0,?,?,?,?,?,?,?,0,'')""",
             (job["id"], body["title"].strip(), body.get("description", "").strip(), units / account_ledger.SCALE,
              body.get("category", "").strip(), job["model"], now, now, account, account,
              job["creator_account_id"], units, body["artifact_id"])).lastrowid
@@ -187,7 +193,8 @@ def delist(conn, account, listing_id):
 _PUBLIC_FROM = """FROM gallery_listings l JOIN jobs j ON j.id=l.job_id
     JOIN accounts owner ON owner.id=j.owner_account_id
     WHERE l.owner_account_id=j.owner_account_id AND owner.status='active'
-    AND l.listed=1 AND l.sold=0 AND l.price_units IS NOT NULL"""
+    AND l.listed=1 AND l.sold=0 AND l.price_units IS NOT NULL
+    AND COALESCE(l.adult_content,0)=0"""
 
 
 def _public_listing(row):

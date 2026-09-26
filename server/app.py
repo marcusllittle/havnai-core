@@ -5599,7 +5599,8 @@ def account_music_preferences() -> Any:
         rows = get_db().execute(f"""SELECT p.id,p.like_count,
             EXISTS(SELECT 1 FROM account_music_likes l WHERE l.account_id=? AND l.publication_id=p.id) AS liked,
             EXISTS(SELECT 1 FROM account_music_saves s WHERE s.account_id=? AND s.publication_id=p.id) AS saved
-            FROM music_publications p WHERE p.state='published' AND p.id IN ({placeholders})""",
+            FROM music_publications p
+            WHERE p.state='published' AND COALESCE(p.adult_content,0)=0 AND p.id IN ({placeholders})""",
             [g.account_id, g.account_id, *ids]).fetchall()
         items = {row["id"]: {"liked_by_me": bool(row["liked"]), "saved_by_me": bool(row["saved"]), "like_count": row["like_count"]} for row in rows}
     return jsonify({"preferences": items})
@@ -5612,7 +5613,8 @@ def account_music_publications() -> Any:
         return error
     if request.method == "GET":
         rows = get_db().execute("""SELECT * FROM music_publications
-            WHERE owner_account_id=? AND state='published' ORDER BY published_at DESC LIMIT 100""",
+            WHERE owner_account_id=? AND state='published' AND COALESCE(adult_content,0)=0
+            ORDER BY published_at DESC LIMIT 100""",
             (g.account_id,)).fetchall()
         return jsonify({"publications": [music_discover.publication_to_dict(row, include_internal=True) for row in rows]})
     data = request.get_json(silent=True)
@@ -5656,10 +5658,13 @@ def account_public_music_creator(profile_id: str) -> Any:
         return jsonify({"error": "creator_not_found"}), 404
     sort = request.args.get("sort", "newest")
     order = {"popular": "play_count DESC,like_count DESC,published_at DESC", "liked": "like_count DESC,play_count DESC,published_at DESC"}.get(sort, "published_at DESC")
-    rows = conn.execute(f"SELECT * FROM music_publications WHERE creator_account_id=? AND state='published' ORDER BY {order} LIMIT 100",
+    rows = conn.execute(f"""SELECT * FROM music_publications
+        WHERE creator_account_id=? AND state='published' AND COALESCE(adult_content,0)=0
+        ORDER BY {order} LIMIT 100""",
                         (profile["account_id"],)).fetchall()
     stats = conn.execute("""SELECT COUNT(*) AS tracks,COALESCE(SUM(play_count),0) AS plays,COALESCE(SUM(like_count),0) AS likes
-        FROM music_publications WHERE creator_account_id=? AND state='published'""", (profile["account_id"],)).fetchone()
+        FROM music_publications
+        WHERE creator_account_id=? AND state='published' AND COALESCE(adult_content,0)=0""", (profile["account_id"],)).fetchone()
     playlists = conn.execute("SELECT * FROM music_playlists WHERE owner_account_id=? AND is_public=1 ORDER BY updated_at DESC",
                              (profile["account_id"],)).fetchall()
     return jsonify({"wallet": "", "profile_id": profile["id"], "display_name": profile["display_name"],
@@ -9011,7 +9016,7 @@ def api_music_audio(publication_id: str) -> Any:
         SELECT a.filename, a.content_type, a.path
         FROM music_publications p
         JOIN artifacts a ON a.id = p.audio_artifact_id
-        WHERE p.id = ? AND p.state = 'published' AND a.kind = 'audio'
+        WHERE p.id = ? AND p.state = 'published' AND COALESCE(p.adult_content,0)=0 AND a.kind = 'audio'
         """,
         (publication_id,),
     ).fetchone()

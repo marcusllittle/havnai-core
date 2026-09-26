@@ -7,6 +7,7 @@ import json
 import sqlite3
 import time
 import uuid
+import adult_content
 import artifact_lifecycle
 from functools import wraps
 from pathlib import Path
@@ -143,6 +144,13 @@ def init_music_discover_tables(conn: sqlite3.Connection) -> None:
     for column in ("creator_account_id", "owner_account_id"):
         if column not in columns:
             conn.execute(f"ALTER TABLE music_publications ADD COLUMN {column} TEXT REFERENCES accounts(id)")
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(music_publications)")}
+    for name, kind in {
+        "adult_content": "INTEGER NOT NULL DEFAULT 0",
+        "adult_policy_reason": "TEXT DEFAULT ''",
+    }.items():
+        if name not in columns:
+            conn.execute(f"ALTER TABLE music_publications ADD COLUMN {name} {kind}")
     conn.execute("""CREATE TABLE IF NOT EXISTS account_public_profiles (
         id TEXT PRIMARY KEY, account_id TEXT NOT NULL UNIQUE REFERENCES accounts(id),
         display_name TEXT NOT NULL, created_at REAL NOT NULL)""")
@@ -220,6 +228,8 @@ def _publish_song(*, job_id, creator_wallet, title, style, tags, creator_account
         (job_id,),
     ).fetchone()
     if existing:
+        if existing["adult_content"]:
+            return {"ok": False, "error": "adult_content_restricted"}
         publication = publication_to_dict(
             existing,
             liked_by_wallet=wallet,
@@ -235,6 +245,9 @@ def _publish_song(*, job_id, creator_wallet, title, style, tags, creator_account
     clean_title = _clean_title(title, "Untitled HavnAI Song" if creator_account_id else params.get("prompt") or job_id)
     clean_style = _clean_style(style or params.get("style") or "")
     clean_tags = _clean_tags(tags if tags is not None else _tags_from_style(clean_style))
+    adult_reason = adult_content.from_job(job, params, metadata, clean_title, clean_style, clean_tags)
+    if adult_reason:
+        return {"ok": False, "error": "adult_content_restricted"}
     now = time.time()
     publication_id = f"music-{hashlib.sha256(f'{job_id}:{wallet}:{now}'.encode()).hexdigest()[:24]}"
     duration = _number_or_none(metadata.get("duration"), params.get("duration"))
@@ -248,8 +261,9 @@ def _publish_song(*, job_id, creator_wallet, title, style, tags, creator_account
         INSERT INTO music_publications (
             id, job_id, audio_artifact_id, creator_wallet, title, style, tags,
             duration, bpm, song_key, instrumental, model, cover_art_seed, state,
-            play_count, like_count, published_at, updated_at, creator_account_id, owner_account_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'published', 0, 0, ?, ?, ?, ?)
+            play_count, like_count, published_at, updated_at, creator_account_id, owner_account_id,
+            adult_content, adult_policy_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'published', 0, 0, ?, ?, ?, ?, 0, '')
         """,
         (
             publication_id,
@@ -313,7 +327,7 @@ def get_publication(
     include_internal: bool = False,
 ) -> Optional[Dict[str, Any]]:
     row = get_db().execute(
-        "SELECT * FROM music_publications WHERE id=? AND state='published'",
+        "SELECT * FROM music_publications WHERE id=? AND state='published' AND COALESCE(adult_content,0)=0",
         (publication_id,),
     ).fetchone()
     if not row:
@@ -339,7 +353,7 @@ def browse_publications(
     include_internal: bool = False,
 ) -> Dict[str, Any]:
     conn = get_db()
-    conditions = ["state='published'"]
+    conditions = ["state='published'", "COALESCE(adult_content,0)=0"]
     params: List[Any] = []
     if search:
         like = f"%{search.strip()}%"
@@ -389,7 +403,7 @@ def set_like(publication_id: str, wallet: str, liked: bool = True) -> Dict[str, 
     if not WALLET_REGEX.match(normalized_wallet):
         return {"ok": False, "error": "invalid_wallet"}
     publication = conn.execute(
-        "SELECT id FROM music_publications WHERE id=? AND state='published'",
+        "SELECT id FROM music_publications WHERE id=? AND state='published' AND COALESCE(adult_content,0)=0",
         (publication_id,),
     ).fetchone()
     if not publication:
@@ -428,8 +442,8 @@ def set_account_music_preference(account_id: str, publication_id: str, *, kind: 
     conn = get_db()
     conn.execute("BEGIN IMMEDIATE")
     with conn:
-        row = conn.execute("SELECT state FROM music_publications WHERE id=?", (publication_id,)).fetchone()
-        if not row or (enabled and row["state"] != "published"):
+        row = conn.execute("SELECT state, COALESCE(adult_content,0) AS adult_content FROM music_publications WHERE id=?", (publication_id,)).fetchone()
+        if not row or (enabled and (row["state"] != "published" or row["adult_content"])):
             return {"ok": False, "error": "publication_not_found"}
         if enabled:
             conn.execute(f"INSERT OR IGNORE INTO {table} VALUES (?,?,?)", (account_id, publication_id, time.time()))
@@ -454,7 +468,7 @@ def account_music_library(account_id: str, *, limit: int = 80, offset: int = 0, 
     conn = get_db()
     limit = max(1, min(limit, MAX_LIMIT))
     offset = max(0, offset)
-    where = "s.account_id=? AND p.state='published'"
+    where = "s.account_id=? AND p.state='published' AND COALESCE(p.adult_content,0)=0"
     params: List[Any] = [account_id]
     if search:
         where += " AND (p.title LIKE ? OR p.style LIKE ? OR p.tags LIKE ?)"
@@ -464,7 +478,7 @@ def account_music_library(account_id: str, *, limit: int = 80, offset: int = 0, 
     rows = conn.execute(f"SELECT p.* {query} ORDER BY s.created_at DESC,p.id LIMIT ? OFFSET ?",
                         [*params, limit, offset]).fetchall()
     liked = conn.execute("""SELECT p.* FROM account_music_likes l JOIN music_publications p ON p.id=l.publication_id
-        WHERE l.account_id=? AND p.state='published' ORDER BY l.created_at DESC,p.id LIMIT 12""", (account_id,)).fetchall()
+        WHERE l.account_id=? AND p.state='published' AND COALESCE(p.adult_content,0)=0 ORDER BY l.created_at DESC,p.id LIMIT 12""", (account_id,)).fetchall()
     return {"publications": [account_publication(row, account_id) for row in rows],
             "recent_liked": [account_publication(row, account_id) for row in liked],
             "total": total, "limit": limit, "offset": offset}
@@ -520,7 +534,7 @@ def list_saved(
     if not WALLET_REGEX.match(normalized_wallet):
         return {"publications": [], "total": 0, "limit": 0, "offset": 0}
     conn = get_db()
-    conditions = ["s.wallet=?", "p.state='published'"]
+    conditions = ["s.wallet=?", "p.state='published'", "COALESCE(p.adult_content,0)=0"]
     params: List[Any] = [normalized_wallet]
     if search:
         like = f"%{search.strip()}%"
@@ -574,7 +588,7 @@ def list_recent_liked(
         SELECT p.*
         FROM music_publication_likes l
         JOIN music_publications p ON p.id=l.publication_id
-        WHERE l.wallet=? AND p.state='published'
+        WHERE l.wallet=? AND p.state='published' AND COALESCE(p.adult_content,0)=0
         ORDER BY l.created_at DESC
         LIMIT ?
         """,
@@ -661,6 +675,8 @@ def update_playlist(
         updates.append("description=?")
         params.append(_clean_playlist_description(description))
     if is_public is not None:
+        if is_public and _playlist_has_adult_publications(playlist_id):
+            return {"ok": False, "error": "adult_content_restricted"}
         updates.append("is_public=?")
         params.append(1 if is_public else 0)
     if not updates:
@@ -803,7 +819,7 @@ def get_creator(wallet: str, *, sort: str = "newest", requester_wallet: Optional
                COALESCE(SUM(play_count), 0) AS play_count,
                COALESCE(SUM(like_count), 0) AS like_count
         FROM music_publications
-        WHERE creator_wallet=? AND state='published'
+        WHERE creator_wallet=? AND state='published' AND COALESCE(adult_content,0)=0
         """,
         (normalized_wallet,),
     ).fetchone()
@@ -838,7 +854,7 @@ def record_play(
 ) -> Dict[str, Any]:
     conn = get_db()
     if not conn.execute(
-        "SELECT id FROM music_publications WHERE id=? AND state='published'",
+        "SELECT id FROM music_publications WHERE id=? AND state='published' AND COALESCE(adult_content,0)=0",
         (publication_id,),
     ).fetchone():
         return {"ok": False, "error": "publication_not_found"}
@@ -1094,7 +1110,7 @@ def _published_publication_exists(publication_id: str) -> bool:
     return bool(
         get_db()
         .execute(
-            "SELECT 1 FROM music_publications WHERE id=? AND state='published'",
+            "SELECT 1 FROM music_publications WHERE id=? AND state='published' AND COALESCE(adult_content,0)=0",
             (publication_id,),
         )
         .fetchone()
@@ -1121,7 +1137,7 @@ def _playlist_publications(playlist_id: str, requester_wallet: Optional[str] = N
         SELECT p.*
         FROM music_playlist_items i
         JOIN music_publications p ON p.id=i.publication_id
-        WHERE i.playlist_id=? AND p.state='published'
+        WHERE i.playlist_id=? AND p.state='published' AND COALESCE(p.adult_content,0)=0
         ORDER BY i.position ASC, i.added_at ASC
         """,
         (playlist_id,),
@@ -1138,11 +1154,28 @@ def _playlist_track_count(playlist_id: str) -> int:
         SELECT COUNT(*) AS n
         FROM music_playlist_items i
         JOIN music_publications p ON p.id=i.publication_id
-        WHERE i.playlist_id=? AND p.state='published'
+        WHERE i.playlist_id=? AND p.state='published' AND COALESCE(p.adult_content,0)=0
         """,
         (playlist_id,),
     ).fetchone()
     return int(row["n"] if row else 0)
+
+
+def _playlist_has_adult_publications(playlist_id: str) -> bool:
+    return bool(
+        get_db()
+        .execute(
+            """
+            SELECT 1
+            FROM music_playlist_items i
+            JOIN music_publications p ON p.id=i.publication_id
+            WHERE i.playlist_id=? AND p.state='published' AND COALESCE(p.adult_content,0)=1
+            LIMIT 1
+            """,
+            (playlist_id,),
+        )
+        .fetchone()
+    )
 
 
 def _compact_playlist_positions(conn: sqlite3.Connection, playlist_id: str) -> None:

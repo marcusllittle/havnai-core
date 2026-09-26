@@ -216,6 +216,38 @@ def test_only_completed_eligible_outputs_can_be_listed(market_case, state, task)
     assert response.json["error"]["code"] == "marketplace_ineligible"
 
 
+def test_adult_outputs_keep_private_access_but_are_not_marketplace_public(market_case):
+    harness, headers, _, _, _, body, private_url = market_case
+    with app.app.app_context():
+        conn = app.get_db()
+        with conn:
+            conn.execute("UPDATE jobs SET model=?, resolved_spec=? WHERE id=?",
+                         ("copaxTimeless_xplus2BNSFW1", '{"parameters":{"prompt":"private adult portrait"}}', body["job_id"]))
+    response = harness.client.post("/v2/marketplace/listings", headers=headers, json=body)
+    assert response.status_code == 409
+    assert response.json["error"]["code"] == "adult_content_restricted"
+    with app.app.app_context():
+        assert app.get_db().execute("SELECT COUNT(*) FROM gallery_listings").fetchone()[0] == 0
+    assert harness.client.get(private_url, headers=headers).status_code == 200
+
+    with app.app.app_context():
+        conn = app.get_db()
+        with conn:
+            conn.execute("UPDATE jobs SET model=?, resolved_spec=? WHERE id=?",
+                         ("juggernautXL_ragnarokBy", '{"parameters":{"prompt":"clean private image"}}', body["job_id"]))
+    listing_id = listing(market_case)
+    assert harness.client.get("/v2/marketplace/listings").json["total"] == 1
+    with app.app.app_context():
+        conn = app.get_db()
+        with conn:
+            conn.execute("UPDATE gallery_listings SET adult_content=1, adult_policy_reason='test_adult_flag' WHERE id=?",
+                         (listing_id,))
+    assert harness.client.get("/v2/marketplace/listings").json["total"] == 0
+    assert harness.client.get(f"/v2/marketplace/listings/{listing_id}").status_code == 404
+    assert harness.client.get(f"/v2/marketplace/listings/{listing_id}/preview").status_code == 404
+    assert harness.client.get(private_url, headers=headers).status_code == 200
+
+
 def test_account_identity_is_required_and_payload_cannot_replace_it(market_case):
     harness, headers, buyer_headers, _, _, body, _ = market_case
     assert harness.client.post("/v2/marketplace/listings", json=body).status_code == 401

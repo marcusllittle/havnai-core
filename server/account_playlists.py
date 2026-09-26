@@ -88,6 +88,8 @@ def modify(account_id, playlist_id, *, operation, data=None, publication_id=None
             return {"ok": True}
         if operation == "metadata":
             validate_metadata(data)
+            if data.get("is_public") and music._playlist_has_adult_publications(playlist_id):
+                raise PlaylistError("adult_content_restricted", 409)
             for key in ("title", "description", "is_public"):
                 if key in data:
                     value = data[key].strip() if key == "title" else data[key]
@@ -107,12 +109,14 @@ def modify(account_id, playlist_id, *, operation, data=None, publication_id=None
                 raise PlaylistError("invalid_payload")
             ids = data["publication_ids"]
             # Reorder the visible list; retain hidden unpublished entries at the end.
-            rows = conn.execute("""SELECT i.publication_id,p.state FROM music_playlist_items i
+            rows = conn.execute("""SELECT i.publication_id,p.state,COALESCE(p.adult_content,0) AS adult_content FROM music_playlist_items i
                 JOIN music_publications p ON p.id=i.publication_id WHERE playlist_id=? ORDER BY position,added_at""", (playlist_id,)).fetchall()
-            visible = {row["publication_id"] for row in rows if row["state"] == "published"}
+            visible = {row["publication_id"] for row in rows
+                       if row["state"] == "published" and not row["adult_content"]}
             if len(set(ids)) != len(ids) or set(ids) != visible:
                 raise PlaylistError("playlist_order_conflict", 409)
-            ordered = ids + [row["publication_id"] for row in rows if row["state"] != "published"]
+            ordered = ids + [row["publication_id"] for row in rows
+                             if row["state"] != "published" or row["adult_content"]]
             for position, item in enumerate(ordered):
                 conn.execute("UPDATE music_playlist_items SET position=? WHERE playlist_id=? AND publication_id=?", (position, playlist_id, item))
         else:

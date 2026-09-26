@@ -66,6 +66,9 @@ following invariants are launch gates:
 - Public music and marketplace responses use field allowlists and omit internal
   account IDs, Clerk identifiers, bearer tokens, private prompts, source paths,
   unlisted media URLs, and artifact IDs unless the route is owner-authenticated.
+- Public launch disables the pre-account wallet gallery browse/detail/purchase
+  surface with `HAVNAI_LEGACY_GALLERY_PUBLIC_ENABLED=0`; the account-backed
+  `/v2/marketplace` surface remains the supported marketplace path.
 - Legacy wallet compatibility never grants access to rows that have account
   ownership.
 
@@ -124,6 +127,8 @@ checks returned HTTP 200 for `/`, `/pricing`, `/support`, `/marketplace`,
 
 - HAVN-47/HAVN-12 still need a private account-token mixed-model drill; public
   legacy drill artifacts must not appear on the production dashboard.
+- Legacy `/gallery` rows from pre-account testing must stay hidden for launch
+  unless each listing receives explicit product-quality review and approval.
 - HAVN-44 has production/prod-like SQLite restore, orphan-attempt repair, local
   backup timer, and representative media/artifact sample evidence. It still
   needs remote backup/retention/encryption/access-control approval or waiver.

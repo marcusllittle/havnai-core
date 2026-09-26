@@ -167,6 +167,30 @@ class BackendReliabilityTests(unittest.TestCase):
         self.assertEqual(db.execute("SELECT owner_account_id FROM jobs WHERE id='migrated'").fetchone()[0], "acct_owner")
         self.assertEqual(db.execute("SELECT COUNT(*) FROM gallery_sales").fetchone()[0], 1)
 
+    def test_legacy_gallery_public_surface_can_be_disabled_without_deleting_rows(self):
+        listing = api.gallery.create_listing("legacy-public", SELLER, "Old rough preview", 3)
+        api.credits.deposit_credits(BUYER, 10)
+
+        with patch.dict(api.gallery.os.environ, {"HAVNAI_LEGACY_GALLERY_PUBLIC_ENABLED": "0"}):
+            self.assertFalse(api.gallery.legacy_public_gallery_enabled())
+            self.assertEqual(api.gallery.browse_gallery()["total"], 0)
+            self.assertIsNone(api.gallery.get_listing(listing["id"]))
+            self.assertFalse(api.gallery.delist(listing["id"], SELLER))
+            self.assertEqual(
+                api.gallery.purchase_listing(listing["id"], BUYER, settle_credits=True)["error"],
+                "listing_not_found",
+            )
+            self.assertEqual(api.gallery.get_owned_assets(SELLER), [])
+            self.assertEqual(api.gallery.seller_listings(SELLER, include_sold=True), [])
+            self.assertEqual(api.gallery.get_ownership_history("legacy-public"), [])
+            self.assertIsNone(api.gallery.get_asset_owner("legacy-public"))
+            self.assertEqual(self.client.get("/gallery/browse").get_json()["total"], 0)
+            self.assertEqual(self.client.get(f"/gallery/listings/{listing['id']}").status_code, 404)
+
+        row = api.get_db().execute("SELECT listed,sold,title FROM gallery_listings WHERE id=?", (listing["id"],)).fetchone()
+        self.assertEqual(tuple(row), (1, 0, "Old rough preview"))
+        self.assertEqual(api.credits.get_credit_balance(BUYER), 10)
+
     def test_listing_insert_rechecks_account_ownership_after_initial_check(self):
         db = api.get_db()
         with db:

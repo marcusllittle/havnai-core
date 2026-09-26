@@ -29,7 +29,7 @@ from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from flask import abort, Flask, jsonify, request, Response, send_file, send_from_directory, g, has_app_context
 from flask_cors import CORS
@@ -9755,6 +9755,155 @@ def network_telemetry() -> Any:
         receipt_batches=merkle_batches.list_batches(5),
     )
     response = jsonify(control if request.path.endswith("control-plane") else summary)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+def _network_alert_dry_run(
+    summary: Dict[str, Any],
+    control: Dict[str, Any],
+    workers: List[Dict[str, Any]],
+    *,
+    inject: Optional[Set[str]] = None,
+) -> Dict[str, Any]:
+    inject = inject or set()
+    queue = control.get("queue") or {}
+    nodes = control.get("nodes") or {}
+    health = control.get("health") or {}
+    claims = control.get("claims") or {}
+    worker_failures = [
+        worker for worker in workers
+        if ((worker.get("model_health") or {}).get("last_error_code"))
+    ]
+    unhealthy_models = [
+        worker for worker in workers
+        if ((worker.get("model_health") or {}).get("status")) == "unhealthy"
+    ]
+    vram_failures = [
+        worker for worker in worker_failures
+        if re.search(
+            r"(cuda|gpu|oom|out[_ -]?of[_ -]?memory|vram)",
+            str((worker.get("model_health") or {}).get("failure_reason") or ""),
+            re.IGNORECASE,
+        )
+    ]
+    failed_jobs = int(queue.get("failed") or 0)
+    queued_jobs = int(queue.get("queued") or 0)
+    oldest_wait = float(queue.get("oldest_wait_seconds") or 0)
+
+    def rule(
+        code: str,
+        severity: str,
+        matched: bool,
+        message: str,
+        evidence: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        injected = code in inject
+        return {
+            "code": code,
+            "severity": severity,
+            "matched": bool(matched or injected),
+            "dry_run_injected": injected,
+            "message": message,
+            "evidence": evidence,
+        }
+
+    rules = [
+        rule(
+            "offline_workers",
+            "warning",
+            int(nodes.get("offline") or 0) > 0,
+            "One or more tracked workers are offline.",
+            {"offline_workers": int(nodes.get("offline") or 0), "tracked_workers": int(nodes.get("tracked") or 0)},
+        ),
+        rule(
+            "no_online_creators",
+            "critical",
+            any(item.get("code") == "no_online_creators" for item in health.get("alerts") or []),
+            "No online creator workers can execute generation jobs.",
+            {"online_workers": int(nodes.get("online") or 0), "ready_creators": int(nodes.get("ready") or 0)},
+        ),
+        rule(
+            "stuck_queue",
+            "critical",
+            queued_jobs > 0 and oldest_wait >= 900,
+            "Queued work has waited longer than the production threshold.",
+            {"queued_jobs": queued_jobs, "oldest_wait_seconds": oldest_wait, "threshold_seconds": 900},
+        ),
+        rule(
+            "claims_at_risk",
+            "warning",
+            int(claims.get("at_risk") or 0) > 0,
+            "One or more active worker leases are missing, expired, or near expiry.",
+            {"claims_at_risk": int(claims.get("at_risk") or 0), "active_claims": int(claims.get("active_count") or 0)},
+        ),
+        rule(
+            "job_error_spike",
+            "warning",
+            failed_jobs >= 5,
+            "Recent failed/expired job count reached the dry-run alert threshold.",
+            {"failed_or_expired_jobs": failed_jobs, "threshold": 5},
+        ),
+        rule(
+            "model_load_failures",
+            "warning",
+            bool(worker_failures),
+            "Workers reported model-load or model-health failure categories.",
+            {"workers_reporting_failures": len(worker_failures)},
+        ),
+        rule(
+            "gpu_vram_exhaustion",
+            "critical",
+            bool(vram_failures),
+            "Workers reported GPU/VRAM exhaustion signals.",
+            {"workers_reporting_gpu_vram_failures": len(vram_failures)},
+        ),
+        rule(
+            "worker_model_unhealthy",
+            "critical",
+            bool(unhealthy_models),
+            "At least one worker/model pair is marked unhealthy.",
+            {"unhealthy_worker_models": len(unhealthy_models)},
+        ),
+        rule(
+            "public_ingress",
+            "critical",
+            str(summary.get("coordinator", {}).get("status") or "") == "critical",
+            "Public ingress/control-plane health is critical.",
+            {"coordinator_status": summary.get("coordinator", {}).get("status")},
+        ),
+    ]
+    matched = [item for item in rules if item["matched"]]
+    return {
+        "schema_version": "network-alert-dry-run.v1",
+        "generated_at": iso_now(),
+        "delivery": {"mode": "dry_run", "sent": False},
+        "status": "critical" if any(item["severity"] == "critical" for item in matched) else "warning" if matched else "ok",
+        "matched_count": len(matched),
+        "rules": rules,
+    }
+
+
+@app.route("/v1/network/alerts/dry-run", methods=["GET"])
+def network_alerts_dry_run() -> Any:
+    auth_error = require_admin()
+    if auth_error:
+        return auth_error
+    raw_inject = request.args.get("inject", "")
+    inject = {
+        item.strip()
+        for item in raw_inject.split(",")
+        if item.strip()
+    }
+    with LOCK:
+        nodes = [(node_id, dict(info)) for node_id, info in NODES.items()]
+    workers = [_worker_snapshot(node_id, node_info=info) for node_id, info in nodes]
+    summary, control = network_status.snapshot(
+        get_db(), workers, version=APP_VERSION, lease_seconds=job_helpers.LEASE_SECONDS,
+        receipt_count=merkle_batches.count_unbatched_receipts(),
+        receipt_batches=merkle_batches.list_batches(5),
+    )
+    response = jsonify(_network_alert_dry_run(summary, control, workers, inject=inject))
     response.headers["Cache-Control"] = "no-store"
     return response
 

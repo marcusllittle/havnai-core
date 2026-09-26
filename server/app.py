@@ -8886,7 +8886,7 @@ def api_music_playlist_modify(playlist_id: str) -> Any:
         is_public=bool(data["is_public"]) if "is_public" in data else None,
     )
     if not result.get("ok"):
-        status = 400 if result.get("error") == "missing_title" else 404
+        status = 400 if result.get("error") == "missing_title" else 409 if result.get("error") == "adult_content_restricted" else 404
         return jsonify({"error": result.get("error")}), status
     return jsonify(result["playlist"])
 

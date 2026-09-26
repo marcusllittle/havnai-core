@@ -516,7 +516,12 @@ def is_saved(publication_id: str, wallet: str) -> bool:
     return bool(
         get_db()
         .execute(
-            "SELECT 1 FROM music_library_saves WHERE wallet=? AND publication_id=?",
+            """
+            SELECT 1
+            FROM music_library_saves s
+            JOIN music_publications p ON p.id=s.publication_id
+            WHERE s.wallet=? AND s.publication_id=? AND p.state='published' AND COALESCE(p.adult_content,0)=0
+            """,
             (normalized_wallet, publication_id),
         )
         .fetchone()

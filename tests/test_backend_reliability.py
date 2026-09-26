@@ -24,6 +24,7 @@ class BackendReliabilityTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.old_path, self.old_conn = api.DB_PATH, api.DB_CONN
+        self.old_admin_token = api.ADMIN_API_TOKEN
         self.nodes = copy.deepcopy(api.NODES)
         api.NODES.clear()
         api.DB_PATH, api.DB_CONN = Path(self.temp.name) / "test.db", None
@@ -37,6 +38,7 @@ class BackendReliabilityTests(unittest.TestCase):
     def tearDown(self):
         api.DB_CONN.close()
         api.DB_PATH, api.DB_CONN = self.old_path, self.old_conn
+        api.ADMIN_API_TOKEN = self.old_admin_token
         api.NODES.clear()
         api.NODES.update(self.nodes)
         self.temp.cleanup()
@@ -212,6 +214,27 @@ class BackendReliabilityTests(unittest.TestCase):
         data = self.client.get("/v1/network/control-plane").get_json()
         self.assertIsNone(data["latency_24h"]["run_p95_seconds"])
         self.assertEqual(data["health"]["status"], "degraded")
+
+    def test_network_alert_dry_run_is_admin_gated_and_non_sending(self):
+        api.ADMIN_API_TOKEN = "test-admin-token"
+
+        unauthorized = self.client.get("/v1/network/alerts/dry-run")
+        self.assertEqual(unauthorized.status_code, 401)
+
+        response = self.client.get(
+            "/v1/network/alerts/dry-run?inject=model_load_failures,gpu_vram_exhaustion",
+            headers={"X-HavnAI-Token": "test-admin-token"},
+        )
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        payload = response.get_json()
+        self.assertEqual(payload["schema_version"], "network-alert-dry-run.v1")
+        self.assertFalse(payload["delivery"]["sent"])
+        rules = {rule["code"]: rule for rule in payload["rules"]}
+        self.assertTrue(rules["model_load_failures"]["matched"])
+        self.assertTrue(rules["model_load_failures"]["dry_run_injected"])
+        self.assertTrue(rules["gpu_vram_exhaustion"]["matched"])
+        self.assertTrue(rules["gpu_vram_exhaustion"]["dry_run_injected"])
 
     def test_network_counts_legacy_states_expired_claims_and_measured_latency(self):
         db = api.get_db()

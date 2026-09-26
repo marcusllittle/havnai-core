@@ -1617,11 +1617,12 @@ def _worker_snapshot(
     avg_utilization = float(node.get("avg_utilization", node.get("utilization", capability_meta.get("avg_utilization", 0.0))) or 0.0)
     current_task = node.get("current_task") or {}
     last_result = node.get("last_result") or {}
+    last_metrics = last_result.get("metrics") if isinstance(last_result.get("metrics"), dict) else {}
     model_name = (last_result.get("model_name") or current_task.get("model_name"))
-    inference_time = last_result.get("metrics", {}).get("inference_time_ms")
+    inference_time = last_metrics.get("inference_time_ms")
     task_type = (last_result.get("task_type") or current_task.get("task_type") or CREATOR_TASK_TYPE)
     weight = (
-        last_result.get("metrics", {}).get("reward_weight")
+        last_metrics.get("reward_weight")
         or current_task.get("weight")
         or MODEL_WEIGHTS.get((model_name or "triomerge_v10").lower(), 10.0)
     )
@@ -1662,6 +1663,15 @@ def _worker_snapshot(
         "score": performance.get("trust_score"),
         "level": performance.get("trust_level"),
         "sample_size": performance.get("sample_size"),
+    }
+    error_code = str(last_metrics.get("error_code") or "").strip()
+    model_health = {
+        "status": "unhealthy" if error_code == "model_unhealthy" else "ok",
+        "model_name": model_name,
+        "task_type": task_type,
+        "last_error_code": error_code or None,
+        "failure_reason": last_metrics.get("failure_reason") or None,
+        "pipeline_load_ms": last_metrics.get("pipeline_load_ms"),
     }
 
     payload: Dict[str, Any] = {
@@ -1718,6 +1728,7 @@ def _worker_snapshot(
             "last_payout_at": performance.get("last_payout_at"),
         },
         "trust": trust,
+        "model_health": model_health,
         "recent_activity_at": recent_activity_at,
         "last_result": last_result,
     }
@@ -2184,6 +2195,20 @@ def metrics() -> Any:
             1 for info in NODES.values()
             if now - float(info.get("last_seen_unix") or 0) <= ONLINE_THRESHOLD
         )
+        model_failure_counts: Dict[Tuple[str, str, str], int] = {}
+        unhealthy_model_counts: Dict[Tuple[str, str], int] = {}
+        for info in NODES.values():
+            result = info.get("last_result") or {}
+            metrics_payload = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
+            error_code = str(metrics_payload.get("error_code") or "").strip()
+            if not error_code:
+                continue
+            model = str(result.get("model_name") or metrics_payload.get("model_name") or "unknown").strip() or "unknown"
+            task = str(result.get("task_type") or metrics_payload.get("task_type") or "unknown").strip() or "unknown"
+            model_failure_counts[(task, model, error_code)] = model_failure_counts.get((task, model, error_code), 0) + 1
+            if error_code == "model_unhealthy":
+                reason = str(metrics_payload.get("failure_reason") or "unknown").strip() or "unknown"
+                unhealthy_model_counts[(model, reason)] = unhealthy_model_counts.get((model, reason), 0) + 1
 
     lines = [
         "# HELP havnai_jobs Jobs by durable state.",
@@ -2211,6 +2236,27 @@ def metrics() -> Any:
     for row in failure_rows:
         category = re.sub(r"[^a-zA-Z0-9_.-]", "_", str(row["category"]))[:64]
         lines.append(f'havnai_failures_total{{category="{category}"}} {int(row["count"])}')
+    if model_failure_counts:
+        lines.extend([
+            "# HELP havnai_worker_model_failures Last reported worker model-load failure categories.",
+            "# TYPE havnai_worker_model_failures gauge",
+        ])
+        for (task, model, code), count in sorted(model_failure_counts.items()):
+            task_label = re.sub(r"[^a-zA-Z0-9_.-]", "_", task)[:64]
+            model_label = re.sub(r"[^a-zA-Z0-9_.-]", "_", model)[:96]
+            code_label = re.sub(r"[^a-zA-Z0-9_.-]", "_", code)[:64]
+            lines.append(
+                f'havnai_worker_model_failures{{task_type="{task_label}",model="{model_label}",error_code="{code_label}"}} {count}'
+            )
+    if unhealthy_model_counts:
+        lines.extend([
+            "# HELP havnai_worker_model_unhealthy Worker/model combinations currently reporting model_unhealthy.",
+            "# TYPE havnai_worker_model_unhealthy gauge",
+        ])
+        for (model, reason), count in sorted(unhealthy_model_counts.items()):
+            model_label = re.sub(r"[^a-zA-Z0-9_.-]", "_", model)[:96]
+            reason_label = re.sub(r"[^a-zA-Z0-9_.-]", "_", reason)[:64]
+            lines.append(f'havnai_worker_model_unhealthy{{model="{model_label}",reason="{reason_label}"}} {count}')
     return Response("\n".join(lines) + "\n", mimetype="text/plain; version=0.0.4")
 
 
@@ -4430,7 +4476,10 @@ def submit_results() -> Any:
                     final_spec = metrics.get("resolved_render_spec") if isinstance(metrics, dict) else None
                     error_code = None
                     if platform_v1.canonical_job_state(status) == "failed":
-                        error_code = platform_v1.failure_category(metrics.get("error") if isinstance(metrics, dict) else status)
+                        supplied_error_code = str(metrics.get("error_code") or "").strip() if isinstance(metrics, dict) else ""
+                        error_code = supplied_error_code or platform_v1.failure_category(
+                            metrics.get("error") if isinstance(metrics, dict) else status
+                        )
                     conn.execute(
                         "UPDATE jobs SET data=?, resolved_spec=COALESCE(?, resolved_spec), error_code=?, updated_at=? WHERE id=?",
                         (

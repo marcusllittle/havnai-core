@@ -283,6 +283,93 @@ class SettlementConvergenceTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 409)
         self.assertEqual(resp.get_json().get("error"), "job_finalized")
 
+    def test_tester_hai_request_is_queued_once_without_granting_credits(self) -> None:
+        before = app_module.credits.get_credit_balance(VALID_WALLET)
+        with patch.dict("os.environ", {"HAVNAI_TESTER_DISTRIBUTION_ENABLED": "1", "HAVNAI_TESTER_DISTRIBUTION_ALLOWLIST": ""}), patch.object(app_module, "rate_limit", return_value=True):
+            payload = {"wallet": VALID_WALLET, "requested_hai": 100, "request_note": "Testing"}
+            first = self.client.post("/credits/tester-distribution/request", json=payload)
+            second = self.client.post("/credits/tester-distribution/request", json=payload)
+            self.assertEqual(first.status_code, 201, first.get_json())
+            self.assertEqual(first.get_json()["request_id"], second.get_json()["request_id"])
+            history = self.client.get(f"/credits/tester-distribution/requests?wallet={VALID_WALLET}")
+            self.assertEqual(history.status_code, 200)
+            self.assertEqual(len(history.get_json()["requests"]), 1)
+            self.assertEqual(history.get_json()["requests"][0]["status"], "pending")
+            invalid = self.client.post("/credits/tester-distribution/request", json={**payload, "requested_hai": "NaN"})
+            self.assertEqual(invalid.status_code, 400)
+        self.assertEqual(app_module.credits.get_credit_balance(VALID_WALLET), before)
+
+    def test_tester_request_respects_configuration_and_resolution_cooldown(self) -> None:
+        payload = {"wallet": VALID_WALLET, "requested_hai": 100}
+        with patch.object(app_module, "rate_limit", return_value=True), patch.dict("os.environ", {"HAVNAI_TESTER_DISTRIBUTION_ENABLED": "0"}):
+            self.assertEqual(self.client.post("/credits/tester-distribution/request", json=payload).status_code, 403)
+        with patch.object(app_module, "rate_limit", return_value=True), patch.dict("os.environ", {"HAVNAI_TESTER_DISTRIBUTION_ENABLED": "1", "HAVNAI_TESTER_DISTRIBUTION_ALLOWLIST": ""}):
+            response = self.client.post("/credits/tester-distribution/request", json=payload)
+            request_id = response.get_json()["request_id"]
+            with patch.object(app_module, "check_join_token", return_value=False):
+                self.assertEqual(self.client.post(f"/credits/tester-distribution/requests/{request_id}/resolve", json={"status": "approved"}).status_code, 403)
+            with patch.object(app_module, "check_join_token", return_value=True), patch.object(app_module, "SERVER_JOIN_TOKEN", "test-admin"):
+                resolved = self.client.post(f"/credits/tester-distribution/requests/{request_id}/resolve", json={"status": "rejected"})
+                self.assertEqual(resolved.status_code, 200)
+            self.assertEqual(self.client.post("/credits/tester-distribution/request", json=payload).status_code, 429)
+
+    def test_gallery_purchase_route_requires_signature(self) -> None:
+        with patch.object(app_module, "rate_limit", return_value=True):
+            response = self.client.post(
+                "/gallery/listings/1/purchase", json={"wallet": VALID_WALLET}
+            )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "signature_required")
+
+    def test_gallery_purchase_transfers_ownership_and_credits_once(self) -> None:
+        buyer = "0x2222222222222222222222222222222222222222"
+        listing = app_module.gallery.create_listing(
+            "purchase-route-job", VALID_WALLET, "Route test", 3.0
+        )
+        app_module.credits.CREDITS_ENABLED = True
+        app_module.credits.deposit_credits(buyer, 10.0, reason="test")
+        seller_before = app_module.credits.get_credit_balance(VALID_WALLET)
+        payload = {"wallet": buyer, "nonce": "test-nonce", "signature": "test-signature"}
+        with patch.object(app_module, "rate_limit", return_value=True), patch.object(
+            app_module, "_verify_wallet_signature", return_value=(True, None)
+        ) as verify:
+            response = self.client.post(
+                f"/gallery/listings/{listing['id']}/purchase", json=payload
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.get_json()["ok"])
+            self.assertEqual(response.get_json()["remaining_credits"], 7.0)
+            self.assertEqual(verify.call_args.kwargs["expected_amount"], 3.0)
+            self.assertEqual(
+                verify.call_args.kwargs["allowed_purposes"],
+                {app_module.WALLET_NONCE_PURPOSE_GALLERY_PURCHASE},
+            )
+            repeat = self.client.post(
+                f"/gallery/listings/{listing['id']}/purchase", json=payload
+            )
+        self.assertEqual(repeat.status_code, 404)
+        self.assertEqual(repeat.get_json()["error"], "listing_not_available")
+        self.assertEqual(app_module.gallery.get_listing(listing["id"])["owner_wallet"], buyer)
+        self.assertEqual(app_module.credits.get_credit_balance(buyer), 7.0)
+        self.assertEqual(app_module.credits.get_credit_balance(VALID_WALLET), seller_before + 3.0)
+
+    def test_gallery_purchase_insufficient_credits_preserves_ownership(self) -> None:
+        buyer = "0x2222222222222222222222222222222222222222"
+        listing = app_module.gallery.create_listing(
+            "unfunded-purchase-job", VALID_WALLET, "Route test", 3.0
+        )
+        app_module.credits.CREDITS_ENABLED = True
+        with patch.object(app_module, "rate_limit", return_value=True), patch.object(
+            app_module, "_verify_wallet_signature", return_value=(True, None)
+        ):
+            response = self.client.post(
+                f"/gallery/listings/{listing['id']}/purchase",
+                json={"wallet": buyer, "nonce": "test", "signature": "test"},
+            )
+        self.assertEqual(response.status_code, 402)
+        self.assertEqual(response.get_json()["error"], "insufficient_credits")
+        self.assertEqual(app_module.gallery.get_listing(listing["id"])["owner_wallet"], VALID_WALLET)
+
     def test_gallery_listing_enforces_settlement_marketplace_eligibility(self) -> None:
         conn = app_module.get_db()
         now = time.time()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import io
 import json
 import sqlite3
@@ -27,6 +28,7 @@ import platform_v1
 WALLET = "0x1111111111111111111111111111111111111111"
 IMAGE_MODEL = "test_sdxl"
 VIDEO_MODEL = "test_ltx23_wangp"
+MUSIC_MODEL = "ace_step_1_5_turbo"
 
 
 class VideoSpecTests(unittest.TestCase):
@@ -54,6 +56,34 @@ class VideoSpecTests(unittest.TestCase):
             platform_v1.resolve_video_spec(
                 {"duration_seconds": 4}, model="ltx_video_distilled"
             )
+
+    def test_music_spec_validates_and_preserves_user_controls(self) -> None:
+        spec = platform_v1.resolve_music_spec(
+            {
+                "prompt": "a nocturnal city pop track",
+                "style": "city pop, warm bass",
+                "lyrics": "[Verse]\nStreetlights glow",
+                "instrumental": False,
+                "duration": 90,
+                "bpm": 118,
+                "key": "A Minor",
+                "seed": 17,
+            },
+            model=MUSIC_MODEL,
+        )
+        self.assertEqual(spec["task_type"], "text_to_music")
+        self.assertEqual(spec["parameters"]["bpm"], 118)
+        self.assertEqual(spec["parameters"]["key"], "A Minor")
+        self.assertEqual(spec["parameters"]["seed"], 17)
+
+    def test_music_spec_rejects_out_of_range_values(self) -> None:
+        for payload, error in (
+            ({"prompt": "test", "duration": 9}, "invalid_duration"),
+            ({"prompt": "test", "duration": 30, "bpm": 301}, "invalid_bpm"),
+            ({"prompt": "test", "duration": 30, "seed": -2}, "invalid_seed"),
+        ):
+            with self.subTest(error=error), self.assertRaisesRegex(ValueError, error):
+                platform_v1.resolve_music_spec(payload, model=MUSIC_MODEL)
 
 
 class ImageDefaultsRegressionTests(unittest.TestCase):
@@ -92,6 +122,14 @@ class ImageDefaultsRegressionTests(unittest.TestCase):
                                     "task_type": "LTX_VIDEO_GEN",
                                     "video_defaults": {"steps": 8, "guidance": 1.0},
                                 },
+                                {
+                                    "name": "music_one",
+                                    "pipeline": "ace_step",
+                                    "task_type": "MUSIC_GEN",
+                                    "music_defaults": {"inference_steps": 8, "batch_size": 2},
+                                    "max_batch_size": 4,
+                                    "timeout_seconds": 1200,
+                                },
                             ]
                         }
                     ),
@@ -115,6 +153,10 @@ class ImageDefaultsRegressionTests(unittest.TestCase):
                     app_module.MANIFEST_MODELS["video_one"]["video_defaults"],
                     {"steps": 8, "guidance": 1.0},
                 )
+                music = app_module.MANIFEST_MODELS["music_one"]
+                self.assertEqual(music["music_defaults"], {"inference_steps": 8, "batch_size": 2})
+                self.assertEqual(music["max_batch_size"], 4)
+                self.assertEqual(music["timeout_seconds"], 1200)
         finally:
             app_module.MANIFEST_MODELS.clear()
             app_module.MANIFEST_MODELS.update(original_manifest)
@@ -174,6 +216,17 @@ class PlatformApiContractTests(unittest.TestCase):
                     "license_status": "research_owner_only",
                     "capabilities": ["image_to_video"],
                 },
+                MUSIC_MODEL: {
+                    "name": MUSIC_MODEL,
+                    "pipeline": "ace_step",
+                    "task_type": "MUSIC_GEN",
+                    "reward_weight": 1.0,
+                    "model_family": "ace_step",
+                    "model_version": "1.5-turbo",
+                    "engine_model": "acestep-v15-turbo",
+                    "capabilities": ["text_to_music"],
+                    "max_batch_size": 4,
+                },
             }
         )
         for directory in (app_module.STATIC_DIR, app_module.OUTPUTS_DIR, app_module.ASSETS_DIR):
@@ -213,9 +266,9 @@ class PlatformApiContractTests(unittest.TestCase):
         app_module.NODES["node-test"] = {
             "role": "creator",
             "last_seen_unix": time.time(),
-            "supports": ["image", "ltx_video"],
-            "models": [IMAGE_MODEL, VIDEO_MODEL],
-            "pipelines": ["sdxl", "ltx23_wangp"],
+            "supports": ["image", "ltx_video", "music"],
+            "models": [IMAGE_MODEL, VIDEO_MODEL, MUSIC_MODEL],
+            "pipelines": ["sdxl", "ltx23_wangp", "ace_step"],
             "capabilities": {
                 IMAGE_MODEL: {
                     "files_present": True,
@@ -228,6 +281,13 @@ class PlatformApiContractTests(unittest.TestCase):
                     "model_version": "2.3-distilled-1.1",
                     "capabilities": ["image_to_video"],
                     "available_modes": ["distilled"],
+                },
+                MUSIC_MODEL: {
+                    "files_present": True,
+                    "pipeline": "ace_step",
+                    "model_version": "1.5-turbo",
+                    "capabilities": ["text_to_music"],
+                    "available_modes": ["text_to_music"],
                 },
             },
         }
@@ -265,8 +325,12 @@ class PlatformApiContractTests(unittest.TestCase):
         available = self.client.get("/v1/capabilities", headers=self.owner_headers)
         payload = available.get_json()
         video = next(model for model in payload["models"] if model["id"] == VIDEO_MODEL)
+        music = next(model for model in payload["models"] if model["id"] == MUSIC_MODEL)
         self.assertTrue(payload["video_v2_available"])
         self.assertTrue(video["available"])
+        self.assertTrue(music["available"])
+        self.assertEqual(music["capabilities"], ["text_to_music"])
+        self.assertEqual(music["max_batch_size"], 4)
         self.assertEqual(video["verified_nodes"], ["node-test"])
         self.assertEqual(video["capabilities"], ["image_to_video"])
 
@@ -330,6 +394,84 @@ class PlatformApiContractTests(unittest.TestCase):
         self.assertEqual(task["type"], "LTX_VIDEO_GEN")
         self.assertEqual(task["timeout"], 3600)
         self.assertEqual(task["source_asset_id"], asset_id)
+
+    def test_music_job_claim_and_audio_artifact_contract(self) -> None:
+        response = self.client.post(
+            "/v1/jobs",
+            json={
+                "type": "text_to_music",
+                "model": MUSIC_MODEL,
+                "prompt": "cinematic electronic sunrise",
+                "style": "ambient techno",
+                "lyrics": "",
+                "instrumental": True,
+                "duration": 30,
+                "bpm": 110,
+                "key": "C Minor",
+                "seed": 23,
+                "wallet": WALLET,
+            },
+            headers=self.owner_headers,
+        )
+        self.assertEqual(response.status_code, 202, response.get_json())
+        job_id = str(response.get_json()["id"])
+        self.assertEqual(response.get_json()["type"], "text_to_music")
+        task = self._claim(job_id)
+        self.assertEqual(task["type"], "MUSIC_GEN")
+        self.assertEqual(task["style"], "ambient techno")
+        self.assertTrue(task["instrumental"])
+        self.assertEqual(task["duration"], 30.0)
+
+        artifact = self.client.post(
+            f"/v1/node/jobs/{job_id}/artifacts",
+            data={
+                "node_id": "node-test",
+                "attempt_id": task["attempt_id"],
+                "kind": "audio",
+                "metadata": json.dumps({"duration": 30, "bpm": 110, "key": "C Minor"}),
+                "file": (io.BytesIO(b"mp3-result"), "result.mp3"),
+            },
+            headers=self.node_headers,
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(artifact.status_code, 201, artifact.get_json())
+        self.assertIn(f"/static/outputs/audio/{job_id}.mp3", artifact.get_json()["url"])
+        second = self.client.post(
+            f"/v1/node/jobs/{job_id}/artifacts",
+            data={
+                "node_id": "node-test",
+                "attempt_id": task["attempt_id"],
+                "kind": "audio",
+                "metadata": json.dumps({"variation": 2, "seed": 24}),
+                "file": (io.BytesIO(b"second-mp3-result"), "music-2.mp3"),
+            },
+            headers=self.node_headers,
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(second.status_code, 201, second.get_json())
+        self.assertIn(f"/static/outputs/audio/{job_id}-take-2.mp3", second.get_json()["url"])
+        self.assertNotEqual(artifact.get_json()["url"], second.get_json()["url"])
+        self.assertEqual((app_module.OUTPUTS_DIR / "audio" / f"{job_id}.mp3").read_bytes(), b"mp3-result")
+        self.assertEqual(
+            (app_module.OUTPUTS_DIR / "audio" / f"{job_id}-take-2.mp3").read_bytes(),
+            b"second-mp3-result",
+        )
+        completed = self.client.post(
+            "/results",
+            json={
+                "node_id": "node-test",
+                "task_id": job_id,
+                "attempt_id": task["attempt_id"],
+                "status": "success",
+                "metrics": {"inference_time_ms": 12},
+            },
+            headers=self.node_headers,
+        )
+        self.assertEqual(completed.status_code, 200, completed.get_json())
+        detail = self.client.get(f"/v1/jobs/{job_id}", headers=self.owner_headers).get_json()
+        self.assertEqual(detail["status"], "succeeded")
+        self.assertEqual(detail["artifacts"][0]["kind"], "audio")
+        self.assertNotIn("path", detail["artifacts"][0])
 
     def test_lease_upload_completion_and_stale_attempt_rejection(self) -> None:
         job_id = self._create_image_job()
@@ -413,6 +555,415 @@ class PlatformApiContractTests(unittest.TestCase):
         self.assertEqual(control.status_code, 200)
         self.assertTrue(control.get_json()["cancel_requested"])
 
+    def test_public_astra_receipt_exposes_hashes_without_prompt_or_wallet(self) -> None:
+        job_id = self._create_image_job()
+        output = app_module.OUTPUTS_DIR / f"{job_id}.png"
+        output.write_bytes(b"final-astra-image")
+        artifact_digest = hashlib.sha256(output.read_bytes()).hexdigest()
+        with app_module.app.app_context():
+            conn = app_module.get_db()
+            app_module.astra_gen.init_astra_gen_tables(conn)
+            app_module.settlement.init_settlement_tables(conn)
+            app_module.astra_receipts.init_receipt_tables(conn)
+            conn.execute(
+                "UPDATE jobs SET status='succeeded', node_id='node-test', completed_at=120 WHERE id=?",
+                (job_id,),
+            )
+            conn.execute(
+                """INSERT INTO astra_reward_images
+                   (run_id, job_id, wallet, pilot_id, outfit_id, map_id, grade, created_at)
+                   VALUES ('run-receipt', ?, ?, 'pilot_nova', 'outfit_17', 'nebula-runway', 'S', 100)""",
+                (job_id, WALLET),
+            )
+            conn.execute(
+                """INSERT INTO artifacts
+                   (id, job_id, kind, filename, content_type, path, size_bytes, sha256, created_at)
+                   VALUES ('artifact-receipt', ?, 'image', 'result.png', 'image/png', ?, ?, ?, 119)""",
+                (job_id, str(output), output.stat().st_size, artifact_digest),
+            )
+            conn.execute(
+                """INSERT INTO job_settlement
+                   (job_id, wallet, job_type, prompt, model, input_metadata,
+                    execution_status, quality_status, settlement_outcome,
+                    assigned_node_id, attempt_count, created_at, updated_at)
+                   VALUES (?, ?, 'IMAGE_GEN', 'private prompt', ?, ?, 'settled',
+                           'valid', 'spent', 'node-test', 1, 100, 121)""",
+                (job_id, WALLET, IMAGE_MODEL, json.dumps({"pipeline": "sdxl", "tier": "A"})),
+            )
+            conn.execute(
+                """INSERT INTO node_payouts
+                   (node_id, job_id, reward_amount, reward_asset_type, status, created_at, updated_at)
+                   VALUES ('node-test', ?, 2.5, 'simulated_hai', 'completed', 121, 121)""",
+                (job_id,),
+            )
+            conn.commit()
+
+        response = self.client.get(f"/astra/artifacts/{job_id}/receipt")
+        self.assertEqual(response.status_code, 200, response.get_json())
+        body = response.get_json()
+        self.assertEqual(body["receipt"]["artifact"]["sha256"], artifact_digest)
+        self.assertEqual(body["receipt"]["execution"]["creator_node_id"], "node-test")
+        self.assertEqual(body["receipt"]["settlement"]["node_reward"], 2.5)
+        self.assertEqual(body["artifact_url"], f"/static/outputs/{job_id}.png")
+        self.assertEqual(
+            body["receipt_sha256"],
+            "sha256:" + hashlib.sha256(body["canonical_json"].encode()).hexdigest(),
+        )
+        self.assertNotIn(WALLET, body["canonical_json"])
+        self.assertNotIn("private prompt", body["canonical_json"])
+        self.assertIn("immutable", response.headers["Cache-Control"])
+
+    def test_astra_receipt_batch_routes_create_prove_and_anchor(self) -> None:
+        receipt_hashes = [hashlib.sha256(f"receipt-{index}".encode()).hexdigest() for index in range(2)]
+        with app_module.app.app_context():
+            conn = app_module.get_db()
+            app_module.astra_receipts.init_receipt_tables(conn)
+            app_module.merkle_batches.init_merkle_tables(conn)
+            for index, receipt_hash in enumerate(receipt_hashes):
+                conn.execute(
+                    """INSERT INTO astra_artifact_receipts
+                       (job_id, schema_version, artifact_sha256, canonical_json,
+                        receipt_sha256, created_at)
+                       VALUES (?, 1, ?, '{}', ?, ?)""",
+                    (f"job-anchor-{index}", f"{index + 11:064x}", receipt_hash, float(index)),
+                )
+            conn.commit()
+
+        treasury = WALLET.lower()
+        with patch.object(
+            app_module.receipt_anchors, "TREASURY_WALLET", treasury
+        ), patch.object(
+            app_module, "_verify_wallet_signature", return_value=(True, None)
+        ) as verify_signature:
+            created = self.client.post(
+                "/astra/receipts/batches",
+                json={"wallet": treasury, "nonce": "nonce", "signature": "sig", "limit": 100},
+            )
+
+        self.assertEqual(created.status_code, 201, created.get_json())
+        verify_signature.assert_called_once()
+        batch = created.get_json()["batch"]
+        self.assertEqual(batch["leaf_count"], 2)
+        self.assertEqual(batch["status"], "ready")
+        self.assertEqual(batch["anchor_payload"]["from"], treasury)
+
+        proof_response = self.client.get("/astra/artifacts/job-anchor-0/receipt/proof")
+        self.assertEqual(proof_response.status_code, 200, proof_response.get_json())
+        proof = proof_response.get_json()
+        self.assertTrue(proof["valid"])
+        self.assertTrue(
+            app_module.merkle_batches.verify_proof(
+                proof["receipt_hash"], proof["proof"], proof["merkle_root"]
+            )
+        )
+
+        verification = {
+            "verified": True,
+            "pending": False,
+            "network": "sepolia",
+            "chain_id": 11155111,
+            "tx_hash": "0x" + "a" * 64,
+            "block_number": 123,
+            "confirmations": 2,
+            "from": treasury,
+            "to": treasury,
+            "calldata": batch["anchor_payload"]["calldata"],
+        }
+        with patch.object(
+            app_module.receipt_anchors,
+            "verify_anchor_transaction",
+            return_value=verification,
+        ):
+            anchored = self.client.post(
+                f"/astra/receipts/batches/{batch['batch_id']}/anchor",
+                json={"tx_hash": verification["tx_hash"]},
+            )
+        self.assertEqual(anchored.status_code, 200, anchored.get_json())
+        anchored_batch = anchored.get_json()["batch"]
+        self.assertEqual(anchored_batch["status"], "anchored")
+        self.assertEqual(anchored_batch["anchor_tx_hash"], verification["tx_hash"])
+        self.assertIn(verification["tx_hash"], anchored_batch["explorer_url"])
+
+        listing = self.client.get("/astra/receipts/batches")
+        self.assertEqual(listing.status_code, 200, listing.get_json())
+        self.assertEqual(listing.get_json()["batches"][0]["status"], "anchored")
+        self.assertEqual(listing.get_json()["unbatched_receipt_count"], 0)
+
+    def test_node_payout_claim_routes_batch_publish_and_confirm(self) -> None:
+        contract = "0x" + "c" * 40
+        token = "0x" + "d" * 40
+        publish_tx = "0x" + "e" * 64
+        claim_tx = "0x" + "f" * 64
+        with app_module.app.app_context():
+            conn = app_module.get_db()
+            app_module.settlement.init_settlement_tables(conn)
+            app_module.payout_claims.init_payout_claim_tables(conn)
+            conn.execute(
+                "INSERT OR REPLACE INTO node_wallets "
+                "(node_id, wallet, node_name, updated_at) VALUES ('node-claim', ?, 'Claim Node', 1)",
+                (WALLET,),
+            )
+            conn.execute(
+                """INSERT INTO node_payouts
+                   (node_id, job_id, reward_amount, reward_asset_type, status,
+                    created_at, updated_at)
+                   VALUES ('node-claim', 'job-claim', 2.5, 'simulated_hai',
+                           'completed', 1, 1)"""
+            )
+            conn.commit()
+
+        publish_verification = {
+            "verified": True,
+            "pending": False,
+            "network": "sepolia",
+            "chain_id": 11155111,
+            "tx_hash": publish_tx,
+            "block_number": 500,
+            "from": WALLET.lower(),
+            "to": contract,
+            "contract": contract,
+            "calldata": "0x1234",
+        }
+        claim_verification = {
+            "verified": True,
+            "pending": False,
+            "network": "sepolia",
+            "chain_id": 11155111,
+            "tx_hash": claim_tx,
+            "block_number": 501,
+            "from": WALLET.lower(),
+            "to": contract,
+            "contract": contract,
+            "wallet": WALLET.lower(),
+            "batch_id": 1,
+            "leaf_index": 0,
+            "amount_wei": "2500000000000000000",
+        }
+        with patch.object(
+            app_module.payout_chain, "TREASURY_WALLET", WALLET.lower()
+        ), patch.object(
+            app_module.payout_chain, "CLAIM_CONTRACT", contract
+        ), patch.object(
+            app_module.payout_chain, "HAI_TOKEN_ADDRESS", token
+        ), patch.object(
+            app_module, "_verify_wallet_signature", return_value=(True, None)
+        ) as verify_signature, patch.object(
+            app_module.payout_chain,
+            "verify_publish_transaction",
+            return_value=publish_verification,
+        ), patch.object(
+            app_module.payout_chain,
+            "verify_claim_transaction",
+            return_value=claim_verification,
+        ):
+            created = self.client.post(
+                "/payouts/claim-batches",
+                json={
+                    "wallet": WALLET,
+                    "nonce": "nonce-claim-batch",
+                    "signature": "0xsigned",
+                },
+            )
+            self.assertEqual(created.status_code, 201, created.get_json())
+            batch = created.get_json()["batch"]
+            self.assertEqual(batch["total_amount_wei"], "2500000000000000000")
+            self.assertEqual(batch["claim_contract"], contract)
+            self.assertEqual(batch["publish_payload"]["to"], contract)
+            self.assertEqual(
+                verify_signature.call_args.kwargs["allowed_purposes"],
+                {app_module.WALLET_NONCE_PURPOSE_NODE_PAYOUT_BATCH_FLUSH},
+            )
+
+            published = self.client.post(
+                f"/payouts/claim-batches/{batch['batch_id']}/publish",
+                json={"tx_hash": publish_tx},
+            )
+            self.assertEqual(published.status_code, 200, published.get_json())
+            self.assertEqual(published.get_json()["batch"]["status"], "published")
+
+            proof = self.client.get(f"/payouts/claims?wallet={WALLET}")
+            self.assertEqual(proof.status_code, 200, proof.get_json())
+            claim = proof.get_json()["claims"][0]
+            self.assertTrue(claim["valid"])
+            self.assertEqual(claim["amount_hai"], "2.5")
+            self.assertEqual(claim["batch_status"], "published")
+
+            confirmed = self.client.post(
+                f"/payouts/claims/{batch['batch_id']}/0/confirm",
+                json={"tx_hash": claim_tx},
+            )
+            self.assertEqual(confirmed.status_code, 200, confirmed.get_json())
+            self.assertTrue(confirmed.get_json()["claim"]["claimed"])
+
+        with app_module.app.app_context():
+            payout = app_module.get_db().execute(
+                "SELECT reward_asset_type, tx_hash FROM node_payouts WHERE job_id='job-claim'"
+            ).fetchone()
+            self.assertEqual(payout["reward_asset_type"], "onchain_hai")
+            self.assertEqual(payout["tx_hash"], claim_tx)
+
+    def test_astra_receipt_anchor_pending_does_not_mutate_batch(self) -> None:
+        with app_module.app.app_context():
+            conn = app_module.get_db()
+            app_module.astra_receipts.init_receipt_tables(conn)
+            app_module.merkle_batches.init_merkle_tables(conn)
+            conn.execute(
+                """INSERT INTO astra_artifact_receipts
+                   (job_id, schema_version, artifact_sha256, canonical_json,
+                    receipt_sha256, created_at)
+                   VALUES ('job-pending-anchor', 1, ?, '{}', ?, 1)""",
+                ("1" * 64, "2" * 64),
+            )
+            conn.commit()
+            batch = app_module.merkle_batches.create_batch()
+        assert batch is not None
+
+        with patch.object(
+            app_module.receipt_anchors,
+            "verify_anchor_transaction",
+            return_value={
+                "verified": False,
+                "pending": True,
+                "error": "insufficient_confirmations",
+                "confirmations": 1,
+                "required_confirmations": 2,
+            },
+        ):
+            response = self.client.post(
+                f"/astra/receipts/batches/{batch['id']}/anchor",
+                json={"tx_hash": "0x" + "b" * 64},
+            )
+        self.assertEqual(response.status_code, 202, response.get_json())
+        self.assertEqual(response.get_json()["status"], "pending")
+        self.assertEqual(app_module.merkle_batches.get_batch(batch["id"])["status"], "ready")
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MusicSpecModeTests(unittest.TestCase):
+    """resolve_music_spec must cover the full studio mode surface."""
+
+    TURBO_CAPS = ("text_to_music", "cover", "repaint")
+    BASE_CAPS = ("text_to_music", "cover", "repaint", "extract", "lego", "complete")
+
+    def spec(self, payload, **kwargs):
+        kwargs.setdefault("model", "ace_step_1_5_base")
+        kwargs.setdefault("capabilities", self.BASE_CAPS)
+        return platform_v1.resolve_music_spec(payload, **kwargs)
+
+    def test_default_mode_is_create(self) -> None:
+        spec = self.spec({"prompt": "a warm house track", "duration": 60})
+        self.assertEqual(spec["mode"], "create")
+        self.assertEqual(spec["engine"]["task_type"], "text2music")
+        self.assertEqual(spec["parameters"]["batch_size"], 1)
+
+    def test_engine_task_type_is_accepted_directly(self) -> None:
+        spec = self.spec({
+            "task_type": "cover",
+            "prompt": "bossa nova",
+            "duration": 60,
+            "audio_asset_id": "asset-1",
+        })
+        self.assertEqual(spec["mode"], "remix")
+
+    def test_mode_rejected_when_model_lacks_capability(self) -> None:
+        with self.assertRaisesRegex(ValueError, "mode_unsupported_by_model"):
+            self.spec(
+                {"mode": "extract", "track_name": "vocals", "audio_asset_id": "a", "duration": 60},
+                capabilities=self.TURBO_CAPS,
+            )
+
+    def test_source_audio_required_for_editing_modes(self) -> None:
+        for mode in ("remix", "repaint", "extract", "layer", "arrange"):
+            with self.subTest(mode=mode):
+                with self.assertRaisesRegex(ValueError, "source_audio_required"):
+                    self.spec({
+                        "mode": mode,
+                        "prompt": "x",
+                        "duration": 60,
+                        "track_name": "drums",
+                        "track_classes": ["bass"],
+                    })
+
+    def test_stem_modes_may_omit_the_prompt(self) -> None:
+        spec = self.spec({
+            "mode": "extract",
+            "track_name": "vocals",
+            "audio_asset_id": "asset-9",
+            "duration": 60,
+        })
+        self.assertEqual(spec["parameters"]["track_name"], "vocals")
+        self.assertEqual(spec["parameters"]["task_type"], "extract")
+
+    def test_create_still_requires_a_prompt(self) -> None:
+        with self.assertRaisesRegex(ValueError, "invalid_prompt"):
+            self.spec({"mode": "create", "duration": 60})
+
+    def test_repaint_range_must_be_ordered(self) -> None:
+        with self.assertRaisesRegex(ValueError, "invalid_repaint_range"):
+            self.spec({
+                "mode": "repaint",
+                "prompt": "x",
+                "duration": 60,
+                "audio_asset_id": "a",
+                "repainting_start": 40,
+                "repainting_end": 20,
+            })
+
+    def test_open_ended_repaint_is_allowed(self) -> None:
+        spec = self.spec({
+            "mode": "repaint",
+            "prompt": "x",
+            "duration": 60,
+            "audio_asset_id": "a",
+            "repainting_start": 40,
+            "repainting_end": -1,
+        })
+        self.assertEqual(spec["parameters"]["repainting_end"], -1.0)
+
+    def test_batch_size_clamped_to_model_ceiling(self) -> None:
+        spec = self.spec(
+            {"prompt": "x", "duration": 60, "batch_size": 8},
+            max_batch_size=2,
+        )
+        self.assertEqual(spec["parameters"]["batch_size"], 2)
+
+    def test_registry_defaults_apply_when_caller_is_silent(self) -> None:
+        spec = self.spec(
+            {"prompt": "x", "duration": 60},
+            defaults={"inference_steps": 50, "guidance_scale": 7.0, "audio_format": "flac"},
+        )
+        self.assertEqual(spec["parameters"]["inference_steps"], 50)
+        self.assertEqual(spec["parameters"]["guidance_scale"], 7.0)
+        self.assertEqual(spec["parameters"]["audio_format"], "flac")
+
+    def test_caller_overrides_registry_defaults(self) -> None:
+        spec = self.spec(
+            {"prompt": "x", "duration": 60, "inference_steps": 12, "audio_format": "wav"},
+            defaults={"inference_steps": 50, "audio_format": "flac"},
+        )
+        self.assertEqual(spec["parameters"]["inference_steps"], 12)
+        self.assertEqual(spec["parameters"]["audio_format"], "wav")
+
+    def test_batch_extends_the_timeout(self) -> None:
+        single = self.spec({"prompt": "x", "duration": 60}, timeout_seconds=900)
+        batch = self.spec({"prompt": "x", "duration": 60, "batch_size": 4}, timeout_seconds=900)
+        self.assertGreater(batch["timeout_seconds"], single["timeout_seconds"])
+
+    def test_invalid_audio_format_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "invalid_audio_format"):
+            self.spec({"prompt": "x", "duration": 60, "audio_format": "ogg"})
+
+    def test_instrumental_clears_lyrics(self) -> None:
+        spec = self.spec({
+            "prompt": "x", "duration": 60, "instrumental": True, "lyrics": "la la la",
+        })
+        self.assertNotIn("lyrics", spec["parameters"])
+
+    def test_duration_bounds_enforced(self) -> None:
+        for bad in (5, 900):
+            with self.subTest(duration=bad):
+                with self.assertRaisesRegex(ValueError, "invalid_duration"):
+                    self.spec({"prompt": "x", "duration": bad})

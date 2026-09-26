@@ -101,6 +101,10 @@ _REFERENCE_FACE_PIPE = None
 _REFERENCE_FACE_PIPE_MODEL = ""
 _IMAGE_PIPELINE_CACHE: "OrderedDict[str, Any]" = OrderedDict()
 _IMAGE_PIPELINE_CACHE_LOCK = threading.Lock()
+MODEL_FAILURE_THRESHOLD = int(os.environ.get("HAVNAI_MODEL_FAILURE_THRESHOLD", "2"))
+MODEL_FAILURE_COOLDOWN_SECONDS = float(os.environ.get("HAVNAI_MODEL_FAILURE_COOLDOWN_SECONDS", "900"))
+_MODEL_FAILURE_LOCK = threading.Lock()
+_MODEL_FAILURES: Dict[str, Dict[str, Any]] = {}
 
 try:
     from huggingface_hub import hf_hub_download  # type: ignore
@@ -676,6 +680,9 @@ def _task_output_path(task_id: str, task_type: str) -> Optional[Path]:
     if task_type in {"IMAGE_GEN", "FACE_SWAP"}:
         path = OUTPUTS_DIR / f"{task_id}.png"
         return path if path.is_file() else None
+    if task_type == "MUSIC_GEN":
+        music_dir = OUTPUTS_DIR / "music" / task_id
+        return next((path for path in music_dir.glob("music.*") if path.is_file()), None)
     candidates = [
         OUTPUTS_DIR / f"video_{task_id}.mp4",
         OUTPUTS_DIR / f"animatediff_{task_id}.mp4",
@@ -784,9 +791,18 @@ def _upload_task_artifact(task: Dict[str, Any], path: Path, kind: str, metadata:
                 "file": (
                     path.name,
                     handle,
-                    {"image": "image/png", "video": "video/mp4", "manifest": "application/json"}.get(
-                        kind, "application/octet-stream"
-                    ),
+                    {
+                        "image": "image/png",
+                        "video": "video/mp4",
+                        "audio": {
+                            ".wav": "audio/wav",
+                            ".flac": "audio/flac",
+                            ".mp3": "audio/mpeg",
+                            ".opus": "audio/ogg",
+                            ".aac": "audio/aac",
+                        }.get(path.suffix.lower(), "application/octet-stream"),
+                        "manifest": "application/json",
+                    }.get(kind, "application/octet-stream"),
                 )
             },
             timeout=HTTP_TIMEOUT_RESULTS,
@@ -922,6 +938,58 @@ def discover_capabilities() -> Dict[str, Any]:
             continue
         if not _is_model_allowed(name):
             continue
+        if pipeline == "ace_step":
+            try:
+                from engines.ace_step.provider import runtime_probe
+
+                ready, probe = runtime_probe()
+            except Exception as exc:
+                ready, probe = False, {"error": str(exc)}
+            expected_model = str(getattr(entry, "engine_model", "") or "acestep-v15-turbo")
+            # `models` lists every checkpoint on disk; only `loaded_models` is
+            # actually servable. Advertising a downloaded-but-unloaded checkpoint
+            # would win us jobs the service then answers with the wrong model.
+            service_models = []
+            if isinstance(probe, dict):
+                service_models = probe.get("loaded_models", probe.get("models")) or []
+            model_ready = ready and expected_model in service_models
+            declared_caps = list(getattr(entry, "capabilities", []) or ["text_to_music"])
+            declared_modes = list(getattr(entry, "available_modes", []) or ["text2music"])
+            # Only advertise a capability the loaded checkpoint actually implements.
+            service_tasks = set()
+            if isinstance(probe, dict):
+                by_model = probe.get("model_task_types") or {}
+                if isinstance(by_model, dict) and expected_model in by_model:
+                    service_tasks = {str(value) for value in by_model[expected_model] or []}
+            if service_tasks:
+                capability_task = {
+                    "text_to_music": "text2music",
+                    "cover": "cover",
+                    "repaint": "repaint",
+                    "extract": "extract",
+                    "lego": "lego",
+                    "complete": "complete",
+                }
+                declared_caps = [
+                    cap for cap in declared_caps
+                    if capability_task.get(cap, cap) in service_tasks
+                ]
+                declared_modes = [mode for mode in declared_modes if mode in service_tasks]
+            details[name] = {
+                "pipeline": pipeline,
+                "model_family": "ace_step",
+                "model_version": str(getattr(entry, "model_version", "") or "1.5"),
+                "license_status": str(getattr(entry, "license_status", "unreviewed") or "unreviewed"),
+                "files_present": model_ready,
+                "capabilities": declared_caps,
+                "available_modes": declared_modes,
+                "max_batch_size": int(getattr(entry, "max_batch_size", 0) or 1),
+                "service": probe,
+            }
+            if model_ready:
+                pipelines.add(pipeline)
+                models.append(name)
+            continue
         # LTX2 can be loaded from HF repo id; local path is optional.
         if pipeline == "ltx2":
             pipelines.add(pipeline)
@@ -1033,6 +1101,9 @@ def discover_supports(capabilities: Dict[str, Any]) -> List[str]:
 
     if _has_image_generation_model():
         supports.append("image")
+
+    if "ace_step" in pipelines and _has_runner("engines.ace_step.provider", "AceStepProvider"):
+        supports.append("music")
 
     if "ltx2" in pipelines and "ltx2" in models and _has_runner("engines.ltx2.ltx2_runner", "run_ltx2"):
         supports.append("video")
@@ -1771,6 +1842,66 @@ def _is_cuda_oom_error(exc: Exception) -> bool:
     )
 
 
+def _model_failure_key(task_type: str, model_name: str) -> str:
+    return f"{task_type.upper()}:{model_name.lower()}"
+
+
+def _classify_model_failure(exc: Exception) -> str:
+    text = str(exc).lower()
+    if isinstance(exc, FileNotFoundError) or "no such file" in text or "missing" in text:
+        return "model_weights_missing"
+    if _is_cuda_oom_error(exc):
+        return "gpu_oom"
+    if "cuda" in text:
+        return "cuda_runtime"
+    if "unsupported" in text:
+        return "unsupported_model_mapping"
+    if "startup" in text or "unreachable" in text:
+        return "engine_startup_failed"
+    return "model_load_failed"
+
+
+def _model_unhealthy_reason(task_type: str, model_name: str, *, now: Optional[float] = None) -> Optional[str]:
+    if MODEL_FAILURE_THRESHOLD <= 0:
+        return None
+    checked_at = time.time() if now is None else now
+    key = _model_failure_key(task_type, model_name)
+    with _MODEL_FAILURE_LOCK:
+        record = _MODEL_FAILURES.get(key)
+        if not record:
+            return None
+        until = float(record.get("until", 0))
+        if until <= 0:
+            return None
+        if checked_at >= until:
+            _MODEL_FAILURES.pop(key, None)
+            return None
+        return str(record.get("reason") or "model_unhealthy")
+
+
+def _record_model_failure(task_type: str, model_name: str, reason: str, *, now: Optional[float] = None) -> int:
+    if MODEL_FAILURE_THRESHOLD <= 0:
+        return 0
+    checked_at = time.time() if now is None else now
+    key = _model_failure_key(task_type, model_name)
+    with _MODEL_FAILURE_LOCK:
+        record = _MODEL_FAILURES.get(key)
+        until = float(record.get("until", 0)) if record else 0.0
+        if not record or (until > 0 and checked_at >= until):
+            record = {"count": 0, "reason": reason, "until": 0.0}
+        record["count"] = int(record.get("count", 0)) + 1
+        record["reason"] = reason
+        if int(record["count"]) >= MODEL_FAILURE_THRESHOLD:
+            record["until"] = checked_at + MODEL_FAILURE_COOLDOWN_SECONDS
+        _MODEL_FAILURES[key] = record
+        return int(record["count"])
+
+
+def _clear_model_failure(task_type: str, model_name: str) -> None:
+    with _MODEL_FAILURE_LOCK:
+        _MODEL_FAILURES.pop(_model_failure_key(task_type, model_name), None)
+
+
 def _cuda_total_vram_gb() -> float:
     if torch is None or not torch.cuda.is_available():
         return 0.0
@@ -2402,6 +2533,140 @@ def _run_faceswap_task(
     return metrics, util, image_b64
 
 
+def _run_music_task(
+    task_id: str,
+    entry: ModelEntry,
+    reward_weight: float,
+    task: Dict[str, Any],
+) -> Tuple[Dict[str, Any], int]:
+    from engines.ace_step import (
+        AceStepCancelled,
+        AceStepCapabilityError,
+        AceStepModelMismatch,
+        AceStepProvider,
+    )
+
+    started = time.time()
+    cancel_event = task.get("_cancel_event")
+
+    def _optional(key: str) -> Any:
+        value = task.get(key)
+        return None if value in (None, "") else value
+
+    settings: Dict[str, Any] = {
+        "task_type": str(task.get("task_type") or "text2music"),
+        "prompt": str(task.get("prompt") or ""),
+        "style": str(task.get("style") or ""),
+        "lyrics": str(task.get("lyrics") or ""),
+        "instrumental": bool(task.get("instrumental")),
+        "duration": float(task.get("duration") or 60),
+        "bpm": _optional("bpm"),
+        "key": _optional("key"),
+        "time_signature": _optional("time_signature"),
+        "vocal_language": _optional("vocal_language"),
+        "seed": _optional("seed"),
+        "batch_size": int(task.get("batch_size") or 1),
+        "audio_format": str(task.get("audio_format") or "mp3"),
+        "inference_steps": _optional("inference_steps"),
+        "guidance_scale": _optional("guidance_scale"),
+        "shift": _optional("shift"),
+        "infer_method": _optional("infer_method"),
+        "audio_cover_strength": _optional("audio_cover_strength"),
+        "cover_noise_strength": _optional("cover_noise_strength"),
+        "repainting_start": _optional("repainting_start"),
+        "repainting_end": _optional("repainting_end"),
+        "repaint_mode": _optional("repaint_mode"),
+        "repaint_strength": _optional("repaint_strength"),
+        "repaint_wav_crossfade_sec": _optional("repaint_wav_crossfade_sec"),
+        "track_name": _optional("track_name"),
+        "track_classes": task.get("track_classes") or None,
+        "global_caption": _optional("global_caption"),
+        "src_audio_path": _optional("audio_input"),
+        "reference_audio_path": _optional("reference_audio"),
+        "engine_model": str(
+            task.get("engine_model")
+            or getattr(entry, "engine_model", "")
+            or "acestep-v15-turbo"
+        ),
+    }
+    settings = {key: value for key, value in settings.items() if value is not None}
+
+    try:
+        provider = AceStepProvider()
+        provider.validate(settings)
+        results = provider.generate(
+            settings,
+            OUTPUTS_DIR / "music" / task_id,
+            progress=lambda value, stage: _report_task_progress(task, value, stage),
+            cancelled=lambda: bool(cancel_event and cancel_event.is_set()),
+            timeout=float(task.get("timeout") or 900),
+        )
+        primary = results[0]
+        metadata = dict(primary.metadata)
+        variations = [
+            {
+                "path": str(item.path),
+                "content_type": item.content_type,
+                "metadata": dict(item.metadata),
+            }
+            for item in results[1:]
+        ]
+        return {
+            "status": "success",
+            "task_type": "music_gen",
+            "model_name": entry.name,
+            "reward_weight": reward_weight,
+            "inference_time_ms": round((time.time() - started) * 1000, 3),
+            "audio_metadata": metadata,
+            "content_type": primary.content_type,
+            "duration": metadata.get("duration", settings.get("duration")),
+            "bpm": metadata.get("bpm", settings.get("bpm")),
+            "key": metadata.get("key", settings.get("key")),
+            "seed": metadata.get("seed", settings.get("seed")),
+            "engine_model": metadata.get("model", settings["engine_model"]),
+            "music_task_type": settings.get("task_type"),
+            "variation_count": len(results),
+            "music_variations": variations,
+        }, utilization_hint
+    except AceStepCancelled as exc:
+        return {
+            "status": "cancelled",
+            "task_type": "music_gen",
+            "model_name": entry.name,
+            "reward_weight": reward_weight,
+            "error": str(exc),
+        }, utilization_hint
+    except AceStepModelMismatch as exc:
+        # The service quietly served a different checkpoint. Failing here keeps
+        # the wrong model out of rewards, receipts and publication metadata.
+        return {
+            "status": "failed",
+            "task_type": "music_gen",
+            "model_name": entry.name,
+            "reward_weight": reward_weight,
+            "error": str(exc),
+            "error_code": "ace_step_model_mismatch",
+        }, utilization_hint
+    except AceStepCapabilityError as exc:
+        return {
+            "status": "failed",
+            "task_type": "music_gen",
+            "model_name": entry.name,
+            "reward_weight": reward_weight,
+            "error": str(exc),
+            "error_code": "ace_step_capability",
+        }, utilization_hint
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "task_type": "music_gen",
+            "model_name": entry.name,
+            "reward_weight": reward_weight,
+            "error": str(exc),
+            "error_code": "ace_step_unreachable" if isinstance(exc, requests.RequestException) else "ace_step_generation",
+        }, utilization_hint
+
+
 def execute_task(task: Dict[str, Any]) -> None:
     global utilization_hint
 
@@ -2413,7 +2678,7 @@ def execute_task(task: Dict[str, Any]) -> None:
     prompt = task.get("prompt") or ""
     negative_prompt = task.get("negative_prompt") or ""
 
-    if task_type in {"IMAGE_GEN", "VIDEO_GEN", "LTX_VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP"} and ROLE != "creator":
+    if task_type in {"IMAGE_GEN", "VIDEO_GEN", "LTX_VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP", "MUSIC_GEN"} and ROLE != "creator":
         log(f"Skipping creator task {task_id[:8]} — node not in creator mode", prefix="⚠️")
         return
 
@@ -2444,6 +2709,34 @@ def execute_task(task: Dict[str, Any]) -> None:
             log(f"Failed to submit disallowed-model result: {exc}", prefix="🚫", task_id=task_id)
         return
 
+    unhealthy_reason = _model_unhealthy_reason(task_type, model_name)
+    if unhealthy_reason:
+        log(
+            f"Rejecting task for unhealthy model '{model_name}' ({unhealthy_reason})",
+            prefix="⚠️",
+            task_id=task_id,
+        )
+        payload = {
+            "node_id": NODE_NAME,
+            "task_id": task_id,
+            "status": "failed",
+            "metrics": {
+                "task_type": task_type.lower(),
+                "model_name": model_name,
+                "reward_weight": reward_weight,
+                "error": f"Model '{model_name}' is temporarily unhealthy after repeated failures",
+                "error_code": "model_unhealthy",
+                "failure_reason": unhealthy_reason,
+            },
+            "utilization": utilization_hint,
+            "submitted_at": time.time(),
+        }
+        try:
+            SESSION.post(endpoint("/results"), data=json.dumps(payload), timeout=15).raise_for_status()
+        except Exception as exc:
+            log(f"Failed to submit unhealthy-model result: {exc}", prefix="🚫", task_id=task_id)
+        return
+
     lease_stop = threading.Event()
     cancel_event = threading.Event()
     lease_thread: Optional[threading.Thread] = None
@@ -2460,10 +2753,19 @@ def execute_task(task: Dict[str, Any]) -> None:
     try:
         source_asset_id = str(task.get("source_asset_id") or "").strip()
         if source_asset_id:
-            task["init_image"] = str(_download_task_asset(source_asset_id, task_id, "source"))
+            task["base_image_url" if task_type == "FACE_SWAP" else "init_image"] = str(_download_task_asset(source_asset_id, task_id, "source"))
+        mask_asset_id = str(task.get("mask_asset_id") or "").strip()
+        if mask_asset_id:
+            task["inpaint_mask"] = str(_download_task_asset(mask_asset_id, task_id, "mask"))
+        face_asset_id = str(task.get("face_asset_id") or "").strip()
+        if face_asset_id:
+            task["face_source_url" if task_type == "FACE_SWAP" else "reference_face_url"] = str(_download_task_asset(face_asset_id, task_id, "face"))
         audio_asset_id = str(task.get("audio_asset_id") or "").strip()
         if audio_asset_id:
             task["audio_input"] = str(_download_task_asset(audio_asset_id, task_id, "audio"))
+        reference_asset_id = str(task.get("reference_asset_id") or "").strip()
+        if reference_asset_id:
+            task["reference_audio"] = str(_download_task_asset(reference_asset_id, task_id, "reference"))
     except Exception as exc:
         asset_error = f"Asset download failed: {exc}"
     task["_cancel_event"] = cancel_event
@@ -2491,12 +2793,14 @@ def execute_task(task: Dict[str, Any]) -> None:
             "error": str(exc),
         }
     except Exception as exc:
+        error_code = _classify_model_failure(exc)
         metrics = {
             "status": "failed",
             "task_type": task_type.lower(),
             "model_name": model_name,
             "reward_weight": reward_weight,
             "error": f"Model resolution failed: {exc}",
+            "error_code": error_code,
         }
     else:
         if task_type == "IMAGE_GEN":
@@ -2513,7 +2817,7 @@ def execute_task(task: Dict[str, Any]) -> None:
                     job_settings = prompt_raw
                     prompt = str(job_settings.get("prompt") or prompt)
                     negative_prompt = str(job_settings.get("negative_prompt") or negative_prompt)
-                elif isinstance(prompt_raw, str) and prompt_raw.strip().startswith("{"):
+                elif isinstance(prompt_raw, str) and prompt_raw.strip().startswith("{") and not task.get("resolved_spec"):
                     job_settings = json.loads(prompt_raw)
                     if isinstance(job_settings, dict):
                         prompt = str(job_settings.get("prompt") or prompt)
@@ -2526,7 +2830,8 @@ def execute_task(task: Dict[str, Any]) -> None:
                 log(f"Failed to parse job settings: {exc}", prefix="⚠️", task_id=task_id)
             # Merge coordinator-sent overrides even when prompt is plain text.
             if isinstance(task, dict):
-                for key in ("steps", "guidance", "width", "height", "sampler", "seed", "reference_face_url"):
+                for key in ("steps", "guidance", "width", "height", "sampler", "seed", "reference_face_url",
+                            "init_image", "inpaint_mask", "img2img_strength", "preserve_reference_aspect"):
                     value = task.get(key)
                     if value is None or value == "":
                         continue
@@ -2555,6 +2860,8 @@ def execute_task(task: Dict[str, Any]) -> None:
             metrics, util, video_b64 = _run_animatediff_task(task_id, entry, model_path, reward_weight, task)
         elif task_type == "FACE_SWAP":
             metrics, util, image_b64 = _run_faceswap_task(task_id, entry, model_path, reward_weight, task)
+        elif task_type == "MUSIC_GEN":
+            metrics, util = _run_music_task(task_id, entry, reward_weight, task)
         else:
             metrics = {
                 "status": "failed",
@@ -2562,6 +2869,7 @@ def execute_task(task: Dict[str, Any]) -> None:
                 "model_name": model_name,
                 "reward_weight": reward_weight,
                 "error": f"Unsupported task type: {task_type}",
+                "error_code": "unsupported_task_type",
             }
 
     if cancel_event.is_set() and metrics.get("status", "success") == "success":
@@ -2570,12 +2878,24 @@ def execute_task(task: Dict[str, Any]) -> None:
         image_b64 = None
         video_b64 = None
 
+    if metrics.get("status") == "success":
+        _clear_model_failure(task_type, model_name)
+    elif metrics.get("error_code") in {
+        "model_load_failed",
+        "model_weights_missing",
+        "gpu_oom",
+        "cuda_runtime",
+        "unsupported_model_mapping",
+        "engine_startup_failed",
+    }:
+        _record_model_failure(task_type, model_name, str(metrics["error_code"]))
+
     output_path = _task_output_path(task_id, task_type)
     artifact_uploaded = False
     if metrics.get("status", "success") == "success" and output_path is not None:
         try:
             _report_task_progress(task, 95, "uploading")
-            if task_type not in {"IMAGE_GEN", "FACE_SWAP"}:
+            if task_type in {"VIDEO_GEN", "LTX_VIDEO_GEN", "ANIMATEDIFF"}:
                 output_path = _postprocess_video(task, output_path)
             resolved_spec = dict(task.get("resolved_spec")) if isinstance(task.get("resolved_spec"), dict) else {}
             metrics["output_sha256"] = _file_sha256(output_path)
@@ -2613,7 +2933,7 @@ def execute_task(task: Dict[str, Any]) -> None:
                 resolved_spec["model"] = model_spec
                 resolved_spec["loras"] = metrics.get("loras", [])
                 parameters = dict(resolved_spec.get("parameters") or {})
-                for key in ("seed", "steps", "guidance", "sampler", "width", "height", "frames", "fps"):
+                for key in ("seed", "steps", "guidance", "sampler", "width", "height", "frames", "fps", "duration", "bpm", "key"):
                     if metrics.get(key) is not None:
                         parameters[key] = metrics[key]
                 resolved_spec["parameters"] = parameters
@@ -2627,13 +2947,35 @@ def execute_task(task: Dict[str, Any]) -> None:
                     "sha256": metrics["output_sha256"],
                     "filename": output_path.name,
                 }
+                if metrics.get("content_type"):
+                    resolved_spec["output"]["content_type"] = metrics["content_type"]
             metrics["resolved_render_spec"] = resolved_spec
+            artifact_metadata = {"resolved_render_spec": resolved_spec, "metrics": metrics}
+            if task_type == "MUSIC_GEN" and isinstance(metrics.get("audio_metadata"), dict):
+                artifact_metadata.update(metrics["audio_metadata"])
             artifact_uploaded = _upload_task_artifact(
                 task,
                 output_path,
-                "image" if task_type in {"IMAGE_GEN", "FACE_SWAP"} else "video",
-                {"resolved_render_spec": resolved_spec, "metrics": metrics},
+                "image" if task_type in {"IMAGE_GEN", "FACE_SWAP"} else "audio" if task_type == "MUSIC_GEN" else "video",
+                artifact_metadata,
             )
+            if artifact_uploaded and task_type == "MUSIC_GEN":
+                for variation in metrics.get("music_variations") or []:
+                    try:
+                        variation_path = Path(str(variation.get("path") or ""))
+                        if not variation_path.is_file():
+                            continue
+                        _upload_task_artifact(
+                            task,
+                            variation_path,
+                            "audio",
+                            {
+                                "resolved_render_spec": resolved_spec,
+                                **(variation.get("metadata") or {}),
+                            },
+                        )
+                    except Exception as exc:
+                        log(f"Variation upload failed for {task_id[:8]}: {exc}", prefix="⚠️")
             if artifact_uploaded and task.get("attempt_id"):
                 manifest_path = OUTPUTS_DIR / "manifests" / f"{task_id}.json"
                 manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2644,6 +2986,8 @@ def execute_task(task: Dict[str, Any]) -> None:
                 _upload_task_artifact(task, manifest_path, "manifest", {"schema_version": 1})
         except Exception as exc:
             log(f"Streamed artifact upload failed for {task_id[:8]}: {exc}", prefix="⚠️")
+
+    metrics.pop("music_variations", None)
 
     with lock:
         utilization_hint = util
@@ -3383,10 +3727,9 @@ def run_image_generation(
     generation_ms = 0
     output_path = OUTPUTS_DIR / f"{task_id}.png"
 
-    width = IMAGE_WIDTH
-    height = IMAGE_HEIGHT
     use_img2img = False
     init_image_raw: Optional[str] = None
+    mask_image_raw: Optional[str] = None
     img2img_strength = 0.75
     reference_face_url = ""
     reference_face_used = False
@@ -3402,20 +3745,22 @@ def run_image_generation(
     cancel_event = job_settings.get("_cancel_event") if isinstance(job_settings, dict) else None
     return_b64 = bool(job_settings.get("_return_b64", True)) if isinstance(job_settings, dict) else True
     if job_settings and isinstance(job_settings, dict):
-        try:
-            width = int(job_settings.get("width", width) or width)
-            height = int(job_settings.get("height", height) or height)
-        except (TypeError, ValueError):
-            pass
         init_image_raw = job_settings.get("init_image") or job_settings.get("init_image_url")
+        mask_image_raw = job_settings.get("inpaint_mask")
         reference_face_url = str(job_settings.get("reference_face_url") or "").strip()
         use_img2img = bool(init_image_raw)
         try:
-            img2img_strength = float(job_settings.get("img2img_strength", 0.75) or 0.75)
+            img2img_strength = float(job_settings.get("img2img_strength", 0.75))
         except (TypeError, ValueError):
-            img2img_strength = 0.75
+            img2img_strength = float("nan")
 
     try:
+        if mask_image_raw and not use_img2img:
+            raise RuntimeError("An edit mask requires a source image")
+        if use_img2img and (FAST_PREVIEW or torch is None or diffusers is None):
+            raise RuntimeError("Image refinement requires the full diffusers runtime")
+        if use_img2img and (not math.isfinite(img2img_strength) or not 0 < img2img_strength <= 1):
+            raise RuntimeError("Image refinement strength must be greater than zero and at most one")
         if reference_face_url and (FAST_PREVIEW or torch is None or diffusers is None):
             raise RuntimeError("Reference face requires the full diffusers runtime and cannot run in fast preview mode")
         if reference_face_url and (Image is None or np is None or cv2 is None or FaceAnalysis is None):
@@ -3549,32 +3894,39 @@ def run_image_generation(
                         _release_image_pipeline(pipe)
             else:
                 init_pil = None
-                if use_img2img and init_image_raw:
-                    try:
-                        from PIL import Image as _PILImage
-                        if init_image_raw.startswith("data:"):
-                            b64_part = init_image_raw.split(",", 1)[-1]
-                            img_bytes = base64.b64decode(b64_part)
-                            init_pil = _PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
-                        elif init_image_raw.startswith(("http://", "https://", "/")):
-                            img_resp = requests.get(init_image_raw, timeout=30)
-                            img_resp.raise_for_status()
-                            init_pil = _PILImage.open(io.BytesIO(img_resp.content)).convert("RGB")
-                        elif os.path.isfile(init_image_raw):
-                            init_pil = _PILImage.open(init_image_raw).convert("RGB")
-                        else:
-                            img_bytes = base64.b64decode(init_image_raw)
-                            init_pil = _PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
-                        if init_pil:
-                            init_pil = init_pil.resize((width, height))
-                            log(f"Init image loaded for img2img (strength={img2img_strength})", prefix="🖼️")
-                    except Exception as exc:
-                        log(f"Failed to load init image, falling back to txt2img: {exc}", prefix="⚠️")
-                        init_pil = None
+                mask_pil = None
+                conditioning: Dict[str, Any] = {}
+                if use_img2img:
+                    init_pil, source_error = load_image_source_with_error(init_image_raw)
+                    if init_pil is None:
+                        raise RuntimeError(f"Cannot load refinement source: {source_error}")
+                    if job_settings.get("preserve_reference_aspect") is True:
+                        source_w, source_h = init_pil.size
+                        smallest_scale = 256 / min(source_w, source_h)
+                        largest_scale = 1536 / max(source_w, source_h)
+                        if smallest_scale > largest_scale:
+                            raise RuntimeError("Source aspect ratio exceeds supported image dimensions")
+                        scale = max(smallest_scale, min(largest_scale, img_w / source_w, img_h / source_h))
+                        img_w = max(256, min(1536, round(source_w * scale / 8) * 8))
+                        img_h = max(256, min(1536, round(source_h * scale / 8) * 8))
+                        resolved_width, resolved_height = img_w, img_h
+                    if mask_image_raw:
+                        mask_pil, mask_error = load_image_source_with_error(mask_image_raw)
+                        if mask_pil is None:
+                            raise RuntimeError(f"Cannot load edit mask: {mask_error}")
+                        if abs((mask_pil.width / mask_pil.height) / (init_pil.width / init_pil.height) - 1) > 0.02:
+                            raise RuntimeError("Edit mask aspect ratio must match the source image")
+                        mask_pil = mask_pil.convert("L").resize((img_w, img_h), Image.Resampling.NEAREST)
+                    init_pil = init_pil.resize((img_w, img_h), Image.Resampling.LANCZOS)
+                    conditioning = {"image": init_pil, "strength": img2img_strength}
+                    if mask_pil is not None:
+                        conditioning["mask_image"] = mask_pil
+                    if int(steps * img2img_strength) < 1:
+                        raise RuntimeError("Image refinement strength is too low for the selected steps")
 
                 pipe_mode = "img2img" if init_pil is not None else "txt2img"
                 log(f"Preparing {pipe_mode} pipeline…", prefix="ℹ️", device=device)
-                transient_pipeline = bool(lora_entries) or IMAGE_PIPELINE_CACHE_SIZE <= 0
+                transient_pipeline = use_img2img or bool(lora_entries) or IMAGE_PIPELINE_CACHE_SIZE <= 0
                 pipe: Optional[Any] = None
                 try:
                     if transient_pipeline:
@@ -3587,6 +3939,14 @@ def run_image_generation(
                         )
                     if not pipeline_cache_hit:
                         log(f"Pipeline ready in {pipeline_load_ms}ms", prefix="✅")
+                    if use_img2img:
+                        # Conversion shares components. Use a transient base so LoRAs,
+                        # scheduler and offload hooks cannot alter the text-only cache.
+                        converter_name = "AutoPipelineForInpainting" if mask_pil is not None else "AutoPipelineForImage2Image"
+                        converter = getattr(diffusers, converter_name, None)
+                        if converter is None:
+                            raise RuntimeError(f"Installed diffusers does not support {converter_name}")
+                        pipe = converter.from_pipe(pipe)
                     if lora_entries and pipe is not None:
                         loaded_loras, lora_load_ms = _apply_explicit_loras(pipe, entry, lora_entries)
                     if pipe is None:
@@ -3606,6 +3966,7 @@ def run_image_generation(
                             generator=generator,
                             height=img_h,
                             width=img_w,
+                            **conditioning,
                             **_pipeline_cancel_kwargs(pipe, cancel_event),
                         )
                     generation_ms = int((time.time() - gen_t0) * 1000)
@@ -3640,7 +4001,10 @@ def run_image_generation(
     except Exception as exc:
         status = "cancelled" if isinstance(exc, TaskCancelled) else "failed"
         error_msg = str(exc)
+        error_code = "cancelled" if isinstance(exc, TaskCancelled) else _classify_model_failure(exc)
         log(f"Image generation failed: {error_msg}", prefix="🚫")
+    else:
+        error_code = ""
 
     duration = time.time() - started
     end_stats = read_gpu_stats()
@@ -3675,6 +4039,8 @@ def run_image_generation(
         metrics["loras"] = loaded_loras
     if status != "success":
         metrics["error"] = error_msg or "image generation error"
+        if error_code:
+            metrics["error_code"] = error_code
     return metrics, util, image_b64
 
 
@@ -3785,6 +4151,8 @@ def heartbeat_loop() -> None:
 
 def poll_tasks_loop() -> None:
     backoff = BACKOFF_BASE
+    cleanup_after = ""
+    cleanup_at = 0.0
     while True:
         try:
             resp = SESSION.get(
@@ -3803,6 +4171,19 @@ def poll_tasks_loop() -> None:
                     execute_video_task_isolated(task)
                 else:
                     execute_task(task)
+            if time.monotonic() >= cleanup_at:
+                cleanup_at = time.monotonic() + 300
+                try:
+                    try:
+                        from .artifact_cleanup import run_batch
+                    except ImportError:
+                        from artifact_cleanup import run_batch
+                    cleanup_after, cleanup_failures = run_batch(SESSION, SERVER_BASE, _node_auth_headers(), NODE_NAME,
+                                                                HAVNAI_HOME, after=cleanup_after)
+                    if cleanup_failures:
+                        log(f"Artifact cleanup deferred for {cleanup_failures} job(s); will retry", prefix="⚠️")
+                except Exception:
+                    log("Artifact cleanup deferred; local files retained for retry", prefix="⚠️")
             backoff = BACKOFF_BASE
         except Exception as exc:
             log(f"Task poll failed: {exc}", prefix="⚠️")

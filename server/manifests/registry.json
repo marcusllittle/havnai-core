@@ -724,6 +724,157 @@
         "revision": "main",
         "license": "LTX-Video (Lightricks) \u2014 see upstream repo"
       }
+    },
+    {
+      "name": "ace_step_1_5_turbo",
+      "pipeline": "ace_step",
+      "path": "",
+      "type": "service",
+      "tags": [
+        "music",
+        "audio",
+        "text_to_music",
+        "cover",
+        "repaint",
+        "ace_step",
+        "turbo"
+      ],
+      "task_type": "MUSIC_GEN",
+      "weight": 20,
+      "reward_weight": 20,
+      "model_family": "ace_step",
+      "model_version": "1.5-turbo",
+      "license_status": "upstream_terms_apply",
+      "engine_model": "acestep-v15-turbo",
+      "capabilities": [
+        "text_to_music",
+        "cover",
+        "repaint"
+      ],
+      "available_modes": [
+        "text2music",
+        "cover",
+        "cover-nofsq",
+        "repaint"
+      ],
+      "strengths": "Fast 8-step ACE-Step 1.5 turbo checkpoint. Best default for text-to-music, remix (cover) and section repaint on a 12 GB GPU.",
+      "weaknesses": "No CFG/guidance control. Stem tasks (extract/lego/complete) require the base checkpoint.",
+      "source": {
+        "kind": "operator",
+        "notes": "Run the supported ACE-Step 1.5 API and configure ACESTEP_API_URL on the HavnAI render node."
+      },
+      "music_defaults": {
+        "inference_steps": 8,
+        "shift": 3.0,
+        "infer_method": "ode",
+        "batch_size": 2,
+        "audio_format": "mp3"
+      },
+      "max_batch_size": 4,
+      "timeout_seconds": 900
+    },
+    {
+      "name": "ace_step_1_5_base",
+      "pipeline": "ace_step",
+      "path": "",
+      "type": "service",
+      "tags": [
+        "music",
+        "audio",
+        "text_to_music",
+        "stems",
+        "extract",
+        "lego",
+        "complete",
+        "ace_step"
+      ],
+      "task_type": "MUSIC_GEN",
+      "weight": 18,
+      "reward_weight": 26,
+      "model_family": "ace_step",
+      "model_version": "1.5-base",
+      "license_status": "upstream_terms_apply",
+      "engine_model": "acestep-v15-base",
+      "capabilities": [
+        "text_to_music",
+        "cover",
+        "repaint",
+        "extract",
+        "lego",
+        "complete"
+      ],
+      "available_modes": [
+        "text2music",
+        "cover",
+        "cover-nofsq",
+        "repaint",
+        "extract",
+        "lego",
+        "complete"
+      ],
+      "music_defaults": {
+        "inference_steps": 50,
+        "guidance_scale": 7.0,
+        "shift": 3.0,
+        "infer_method": "ode",
+        "batch_size": 1,
+        "audio_format": "flac"
+      },
+      "max_batch_size": 2,
+      "timeout_seconds": 1800,
+      "strengths": "Full ACE-Step 1.5 task surface: stem extraction, single-track generation (lego) and arrangement (complete), plus CFG-guided text-to-music.",
+      "weaknesses": "50 inference steps with CFG \u2014 several times slower than turbo. Reward weight is raised to compensate for the longer occupancy.",
+      "source": {
+        "kind": "operator",
+        "notes": "huggingface-cli download ACE-Step/acestep-v15-base --local-dir $ACESTEP_CHECKPOINTS_DIR/acestep-v15-base, then expose it through the ACE-Step API service (ACESTEP_CONFIG_PATH=acestep-v15-base)."
+      }
+    },
+    {
+      "name": "ace_step_1_5_sft",
+      "pipeline": "ace_step",
+      "path": "",
+      "type": "service",
+      "tags": [
+        "music",
+        "audio",
+        "text_to_music",
+        "quality",
+        "ace_step"
+      ],
+      "task_type": "MUSIC_GEN",
+      "weight": 12,
+      "reward_weight": 24,
+      "model_family": "ace_step",
+      "model_version": "1.5-sft",
+      "license_status": "upstream_terms_apply",
+      "engine_model": "acestep-v15-sft",
+      "capabilities": [
+        "text_to_music",
+        "cover",
+        "repaint"
+      ],
+      "available_modes": [
+        "text2music",
+        "cover",
+        "cover-nofsq",
+        "repaint"
+      ],
+      "music_defaults": {
+        "inference_steps": 50,
+        "guidance_scale": 7.0,
+        "shift": 3.0,
+        "infer_method": "ode",
+        "batch_size": 1,
+        "audio_format": "flac"
+      },
+      "max_batch_size": 2,
+      "timeout_seconds": 1800,
+      "strengths": "Highest text-to-music fidelity of the 2B family; CFG-guided, lower diversity than base.",
+      "weaknesses": "50-step CFG inference. No stem tasks.",
+      "source": {
+        "kind": "operator",
+        "notes": "uv run acestep-download --model acestep-v15-sft"
+      }
     }
   ]
 }

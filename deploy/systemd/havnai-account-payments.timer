@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodically reconcile account credit payments
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=5min
+RandomizedDelaySec=30s
+Unit=havnai-account-payments.service
+
+[Install]
+WantedBy=timers.target

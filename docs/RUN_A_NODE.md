@@ -377,6 +377,35 @@ The GPU is too small for that workload. Either restrict the node to image work,
 or lower concurrency. Serving jobs you cannot finish costs you reputation and
 the requester their time.
 
+### Repeated model-load failures or `model_unhealthy`
+
+The node reports stable failure categories in task metrics so operators can fix
+the right layer instead of blindly rebooting:
+
+| Error code | What it means | Operator action |
+| --- | --- | --- |
+| `model_weights_missing` | The manifest entry resolves, but weights are absent or unreadable. | Run `havnai-fetch-models --dry-run`, fetch the missing weight, then confirm the path and digest. |
+| `gpu_oom` | Model load or generation exhausted VRAM. | Stop accepting that model/task on this GPU, lower the profile/resolution, or move it to a larger GPU. |
+| `cuda_runtime` | CUDA/cuDNN failed outside a plain OOM. | Run `havnai-doctor`, verify `nvidia-smi`, PyTorch CUDA wheels, and driver/runtime compatibility. |
+| `unsupported_model_mapping` | The coordinator sent a task/model combination this node cannot serve. | Refresh the manifest and check `HAI_ALLOWED_MODELS` or local registry overrides. |
+| `engine_startup_failed` | A sidecar engine or external model service did not become ready. | Check that service's logs and health endpoint before restarting the node agent. |
+| `model_load_failed` | Generic load failure that did not match a narrower category. | Inspect `journalctl --user -u havnai-node -n 100 --no-pager` and the model path. |
+
+After repeated failures for the same task type and model, the node temporarily
+returns `model_unhealthy` for that combination. This protects the queue from a
+loop of doomed attempts while leaving other models available. A later successful
+run clears the local unhealthy state; otherwise fix the underlying cause and
+restart the node once to clear the in-memory cooldown immediately.
+
+Model transition strategy by task family:
+
+| Task family | Runtime strategy | Recovery notes |
+| --- | --- | --- |
+| Image generation | Text-to-image pipelines are cached by model path, pipeline, device, and dtype. Switching models evicts the least-recently-used pipeline and releases it back to CPU before emptying CUDA cache. LoRA, image-refinement, and reference-face runs use transient pipelines so adapters do not contaminate the base cache. | If a switch fails with `gpu_oom`, reduce the image profile or disable the offending model for that node. Successful image work clears `model_unhealthy`. |
+| Face swap | Uses the image model path plus InstantID/face-analysis runtime. OOM fallback lowers the face-swap profile before failing. | Confirm both source images download, then use `havnai-doctor` and lower `HAI_FACE_SWAP_PROFILE` if VRAM is tight. |
+| Video generation | Video jobs run through isolated task execution when they carry an attempt ID, so model transitions and crashes do not poison the polling process. LTX, LTX-Video, AnimateDiff, and WAN runners perform their own CUDA cleanup on failure. | Check the isolated job logs and runner-specific status. A failed attempt is reported back to the coordinator for retry/reassignment policy rather than charged as a success. |
+| Music generation | ACE-Step uses its service health and loaded-model probe before generation. Unsupported or unloaded model requests return capability errors instead of silently using the wrong model. | Restart or warm the ACE-Step service, then verify `/health` reports the requested loaded model before re-enabling the task. |
+
 ### Disk fills up
 
 Checkpoints are 2–7 GB each. Move them to a larger drive and point the node at

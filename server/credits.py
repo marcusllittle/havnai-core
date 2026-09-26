@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import math
 import sqlite3
 import time
 from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
@@ -71,12 +72,11 @@ def get_credit_balance(wallet: str) -> float:
     return float(row["balance"]) if row else 0.0
 
 
-def deposit_credits(wallet: str, amount: float, reason: str = "") -> float:
-    """Add credits to a wallet.  Returns new balance."""
+def deposit_in_transaction(conn: sqlite3.Connection, wallet: str, amount: float) -> float:
+    """Add credits without committing; caller owns the payment transaction."""
     wallet = _normalize_wallet(wallet)
-    if amount <= 0:
-        return get_credit_balance(wallet)
-    conn = get_db()
+    if not math.isfinite(amount) or amount <= 0:
+        raise ValueError("credit amount must be positive and finite")
     conn.execute(
         """
         INSERT INTO credits (wallet, balance, total_deposited, total_spent, updated_at)
@@ -88,8 +88,18 @@ def deposit_credits(wallet: str, amount: float, reason: str = "") -> float:
         """,
         (wallet, amount, amount, time.time()),
     )
-    conn.commit()
-    new_balance = get_credit_balance(wallet)
+    return float(conn.execute("SELECT balance FROM credits WHERE wallet=?", (wallet,)).fetchone()[0])
+
+
+def deposit_credits(wallet: str, amount: float, reason: str = "") -> float:
+    """Add credits to a wallet. Returns the committed balance."""
+    if not math.isfinite(amount):
+        raise ValueError("credit amount must be finite")
+    if amount <= 0:
+        return get_credit_balance(wallet)
+    conn = get_db()
+    with conn:
+        new_balance = deposit_in_transaction(conn, wallet, amount)
     log_event("Credits deposited", wallet=wallet, amount=amount, new_balance=new_balance, reason=reason)
     return new_balance
 

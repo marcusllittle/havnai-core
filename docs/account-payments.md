@@ -1,0 +1,167 @@
+# Account credit payments (HAVN-21)
+
+This branch implements account Checkout, provider reconciliation, account receipts,
+and refund/dispute ledger adjustments. It is not a completed production rollout:
+production Clerk configuration, approved terms/refund policy, and a real
+Stripe sandbox acceptance run are still required before enabling Checkout.
+
+## Boundary and configuration
+
+The account payment path is separate from legacy wallet payments. It never uses a
+wallet address or owner token to identify a buyer. POST `/v2/account/checkout`
+requires a verified account bearer token, a stable `Idempotency-Key` (16–128
+characters), and exactly
+`{ "package_id": "starter", "terms_version": "...", "catalog_version": "..." }`.
+Core selects price, USD currency, credit units, and return URLs. Client-supplied
+account IDs, credit quantities, prices, and return URLs are rejected.
+
+Private coordinator environment, not web environment:
+
+```dotenv
+STRIPE_SECRET_KEY=<existing Stripe project's server key>
+STRIPE_ACCOUNT_WEBHOOK_SECRET=<signing secret for the v2 webhook endpoint>
+HAVNAI_CHECKOUT_ORIGIN=https://joinhavn.io
+HAVNAI_CREDIT_TERMS_VERSION=<approved published policy revision>
+HAVNAI_CREDIT_TERMS_URL=https://joinhavn.io/<published-credit-terms>
+HAVNAI_CREDIT_REFUND_URL=https://joinhavn.io/<published-refund-policy>
+HAVNAI_ACCOUNT_CHECKOUT_ENABLED=false
+```
+
+Only enable after the pricing/terms/refund UI and acceptance checks are complete.
+Test checkout may use an exact localhost HTTP origin; live checkout requires
+HTTPS. Test and live account purchases cannot share a database. Use a separate
+staging coordinator/database and Clerk development application. Changing the
+Stripe key to live does not convert test credit balances into paid balances.
+Disabling checkout does not disable webhook processing or refund reconciliation.
+
+For the isolated local account preview, pass `--sandbox-payments-env /private/path/payments.env`
+to `scripts/account_preview.py` alongside its existing `--web-env` argument.
+The private file must contain `STRIPE_SECRET_KEY` (test key only),
+`STRIPE_ACCOUNT_WEBHOOK_SECRET` (the local sandbox listener's signing secret),
+and explicit `HAVNAI_CREDIT_TERMS_VERSION`, `HAVNAI_CREDIT_TERMS_URL`, and
+`HAVNAI_CREDIT_REFUND_URL` values. Both policy URLs must point to actual pages on
+the same local web origin. Sandbox test policies do not approve commercial terms.
+The helper allows only these settings, fixes Checkout's origin to the local web
+origin, rejects live keys before creating preview storage, and leaves legacy
+Stripe/HAI funding disabled. Without this flag, all payment credentials are cleared
+and Checkout remains disabled. Never put this private file in Git or chat.
+
+Forward the sandbox's Stripe events to the preview's
+`http://127.0.0.1:5101/v2/payments/stripe/webhook` using Stripe CLI. CLI browser
+authorization enables CLI requests/listening; the Python application's Stripe SDK
+still needs its own sandbox server key. A successful CLI login alone does not
+configure account Checkout or prove funding. Keep the listener running during
+acceptance and verify the signed webhook, account receipt and ledger afterward.
+
+Configure a direct-account Stripe webhook endpoint for
+`/v2/payments/stripe/webhook` with the events listed in
+`server/account_payments.py:EVENT_TYPES`. The raw request body and Stripe signature
+must reach core unchanged. Connected-account events are rejected. Public package
+availability is at GET `/v2/credit-packages`; account history is at GET
+`/v2/account/purchases`, with an opaque `before` purchase-id cursor, and GET
+`/v2/account/purchases/:id`. These private responses are not cacheable.
+
+## Integrity rules
+
+- The public catalog includes a version covering prices, quantities, currency,
+  and policy revision/URLs. A new purchase with an outdated version returns
+  `pricing_changed` before creating a purchase or contacting Stripe. The buyer
+  must reload and review the new quote. Replaying an existing idempotency key
+  retains its original quote even after the catalog changes.
+- Persist the accepted terms and refund URLs on purchases and paid receipts.
+  Existing receipts without those fields retain empty URLs; migration must not
+  substitute today's policies for an unknown historical agreement.
+- Persist purchase, server-selected amount/quantity, accepted terms revision,
+  and exact Checkout parameters **before** making the Stripe create request.
+  Retry using the persisted purchase's Stripe idempotency key and exact parameters.
+- An unresolved creation older than 23 hours is held for reconciliation, because
+  Stripe can prune idempotency keys after 24 hours. Do not blindly create another
+  session for that request.
+- A success redirect does not fund anything. Verify webhook signatures and read
+  current PaymentIntent, Charge, and Dispute state using the server API key.
+  Match purchase metadata, payment ID, amount, currency, and live/test mode.
+- A payment ID and Checkout session can bind to only one purchase globally.
+  Funding, immutable receipt creation, any adjustment, and purchase status commit
+  in one SQLite transaction. Event acknowledgement follows that transaction; if
+  acknowledgement fails, replay rechecks state without duplicating credits.
+- Current provider reads happen outside SQLite write transactions. A revision
+  fence rejects stale concurrent reads with a retryable response. Out-of-order
+  event payloads are lookup hints, never financial truth.
+- Credits use integer units (1000 units = one credit). Successful partial refunds
+  and formal active/lost disputes reduce the original purchase's retained grant,
+  capped at the whole purchase. The retained portion rounds down to a unit.
+  Won disputes restore only the grant still justified after successful refunds.
+  Inquiries and prevented disputes do not revoke credits.
+- Reversing spent credits may create debt. New spending remains blocked by the
+  ledger's available-balance condition; releasing a job reservation does not
+  recreate refunded funding. Subsequent paid funding offsets debt normally.
+- Receipts and adjustment records are append-only. Adjustment records retain
+  provider dispute IDs/statuses and the monetary snapshot used for the change.
+  Public account APIs omit payment-method data and provider credentials.
+
+The existing service grants no credit for failed, unpaid, cancelled, or expired
+Checkout attempts. A cancellation redirect alone does not cancel a still-open
+Stripe session. No automatic refund is promised or initiated by these routes.
+
+## Recovery without creating another charge
+
+Run with the coordinator's private environment loaded and the existing database
+path. This command only retrieves provider state and reconciles local records:
+
+```bash
+python server/account_payments.py --database /path/to/coordinator.db --purchase pur_...
+```
+
+If Checkout's create response was lost before its session ID was saved, locate the
+session in the Stripe dashboard by metadata `havnai_purchase=pur_...` and supply
+`--session cs_...`. Recovery verifies the session's metadata, reference, currency,
+amount, and mode before saving any binding or reconciling credits. A session ID
+alone is never enough to grant credits. Back up the database before operational
+recovery and verify the resulting account receipt and ledger entries afterward.
+
+For bounded periodic recovery, the same command supports `--batch --limit 25`
+instead of `--purchase`. The limit must be 1–100. It visits purchases in order of
+their last reconciliation check, including already-paid orders so missed refund
+or dispute webhooks can be recovered. It never creates Checkout sessions,
+charges, or refunds. Reconciliation still validates current Stripe state before
+changing any credits. The checks table records attempt time and a fixed outcome,
+so a failed oldest purchase cannot indefinitely starve newer purchases.
+
+The command prints purchase IDs, outcomes and resulting states, never provider
+exception messages. Any rejected/provider-failed/missing-session item produces a
+nonzero exit status after the rest of the batch is attempted. `needs_session`
+requires the single-purchase recovery procedure above; do not create another
+Checkout to guess at the missing payment. Financial receipts and adjustments
+remain append-only; reconciliation check records are operational scheduling state.
+
+Optional `deploy/systemd/havnai-account-payments.service` and `.timer` templates
+run 25 purchases every five minutes using the coordinator's private environment.
+They are repository templates only, not installed or enabled. Deploy the additive
+schema first and verify database backup/restore and a manual sandbox batch before
+enabling the timer. The service timeout bounds a run; already-committed economic
+effects remain idempotent if a process is stopped and retried. Monitor timer/service
+failures (`systemctl status havnai-account-payments.service` and its journal),
+webhook delivery failures and prolonged pending purchases. Tune batch size and
+interval to the purchase volume so paid orders are revisited within the desired
+refund recovery window. External alert delivery remains a rollout task.
+
+## Evidence and remaining live gate
+
+`tests/test_account_payments.py` uses real SQLite transactions, real Stripe webhook
+HMAC verification, and Stripe SDK response objects. Provider network requests are
+mocked; no charge is made. It covers duplicate funding, lost creation responses,
+lost acknowledgements, failed/cancelled payments, wrong binding, cross-account
+receipt access, refunds after spending, dispute wins, stale reconciliation,
+rollback, receipt immutability, expiration, recovery, and mode isolation.
+
+The local preview has verified development Clerk sign-in, actual Stripe sandbox
+purchase and refund, webhook funding and receipt visibility, decline handling,
+missed-webhook recovery, and two real account-funded GPU images visible in
+Collection. See `docs/havn-11-verification.md` for evidence and its limits.
+Production Clerk configuration, conventional production funding, approved
+commercial policies, and remaining browser publication/management acceptance
+are still open. Sandbox evidence does not prove production readiness.
+
+References: [Stripe idempotency](https://docs.stripe.com/api/idempotent_requests),
+[dispute states](https://docs.stripe.com/api/disputes/object),
+[SDK resource conversion](https://github.com/stripe/stripe-python#working-with-api-resources).

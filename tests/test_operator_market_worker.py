@@ -27,6 +27,7 @@ class OperatorMarketWorkerTests(unittest.TestCase):
         self._orig_db_path = app_module.DB_PATH
         self._orig_db_conn = app_module.DB_CONN
         self._orig_server_join_token = app_module.SERVER_JOIN_TOKEN
+        self._orig_admin_api_token = app_module.ADMIN_API_TOKEN
         self._orig_nodes = copy.deepcopy(app_module.NODES)
         self._orig_tasks = copy.deepcopy(app_module.TASKS)
 
@@ -45,6 +46,7 @@ class OperatorMarketWorkerTests(unittest.TestCase):
         app_module.gallery.init_gallery_tables(app_module.get_db())
 
         app_module.SERVER_JOIN_TOKEN = JOIN_TOKEN
+        app_module.ADMIN_API_TOKEN = JOIN_TOKEN
         app_module.NODES.clear()
         app_module.TASKS.clear()
 
@@ -58,6 +60,7 @@ class OperatorMarketWorkerTests(unittest.TestCase):
         app_module.DB_PATH = self._orig_db_path
         app_module.DB_CONN = self._orig_db_conn
         app_module.SERVER_JOIN_TOKEN = self._orig_server_join_token
+        app_module.ADMIN_API_TOKEN = self._orig_admin_api_token
         app_module.NODES.clear()
         app_module.NODES.update(self._orig_nodes)
         app_module.TASKS.clear()
@@ -176,6 +179,60 @@ class OperatorMarketWorkerTests(unittest.TestCase):
         self.assertIn("performance", node_row)
         self.assertIn("payouts", node_row)
         self.assertIn("trust", node_row)
+
+    def test_operator_worker_reports_model_health_from_last_failure(self) -> None:
+        self._register_node()
+        app_module.NODES[NODE_ID]["last_result"] = {
+            "task_id": "job-model-load-failed",
+            "status": "failed",
+            "model_name": "ltx2",
+            "task_type": "VIDEO_GEN",
+            "metrics": {
+                "error_code": "model_unhealthy",
+                "failure_reason": "load_timeout",
+                "pipeline_load_ms": 45000,
+                "reward_weight": 0,
+            },
+        }
+
+        workers = self.client.get("/operators/workers?status=online")
+        self.assertEqual(workers.status_code, 200)
+        model_health = workers.get_json()["workers"][0]["model_health"]
+        self.assertEqual(model_health["status"], "unhealthy")
+        self.assertEqual(model_health["model_name"], "ltx2")
+        self.assertEqual(model_health["task_type"], "VIDEO_GEN")
+        self.assertEqual(model_health["last_error_code"], "model_unhealthy")
+        self.assertEqual(model_health["failure_reason"], "load_timeout")
+        self.assertEqual(model_health["pipeline_load_ms"], 45000)
+
+        detail = self.client.get(f"/operators/workers/{NODE_ID}")
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.get_json()["model_health"], model_health)
+
+    def test_metrics_exports_worker_model_failure_categories(self) -> None:
+        self._register_node()
+        app_module.NODES[NODE_ID]["last_result"] = {
+            "task_id": "job-model-load-failed",
+            "status": "failed",
+            "model_name": "ltx2 weird/name",
+            "task_type": "VIDEO GEN",
+            "metrics": {
+                "error_code": "model_unhealthy",
+                "failure_reason": "missing weights",
+            },
+        }
+
+        response = self.client.get("/metrics", headers={"X-HavnAI-Token": JOIN_TOKEN})
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        self.assertIn(
+            'havnai_worker_model_failures{task_type="VIDEO_GEN",model="ltx2_weird_name",error_code="model_unhealthy"} 1',
+            body,
+        )
+        self.assertIn(
+            'havnai_worker_model_unhealthy{model="ltx2_weird_name",reason="missing_weights"} 1',
+            body,
+        )
 
 
 if __name__ == "__main__":

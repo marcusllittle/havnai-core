@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BRANCH="feat/joinhavn-flagship-redesign"
+BRANCH="${BRANCH:-feat/havn-11-commercial-accounts}"
 PI_HOST="${PI_HOST:-marcus@100.122.73.117}"
 GPU_HOST="${GPU_HOST:-localhost}"
 SHA="${1:-$(git rev-parse HEAD)}"
@@ -11,7 +11,7 @@ test "$(git branch --show-current)" = "$BRANCH" || {
   exit 1
 }
 git cat-file -e "${SHA}^{commit}"
-git merge-base --is-ancestor "$SHA" "$BRANCH" || {
+git merge-base --is-ancestor "$SHA" "refs/heads/$BRANCH" || {
   echo "Refusing deploy: $SHA is not on $BRANCH" >&2
   exit 1
 }

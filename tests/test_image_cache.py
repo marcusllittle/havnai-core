@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import sys
+import io
+import base64
+import json
+import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "client"))
 sys.path.insert(0, str(ROOT))
+sys.modules.setdefault("onnxruntime", SimpleNamespace())
 
 import client as client_module  # type: ignore
 
@@ -61,18 +67,28 @@ class ImagePipelineCacheTests(unittest.TestCase):
         self._orig_fast_preview = client_module.FAST_PREVIEW
         self._orig_torch = client_module.torch
         self._orig_diffusers = client_module.diffusers
+        self._orig_failure_threshold = client_module.MODEL_FAILURE_THRESHOLD
+        self._orig_failure_cooldown = client_module.MODEL_FAILURE_COOLDOWN_SECONDS
         client_module.IMAGE_PIPELINE_CACHE_SIZE = 1
         client_module.FAST_PREVIEW = False
+        client_module.MODEL_FAILURE_THRESHOLD = 2
+        client_module.MODEL_FAILURE_COOLDOWN_SECONDS = 900
         client_module.torch = _FakeTorch()  # type: ignore[assignment]
         client_module.diffusers = object()  # type: ignore[assignment]
         with client_module._IMAGE_PIPELINE_CACHE_LOCK:
             client_module._IMAGE_PIPELINE_CACHE.clear()
+        with client_module._MODEL_FAILURE_LOCK:
+            client_module._MODEL_FAILURES.clear()
 
     def tearDown(self) -> None:
         with client_module._IMAGE_PIPELINE_CACHE_LOCK:
             client_module._IMAGE_PIPELINE_CACHE.clear()
+        with client_module._MODEL_FAILURE_LOCK:
+            client_module._MODEL_FAILURES.clear()
         client_module.IMAGE_PIPELINE_CACHE_SIZE = self._orig_cache_size
         client_module.FAST_PREVIEW = self._orig_fast_preview
+        client_module.MODEL_FAILURE_THRESHOLD = self._orig_failure_threshold
+        client_module.MODEL_FAILURE_COOLDOWN_SECONDS = self._orig_failure_cooldown
         client_module.torch = self._orig_torch
         client_module.diffusers = self._orig_diffusers
 
@@ -99,6 +115,33 @@ class ImagePipelineCacheTests(unittest.TestCase):
         self.assertTrue(hit2)
         self.assertEqual(load2, 0)
         self.assertEqual(build_calls["count"], 1)
+
+    def test_successful_model_switch_evicts_previous_pipeline_without_marking_unhealthy(self) -> None:
+        entry_a = SimpleNamespace(name="m1")
+        entry_b = SimpleNamespace(name="m2")
+        pipe_a = _FakePipe()
+        pipe_b = _FakePipe()
+
+        def _build(entry, *_args):
+            return (pipe_a if entry.name == "m1" else pipe_b), 10
+
+        with patch.object(client_module, "_construct_base_image_pipeline", side_effect=_build), patch.object(
+            client_module, "_release_image_pipeline"
+        ) as release:
+            acquired_a, hit_a, _ = client_module._acquire_base_image_pipeline(
+                entry_a, Path("/tmp/model-a.safetensors"), "sdxl", "float16", True, "cpu"
+            )
+            acquired_b, hit_b, _ = client_module._acquire_base_image_pipeline(
+                entry_b, Path("/tmp/model-b.safetensors"), "sdxl", "float16", True, "cpu"
+            )
+
+        self.assertIs(acquired_a, pipe_a)
+        self.assertIs(acquired_b, pipe_b)
+        self.assertFalse(hit_a)
+        self.assertFalse(hit_b)
+        release.assert_called_once_with(pipe_a)
+        self.assertIsNone(client_module._model_unhealthy_reason("IMAGE_GEN", "m1"))
+        self.assertIsNone(client_module._model_unhealthy_reason("IMAGE_GEN", "m2"))
 
     def test_lora_run_uses_transient_pipeline_and_does_not_use_cache_path(self) -> None:
         entry = SimpleNamespace(name="m2", pipeline="sd15")
@@ -137,6 +180,148 @@ class ImagePipelineCacheTests(unittest.TestCase):
         construct_mock.assert_called_once()
         acquire_mock.assert_not_called()
         release_mock.assert_called_once_with(fake_pipe)
+
+    def test_refinement_and_masks_reach_the_correct_pipeline_without_cache_mutation(self) -> None:
+        for masked in (False, True):
+            with self.subTest(masked=masked), tempfile.TemporaryDirectory() as directory:
+                source = Path(directory) / "source.png"
+                client_module.Image.new("RGB", (80, 40), (20, 40, 60)).save(source)
+                mask_bytes = io.BytesIO()
+                client_module.Image.new("L", (40, 20), 255).save(mask_bytes, format="PNG")
+                mask = "data:image/png;base64," + base64.b64encode(mask_bytes.getvalue()).decode()
+                base = Mock()
+                converted = Mock(side_effect=_FakePipe())
+                converter = Mock()
+                converter.from_pipe.return_value = converted
+                runtime = SimpleNamespace(**{
+                    "AutoPipelineForInpainting" if masked else "AutoPipelineForImage2Image": converter,
+                })
+                with patch.object(client_module, "diffusers", runtime), patch.object(
+                    client_module, "read_gpu_stats", return_value={"utilization": 0}
+                ), patch.object(client_module, "_resolve_image_runtime", return_value=("cpu", "float32", True, "sdxl")), patch.object(
+                    client_module, "_collect_explicit_loras", return_value=[(Path("style"), 0.5, "adapter")]
+                ), patch.object(client_module, "_construct_base_image_pipeline", return_value=(base, 12)), patch.object(
+                    client_module, "_acquire_base_image_pipeline"
+                ) as cache, patch.object(client_module, "_apply_explicit_loras", return_value=(["style"], 1)) as loras, patch.object(
+                    client_module, "_truncate_image_prompts", return_value=("edit", "noise")
+                ), patch.object(client_module, "_apply_image_sampler"), patch.object(
+                    client_module, "_pipeline_cancel_kwargs", return_value={}
+                ), patch.object(client_module, "_save_output_image"), patch.object(client_module, "_release_image_pipeline") as release:
+                    metrics, _, _ = client_module.run_image_generation(
+                        task_id="refine-test", entry=SimpleNamespace(name="sdxl", pipeline="sdxl"),
+                        model_path=Path("model.safetensors"), reward_weight=1, prompt="edit", negative_prompt="noise",
+                        job_settings={"init_image": str(source), "inpaint_mask": mask if masked else None,
+                                      "img2img_strength": 0.4, "steps": 20, "width": 512, "height": 512,
+                                      "preserve_reference_aspect": True, "_return_b64": False},
+                    )
+                self.assertEqual(metrics["status"], "success", metrics)
+                self.assertEqual((metrics["width"], metrics["height"]), (512, 256))
+                converter.from_pipe.assert_called_once_with(base)
+                base.assert_not_called()
+                cache.assert_not_called()
+                self.assertIs(loras.call_args.args[0], converted)
+                release.assert_called_once_with(converted)
+                arguments = converted.call_args.kwargs
+                self.assertEqual(arguments["image"].size, (512, 256))
+                self.assertEqual(arguments["image"].getpixel((0, 0)), (20, 40, 60))
+                self.assertEqual(arguments["strength"], 0.4)
+                if masked:
+                    self.assertEqual(arguments["mask_image"].mode, "L")
+                    self.assertEqual(arguments["mask_image"].size, (512, 256))
+                else:
+                    self.assertNotIn("mask_image", arguments)
+
+    def test_invalid_refinement_never_falls_back_to_text_only(self) -> None:
+        cases = [
+            {"init_image": "invalid source"},
+            {"inpaint_mask": "mask without source"},
+            {"init_image": "source", "img2img_strength": 0},
+            {"init_image": "source", "img2img_strength": float("nan")},
+        ]
+        for settings in cases:
+            with self.subTest(settings=settings), patch.object(client_module, "read_gpu_stats", return_value={}), patch.object(
+                client_module, "_resolve_image_runtime", return_value=("cpu", "float32", True, "sdxl")
+            ), patch.object(client_module, "_collect_explicit_loras", return_value=[]), patch.object(
+                client_module, "_construct_base_image_pipeline"
+            ) as construct, patch.object(client_module, "_acquire_base_image_pipeline") as cache:
+                metrics, _, output = client_module.run_image_generation(
+                    task_id="invalid-refine", entry=SimpleNamespace(name="sdxl"), model_path=Path("model"),
+                    reward_weight=1, prompt="edit", negative_prompt="", job_settings=settings,
+                )
+            self.assertEqual(metrics["status"], "failed")
+            self.assertIsNone(output)
+            construct.assert_not_called()
+            cache.assert_not_called()
+
+    def test_model_load_failures_trip_unhealthy_gate_and_success_clears_it(self) -> None:
+        entry = SimpleNamespace(name="sdxl", pipeline="sdxl")
+        post = Mock()
+        post.return_value.raise_for_status.return_value = None
+        task = {"task_id": "load-failure", "type": "IMAGE_GEN", "model_name": "sdxl", "prompt": "test"}
+
+        with patch.object(client_module, "ROLE", "creator"), patch.object(client_module, "_is_model_allowed", return_value=True), patch.object(
+            client_module, "ensure_model_entry", return_value=entry
+        ), patch.object(client_module, "ensure_model_path", return_value=Path("model")), patch.object(
+            client_module, "_resolve_image_runtime", return_value=("cuda", "float16", True, "sdxl")
+        ), patch.object(client_module, "_collect_explicit_loras", return_value=[]), patch.object(
+            client_module, "_construct_base_image_pipeline", side_effect=RuntimeError("CUDA out of memory while loading")
+        ), patch.object(client_module, "read_gpu_stats", return_value={"utilization": 0}), patch.object(
+            client_module.SESSION, "post", post
+        ):
+            client_module.execute_task(dict(task, task_id="load-failure-1"))
+            client_module.execute_task(dict(task, task_id="load-failure-2"))
+            client_module.execute_task(dict(task, task_id="load-failure-3"))
+
+        payloads = [json.loads(call.kwargs["data"]) for call in post.call_args_list]
+        self.assertEqual(payloads[0]["metrics"]["error_code"], "gpu_oom")
+        self.assertEqual(payloads[1]["metrics"]["error_code"], "gpu_oom")
+        self.assertEqual(payloads[2]["metrics"]["error_code"], "model_unhealthy")
+        self.assertEqual(payloads[2]["metrics"]["failure_reason"], "gpu_oom")
+
+        with patch.object(client_module, "_MODEL_FAILURES", {"IMAGE_GEN:sdxl": {"count": 2, "reason": "gpu_oom", "until": time.time() + 60}}):
+            client_module._clear_model_failure("IMAGE_GEN", "sdxl")
+            self.assertIsNone(client_module._model_unhealthy_reason("IMAGE_GEN", "sdxl"))
+
+    def test_downloaded_owned_images_reach_generation_and_prompt_json_is_literal(self) -> None:
+        prompt = '{"init_image":"/private/file","steps":1,"prompt":"injected"}'
+        task = {"task_id": "owned-image", "type": "IMAGE_GEN", "model_name": "sdxl",
+                "prompt": prompt, "resolved_spec": {"schema_version": 1},
+                "source_asset_id": "source-owned", "mask_asset_id": "mask-owned",
+                "img2img_strength": 0.4, "preserve_reference_aspect": True, "steps": 20}
+        with patch.object(client_module, "ROLE", "creator"), patch.object(client_module, "_is_model_allowed", return_value=True), patch.object(
+            client_module, "_download_task_asset", side_effect=lambda asset, job, kind: Path("/tmp") / f"{asset}.png"
+        ) as download, patch.object(client_module, "ensure_model_entry", return_value=SimpleNamespace(name="sdxl")), patch.object(
+            client_module, "ensure_model_path", return_value=Path("model")
+        ), patch.object(client_module, "run_image_generation", return_value=({"status": "success"}, 0, None)) as generate, patch.object(
+            client_module, "_task_output_path", return_value=None
+        ), patch.object(client_module.SESSION, "post") as post:
+            post.return_value.json.return_value = {"reward": 0}
+            client_module.execute_task(task)
+        self.assertEqual(download.call_count, 2)
+        self.assertEqual(generate.call_args.args[4], prompt)
+        settings = generate.call_args.args[6]
+        self.assertEqual(settings["init_image"], "/tmp/source-owned.png")
+        self.assertEqual(settings["inpaint_mask"], "/tmp/mask-owned.png")
+        self.assertEqual(settings["steps"], 20)
+        self.assertEqual(settings["img2img_strength"], 0.4)
+        self.assertTrue(settings["preserve_reference_aspect"])
+
+    def test_face_swap_worker_uses_downloaded_owned_sources(self) -> None:
+        task = {"task_id": "owned-swap", "type": "FACE_SWAP", "model_name": "sdxl",
+                "source_asset_id": "base-owned", "face_asset_id": "face-owned",
+                "base_image_url": "/untrusted", "face_source_url": "/untrusted"}
+        with patch.object(client_module, "ROLE", "creator"), patch.object(client_module, "_is_model_allowed", return_value=True), patch.object(
+            client_module, "_download_task_asset", side_effect=lambda asset, job, kind: Path("/tmp") / f"{asset}.png"
+        ), patch.object(client_module, "ensure_model_entry", return_value=SimpleNamespace(name="sdxl")), patch.object(
+            client_module, "ensure_model_path", return_value=Path("model")
+        ), patch.object(client_module, "_run_faceswap_task", return_value=({"status": "success"}, 0, None)) as generate, patch.object(
+            client_module, "_task_output_path", return_value=None
+        ), patch.object(client_module.SESSION, "post") as post:
+            post.return_value.json.return_value = {"reward": 0}
+            client_module.execute_task(task)
+        received = generate.call_args.args[4]
+        self.assertEqual(received["base_image_url"], "/tmp/base-owned.png")
+        self.assertEqual(received["face_source_url"], "/tmp/face-owned.png")
 
 
 if __name__ == "__main__":

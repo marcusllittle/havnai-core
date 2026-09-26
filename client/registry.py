@@ -37,6 +37,10 @@ except Exception:  # pragma: no cover
         available_modes: List[str] = field(default_factory=list)
         default_pipeline_mode: str = ""
         default_upscaler: str = ""
+        engine_model: str = ""
+        music_defaults: Dict[str, object] = field(default_factory=dict)
+        max_batch_size: int = 1
+        timeout_seconds: int = 0
 
     @dataclass
     class Manifest:  # type: ignore
@@ -142,6 +146,16 @@ class ModelRegistry:
                         filtered["reward_weight"] = float(model.get("weight"))  # type: ignore[arg-type]
                     except Exception:
                         pass
+                for numeric_key, fallback in (("max_batch_size", 1), ("timeout_seconds", 0)):
+                    if filtered.get(numeric_key) in (None, ""):
+                        filtered[numeric_key] = fallback
+                    else:
+                        try:
+                            filtered[numeric_key] = int(filtered[numeric_key])
+                        except (TypeError, ValueError):
+                            filtered[numeric_key] = fallback
+                if not isinstance(filtered.get("music_defaults"), dict):
+                    filtered["music_defaults"] = {}
                 tags = filtered.get("tags")
                 if isinstance(tags, str):
                     filtered["tags"] = [tags]

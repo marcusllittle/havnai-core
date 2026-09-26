@@ -31,6 +31,19 @@ does not close that ticket.
 An unreleased hold prevents physical purge, but does not extend owner recovery.
 Hold administration must remain operator-only; no customer endpoint grants it.
 
+An operator with coordinator database access can place and release a named hold:
+
+```sh
+python server/artifact_lifecycle.py --database /path/to/coordinator.db --hold job-ID --hold-id support-case-123 --actor operator-id --reason support
+python server/artifact_lifecycle.py --database /path/to/coordinator.db --release-hold job-ID --hold-id support-case-123 --actor operator-id
+```
+
+Allowed reasons are `admin`, `legal`, `support`, `dispute` and `settlement`.
+Do not put customer details or secrets in these identifiers. Each action records
+the operator and hold ID in the lifecycle audit; identical retries add no event.
+Released hold IDs cannot be reused. New holds after completed purge are rejected.
+Holds and purge serialize under the same database lock.
+
 After migration and a backup/restore check, the scheduler can invoke:
 
 ```sh
@@ -40,10 +53,12 @@ python server/artifact_lifecycle.py --database /path/to/coordinator.db --outputs
 The service/timer templates in `deploy/systemd/havnai-artifact-purge.*` are not
 installed or enabled by this change. Configure both paths explicitly. Purge
 rechecks expiry and holds under a write lock, refuses shared or out-of-root
-paths, removes registered artifact files and retains database audit rows. Missing
-files are safe on retry. Failures return a nonzero exit status and must be
-monitored. Unregistered worker caches/original copies require a separate inventory
+paths (including upload references), removes registered artifact files and retains
+database audit rows. Missing files are safe on retry. Failures return a nonzero
+exit status and must be monitored. Last-attempt ordering prevents a failed oldest
+item from starving the remainder of the batch. Apply the additive schema migration
+before running the scheduler. Unregistered worker caches/original copies require a separate inventory
 and cleanup review before claiming complete physical reclamation.
 
-Production activation, storage inventory, hold administration and live recovery
+Production activation, storage inventory, operational hold procedures and live recovery
 evidence remain open. Do not infer launch readiness from fixture tests.

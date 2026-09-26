@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import time
 import uuid
+import re
 from pathlib import Path
 
 RECOVERY_SECONDS = 30 * 86400
@@ -29,6 +30,10 @@ def initialize(conn):
         CREATE TABLE IF NOT EXISTS artifact_lifecycle_events (
             id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id),
             account_id TEXT NOT NULL, action TEXT NOT NULL, created_at REAL NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS artifact_purge_checks (
+            job_id TEXT PRIMARY KEY REFERENCES jobs(id),
+            checked_at REAL NOT NULL, outcome TEXT NOT NULL
         );
     """)
 
@@ -65,9 +70,9 @@ def _event(conn, account, job_id, action, now):
 
 
 def delete(conn, account, job_id, *, now=None):
-    now = time.time() if now is None else now
     conn.execute("BEGIN IMMEDIATE")
     with conn:
+        now = time.time() if now is None else now
         job = _owner(conn, account, job_id)
         old = conn.execute("SELECT * FROM artifact_lifecycle WHERE job_id=? AND restored_at IS NULL", (job_id,)).fetchone()
         if old:
@@ -89,9 +94,9 @@ def delete(conn, account, job_id, *, now=None):
 
 
 def restore(conn, account, job_id, *, now=None):
-    now = time.time() if now is None else now
     conn.execute("BEGIN IMMEDIATE")
     with conn:
+        now = time.time() if now is None else now
         _owner(conn, account, job_id)
         row = conn.execute("SELECT * FROM artifact_lifecycle WHERE job_id=?", (job_id,)).fetchone()
         if not row:
@@ -105,16 +110,45 @@ def restore(conn, account, job_id, *, now=None):
         return dict(conn.execute("SELECT * FROM artifact_lifecycle WHERE job_id=?", (job_id,)).fetchone())
 
 
+def set_hold(conn, job_id, hold_id, *, actor, reason=None, release=False, now=None):
+    """Operator-only entry point; deliberately not exposed by customer routes."""
+    if not all(isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,120}", value) for value in (hold_id, actor)):
+        raise LifecycleError("invalid_hold_identity", 422)
+    if not release and reason not in {"admin", "legal", "support", "dispute", "settlement"}:
+        raise LifecycleError("invalid_hold_reason", 422)
+    conn.execute("BEGIN IMMEDIATE")
+    with conn:
+        now = time.time() if now is None else now
+        if not conn.execute("SELECT 1 FROM jobs WHERE id=? AND owner_account_id IS NOT NULL", (job_id,)).fetchone():
+            raise LifecycleError("job_not_found", 404)
+        old = conn.execute("SELECT * FROM artifact_lifecycle_holds WHERE job_id=? AND hold_id=?", (job_id, hold_id)).fetchone()
+        if release:
+            if not old:
+                raise LifecycleError("hold_not_found", 404)
+            if old["released_at"] is not None:
+                return
+            conn.execute("UPDATE artifact_lifecycle_holds SET released_at=? WHERE job_id=? AND hold_id=?", (now, job_id, hold_id))
+        else:
+            if old:
+                if old["released_at"] is not None or old["reason"] != reason:
+                    raise LifecycleError("hold_id_conflict")
+                return
+            if conn.execute("SELECT 1 FROM artifact_lifecycle WHERE job_id=? AND purged_at IS NOT NULL", (job_id,)).fetchone():
+                raise LifecycleError("artifact_already_purged")
+            conn.execute("INSERT INTO artifact_lifecycle_holds VALUES (?,?,?,?,NULL)", (job_id, hold_id, reason, now))
+        _event(conn, "operator:" + actor, job_id, ("release_hold:" if release else "hold:") + hold_id, now)
+
+
 def purge(conn, job_id, *, outputs_dir, now=None):
     """Scheduled purge. A write lock serializes holds/restore and publication.
 
     A crash between unlink and commit leaves a deleted, non-restorable item for
     an idempotent retry. Never follow an artifact outside the configured root.
     """
-    now = time.time() if now is None else now
     root = Path(outputs_dir).resolve()
     conn.execute("BEGIN IMMEDIATE")
     with conn:
+        now = time.time() if now is None else now
         row = conn.execute("""SELECT d.*,j.owner_account_id FROM artifact_lifecycle d
             JOIN jobs j ON j.id=d.job_id WHERE d.job_id=?""", (job_id,)).fetchone()
         if not row or row["restored_at"] is not None or now < row["recover_until"]:
@@ -124,6 +158,8 @@ def purge(conn, job_id, *, outputs_dir, now=None):
         if conn.execute("SELECT 1 FROM artifact_lifecycle_holds WHERE job_id=? AND released_at IS NULL", (job_id,)).fetchone():
             raise LifecycleError("artifact_on_hold")
         artifacts = conn.execute("SELECT path FROM artifacts WHERE job_id=?", (job_id,)).fetchall()
+        referenced_paths = {Path(other[0]).resolve() for other in conn.execute(
+            "SELECT path FROM artifacts WHERE job_id<>? UNION SELECT path FROM assets", (job_id,))}
         paths = set()
         for artifact in artifacts:
             path = Path(artifact["path"]).resolve()
@@ -131,9 +167,8 @@ def purge(conn, job_id, *, outputs_dir, now=None):
                 raise LifecycleError("unsafe_artifact_path")
             # Do not destroy bytes another generation still references, even if
             # a legacy writer used an aliased path spelling.
-            for other in conn.execute("SELECT path FROM artifacts WHERE job_id<>?", (job_id,)):
-                if Path(other["path"]).resolve() == path:
-                    raise LifecycleError("shared_artifact_storage")
+            if path in referenced_paths:
+                raise LifecycleError("shared_artifact_storage")
             paths.add(path)
         for path in paths:
             path.unlink(missing_ok=True)
@@ -141,32 +176,69 @@ def purge(conn, job_id, *, outputs_dir, now=None):
         _event(conn, row["owner_account_id"], job_id, "purge", now)
 
 
+def purge_batch(conn, *, outputs_dir, limit=25, now=None):
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise LifecycleError("invalid_purge_limit", 422)
+    now = time.time() if now is None else now
+    rows = conn.execute("""SELECT d.job_id FROM artifact_lifecycle d
+        LEFT JOIN artifact_purge_checks c ON c.job_id=d.job_id
+        WHERE d.restored_at IS NULL AND d.purged_at IS NULL AND d.recover_until<=?
+        AND NOT EXISTS (SELECT 1 FROM artifact_lifecycle_holds h WHERE h.job_id=d.job_id AND h.released_at IS NULL)
+        ORDER BY COALESCE(c.checked_at,0),d.recover_until,d.job_id LIMIT ?""", (now, limit)).fetchall()
+    results = []
+    for row in rows:
+        outcome = "purged"
+        try:
+            purge(conn, row[0], outputs_dir=outputs_dir, now=now)
+        except LifecycleError as exc:
+            outcome = str(exc)
+        except OSError:
+            outcome = "storage_error"
+        with conn:
+            conn.execute("""INSERT INTO artifact_purge_checks VALUES (?,?,?)
+                ON CONFLICT(job_id) DO UPDATE SET checked_at=excluded.checked_at,outcome=excluded.outcome""", (row[0], now, outcome))
+        results.append({"job_id": row[0], "outcome": outcome})
+    return results
+
+
 def main():
     import argparse
     import sqlite3
     parser = argparse.ArgumentParser(description="Purge expired soft-deleted generation artifacts")
     parser.add_argument("--database", required=True)
-    parser.add_argument("--outputs-dir", required=True)
+    parser.add_argument("--outputs-dir")
     parser.add_argument("--limit", type=int, default=25)
+    actions = parser.add_mutually_exclusive_group()
+    actions.add_argument("--hold", metavar="JOB_ID")
+    actions.add_argument("--release-hold", metavar="JOB_ID")
+    parser.add_argument("--hold-id")
+    parser.add_argument("--actor")
+    parser.add_argument("--reason", choices=["admin", "legal", "support", "dispute", "settlement"])
     args = parser.parse_args()
     if not 1 <= args.limit <= 100:
         parser.error("limit must be between 1 and 100")
-    conn = sqlite3.connect(f"file:{Path(args.database).resolve().as_posix()}?mode=rw", uri=True, timeout=30)
+    if args.hold or args.release_hold:
+        if not args.hold_id or not args.actor or (args.hold and not args.reason):
+            parser.error("hold operations require --hold-id, --actor and, for a new hold, --reason")
+    elif not args.outputs_dir or args.hold_id or args.actor or args.reason:
+        parser.error("purge requires --outputs-dir and does not accept hold options")
+    conn = sqlite3.connect(Path(args.database).resolve().as_uri() + "?mode=rw", uri=True, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     failed = False
     try:
-        rows = conn.execute("""SELECT d.job_id FROM artifact_lifecycle d
-            WHERE d.restored_at IS NULL AND d.purged_at IS NULL AND d.recover_until<=?
-            AND NOT EXISTS (SELECT 1 FROM artifact_lifecycle_holds h WHERE h.job_id=d.job_id AND h.released_at IS NULL)
-            ORDER BY d.recover_until LIMIT ?""", (time.time(), args.limit)).fetchall()
-        for row in rows:
+        if args.hold or args.release_hold:
             try:
-                purge(conn, row[0], outputs_dir=args.outputs_dir)
-                print(row[0], "purged")
-            except (LifecycleError, OSError):
+                set_hold(conn, args.hold or args.release_hold, args.hold_id, actor=args.actor,
+                         reason=args.reason, release=bool(args.release_hold))
+                print("hold_updated")
+            except LifecycleError as exc:
                 failed = True
-                print(row[0], "purge_failed")
+                print(str(exc))
+        else:
+            for result in purge_batch(conn, outputs_dir=args.outputs_dir, limit=args.limit):
+                print(result["job_id"], result["outcome"])
+                failed |= result["outcome"] not in {"purged", "artifact_on_hold", "purge_not_eligible"}
     finally:
         conn.close()
     return int(failed)

@@ -175,3 +175,15 @@ The ACE-Step adapter matches the main core checkout byte-for-byte; this does not
 establish equivalent prompts, service configuration or generation quality.
 No account music publication existed at this check. Publish/unpublish, anonymous
 playback and retained private access after unpublishing remain to be verified.
+
+## Live preview deletion checkpoint
+
+On 2026-09-25 at 22:08 and 22:09 local time, the signed-in browser deleted image
+`job-91bd7785b31b4f3cbb9460e22e7dbe8f` and song
+`job-b7dba0f9d4954d538d89607faaf607a0`. Both DELETE requests returned HTTP 200.
+Read-only inspection confirmed persisted deletion timestamps and exactly 30-day
+recovery deadlines. Neither item was restored or physically purged at this check.
+All three generation reservations remained captured at 1,000 units each.
+This verifies live deletion writes, not browser refresh/no-resurrection or restore
+acceptance. The purge scheduler remains uninstalled; fixture-based CLI tests are
+not evidence of production activation.

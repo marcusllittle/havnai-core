@@ -62,9 +62,9 @@ Required alert classes and current evidence path:
 | Disk/storage pressure | `/metrics` disk gauge; external threshold notification remains an operator rollout item |
 | Payment/funding failures | account payment/receipt logs and Stripe dashboard correlation; external threshold notification remains an operator rollout item |
 
-## Production Evidence Snapshot
+## Production Evidence Snapshots
 
-Snapshot captured on 2026-09-26 after deploying core commit
+Initial snapshot captured on 2026-09-26 after deploying core commit
 `6456009dfecdf0cbc36af38cdc937e018ddd3931`:
 
 ```text
@@ -85,6 +85,26 @@ returned schema `network-alert-dry-run.v1`, `delivery.mode=dry_run`,
 `sent=false`, and matched real `job_error_spike` plus injected
 `model_load_failures` and `gpu_vram_exhaustion` conditions.
 
+Refresh snapshot later on 2026-09-26:
+
+```text
+GET /health
+{"nodes":1,"queue_depth":0,"status":"ok","version":"dev"}
+```
+
+`/v1/network/control-plane` reported `queue.queued=0`, `queue.running=0`,
+`oldest_wait_seconds=0`, one tracked online/ready node, zero active claims,
+zero at-risk claims, zero unbatched receipts, and `health.status=healthy` with
+an empty alert list. `havnai-coordinator.service` and `havnai-backup.timer`
+were active on the coordinator host, with the next backup timer run observed for
+2026-09-27 03:29:36 EDT.
+
+The later refresh did not re-read `/metrics` or alert dry-run because no
+admin/node token was available in the local shell or readable coordinator-host
+environment files. The protected backup environment file correctly denied
+unprivileged reads. Use an operator shell with the appropriate token for the
+final pre-launch `/metrics` and dry-run refresh.
+
 ## Remaining Launch Gaps
 
 - Capture saved dashboard links or screenshots if Jira requires visual evidence
@@ -92,9 +112,10 @@ returned schema `network-alert-dry-run.v1`, `delivery.mode=dry_run`,
 - Run a live mixed-model worker drill so `havnai_worker_model_failures` and
   `havnai_worker_model_unhealthy` have real production samples rather than only
   dry-run alert injection.
+- Refresh `/metrics` and `/v1/network/alerts/dry-run` from an operator shell
+  with the admin/node token during final pre-launch checks.
 - Wire external alert delivery for disk/storage and payment/funding thresholds,
   or record explicit launch waivers for those notification paths.
-- Cross-link restore, restart-recovery, and rollback drill evidence from
-  HAVN-44, HAVN-45, and HAVN-46 before closing HAVN-17/HAVN-11.
-  Use `docs/production-operations-runbook.md` as the evidence template for
-  those drills.
+- HAVN-44 and HAVN-46 now have production/prod-like restore/media and
+  coordinator rollback evidence. HAVN-45/HAVN-49 still need a private
+  accepted-work restart drill with a funded account bearer token.

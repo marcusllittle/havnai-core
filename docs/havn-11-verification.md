@@ -234,3 +234,25 @@ Storage review also identified derived last-frame assets under ASSETS_DIR and
 worker storage as remaining physical-retention boundaries. Existing purge handles
 registered artifact paths under the configured outputs root only. Full storage
 reclamation and production purge activation are not established by these tests.
+
+## Combined regression checkpoint after retention and video deletion
+
+At core `55945dd` and web `896c47b`, the combined account regression run passed:
+
+- Core: `python -B -m pytest tests/test_account*.py tests/test_artifact*.py tests/test_worker_artifact_cleanup.py -q -x --tb=short`,
+  using the isolated Python environment and `/dev/shm` temporary fixtures:
+  **502 passed in 58.88 seconds**.
+- Web: `npx vitest run`: **481 tests across 79 files passed**.
+- Web TypeScript and production build passed at the video-deletion checkpoint.
+
+This exercises account auth, ledger/payments, imports, marketplace, music/video,
+recovery, purge and worker cleanup interactions under fixtures. It does not
+substitute for production Clerk/Stripe setup, live wallet acceptance, the mixed
+model worker run, or production operations drills required by HAVN-25.
+
+The isolated coordinator and worker are running the updated lifecycle code;
+live cleanup polling returned HTTP 200 with zero purged creations and preserved
+all eight worker output files. Production was not restarted. Clerk production
+creation remains rejected by the provider's unspecified plan-feature mismatch.
+The workstation's stale hosts override still needs the prepared administrator
+repair before normal canonical API verification can pass.

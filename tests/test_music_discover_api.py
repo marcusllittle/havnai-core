@@ -311,6 +311,41 @@ class MusicDiscoverApiTests(unittest.TestCase):
         self.assertEqual(self.client.get(f"/music/playlists/{playlist_id}").status_code, 404)
         self.assertEqual(self.client.get(f"/music/playlists/{playlist_id}/cover.svg").status_code, 404)
 
+    def test_legacy_adult_metadata_is_backfilled_and_hidden_from_public_music(self) -> None:
+        publish_payload = {
+            **self._signed_payload("music_publish", job_id="job-1"),
+            "job_id": "job-1",
+            "title": "Legacy Track",
+            "style": "Smooth R&B",
+            "tags": ["smooth"],
+        }
+        publish = self.client.post("/music/publications", json=publish_payload)
+        self.assertEqual(publish.status_code, 201, publish.get_data(as_text=True))
+        publication_id = publish.get_json()["id"]
+
+        conn = app_module.get_db()
+        conn.execute(
+            "UPDATE music_publications SET style=?, tags=? WHERE id=?",
+            (
+                "Smooth, confident, and deeply sexual without losing polish.",
+                json.dumps(["smooth", "deeply sexual"]),
+                publication_id,
+            ),
+        )
+        conn.commit()
+
+        discover = self.client.get("/music/discover")
+        self.assertEqual(discover.status_code, 200)
+        self.assertEqual(discover.get_json()["publications"], [])
+        self.assertEqual(self.client.get(f"/music/discover/{publication_id}").status_code, 404)
+        self.assertEqual(self.client.get(f"/music/publications/{publication_id}/audio").status_code, 404)
+
+        row = conn.execute(
+            "SELECT adult_content,adult_policy_reason FROM music_publications WHERE id=?",
+            (publication_id,),
+        ).fetchone()
+        self.assertEqual(tuple(row), (1, "adult_content_signal"))
+
     def test_save_playlist_private_access_and_creator_routes(self) -> None:
         publish_payload = {
             **self._signed_payload("music_publish", job_id="job-1"),

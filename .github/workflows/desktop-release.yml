@@ -36,13 +36,19 @@ jobs:
             # stays low enough for older operator machines.
           - platform: macos-14
             label: macos-arm64
-          - platform: macos-13
+            target: aarch64-apple-darwin
+          # Intel Macs are cross-compiled on the arm64 runner. GitHub retired
+          # the macos-13 Intel image, and a job pinned to it sat queued for
+          # 24 hours until it was cancelled, taking the whole release with it.
+          - platform: macos-14
             label: macos-x86_64
+            target: x86_64-apple-darwin
           - platform: windows-latest
             label: windows
 
     runs-on: ${{ matrix.platform }}
     name: ${{ matrix.label }}
+    timeout-minutes: 90
 
     steps:
       - uses: actions/checkout@v4
@@ -61,9 +67,11 @@ jobs:
             desktop-file-utils
 
       - name: Install Rust
-        # macos-13 is x86_64 and macos-14 is arm64, so each runner's host
-        # target is already the one we want to ship.
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Add cross-compilation target
+        if: matrix.target
+        run: rustup target add ${{ matrix.target }}
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -72,8 +80,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             desktop/src-tauri/target
-          key: ${{ matrix.platform }}-cargo-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
-          restore-keys: ${{ matrix.platform }}-cargo-
+          # Keyed by label, not runner: both Mac builds share macos-14.
+          key: ${{ matrix.label }}-cargo-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
+          restore-keys: ${{ matrix.label }}-cargo-
 
       - name: Check formatting and lints
         working-directory: desktop/src-tauri
@@ -101,6 +110,7 @@ jobs:
           # Windows signing
           TAURI_WINDOWS_SIGNING_certificate: ${{ secrets.WINDOWS_CERTIFICATE }}
           TAURI_WINDOWS_SIGNING_certificate_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          TARGET: ${{ matrix.target }}
         run: |
           # An absent GitHub secret arrives as an empty string, not as an unset
           # variable, and Tauri treats a defined-but-empty signing variable as
@@ -112,15 +122,24 @@ jobs:
                      TAURI_WINDOWS_SIGNING_certificate_PASSWORD; do
             if [ -z "${!var:-}" ]; then unset "$var"; fi
           done
-          cargo tauri build
+          # The cargo cache restores target/, including bundles from earlier
+          # versions. Clear them so only this build's installers get collected.
+          rm -rf src-tauri/target/release/bundle src-tauri/target/*/release/bundle
+          if [ -n "$TARGET" ]; then
+            cargo tauri build --target "$TARGET"
+          else
+            cargo tauri build
+          fi
 
       - name: Collect installers
         shell: bash
-        working-directory: desktop/src-tauri/target/release/bundle
+        # Host builds land in target/release/bundle, cross builds in
+        # target/<triple>/release/bundle.
+        working-directory: desktop/src-tauri/target
         run: |
           mkdir -p "$GITHUB_WORKSPACE/dist"
           # Only ship the artifacts an operator can actually double-click.
-          find . -type f \
+          find . -path "*release/bundle/*" -type f \
             \( -name "*.deb" -o -name "*.AppImage" -o -name "*.dmg" \
                -o -name "*-setup.exe" -o -name "*.msi" \) \
             -exec cp {} "$GITHUB_WORKSPACE/dist/" \;

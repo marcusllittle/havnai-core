@@ -205,6 +205,19 @@ class CoordinatorClient:
             raise RuntimeError("account token required")
         return self._json("GET", f"/v2/jobs/{parse.quote(job_id)}", headers={"Authorization": f"Bearer {self.account_token}"})
 
+    def account_preflight(self) -> dict[str, Any]:
+        if not self.account_token:
+            raise RuntimeError("account token required")
+        headers = {"Authorization": f"Bearer {self.account_token}"}
+        account = self._json("GET", "/v2/account", headers=headers)
+        credits = self._json("GET", "/v2/account/credits", headers=headers)
+        return {
+            "account_id_present": bool(str(account.get("id") or "").strip()),
+            "status": account.get("status"),
+            "available_units": credits.get("available_units"),
+            "reserved_units": credits.get("reserved_units"),
+        }
+
     def metrics_text(self) -> str | None:
         if not self.node_token:
             return None
@@ -243,6 +256,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--submit-retry-seconds", type=float, default=DEFAULT_SUBMIT_RETRY_SECONDS)
     parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--execute", action="store_true", help="Queue jobs and poll live coordinator results")
+    parser.add_argument("--preflight", action="store_true", help="Validate private account token and credits without submitting jobs")
     parser.add_argument("--account-token", default=os.environ.get("HAVNAI_DRILL_ACCOUNT_TOKEN", ""),
                         help="bearer token for private account-owned drill jobs; preferred for live acceptance")
     parser.add_argument("--allow-production-visible", action="store_true", help="confirm live execution may create visible production jobs")
@@ -268,6 +282,23 @@ def main(argv: list[str] | None = None) -> int:
         "private_account_jobs": bool(args.account_token.strip()),
         "mix": [{"index": job.index, "task_type": job.task_type, "account_type": job.account_type, "model": job.model} for job in plan],
     }, indent=2, sort_keys=True))
+    if args.preflight:
+        account_token = args.account_token.strip()
+        if not account_token:
+            raise SystemExit("--preflight requires --account-token or HAVNAI_DRILL_ACCOUNT_TOKEN")
+        client = CoordinatorClient(args.base_url, node_token=args.node_token, submit_retry_seconds=args.submit_retry_seconds,
+                                   account_token=account_token)
+        preflight = client.account_preflight()
+        result = {
+            "schema": "havn-47-mixed-model-worker-drill-preflight.v1",
+            "generated_at": _utc_now(),
+            "base_url": _clean_base_url(args.base_url),
+            "account_token_present": True,
+            **preflight,
+            "passed": bool(preflight.get("account_id_present")) and int(preflight.get("available_units") or 0) > 0,
+        }
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0 if result["passed"] else 2
     if not args.execute:
         return 0
     account_token = args.account_token.strip()

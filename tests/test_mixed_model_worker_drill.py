@@ -122,3 +122,51 @@ def test_execute_requires_visible_production_confirmation() -> None:
 
     assert completed.returncode != 0
     assert "production-visible jobs" in completed.stderr
+
+
+def test_preflight_requires_account_token() -> None:
+    script = ROOT / "scripts" / "mixed_model_worker_drill.py"
+    completed = subprocess.run(
+        [sys.executable, str(script), "--count", "1", "--preflight"],
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode != 0
+    assert "requires --account-token" in completed.stderr
+
+
+def test_preflight_reports_funded_account_without_printing_token(monkeypatch, capsys) -> None:
+    class Client:
+        def __init__(self, *args, **kwargs):
+            assert kwargs["account_token"] == "secret-token"
+
+        def account_preflight(self):
+            return {
+                "account_id_present": True,
+                "status": "active",
+                "available_units": 5000,
+                "reserved_units": 0,
+            }
+
+    monkeypatch.setattr(drill, "CoordinatorClient", Client)
+
+    code = drill.main(["--count", "1", "--preflight", "--account-token", "secret-token"])
+    out = capsys.readouterr().out
+    decoder = json.JSONDecoder()
+    reports = []
+    index = 0
+    while index < len(out):
+        while index < len(out) and out[index].isspace():
+            index += 1
+        if index >= len(out):
+            break
+        payload, index = decoder.raw_decode(out, index)
+        reports.append(payload)
+    preflight = reports[-1]
+
+    assert code == 0
+    assert preflight["schema"] == "havn-47-mixed-model-worker-drill-preflight.v1"
+    assert preflight["passed"] is True
+    assert preflight["available_units"] == 5000
+    assert "secret-token" not in out

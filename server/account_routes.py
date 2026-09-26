@@ -17,6 +17,7 @@ import account_lifecycle
 import account_marketplace
 import account_import
 import account_workflows
+import account_astra
 import stripe
 
 ERROR_DETAILS = {
@@ -107,6 +108,10 @@ def create_blueprint(get_db: Callable[[], sqlite3.Connection], rate_limit: Calla
 
     @api.errorhandler(account_workflows.WorkflowError)
     def workflow_error(exc):
+        return fail(str(exc), exc.status)
+
+    @api.errorhandler(account_astra.AstraAccountError)
+    def astra_account_error(exc):
         return fail(str(exc), exc.status)
 
     @api.get("/workflows")
@@ -329,6 +334,75 @@ def create_blueprint(get_db: Callable[[], sqlite3.Connection], rate_limit: Calla
             settled_after,reserved_after,reason,created_at FROM account_credit_ledger
             WHERE account_id=? AND id<? ORDER BY id DESC LIMIT ?""", (g.account_id, cursor, limit)).fetchall()
         return jsonify({"entries": [dict(row) for row in rows], "next_cursor": rows[-1]["id"] if len(rows) == limit else None})
+
+    @api.get("/astra/session")
+    @authenticate()
+    def astra_account_session():
+        return jsonify(account_astra.session(g.account_id))
+
+    @api.post("/astra/run/start")
+    @authenticate()
+    def astra_account_run_start():
+        if not rate_limit(f"account-astra-run:{g.account_id}", limit=20):
+            return fail("rate_limited", 429)
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return fail("invalid_payload", 422)
+        map_id = str(data.get("map_id") or "").strip() or "unknown"
+        return jsonify(account_astra.start_run(get_db(), g.account_id, map_id)), 201
+
+    @api.post("/astra/reward")
+    @authenticate()
+    def astra_account_reward():
+        if not rate_limit(f"account-astra-reward:{g.account_id}", limit=10):
+            return fail("rate_limited", 429)
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return fail("invalid_payload", 422)
+        try:
+            score = int(data.get("score", 0))
+            duration_s = float(data.get("duration_s", 0.0))
+        except (TypeError, ValueError):
+            return fail("invalid_payload", 422)
+        result = account_astra.submit_reward(
+            get_db(),
+            g.account_id,
+            score=score,
+            grade=str(data.get("grade") or "?").strip() or "?",
+            duration_s=duration_s,
+            map_id=str(data.get("map_id") or "unknown").strip() or "unknown",
+            run_token=str(data.get("run_token") or "").strip(),
+        )
+        if not result.get("ok"):
+            return fail(str(result.get("reason") or "astra_reward_rejected"), 422)
+        return jsonify(result), 200
+
+    @api.post("/astra/spend")
+    @authenticate()
+    def astra_account_spend():
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return fail("invalid_payload", 422)
+        action = str(data.get("action") or "").strip()
+        if not action:
+            return fail("invalid_payload", 422)
+        try:
+            result = account_astra.process_spend(
+                get_db(),
+                g.account_id,
+                action=action,
+                idempotency_key=request.headers.get("Idempotency-Key", ""),
+            )
+        except account_ledger.LedgerError as exc:
+            return fail(str(exc), 409)
+        if not result.get("ok"):
+            return fail(str(result.get("reason") or "astra_spend_rejected"), 422)
+        return jsonify(result), 200
+
+    @api.get("/astra/stats")
+    @authenticate()
+    def astra_account_stats():
+        return jsonify(account_astra.stats(get_db(), g.account_id))
 
     @api.get("/credit-packages")
     def credit_packages():

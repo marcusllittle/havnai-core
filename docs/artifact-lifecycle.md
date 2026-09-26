@@ -81,3 +81,28 @@ creations by `created_at`, removes artifact audit rows, or uses
 migrated schema are required. Prefer one retention timer; both entry points use
 the same serialized, idempotent purge if an operator temporarily has both enabled.
 This source change does not update or restart an installed production timer.
+
+## Worker storage inventory
+
+Source inspection identifies a separate cleanup boundary in `client/client.py`:
+
+- `_save_output_image` writes both `outputs/<job>.png` and
+  `outputs/originals/<job>.png` under the worker's `HAVNAI_HOME`.
+- `_task_output_path` also selects `outputs/music/<job>/music.*` and video files
+  named `<job>.mp4`, `video_<job>.mp4`, or `animatediff_<job>.mp4`.
+- `_download_task_asset` stores input copies under `assets/<job>/`.
+- The upload flow sends output artifacts, music variations and
+  `outputs/manifests/<job>.json`; it does not upload the image original saved by
+  `_save_output_image`. The coordinator's legacy original-download lookup is not
+  evidence that that original was transferred.
+- Isolated video task envelopes in `tasks/<job>.json` are unlinked in `finally`.
+  Successful result submission does not clean the above output/input files.
+
+A read-only inventory of the dedicated local account-preview test worker found
+8 output files totaling 5,581,819 bytes, zero asset files and zero task envelopes.
+No files were removed and no production node filesystem was inspected by this
+check. Coordinator purge cannot reclaim these worker-local copies. Completing
+worker reclamation requires coordinator-authorized purge eligibility plus a
+bounded worker job-file inventory; file age or HTTP 409 settlement responses
+alone must not authorize deletion. Model/checkpoint directories are outside this
+cleanup scope. HAVN-27 physical reclamation therefore remains incomplete.

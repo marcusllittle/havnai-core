@@ -65,6 +65,22 @@ Latest live run, 2026-09-26:
 - Failing check: `legacy_gallery_hidden` with
   `status=200 total=7 allow_legacy_gallery=False`.
 
+## Final Platform Evidence Commands
+
+Run these from the deployed release candidate or operator context before any
+GO/CONDITIONAL GO. Attach redacted JSON output or a dated waiver to the linked
+ticket.
+
+| Gate | Command | Passing signal |
+| --- | --- | --- |
+| Public smoke | `python3 scripts/launch_public_smoke.py --json` | `ok=true` without `--allow-legacy-gallery` |
+| Content isolation | `python3 scripts/content_isolation_evidence.py ...` | `passed=true`; public denial, no-store cache, owner access, cross-account denial, and social-preview denial proven |
+| Mixed-model stability | `python3 scripts/mixed_model_worker_drill.py --preflight --account-token <redacted>` then private 30-job drill | funded account preflight passes; private `/v2/jobs` drill completes without public rough outputs |
+| Monitoring | `HAVNAI_ADMIN_TOKEN=<redacted> python3 scripts/collect_observability_evidence.py` | `passed=true`; required metrics present; alert dry-run schema returned |
+| Backup/restore | `python3 scripts/backup_evidence_audit.py ...` | `passed=true`; local backup plus remote retention evidence or dated waiver |
+| Restart recovery | `python3 scripts/account_restart_recovery_drill.py --preflight --account-token <redacted> --restart-command '<approved command>'` then live drill | preflight passes; accepted job survives restart without duplicate charge, receipt, or payout |
+| Rollback | `python3 scripts/rollback_evidence_audit.py ...` | `passed=true`; coordinator, web, and node rollback evidence or dated waivers present |
+
 ## Current NO-GO Conditions
 
 - Live production `/gallery/browse?limit=1` still returns `total: 7` and

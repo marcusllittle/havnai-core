@@ -5,7 +5,9 @@ from __future__ import annotations
 import sys
 import io
 import base64
+import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +17,7 @@ from unittest.mock import Mock, patch
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "client"))
 sys.path.insert(0, str(ROOT))
+sys.modules.setdefault("onnxruntime", SimpleNamespace())
 
 import client as client_module  # type: ignore
 
@@ -64,18 +67,28 @@ class ImagePipelineCacheTests(unittest.TestCase):
         self._orig_fast_preview = client_module.FAST_PREVIEW
         self._orig_torch = client_module.torch
         self._orig_diffusers = client_module.diffusers
+        self._orig_failure_threshold = client_module.MODEL_FAILURE_THRESHOLD
+        self._orig_failure_cooldown = client_module.MODEL_FAILURE_COOLDOWN_SECONDS
         client_module.IMAGE_PIPELINE_CACHE_SIZE = 1
         client_module.FAST_PREVIEW = False
+        client_module.MODEL_FAILURE_THRESHOLD = 2
+        client_module.MODEL_FAILURE_COOLDOWN_SECONDS = 900
         client_module.torch = _FakeTorch()  # type: ignore[assignment]
         client_module.diffusers = object()  # type: ignore[assignment]
         with client_module._IMAGE_PIPELINE_CACHE_LOCK:
             client_module._IMAGE_PIPELINE_CACHE.clear()
+        with client_module._MODEL_FAILURE_LOCK:
+            client_module._MODEL_FAILURES.clear()
 
     def tearDown(self) -> None:
         with client_module._IMAGE_PIPELINE_CACHE_LOCK:
             client_module._IMAGE_PIPELINE_CACHE.clear()
+        with client_module._MODEL_FAILURE_LOCK:
+            client_module._MODEL_FAILURES.clear()
         client_module.IMAGE_PIPELINE_CACHE_SIZE = self._orig_cache_size
         client_module.FAST_PREVIEW = self._orig_fast_preview
+        client_module.MODEL_FAILURE_THRESHOLD = self._orig_failure_threshold
+        client_module.MODEL_FAILURE_COOLDOWN_SECONDS = self._orig_failure_cooldown
         client_module.torch = self._orig_torch
         client_module.diffusers = self._orig_diffusers
 
@@ -212,6 +225,35 @@ class ImagePipelineCacheTests(unittest.TestCase):
             self.assertIsNone(output)
             construct.assert_not_called()
             cache.assert_not_called()
+
+    def test_model_load_failures_trip_unhealthy_gate_and_success_clears_it(self) -> None:
+        entry = SimpleNamespace(name="sdxl", pipeline="sdxl")
+        post = Mock()
+        post.return_value.raise_for_status.return_value = None
+        task = {"task_id": "load-failure", "type": "IMAGE_GEN", "model_name": "sdxl", "prompt": "test"}
+
+        with patch.object(client_module, "ROLE", "creator"), patch.object(client_module, "_is_model_allowed", return_value=True), patch.object(
+            client_module, "ensure_model_entry", return_value=entry
+        ), patch.object(client_module, "ensure_model_path", return_value=Path("model")), patch.object(
+            client_module, "_resolve_image_runtime", return_value=("cuda", "float16", True, "sdxl")
+        ), patch.object(client_module, "_collect_explicit_loras", return_value=[]), patch.object(
+            client_module, "_construct_base_image_pipeline", side_effect=RuntimeError("CUDA out of memory while loading")
+        ), patch.object(client_module, "read_gpu_stats", return_value={"utilization": 0}), patch.object(
+            client_module.SESSION, "post", post
+        ):
+            client_module.execute_task(dict(task, task_id="load-failure-1"))
+            client_module.execute_task(dict(task, task_id="load-failure-2"))
+            client_module.execute_task(dict(task, task_id="load-failure-3"))
+
+        payloads = [json.loads(call.kwargs["data"]) for call in post.call_args_list]
+        self.assertEqual(payloads[0]["metrics"]["error_code"], "gpu_oom")
+        self.assertEqual(payloads[1]["metrics"]["error_code"], "gpu_oom")
+        self.assertEqual(payloads[2]["metrics"]["error_code"], "model_unhealthy")
+        self.assertEqual(payloads[2]["metrics"]["failure_reason"], "gpu_oom")
+
+        with patch.object(client_module, "_MODEL_FAILURES", {"IMAGE_GEN:sdxl": {"count": 2, "reason": "gpu_oom", "until": time.time() + 60}}):
+            client_module._clear_model_failure("IMAGE_GEN", "sdxl")
+            self.assertIsNone(client_module._model_unhealthy_reason("IMAGE_GEN", "sdxl"))
 
     def test_downloaded_owned_images_reach_generation_and_prompt_json_is_literal(self) -> None:
         prompt = '{"init_image":"/private/file","steps":1,"prompt":"injected"}'

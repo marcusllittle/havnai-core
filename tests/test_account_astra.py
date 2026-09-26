@@ -54,7 +54,26 @@ def test_account_astra_session_uses_bearer_without_wallet(platform):
     assert response.json["mode"] == "account"
     assert response.json["account_id"] == account
     assert response.json["wallet_required"] is False
+    assert response.json["endpoints"]["generate_preflight"] == "/v2/astra/generate-preflight"
     assert harness.client.get("/v2/astra/session").status_code == 401
+
+
+def test_account_astra_generate_preflight_is_bearer_only_and_explicitly_disabled(platform):
+    harness, headers, account = platform
+
+    response = harness.client.get("/v2/astra/generate-preflight", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json == {
+        "mode": "account",
+        "account_id": account,
+        "auth": "bearer",
+        "wallet_required": False,
+        "available": False,
+        "reason": "account_reward_image_not_enabled",
+        "generate_reward_endpoint": None,
+    }
+    assert harness.client.get("/v2/astra/generate-preflight").status_code == 401
 
 
 def test_legacy_astra_session_token_cannot_authorize_account_routes(platform):

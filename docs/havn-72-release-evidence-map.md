@@ -42,6 +42,20 @@ waived with mitigation.
 | Security, trust/privacy, licensing, accessibility/device | Marcus/Codex/Claude by issue | HAVN-68, HAVN-69, HAVN-70, HAVN-71 linked to HAVN-72 | All four remain To Do and cannot be silently waived |
 | Launch-day owner, stop/rollback triggers, known limitations, post-launch smoke | Marcus final owner; Codex supplies operations material | `docs/production-operations-runbook.md` evidence template and rollback/restore procedures | Final owner roster, support owner, monitoring links, stop triggers, and smoke checklist not yet signed off |
 
+## Public Launch Smoke Command
+
+After deploying the release candidate, run the public smoke script and attach the
+redacted output to HAVN-72:
+
+```bash
+python3 scripts/launch_public_smoke.py --json
+```
+
+The command uses only public endpoints. It should fail while live
+`/gallery/browse` returns unreviewed legacy rows. Use `--allow-legacy-gallery`
+only if Marcus has explicitly approved those rows after product-quality review
+and the waiver is recorded in HAVN-72.
+
 ## Current NO-GO Conditions
 
 - Live production `/gallery/browse?limit=1` still returns `total: 7` and

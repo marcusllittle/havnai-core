@@ -97,6 +97,16 @@ Rollback is not automatically safe after schema, provider, or filesystem changes
 Every rollback drill must record whether a backward move is safe, or whether a
 forward fix/compensating migration is required.
 
+As of 2026-09-26, coordinator rollback has been exercised once in production-like
+conditions: release `2f8c8e38cd98da991e71a64de89ba9a2b85060b1` was rolled back
+to `ad7164dbacc5a0351546b88ca7b1558a0b34f36e` and then restored to
+`2f8c8e38cd98da991e71a64de89ba9a2b85060b1`, with local/public health and
+control-plane checks green. Web rollback has not been executed, but Vercel
+deployment inventory identified production rollback candidates under project
+`havnai-web` (`prj_41KTJsGstZ9bHYJpajM4qH9d8wAl`) and production route smoke
+checks returned HTTP 200 for `/`, `/pricing`, `/support`, `/marketplace`,
+`/discover`, `/terms/credits-v1`, `/refunds/credits-v1`, and `/create`.
+
 ## Evidence ownership matrix
 
 | HAVN ticket | Evidence owner | Required production or production-like proof |
@@ -114,12 +124,15 @@ forward fix/compensating migration is required.
 
 - HAVN-47/HAVN-12 still need a private account-token mixed-model drill; public
   legacy drill artifacts must not appear on the production dashboard.
-- HAVN-44 still needs a production or production-like restore drill including
-  media/artifact recovery, not only local SQLite fixture tests.
+- HAVN-44 has production/prod-like SQLite restore, orphan-attempt repair, local
+  backup timer, and representative media/artifact sample evidence. It still
+  needs remote backup/retention/encryption/access-control approval or waiver.
 - HAVN-45/HAVN-49 still need a controlled restart drill with accepted work and
   duplicate-charge/reward/receipt evidence.
-- HAVN-46 still needs a real rollback drill and smoke evidence.
+- HAVN-46 has coordinator rollback evidence and Vercel rollback inventory. It
+  still needs web/Vercel and node-runtime rollback exercise or waiver.
 - HAVN-43 still needs external alert delivery evidence or explicit launch
   waivers for thresholds not wired to notifications.
-- HAVN-14 cannot close until Claude's Astra HAVN-58 evidence is attached and
-  consumed.
+- HAVN-14 consumed Claude's Astra HAVN-58 evidence; remaining platform gap is
+  final deployed owner/private adult generation, cross-account denial, and
+  public cache/social-preview proof or waiver.

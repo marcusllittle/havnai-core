@@ -9,9 +9,11 @@ import uuid
 from decimal import Decimal, InvalidOperation
 
 import account_ledger
+import artifact_lifecycle
 
 
 def initialize(conn: sqlite3.Connection) -> None:
+    artifact_lifecycle.initialize(conn)
     for table, additions in {
         "jobs": ["creator_account_id", "owner_account_id"],
         "assets": ["owner_account_id"],

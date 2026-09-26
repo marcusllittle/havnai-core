@@ -71,6 +71,7 @@ import account_payments
 import account_routes
 import account_auth
 import account_jobs
+import artifact_lifecycle
 import account_anchors
 import account_video
 import account_video_chains
@@ -5397,6 +5398,8 @@ def _job_artifacts(job_id: str) -> List[Dict[str, Any]]:
 
 
 def _v1_job_payload(job: Dict[str, Any]) -> Dict[str, Any]:
+    if job.get("owner_account_id") and artifact_lifecycle.deleted(get_db(), job.get("id")):
+        return {"id": job.get("id"), "status": "deleted", "artifacts": []}
     settings = platform_v1.parse_json_object(job.get("data"))
     resolved_spec = platform_v1.parse_json_object(job.get("resolved_spec"))
     status = platform_v1.canonical_job_state(job.get("status"))
@@ -5445,7 +5448,8 @@ def _require_studio_user() -> Optional[Any]:
 
 def _studio_job_access(job: Dict[str, Any]) -> bool:
     if request.path.startswith("/v2/"):
-        return bool(job.get("owner_account_id") == getattr(g, "account_id", None))
+        return bool(job.get("owner_account_id") == getattr(g, "account_id", None)
+                    and not artifact_lifecycle.deleted(get_db(), job.get("id")))
     return not job.get("owner_account_id")
 
 
@@ -5494,7 +5498,8 @@ def account_artifact_content(artifact_id: str) -> Any:
     if error:
         return error
     row = get_db().execute("""SELECT a.* FROM artifacts a JOIN jobs j ON j.id=a.job_id
-        WHERE a.id=? AND j.owner_account_id=?""", (artifact_id, g.account_id)).fetchone()
+        WHERE a.id=? AND j.owner_account_id=? AND NOT EXISTS
+        (SELECT 1 FROM artifact_lifecycle d WHERE d.job_id=j.id AND d.restored_at IS NULL)""", (artifact_id, g.account_id)).fetchone()
     if not row:
         return jsonify({"error": "artifact_not_found"}), 404
     path = Path(row["path"]).resolve()
@@ -5750,6 +5755,7 @@ def v1_list_jobs() -> Any:
     requested_status = str(request.args.get("status") or "").strip().lower()
     collection = request.args.get("collection") == "1" and bool(getattr(g, "account_id", None))
     conditions = ["owner_account_id IS ?"]
+    conditions.append("NOT EXISTS (SELECT 1 FROM artifact_lifecycle d WHERE d.job_id=jobs.id AND d.restored_at IS NULL)")
     params: List[Any] = [getattr(g, "account_id", None)]
     if collection:
         conditions.append("NOT EXISTS (SELECT 1 FROM account_collection_hidden h WHERE h.account_id=jobs.owner_account_id AND h.job_id=jobs.id)")
@@ -6179,6 +6185,33 @@ def _create_studio_job(payload, account_id, request_key, chain=None) -> Any:
     log_event("v1 job queued", job_id=job_id, task_type=task_type, model=selected_model)
     job = get_job(job_id)
     return jsonify(_v1_job_payload(job or {"id": job_id, "status": "queued", "model": selected_model})), 202
+
+
+@app.route("/v2/account/deleted-generations", methods=["GET"])
+def account_deleted_generations() -> Any:
+    error = _require_studio_user()
+    if error:
+        return error
+    rows = get_db().execute("""SELECT d.job_id,d.deleted_at,d.recover_until,d.purged_at
+        FROM artifact_lifecycle d JOIN jobs j ON j.id=d.job_id
+        WHERE j.owner_account_id=? AND d.restored_at IS NULL
+        ORDER BY d.deleted_at DESC LIMIT 100""", (g.account_id,)).fetchall()
+    return jsonify({"generations": [dict(row) for row in rows]})
+
+
+@app.route("/v2/jobs/<job_id>", methods=["DELETE"])
+@app.route("/v2/jobs/<job_id>/restore", methods=["POST"])
+def account_generation_lifecycle(job_id: str) -> Any:
+    error = _require_studio_user()
+    if error:
+        return error
+    if request.get_data():
+        return jsonify({"error": "invalid_payload"}), 422
+    try:
+        action = artifact_lifecycle.delete if request.method == "DELETE" else artifact_lifecycle.restore
+        return jsonify(action(get_db(), g.account_id, job_id))
+    except artifact_lifecycle.LifecycleError as exc:
+        return jsonify({"error": str(exc)}), exc.status
 
 
 @app.route("/v2/jobs/<job_id>", methods=["GET"])

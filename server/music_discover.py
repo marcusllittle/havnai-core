@@ -7,6 +7,7 @@ import json
 import sqlite3
 import time
 import uuid
+import artifact_lifecycle
 from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -186,7 +187,7 @@ def _publish_song(*, job_id, creator_wallet, title, style, tags, creator_account
         "SELECT id, wallet, model, task_type, status, resolved_spec, creator_account_id, owner_account_id FROM jobs WHERE id=?",
         (job_id,),
     ).fetchone()
-    if not job:
+    if not job or (job["owner_account_id"] and artifact_lifecycle.deleted(conn, job_id)):
         return {"ok": False, "error": "job_not_found"}
     if creator_account_id:
         if job["owner_account_id"] != creator_account_id:

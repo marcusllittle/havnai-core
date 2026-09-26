@@ -10,6 +10,7 @@ import uuid
 import warnings
 
 import account_ledger
+import artifact_lifecycle
 import platform_v1
 
 
@@ -75,6 +76,8 @@ def _active_account(conn, account):
 
 
 def _artifact(conn, job_id, artifact_id):
+    if artifact_lifecycle.deleted(conn, job_id):
+        raise MarketplaceError("marketplace_artifact_unavailable", 409)
     row = conn.execute("SELECT id,kind,content_type,path FROM artifacts WHERE id=? AND job_id=?", (artifact_id, job_id)).fetchone()
     if (not row or row["kind"] != "image" or row["content_type"] not in {"image/png", "image/jpeg", "image/webp"}
             or not Path(row["path"]).is_file()):
@@ -226,6 +229,7 @@ def account_listings(conn, account, *, limit=24, offset=0):
     _pagination(limit, offset)
     where = """FROM gallery_listings l JOIN jobs j ON j.id=l.job_id
         WHERE j.owner_account_id=? AND l.owner_account_id=?
+        AND NOT EXISTS (SELECT 1 FROM artifact_lifecycle d WHERE d.job_id=j.id AND d.restored_at IS NULL)
         AND l.id=(SELECT MAX(latest.id) FROM gallery_listings latest
                   WHERE latest.job_id=l.job_id AND latest.owner_account_id IS NOT NULL)"""
     params = (account, account)

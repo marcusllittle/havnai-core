@@ -35,6 +35,7 @@ def cleanup_job(home, job):
     paths = [outputs / f"{job}.png", outputs / "originals" / f"{job}.png",
              outputs / "manifests" / f"{job}.json"]
     paths.extend(outputs / f"{prefix}{job}.mp4" for prefix in ("", "video_", "animatediff_"))
+    files = set(paths)
     directories = [outputs / "music" / job, home / "assets" / job]
     for directory in directories:
         paths.append(directory)
@@ -48,6 +49,8 @@ def cleanup_job(home, job):
         if any(parent.is_symlink() for parent in (path, *path.parents) if parent != home):
             raise ValueError("unsafe_cleanup_path")
         if path.exists() and not (path.is_file() or path.is_dir()):
+            raise ValueError("unsafe_cleanup_path")
+        if path.exists() and ((path in files and not path.is_file()) or (path in directories and not path.is_dir())):
             raise ValueError("unsafe_cleanup_path")
     removed = 0
     for path in paths:

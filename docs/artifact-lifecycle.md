@@ -124,3 +124,13 @@ requests, symlinks, traversal, idempotency and bundle contents. These changes ar
 not yet loaded on the local or production worker. Live multi-node cleanup,
 engine-specific temporary files, external ACE-Step service storage, and operational
 cleanup monitoring remain unverified; full physical reclamation is not yet proven.
+
+Local rollout checkpoint: after verifying the preview had only three succeeded
+jobs and zero purged records, its SQLite backup passed integrity checking. Only
+the isolated loopback coordinator and `havn11-local-3060` worker were restarted.
+The updated worker registered successfully and its actual
+`POST /v1/node/artifact-purges` returned 200. All eight existing output files
+remained present, as expected for zero authorized purges. Production services
+were not changed. This verifies live polling and preservation, not live deletion.
+Six targeted cleanup tests additionally cover paging beyond a failed first job,
+retry on the next sweep, network failure, and unexpected filesystem object types.

@@ -5,6 +5,7 @@ from tests.test_account_auth import keys
 from tests.test_account_music import music
 import app
 import artifact_lifecycle as lifecycle
+import client.artifact_cleanup as cleanup
 
 
 def put(root, relative):
@@ -60,6 +61,48 @@ def test_worker_requires_explicit_bounded_authorization(tmp_path):
     session.approved = ["job-1"]
     run_batch(session, "https://coordinator", {}, "node-test", tmp_path)
     assert not image.exists()
+
+
+def test_worker_pages_past_failures_and_retries_remaining_files(tmp_path, monkeypatch):
+    paths = [put(tmp_path, f"outputs/job-{number:03}.png") for number in range(31)]
+    real_cleanup = cleanup.cleanup_job
+    def fail_first(home, job):
+        if job == "job-000":
+            raise PermissionError("fixture")
+        return real_cleanup(home, job)
+    monkeypatch.setattr(cleanup, "cleanup_job", fail_first)
+    class Session:
+        def post(self, url, **kwargs):
+            self.batch = kwargs["json"]["job_ids"]
+            assert len(self.batch) <= 25
+            return self
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {"job_ids": self.batch}
+    session = Session()
+    cursor, failures = run_batch(session, "https://coordinator", {}, "node", tmp_path)
+    assert (cursor, failures) == ("job-024", 1)
+    cursor, failures = run_batch(session, "https://coordinator", {}, "node", tmp_path, after=cursor)
+    assert (cursor, failures) == ("job-030", 0)
+    assert paths[0].exists() and not any(path.exists() for path in paths[1:])
+    monkeypatch.setattr(cleanup, "cleanup_job", real_cleanup)
+    assert run_batch(session, "https://coordinator", {}, "node", tmp_path, after=cursor) == ("job-000", 0)
+    assert not paths[0].exists()
+
+
+def test_worker_network_failure_and_wrong_file_type_preserve_outputs(tmp_path):
+    image = put(tmp_path, "outputs/job-1.png")
+    class Offline:
+        def post(self, *args, **kwargs):
+            raise TimeoutError("fixture")
+    with pytest.raises(TimeoutError):
+        run_batch(Offline(), "https://coordinator", {}, "node", tmp_path)
+    assert image.exists()
+    (tmp_path / "outputs/job-1.mp4").mkdir()
+    with pytest.raises(ValueError):
+        cleanup_job(tmp_path, "job-1")
+    assert image.exists()
 
 
 def test_coordinator_only_authorizes_completed_purge_for_assigned_node(music, monkeypatch, tmp_path):

@@ -704,6 +704,8 @@ def log_event(message: str, level: str = "info", **extra: Any) -> None:
 def _no_store_json(payload: dict[str, Any], status: int) -> Any:
     response = jsonify(payload)
     response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
     return response, status
 
 

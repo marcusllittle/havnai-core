@@ -280,6 +280,8 @@ def test_adult_outputs_keep_private_access_but_are_not_marketplace_public(market
     preview = harness.client.get(f"/v2/marketplace/listings/{listing_id}/preview")
     assert preview.status_code == 404
     assert "no-store" in preview.headers["Cache-Control"]
+    assert preview.headers["Pragma"] == "no-cache"
+    assert preview.headers["Expires"] == "0"
     assert harness.client.get(private_url, headers=headers).status_code == 200
 
 

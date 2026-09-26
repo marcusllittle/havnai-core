@@ -80,6 +80,8 @@ def create_blueprint(get_db: Callable[[], sqlite3.Connection], rate_limit: Calla
         response = jsonify({"error": error, "request_id": uuid.uuid4().hex})
         if no_store:
             response.headers["Cache-Control"] = "no-store"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
         return response, status
 
     @api.errorhandler(account_auth.AccountAuthError)

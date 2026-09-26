@@ -96,6 +96,56 @@ def test_rejects_unfinished_or_wrong_artifact_without_publication(music):
     assert conn.execute("SELECT count(*) FROM music_publications").fetchone()[0] == 0
 
 
+def test_adult_music_remains_private_and_cannot_enter_public_surfaces(music):
+    harness, headers, account = music
+    conn = app.get_db()
+    conn.execute(
+        "UPDATE jobs SET model=?, resolved_spec=? WHERE id='job-1'",
+        ("ace_step_nsfw", json.dumps({"parameters": {"prompt": "private adult club song"}})),
+    )
+    conn.commit()
+
+    response = publish(harness, headers, title="Private adult song")
+    assert response.status_code == 422
+    assert response.json["error"]["code"] == "adult_content_restricted"
+    assert conn.execute("SELECT count(*) FROM music_publications").fetchone()[0] == 0
+    assert harness.client.get("/v2/artifacts/artifact-1/content", headers=headers).status_code == 200
+
+    conn.execute(
+        "UPDATE jobs SET model=?, resolved_spec=? WHERE id='job-1'",
+        ("ace_step_1_5_turbo", json.dumps({"parameters": {"prompt": "clean private prompt"}})),
+    )
+    conn.commit()
+    publication = publish(harness, headers).json
+    publication_id = publication["id"]
+    playlist_id = f"playlist-{uuid.uuid4()}"
+    assert harness.client.post("/v2/music/playlists", headers=headers,
+                               json={"id": playlist_id, "title": "Private set"}).status_code == 201
+    assert harness.client.put(f"/v2/music/playlists/{playlist_id}/items/{publication_id}", headers=headers).status_code == 200
+
+    conn.execute(
+        "UPDATE music_publications SET adult_content=1, adult_policy_reason='test_adult_flag' WHERE id=?",
+        (publication_id,),
+    )
+    conn.commit()
+
+    assert harness.client.get(f"/music/discover/{publication_id}").status_code == 404
+    assert harness.client.get(f"/music/publications/{publication_id}/audio").status_code == 404
+    assert harness.client.get(f"/music/publications/{publication_id}/cover.svg").status_code == 404
+    assert harness.client.get("/music/discover").json["publications"] == []
+    assert harness.client.get("/v2/music/publications", headers=headers).json["publications"] == []
+    assert harness.client.post("/v2/music/preferences", headers=headers,
+                               json={"publication_ids": [publication_id]}).json["preferences"] == {}
+    profile = conn.execute("SELECT id FROM account_public_profiles WHERE account_id=?", (account,)).fetchone()[0]
+    creator = harness.client.get(f"/music/creators/{profile}")
+    assert creator.status_code == 200
+    assert creator.json["track_count"] == 0
+    assert creator.json["publications"] == []
+    assert harness.client.patch(f"/v2/music/playlists/{playlist_id}", headers=headers,
+                                json={"is_public": True}).status_code == 409
+    assert harness.client.get("/v2/artifacts/artifact-1/content", headers=headers).status_code == 200
+
+
 def test_concurrent_publish_returns_same_publication(music, monkeypatch):
     harness, _, account = music
     path = app.DB_PATH

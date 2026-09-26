@@ -57,6 +57,20 @@ def test_account_astra_session_uses_bearer_without_wallet(platform):
     assert harness.client.get("/v2/astra/session").status_code == 401
 
 
+def test_legacy_astra_session_token_cannot_authorize_account_routes(platform):
+    harness, _, _ = platform
+    with app.app.app_context():
+        app.astra_rewards.init_astra_tables(app.get_db())
+    legacy = app.astra_rewards.create_session("0x" + "1" * 40, 3600)
+
+    response = harness.client.get(
+        "/v2/astra/session",
+        headers={"Authorization": f"Bearer {legacy['token']}"},
+    )
+
+    assert response.status_code == 401
+
+
 def test_account_reward_is_server_timed_capped_and_never_uses_legacy_wallet(platform):
     harness, headers, account = platform
     token_value = _start_run(harness, headers)

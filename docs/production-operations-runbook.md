@@ -217,3 +217,78 @@ Redactions applied:
 Attach or link reports only after removing secrets, internal paths, private
 prompts, account emails, raw account IDs, provider IDs, unlisted media URLs, and
 tokens. Keep the unredacted packet in the private operations store.
+
+## Launch-Day Operations Checklist
+
+HAVN-72 final acceptance needs a dated owner roster, stop triggers, rollback
+owners, and post-launch smoke checks. Fill this table in Jira before GO or
+CONDITIONAL GO. Do not put secrets, personal phone numbers, tokens, private
+paths, raw account IDs, or unlisted media URLs in the public ticket.
+
+| Role | Named owner required before GO | Evidence or handoff required |
+| --- | --- | --- |
+| Release decision owner | Marcus Little | HAVN-72 dated GO, NO-GO, or CONDITIONAL GO |
+| Coordinator deploy owner | Platform operator | Core commit, deploy timestamp, health checks, rollback owner |
+| Web deploy owner | Platform web operator | Vercel deployment ID, production URL smoke checks, rollback candidate |
+| Worker/node owner | Node operator | Ready heartbeat, model capability smoke, node rollback path |
+| Payments owner | Platform/payment operator | Stripe webhook health, funding replay evidence, reconciliation contact |
+| Support owner | Marcus or named support lead | Support intake URL, escalation path, known-limitations note |
+| Astra owner | Claude/Marcus coordination | Astra acceptance links and any disabled/deferred public surfaces |
+
+### Pre-Launch Stop Triggers
+
+Any of the following should block GO until fixed or explicitly waived by Marcus
+with mitigation and an expiration:
+
+- public gallery, Discover, marketplace, social preview, or game route exposes
+  unreviewed, private, adult-restricted, or account-owned content;
+- `/health` is non-200, control-plane status is not healthy, no ready worker is
+  available for launch-critical task types, or queue/running jobs cannot drain;
+- account sign-in, credits, Stripe webhook funding, receipts, account library,
+  artifact delivery, deletion/recovery, publication, or download fails in the
+  signed-in smoke path;
+- duplicate funding, duplicate receipt, duplicate account charge/capture,
+  duplicate node payout, or duplicate reward is observed;
+- backup is older than the approved RPO, restore drill is unverified, or remote
+  backup is neither configured nor waived;
+- rollback owner cannot identify the previous web/coordinator/node version;
+- monitoring/alert dry-run cannot be refreshed and no waiver exists;
+- Claude-owned Astra quality/client gates are still public but unaccepted.
+
+### Post-Launch Smoke Route List
+
+Run these checks after every production deploy, rollback, DNS change, or
+launch-day configuration change. Record UTC timestamp, route, status, owner, and
+redacted response summary.
+
+| Surface | Smoke check | Healthy signal |
+| --- | --- | --- |
+| Core liveness | `GET https://api.joinhavn.io/health` | 200, `status=ok`, expected version |
+| Core readiness | `GET https://api.joinhavn.io/healthz` | 200, ready |
+| Control plane | `GET /v1/network/control-plane` with admin token when required | healthy, no critical alerts, ready node present |
+| Model catalog | `GET /models/list` | launch-critical image/video/music models mapped to ready capacity |
+| Public gallery | `GET /gallery/browse?limit=1` | zero unreviewed legacy rows unless explicitly reviewed/opted in |
+| Music Discover | `GET /music/discover` | public-only rows; no private/adult media leaks |
+| Web home | `GET https://joinhavn.io/` | 200 and current production deployment |
+| Create | `GET https://joinhavn.io/create` | 200, account/credits launch copy, no invite-code gate |
+| Pricing/policies | `/pricing`, `/terms/credits-v1`, `/refunds/credits-v1`, `/support` | 200 and policy links current |
+| Account auth | signed-in browser smoke | account loads, balance visible, no wallet prompt for account generation |
+| Account generation | signed-in private job smoke | job reaches terminal state or documented safe retry without duplicate charge |
+| Artifact access | owner and cross-account smoke | owner can view/download; other account denied with no-store denial headers |
+| Restart/rollback | drill-specific smoke | same `job_id` retains ownership and has no duplicate charge/payout/receipt |
+
+### Known-Limitations Template
+
+Use this text shape for HAVN-72 if any CONDITIONAL GO is requested:
+
+```text
+Limitation:
+Public surface affected:
+Owner:
+Expires:
+Mitigation:
+Disabled feature or reduced scope:
+Customer/support impact:
+Rollback or stop trigger:
+Evidence link:
+```

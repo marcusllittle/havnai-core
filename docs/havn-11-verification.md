@@ -210,3 +210,27 @@ catalog still reports the original explicit sandbox policy. No coordinator
 configuration or production service was changed. Public deployment, allowlisted
 running policy-config evidence, a live receipt bound to the approved revision,
 and Jira evidence linkage remain unproven. HAVN-11 is not complete.
+
+The owner subsequently reviewed the policy pages, approved their wording, and
+confirmed `team@joinhavn.io` is the correct support address. This clears the copy
+approval item above; it does not establish public deployment, active production
+configuration, or actual support-mail delivery. Those remain separate evidence.
+
+## Recovery pagination checkpoint
+
+Replaced the recovery endpoint's fixed 100-row cutoff with owner-scoped keyset
+pages. Timestamp ties use job IDs for stable ordering; restoring a page boundary
+does not lose older entries. The web recovery page offers Older deletions and
+Latest deletions, preserves the current cursor on retry, and cancels stale
+requests when the account changes.
+
+Validation: 30 targeted backend tests passed across recovery paging, lifecycle,
+and purge operations; seven recovery UI tests, TypeScript, and the web production
+build passed. Paging coverage includes 136 recoverable entries, equal timestamps,
+restoration between pages, invalid cursors, and owner isolation. This is automated
+fixture evidence; the running preview coordinator has not yet loaded this change.
+
+Storage review also identified derived last-frame assets under ASSETS_DIR and
+worker storage as remaining physical-retention boundaries. Existing purge handles
+registered artifact paths under the configured outputs root only. Full storage
+reclamation and production purge activation are not established by these tests.

@@ -6198,11 +6198,14 @@ def account_deleted_generations() -> Any:
     error = _require_studio_user()
     if error:
         return error
-    rows = get_db().execute("""SELECT d.job_id,d.deleted_at,d.recover_until,d.purged_at
-        FROM artifact_lifecycle d JOIN jobs j ON j.id=d.job_id
-        WHERE j.owner_account_id=? AND d.restored_at IS NULL
-        ORDER BY d.deleted_at DESC LIMIT 100""", (g.account_id,)).fetchall()
-    return jsonify({"generations": [dict(row) for row in rows]})
+    raw_limit = request.args.get("limit", "25")
+    if not re.fullmatch(r"[0-9]{1,3}", raw_limit):
+        return jsonify({"error": "invalid_recovery_limit"}), 422
+    try:
+        return jsonify(artifact_lifecycle.list_deleted(get_db(), g.account_id,
+            before=request.args.get("before"), limit=int(raw_limit)))
+    except artifact_lifecycle.LifecycleError as exc:
+        return jsonify({"error": str(exc)}), exc.status
 
 
 @app.route("/v2/jobs/<job_id>", methods=["DELETE"])

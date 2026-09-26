@@ -4,6 +4,10 @@ from __future__ import annotations
 import time
 import uuid
 import re
+import base64
+import binascii
+import json
+import math
 from pathlib import Path
 
 RECOVERY_SECONDS = 30 * 86400
@@ -35,11 +39,49 @@ def initialize(conn):
             job_id TEXT PRIMARY KEY REFERENCES jobs(id),
             checked_at REAL NOT NULL, outcome TEXT NOT NULL
         );
+        CREATE INDEX IF NOT EXISTS artifact_lifecycle_deleted_order
+            ON artifact_lifecycle(deleted_at DESC,job_id DESC) WHERE restored_at IS NULL;
     """)
 
 
 def deleted(conn, job_id):
     return bool(conn.execute("SELECT 1 FROM artifact_lifecycle WHERE job_id=? AND restored_at IS NULL", (job_id,)).fetchone())
+
+
+def list_deleted(conn, account, *, before=None, limit=25):
+    """Owner-scoped keyset pages; restoring the previous page's last row is safe.
+
+    The cursor is a position, not an authorization credential. Every page still
+    filters the authenticated owner. Never put prompt/settings/media in it.
+    """
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise LifecycleError("invalid_recovery_limit", 422)
+    params = [account]
+    position = ""
+    if before is not None:
+        try:
+            if not isinstance(before, str) or not 1 <= len(before) <= 1024:
+                raise ValueError()
+            cursor = json.loads(base64.b64decode(before.encode("ascii"), altchars=b"-_", validate=True))
+            if (not isinstance(cursor, list) or len(cursor) != 4 or type(cursor[0]) is not int or cursor[0] != 1 or cursor[1] != account
+                    or type(cursor[2]) not in (int, float) or not math.isfinite(cursor[2]) or cursor[2] < 0
+                    or not isinstance(cursor[3], str) or not 1 <= len(cursor[3]) <= 200):
+                raise ValueError()
+        except (ValueError, TypeError, UnicodeError, binascii.Error, OverflowError):
+            raise LifecycleError("invalid_recovery_cursor", 422) from None
+        position = " AND (d.deleted_at<? OR (d.deleted_at=? AND d.job_id<?))"
+        params.extend([cursor[2], cursor[2], cursor[3]])
+    rows = conn.execute("""SELECT d.job_id,d.deleted_at,d.recover_until,d.purged_at
+        FROM artifact_lifecycle d JOIN jobs j ON j.id=d.job_id
+        WHERE j.owner_account_id=? AND d.restored_at IS NULL""" + position +
+        " ORDER BY d.deleted_at DESC,d.job_id DESC LIMIT ?", (*params, limit + 1)).fetchall()
+    page = rows[:limit]
+    next_cursor = None
+    if len(rows) > limit:
+        last = page[-1]
+        next_cursor = base64.urlsafe_b64encode(json.dumps(
+            [1, account, last["deleted_at"], last["job_id"]], separators=(",", ":")).encode()).decode("ascii")
+    return {"generations": [dict(row) for row in page], "next_cursor": next_cursor}
 
 
 def derived_asset_deleted(conn, asset_id):

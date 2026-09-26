@@ -71,14 +71,18 @@ def create_blueprint(get_db: Callable[[], sqlite3.Connection], rate_limit: Calla
             return wrapped
         return decorate
 
-    def fail(code, status):
+    def fail(code, status, *, no_store=False):
         detail = ERROR_DETAILS.get(code, {})
         error = {"code": code, "message": detail.get("message", code.replace("_", " ").capitalize())}
         if detail:
             error["action"] = detail["action"]
             error["retryable"] = detail["retryable"]
-        return jsonify({"error": error,
-                        "request_id": uuid.uuid4().hex}), status
+        response = jsonify({"error": error, "request_id": uuid.uuid4().hex})
+        if no_store:
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response, status
 
     @api.errorhandler(account_auth.AccountAuthError)
     def auth_error(exc):
@@ -247,10 +251,14 @@ def create_blueprint(get_db: Callable[[], sqlite3.Connection], rate_limit: Calla
     @api.get("/marketplace/listings/<int:listing_id>/preview")
     def marketplace_preview(listing_id):
         if not rate_limit(f"marketplace-preview:{request.remote_addr}", limit=60):
-            return fail("rate_limited", 429)
+            return fail("rate_limited", 429, no_store=True)
         if outputs_dir is None:
-            return fail("preview_unavailable", 503)
-        response = Response(account_marketplace.preview(get_db(), listing_id, outputs_dir=outputs_dir()), mimetype="image/jpeg")
+            return fail("preview_unavailable", 503, no_store=True)
+        try:
+            preview = account_marketplace.preview(get_db(), listing_id, outputs_dir=outputs_dir())
+        except account_marketplace.MarketplaceError as exc:
+            return fail(str(exc), exc.status, no_store=True)
+        response = Response(preview, mimetype="image/jpeg")
         response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 

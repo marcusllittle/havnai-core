@@ -105,6 +105,26 @@ environment files. The protected backup environment file correctly denied
 unprivileged reads. Use an operator shell with the appropriate token for the
 final pre-launch `/metrics` and dry-run refresh.
 
+Second refresh on 2026-09-26 at 22:35 UTC:
+
+```text
+GET /health
+{"nodes":1,"queue_depth":0,"status":"ok","version":"dev"}
+
+GET /healthz
+{"concurrency":{"attempts":5,"errors":[],"success":5},"ok":true}
+
+GET /metrics
+HTTP 401 {"error":"unauthorized","role":"admin"}
+
+GET /v1/network/alerts/dry-run
+HTTP 401 {"error":"unauthorized","role":"admin"}
+```
+
+This proves the public liveness/readiness checks were healthy and the metrics
+and dry-run alert surfaces were still admin-gated. It does not replace the
+required final operator-token scrape.
+
 ## Remaining Launch Gaps
 
 - Capture saved dashboard links or screenshots if Jira requires visual evidence

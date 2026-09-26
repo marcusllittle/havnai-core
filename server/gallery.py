@@ -42,7 +42,7 @@ def _account_owned_job(conn: sqlite3.Connection, job_id: str) -> bool:
 
 def legacy_public_gallery_enabled() -> bool:
     """Return whether pre-account wallet gallery routes are publicly browseable."""
-    return os.getenv("HAVNAI_LEGACY_GALLERY_PUBLIC_ENABLED", "1").strip().lower() in {
+    return os.getenv("HAVNAI_LEGACY_GALLERY_PUBLIC_ENABLED", "0").strip().lower() in {
         "1",
         "true",
         "yes",

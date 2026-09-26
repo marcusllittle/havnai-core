@@ -66,8 +66,9 @@ following invariants are launch gates:
 - Public music and marketplace responses use field allowlists and omit internal
   account IDs, Clerk identifiers, bearer tokens, private prompts, source paths,
   unlisted media URLs, and artifact IDs unless the route is owner-authenticated.
-- Public launch disables the pre-account wallet gallery browse/detail/purchase
-  surface with `HAVNAI_LEGACY_GALLERY_PUBLIC_ENABLED=0`; the account-backed
+- Public launch keeps the pre-account wallet gallery browse/detail/purchase
+  surface disabled by default. `HAVNAI_LEGACY_GALLERY_PUBLIC_ENABLED=1` is an
+  explicit legacy opt-in only after product-quality review; the account-backed
   `/v2/marketplace` surface remains the supported marketplace path.
 - Legacy wallet compatibility never grants access to rows that have account
   ownership.

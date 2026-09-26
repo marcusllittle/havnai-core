@@ -332,6 +332,8 @@ def get_publication(
     ).fetchone()
     if not row:
         return None
+    if _restrict_legacy_adult_publication(row):
+        return None
     return publication_to_dict(
         row,
         liked_by_wallet=liked_by_wallet,
@@ -380,6 +382,7 @@ def browse_publications(
         f"SELECT * FROM music_publications {where} ORDER BY {order} LIMIT ? OFFSET ?",
         [*params, limit_int, offset_int],
     ).fetchall()
+    safe_rows = [row for row in rows if not _restrict_legacy_adult_publication(row)]
     return {
         "publications": [
             publication_to_dict(
@@ -388,7 +391,7 @@ def browse_publications(
                 saved_by_wallet=saved_by_wallet,
                 include_internal=include_internal,
             )
-            for row in rows
+            for row in safe_rows
         ],
         "total": int(total_row["n"] if total_row else 0),
         "limit": limit_int,
@@ -403,10 +406,10 @@ def set_like(publication_id: str, wallet: str, liked: bool = True) -> Dict[str, 
     if not WALLET_REGEX.match(normalized_wallet):
         return {"ok": False, "error": "invalid_wallet"}
     publication = conn.execute(
-        "SELECT id FROM music_publications WHERE id=? AND state='published' AND COALESCE(adult_content,0)=0",
+        "SELECT * FROM music_publications WHERE id=? AND state='published' AND COALESCE(adult_content,0)=0",
         (publication_id,),
     ).fetchone()
-    if not publication:
+    if not publication or _restrict_legacy_adult_publication(publication):
         return {"ok": False, "error": "publication_not_found"}
     now = time.time()
     if liked:
@@ -442,8 +445,15 @@ def set_account_music_preference(account_id: str, publication_id: str, *, kind: 
     conn = get_db()
     conn.execute("BEGIN IMMEDIATE")
     with conn:
-        row = conn.execute("SELECT state, COALESCE(adult_content,0) AS adult_content FROM music_publications WHERE id=?", (publication_id,)).fetchone()
-        if not row or (enabled and (row["state"] != "published" or row["adult_content"])):
+        row = conn.execute("SELECT * FROM music_publications WHERE id=?", (publication_id,)).fetchone()
+        if not row or (
+            enabled
+            and (
+                row["state"] != "published"
+                or row["adult_content"]
+                or _restrict_legacy_adult_publication(row, commit=False)
+            )
+        ):
             return {"ok": False, "error": "publication_not_found"}
         if enabled:
             conn.execute(f"INSERT OR IGNORE INTO {table} VALUES (?,?,?)", (account_id, publication_id, time.time()))
@@ -479,8 +489,10 @@ def account_music_library(account_id: str, *, limit: int = 80, offset: int = 0, 
                         [*params, limit, offset]).fetchall()
     liked = conn.execute("""SELECT p.* FROM account_music_likes l JOIN music_publications p ON p.id=l.publication_id
         WHERE l.account_id=? AND p.state='published' AND COALESCE(p.adult_content,0)=0 ORDER BY l.created_at DESC,p.id LIMIT 12""", (account_id,)).fetchall()
-    return {"publications": [account_publication(row, account_id) for row in rows],
-            "recent_liked": [account_publication(row, account_id) for row in liked],
+    safe_rows = [row for row in rows if not _restrict_legacy_adult_publication(row)]
+    safe_liked = [row for row in liked if not _restrict_legacy_adult_publication(row)]
+    return {"publications": [account_publication(row, account_id) for row in safe_rows],
+            "recent_liked": [account_publication(row, account_id) for row in safe_liked],
             "total": total, "limit": limit, "offset": offset}
 
 
@@ -568,10 +580,11 @@ def list_saved(
         """,
         [*params, limit_int, offset_int],
     ).fetchall()
+    safe_rows = [row for row in rows if not _restrict_legacy_adult_publication(row)]
     return {
         "publications": [
             publication_to_dict(row, liked_by_wallet=normalized_wallet, saved_by_wallet=normalized_wallet)
-            for row in rows
+            for row in safe_rows
         ],
         "total": int(total_row["n"] if total_row else 0),
         "limit": limit_int,
@@ -599,12 +612,13 @@ def list_recent_liked(
         """,
         (normalized_wallet, limit_int),
     ).fetchall()
+    safe_rows = [row for row in rows if not _restrict_legacy_adult_publication(row)]
     return {
         "publications": [
             publication_to_dict(row, liked_by_wallet=normalized_wallet, saved_by_wallet=normalized_wallet)
-            for row in rows
+            for row in safe_rows
         ],
-        "total": len(rows),
+        "total": len(safe_rows),
         "limit": limit_int,
         "offset": 0,
     }
@@ -1112,14 +1126,37 @@ def _format_wallet(wallet: Any) -> str:
 
 
 def _published_publication_exists(publication_id: str) -> bool:
-    return bool(
+    row = (
         get_db()
         .execute(
-            "SELECT 1 FROM music_publications WHERE id=? AND state='published' AND COALESCE(adult_content,0)=0",
+            "SELECT * FROM music_publications WHERE id=? AND state='published' AND COALESCE(adult_content,0)=0",
             (publication_id,),
         )
         .fetchone()
     )
+    return bool(row and not _restrict_legacy_adult_publication(row))
+
+
+def _restrict_legacy_adult_publication(row: sqlite3.Row, *, commit: bool = True) -> bool:
+    """Hide and backfill older public rows that now match adult policy."""
+    if bool(row["adult_content"]):
+        return True
+    reason = adult_content.classify(
+        row["title"],
+        row["style"],
+        row["tags"],
+        row["model"],
+    )
+    if not reason:
+        return False
+    conn = get_db()
+    conn.execute(
+        "UPDATE music_publications SET adult_content=1, adult_policy_reason=?, updated_at=? WHERE id=?",
+        (reason, time.time(), row["id"]),
+    )
+    if commit:
+        conn.commit()
+    return True
 
 
 def _owner_playlist_row(playlist_id: str, wallet: str) -> Optional[sqlite3.Row]:

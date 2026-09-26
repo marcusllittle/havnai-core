@@ -130,12 +130,45 @@ def test_price_conflicts_self_purchase_and_foreign_delist_do_not_charge(market_c
     listing_id = listing(market_case)
     route = f"/v2/marketplace/listings/{listing_id}"
     assert harness.client.post(route + "/purchase", headers=buyer_headers, json={"expected_price_units": 2999}).status_code == 409
-    assert harness.client.post(route + "/purchase", headers=seller_headers, json={"expected_price_units": 3000}).status_code == 409
+    self_purchase = harness.client.post(route + "/purchase", headers=seller_headers, json={"expected_price_units": 3000})
+    assert self_purchase.status_code == 409
+    assert self_purchase.json["error"] == {
+        "code": "cannot_buy_own_listing",
+        "message": "You already own this listing.",
+        "action": "open_collection",
+        "retryable": False,
+    }
     assert harness.client.delete(route, headers=buyer_headers).status_code == 404
     for _ in range(2):
         assert harness.client.delete(route, headers=seller_headers).status_code == 204
     assert harness.client.post(route + "/purchase", headers=buyer_headers, json={"expected_price_units": 3000}).status_code == 404
     assert harness.client.get("/v2/account/credits", headers=buyer_headers).json["available_units"] == 10000
+
+
+def test_insufficient_balance_purchase_is_actionable_and_never_records_sale(market_case, keys):
+    harness, _, _, seller, _, body, _ = market_case
+    listing_id = listing(market_case)
+    route = f"/v2/marketplace/listings/{listing_id}/purchase"
+    buyer_headers = {"Authorization": token(keys, sub="unfunded", sid="unfunded-session"), "Idempotency-Key": "unfunded-buy"}
+    buyer = harness.client.get("/v2/account", headers=buyer_headers).json["id"]
+    response = harness.client.post(route, headers=buyer_headers, json={"expected_price_units": 3000})
+    assert response.status_code == 409
+    assert response.json["error"] == {
+        "code": "insufficient_credits",
+        "message": "Not enough credits for this purchase. Add credits and try again.",
+        "action": "fund_credits",
+        "retryable": False,
+    }
+    assert response.headers["Cache-Control"] == "private, no-store"
+    retry = harness.client.post(route, headers=buyer_headers, json={"expected_price_units": 3000})
+    assert retry.status_code == 409
+    with app.app.app_context():
+        conn = app.get_db()
+        assert tuple(conn.execute("SELECT owner_account_id FROM jobs WHERE id=?", (body["job_id"],)).fetchone()) == (seller,)
+        assert conn.execute("SELECT COUNT(*) FROM account_credit_sales").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM gallery_sales").fetchone()[0] == 0
+        assert account_ledger.balance(conn, buyer)["available_units"] == 0
+        assert account_ledger.balance(conn, seller)["available_units"] == 9000
 
 
 @pytest.mark.parametrize("change", [{"price_units": True}, {"price_units": 0}, {"price_units": 1.5},

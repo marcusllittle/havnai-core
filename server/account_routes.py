@@ -19,6 +19,39 @@ import account_import
 import account_workflows
 import stripe
 
+ERROR_DETAILS = {
+    "insufficient_credits": {
+        "message": "Not enough credits for this purchase. Add credits and try again.",
+        "action": "fund_credits",
+        "retryable": False,
+    },
+    "listing_price_changed": {
+        "message": "This listing's price changed. Review the listing before buying.",
+        "action": "reload_listing",
+        "retryable": False,
+    },
+    "cannot_buy_own_listing": {
+        "message": "You already own this listing.",
+        "action": "open_collection",
+        "retryable": False,
+    },
+    "listing_not_found": {
+        "message": "This listing is no longer available.",
+        "action": "reload_marketplace",
+        "retryable": False,
+    },
+    "marketplace_artifact_unavailable": {
+        "message": "This creation is no longer available to buy.",
+        "action": "reload_marketplace",
+        "retryable": False,
+    },
+    "idempotency_conflict": {
+        "message": "A saved marketplace request does not match this action. Review it before retrying.",
+        "action": "review_pending_request",
+        "retryable": False,
+    },
+}
+
 
 def create_blueprint(get_db: Callable[[], sqlite3.Connection], rate_limit: Callable[..., bool], *, outputs_dir=None) -> Blueprint:
     api = Blueprint("commercial_accounts", __name__, url_prefix="/v2")
@@ -39,7 +72,12 @@ def create_blueprint(get_db: Callable[[], sqlite3.Connection], rate_limit: Calla
         return decorate
 
     def fail(code, status):
-        return jsonify({"error": {"code": code, "message": code.replace("_", " ").capitalize()},
+        detail = ERROR_DETAILS.get(code, {})
+        error = {"code": code, "message": detail.get("message", code.replace("_", " ").capitalize())}
+        if detail:
+            error["action"] = detail["action"]
+            error["retryable"] = detail["retryable"]
+        return jsonify({"error": error,
                         "request_id": uuid.uuid4().hex}), status
 
     @api.errorhandler(account_auth.AccountAuthError)

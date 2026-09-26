@@ -1,11 +1,65 @@
 import pytest
 import uuid
+import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from tests.test_account_auth import keys, token
 from tests.test_account_music import music, publish
 import app
 import artifact_lifecycle as lifecycle
+import music_discover
+
+
+def test_publish_and_delete_race_leaves_no_public_song(music, monkeypatch):
+    harness, headers, account = music
+    database = app.DB_PATH
+    local = threading.local()
+    barrier = threading.Barrier(2)
+    original_get_db = music_discover.get_db
+    monkeypatch.setattr(music_discover, "get_db", lambda: getattr(local, "conn", None) or original_get_db())
+    def run(operation):
+        local.conn = sqlite3.connect(database, timeout=10)
+        local.conn.row_factory = sqlite3.Row
+        try:
+            barrier.wait(timeout=10)
+            if operation == "publish":
+                return music_discover.publish_song(job_id="job-1", creator_account_id=account, title="Race song")
+            lifecycle.delete(local.conn, account, "job-1")
+            return {"deleted": True}
+        finally:
+            local.conn.close()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        published, removed = pool.map(run, ["publish", "delete"])
+    assert removed == {"deleted": True}
+    assert published.get("ok") is True or published.get("error") == "job_not_found"
+    conn = app.get_db()
+    assert lifecycle.deleted(conn, "job-1")
+    assert conn.execute("SELECT count(*) FROM music_publications WHERE state='published' AND job_id='job-1'").fetchone()[0] == 0
+    assert harness.client.get("/v2/artifacts/artifact-1/content", headers=headers).status_code == 404
+    if published.get("ok"):
+        publication = published["publication"]["id"]
+        assert harness.client.get(f"/music/publications/{publication}/audio").status_code == 404
+
+
+def test_concurrent_delete_retries_keep_one_recovery_window(music):
+    _, _, account = music
+    database = app.DB_PATH
+    barrier = threading.Barrier(4)
+    def run(index):
+        conn = sqlite3.connect(database, timeout=10)
+        conn.row_factory = sqlite3.Row
+        try:
+            barrier.wait(timeout=10)
+            return lifecycle.delete(conn, account, "job-1", now=100 + index)
+        finally:
+            conn.close()
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(run, range(4)))
+    assert all(result == results[0] for result in results)
+    assert results[0]["recover_until"] - results[0]["deleted_at"] == lifecycle.RECOVERY_SECONDS
+    assert app.get_db().execute("SELECT count(*) FROM artifact_lifecycle_events WHERE action='delete'").fetchone()[0] == 1
 
 
 def test_delete_unpublishes_blocks_reads_and_restores_only_private(music):

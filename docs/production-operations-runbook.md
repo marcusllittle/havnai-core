@@ -194,6 +194,21 @@ production route smoke checks, but no Vercel promotion/rollback was executed.
 Node-runtime rollback is documented in `docs/RUN_A_NODE.md` and still requires a
 heartbeat/model-capability exercise or waiver.
 
+Use the read-only rollback audit helper to assemble the redacted HAVN-46 packet:
+
+```bash
+python scripts/rollback_evidence_audit.py \
+  --coordinator-evidence /redacted/coordinator-rollback.json \
+  --web-evidence /redacted/vercel-rollback.json \
+  --node-evidence /redacted/node-rollback.json
+```
+
+For any surface that is waived instead of exercised, provide
+`--web-waiver-id`, `--web-waiver-expires`, `--node-waiver-id`, or
+`--node-waiver-expires` with the approval recorded in Jira. The helper reports
+`passed=false` until coordinator, web, and node rollback evidence are each
+exercised or explicitly waived.
+
 ## Evidence Packet Template
 
 Each Jira evidence packet should include:

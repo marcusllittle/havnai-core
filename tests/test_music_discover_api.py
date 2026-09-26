@@ -246,6 +246,71 @@ class MusicDiscoverApiTests(unittest.TestCase):
         self.assertFalse(short_play.get_json()["counted"])
         self.assertTrue(counted_play.get_json()["counted"])
 
+    def test_adult_flag_hides_legacy_music_from_public_surfaces_and_saved_state(self) -> None:
+        publish_payload = {
+            **self._signed_payload("music_publish", job_id="job-1"),
+            "job_id": "job-1",
+            "title": "Late Night Track",
+            "style": "Synthwave",
+            "tags": ["Synthwave"],
+        }
+        publish = self.client.post("/music/publications", json=publish_payload)
+        self.assertEqual(publish.status_code, 201, publish.get_data(as_text=True))
+        publication_id = publish.get_json()["id"]
+
+        save_payload = self._signed_payload("music_save", publication_id=publication_id)
+        self.assertEqual(self.client.post(f"/music/publications/{publication_id}/save", json=save_payload).status_code, 200)
+        create_payload = {
+            **self._signed_payload("playlist_create", playlist_id="new"),
+            "title": "Private Adult Hold",
+        }
+        playlist_id = self.client.post("/music/playlists", json=create_payload).get_json()["id"]
+        add_payload = {
+            **self._signed_payload("playlist_add", playlist_id=playlist_id, publication_id=publication_id),
+            "publication_id": publication_id,
+        }
+        self.assertEqual(self.client.post(f"/music/playlists/{playlist_id}/items", json=add_payload).status_code, 200)
+
+        conn = app_module.get_db()
+        conn.execute(
+            "UPDATE music_publications SET adult_content=1, adult_policy_reason='test_adult_flag' WHERE id=?",
+            (publication_id,),
+        )
+        conn.commit()
+
+        self.assertEqual(self.client.get("/music/discover").get_json()["publications"], [])
+        self.assertEqual(self.client.get("/music/discover?search=Late").get_json()["total"], 0)
+        self.assertEqual(self.client.get("/music/discover?style=Synthwave").get_json()["total"], 0)
+        self.assertEqual(self.client.get(f"/music/discover/{publication_id}").status_code, 404)
+        self.assertEqual(self.client.get(f"/music/publications/{publication_id}/audio").status_code, 404)
+        self.assertEqual(self.client.get(f"/music/publications/{publication_id}/cover.svg").status_code, 404)
+        self.assertEqual(self.client.post(f"/music/publications/{publication_id}/play", json={"seconds_listened": 8}).status_code, 404)
+        self.assertEqual(self.client.get(f"/static/outputs/artifacts/job-1/song.mp3").status_code, 404)
+
+        like_payload = {**self._signed_payload("music_like", publication_id=publication_id), "liked": True}
+        self.assertEqual(self.client.post(f"/music/publications/{publication_id}/like", json=like_payload).status_code, 404)
+        saved_payload = self._signed_payload("music_library_read", publication_id=publication_id)
+        saved_state = self.client.post(f"/music/publications/{publication_id}/saved", json=saved_payload)
+        self.assertEqual(saved_state.status_code, 200)
+        self.assertFalse(saved_state.get_json()["saved"])
+        library_payload = self._signed_payload("music_library_read")
+        library = self.client.post("/music/library", json=library_payload)
+        self.assertEqual(library.status_code, 200, library.get_data(as_text=True))
+        self.assertEqual(library.get_json()["publications"], [])
+        self.assertEqual(library.get_json()["recent_liked"], [])
+
+        creator = self.client.get(f"/music/creator/{self.wallet}")
+        self.assertEqual(creator.status_code, 404)
+        public_update = {
+            **self._signed_payload("playlist_update", playlist_id=playlist_id),
+            "is_public": True,
+        }
+        update = self.client.patch(f"/music/playlists/{playlist_id}", json=public_update)
+        self.assertEqual(update.status_code, 409, update.get_data(as_text=True))
+        self.assertEqual(update.get_json()["error"], "adult_content_restricted")
+        self.assertEqual(self.client.get(f"/music/playlists/{playlist_id}").status_code, 404)
+        self.assertEqual(self.client.get(f"/music/playlists/{playlist_id}/cover.svg").status_code, 404)
+
     def test_save_playlist_private_access_and_creator_routes(self) -> None:
         publish_payload = {
             **self._signed_payload("music_publish", job_id="job-1"),

@@ -101,6 +101,10 @@ _REFERENCE_FACE_PIPE = None
 _REFERENCE_FACE_PIPE_MODEL = ""
 _IMAGE_PIPELINE_CACHE: "OrderedDict[str, Any]" = OrderedDict()
 _IMAGE_PIPELINE_CACHE_LOCK = threading.Lock()
+MODEL_FAILURE_THRESHOLD = int(os.environ.get("HAVNAI_MODEL_FAILURE_THRESHOLD", "2"))
+MODEL_FAILURE_COOLDOWN_SECONDS = float(os.environ.get("HAVNAI_MODEL_FAILURE_COOLDOWN_SECONDS", "900"))
+_MODEL_FAILURE_LOCK = threading.Lock()
+_MODEL_FAILURES: Dict[str, Dict[str, Any]] = {}
 
 try:
     from huggingface_hub import hf_hub_download  # type: ignore
@@ -1838,6 +1842,66 @@ def _is_cuda_oom_error(exc: Exception) -> bool:
     )
 
 
+def _model_failure_key(task_type: str, model_name: str) -> str:
+    return f"{task_type.upper()}:{model_name.lower()}"
+
+
+def _classify_model_failure(exc: Exception) -> str:
+    text = str(exc).lower()
+    if isinstance(exc, FileNotFoundError) or "no such file" in text or "missing" in text:
+        return "model_weights_missing"
+    if _is_cuda_oom_error(exc):
+        return "gpu_oom"
+    if "cuda" in text:
+        return "cuda_runtime"
+    if "unsupported" in text:
+        return "unsupported_model_mapping"
+    if "startup" in text or "unreachable" in text:
+        return "engine_startup_failed"
+    return "model_load_failed"
+
+
+def _model_unhealthy_reason(task_type: str, model_name: str, *, now: Optional[float] = None) -> Optional[str]:
+    if MODEL_FAILURE_THRESHOLD <= 0:
+        return None
+    checked_at = time.time() if now is None else now
+    key = _model_failure_key(task_type, model_name)
+    with _MODEL_FAILURE_LOCK:
+        record = _MODEL_FAILURES.get(key)
+        if not record:
+            return None
+        until = float(record.get("until", 0))
+        if until <= 0:
+            return None
+        if checked_at >= until:
+            _MODEL_FAILURES.pop(key, None)
+            return None
+        return str(record.get("reason") or "model_unhealthy")
+
+
+def _record_model_failure(task_type: str, model_name: str, reason: str, *, now: Optional[float] = None) -> int:
+    if MODEL_FAILURE_THRESHOLD <= 0:
+        return 0
+    checked_at = time.time() if now is None else now
+    key = _model_failure_key(task_type, model_name)
+    with _MODEL_FAILURE_LOCK:
+        record = _MODEL_FAILURES.get(key)
+        until = float(record.get("until", 0)) if record else 0.0
+        if not record or (until > 0 and checked_at >= until):
+            record = {"count": 0, "reason": reason, "until": 0.0}
+        record["count"] = int(record.get("count", 0)) + 1
+        record["reason"] = reason
+        if int(record["count"]) >= MODEL_FAILURE_THRESHOLD:
+            record["until"] = checked_at + MODEL_FAILURE_COOLDOWN_SECONDS
+        _MODEL_FAILURES[key] = record
+        return int(record["count"])
+
+
+def _clear_model_failure(task_type: str, model_name: str) -> None:
+    with _MODEL_FAILURE_LOCK:
+        _MODEL_FAILURES.pop(_model_failure_key(task_type, model_name), None)
+
+
 def _cuda_total_vram_gb() -> float:
     if torch is None or not torch.cuda.is_available():
         return 0.0
@@ -2645,6 +2709,34 @@ def execute_task(task: Dict[str, Any]) -> None:
             log(f"Failed to submit disallowed-model result: {exc}", prefix="🚫", task_id=task_id)
         return
 
+    unhealthy_reason = _model_unhealthy_reason(task_type, model_name)
+    if unhealthy_reason:
+        log(
+            f"Rejecting task for unhealthy model '{model_name}' ({unhealthy_reason})",
+            prefix="⚠️",
+            task_id=task_id,
+        )
+        payload = {
+            "node_id": NODE_NAME,
+            "task_id": task_id,
+            "status": "failed",
+            "metrics": {
+                "task_type": task_type.lower(),
+                "model_name": model_name,
+                "reward_weight": reward_weight,
+                "error": f"Model '{model_name}' is temporarily unhealthy after repeated failures",
+                "error_code": "model_unhealthy",
+                "failure_reason": unhealthy_reason,
+            },
+            "utilization": utilization_hint,
+            "submitted_at": time.time(),
+        }
+        try:
+            SESSION.post(endpoint("/results"), data=json.dumps(payload), timeout=15).raise_for_status()
+        except Exception as exc:
+            log(f"Failed to submit unhealthy-model result: {exc}", prefix="🚫", task_id=task_id)
+        return
+
     lease_stop = threading.Event()
     cancel_event = threading.Event()
     lease_thread: Optional[threading.Thread] = None
@@ -2701,12 +2793,14 @@ def execute_task(task: Dict[str, Any]) -> None:
             "error": str(exc),
         }
     except Exception as exc:
+        error_code = _classify_model_failure(exc)
         metrics = {
             "status": "failed",
             "task_type": task_type.lower(),
             "model_name": model_name,
             "reward_weight": reward_weight,
             "error": f"Model resolution failed: {exc}",
+            "error_code": error_code,
         }
     else:
         if task_type == "IMAGE_GEN":
@@ -2775,6 +2869,7 @@ def execute_task(task: Dict[str, Any]) -> None:
                 "model_name": model_name,
                 "reward_weight": reward_weight,
                 "error": f"Unsupported task type: {task_type}",
+                "error_code": "unsupported_task_type",
             }
 
     if cancel_event.is_set() and metrics.get("status", "success") == "success":
@@ -2782,6 +2877,18 @@ def execute_task(task: Dict[str, Any]) -> None:
         metrics["error"] = "cancelled_by_user"
         image_b64 = None
         video_b64 = None
+
+    if metrics.get("status") == "success":
+        _clear_model_failure(task_type, model_name)
+    elif metrics.get("error_code") in {
+        "model_load_failed",
+        "model_weights_missing",
+        "gpu_oom",
+        "cuda_runtime",
+        "unsupported_model_mapping",
+        "engine_startup_failed",
+    }:
+        _record_model_failure(task_type, model_name, str(metrics["error_code"]))
 
     output_path = _task_output_path(task_id, task_type)
     artifact_uploaded = False
@@ -3873,7 +3980,10 @@ def run_image_generation(
     except Exception as exc:
         status = "cancelled" if isinstance(exc, TaskCancelled) else "failed"
         error_msg = str(exc)
+        error_code = "cancelled" if isinstance(exc, TaskCancelled) else _classify_model_failure(exc)
         log(f"Image generation failed: {error_msg}", prefix="🚫")
+    else:
+        error_code = ""
 
     duration = time.time() - started
     end_stats = read_gpu_stats()
@@ -3908,6 +4018,8 @@ def run_image_generation(
         metrics["loras"] = loaded_loras
     if status != "success":
         metrics["error"] = error_msg or "image generation error"
+        if error_code:
+            metrics["error_code"] = error_code
     return metrics, util, image_b64
 
 

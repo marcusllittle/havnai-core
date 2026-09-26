@@ -1,7 +1,67 @@
-# HAVN-11 verification checkpoint — 2026-09-25
+# HAVN-11 verification checkpoint — 2026-09-26
 
 HAVN-11 remains incomplete. This checkpoint distinguishes executable regression
 evidence from the live acceptance still required by the Jira story.
+
+## 2026-09-26 Production Status
+
+Production web now serves the HAVN-11 commercial-account branch through
+`joinhavn.io`:
+
+- Web PR #107 merged to `main` at
+  `5c34795e0a71797d5b1e8f338d6858ed0fdbba88`.
+- Vercel production deployment `dpl_87qkMdAtYeEp4wpcntnYK4BzU7vs` reached
+  `READY` with aliases `joinhavn.io` and `www.joinhavn.io`.
+- Production probes returned HTTP 200 for `/marketplace`, `/pricing`,
+  `/terms/credits-v1`, `/refunds/credits-v1`, `/support`, and
+  `/api/v2/marketplace/listings?limit=5`.
+
+Production core remains on deployed version `6456009` at this checkpoint. Core
+PR #86 adds admin-only `GET /v1/account/readiness`, and PR #87 adds
+`scripts/deploy_coordinator_release.sh` so server-only coordinator changes can be
+rolled out without restarting the GPU node. Both are merged to `main`, but they
+are not live until the coordinator is deployed from a reachable host path.
+
+Current live commercial-account blocker:
+
+- `GET https://joinhavn.io/api/v2/account/credits` returns
+  `503 account_auth_not_configured`.
+- The production coordinator environment inspection available from this
+  workstation shows Stripe values but no Clerk/account-auth values.
+- Core account auth requires `HAVNAI_CLERK_ISSUER`,
+  `HAVNAI_ACCOUNT_ORIGINS`, and either `CLERK_SECRET_KEY` or
+  `CLERK_JWT_KEY`.
+- Lifecycle webhook readiness additionally requires `HAVNAI_CLERK_INSTANCE_ID`
+  and `CLERK_WEBHOOK_SIGNING_SECRET`.
+
+Coordinator deployment is the current operational blocker, not web deployment.
+From this WSL session, SSH to `100.122.73.117:22`, `47.201.207.37:22`, and
+`api.joinhavn.io:22` timed out or was closed, no Tailscale status was available,
+and GitHub only exposed CI/desktop-release workflows. Do not restart the GPU node
+to deploy a server-only account-auth diagnostic.
+
+When a reachable coordinator deploy path is available, use:
+
+```bash
+git fetch origin main
+git switch main
+git reset --hard origin/main
+bash scripts/deploy_coordinator_release.sh 9734240ffcb1115bee81c3438828b5d921030190
+```
+
+Then verify:
+
+```bash
+curl -fsS https://api.joinhavn.io/health
+curl -fsS https://api.joinhavn.io/healthz
+curl -fsS -H "X-HavnAI-Token: <admin token>" \
+  https://api.joinhavn.io/v1/account/readiness
+```
+
+The readiness response must be pasted only with secrets omitted. It intentionally
+returns ready booleans and missing variable names, not secret values. If it still
+reports missing Clerk/account-auth values, HAVN-25/HAVN-11 cannot close without
+an explicit waiver.
 
 ## Executed regression checks
 
@@ -216,6 +276,13 @@ The owner subsequently reviewed the policy pages, approved their wording, and
 confirmed `team@joinhavn.io` is the correct support address. This clears the copy
 approval item above; it does not establish public deployment, active production
 configuration, or actual support-mail delivery. Those remain separate evidence.
+
+On 2026-09-26, web PR #107 was deployed to Vercel production and public HTTPS
+probes to `/pricing`, `/terms/credits-v1`, `/refunds/credits-v1`, and `/support`
+returned HTTP 200 on `joinhavn.io`. This supersedes the earlier 404 deployment
+gap for the public pages. Active coordinator policy configuration and a live
+receipt bound to those URLs remain unproven until production account auth and
+checkout readiness are configured.
 
 ## Recovery pagination checkpoint
 

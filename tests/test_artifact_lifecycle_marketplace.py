@@ -1,4 +1,5 @@
 from tests.test_account_jobs import platform, keys
+from tests.test_account_jobs import create
 from tests.test_account_marketplace import market_case, listing
 import app
 import account_marketplace as market
@@ -16,6 +17,9 @@ def test_delete_delists_and_retains_account_ledger(market_case):
     response = harness.client.delete(job_url, headers=seller_headers)
     assert response.status_code == 200, response.json
     assert harness.client.get(url, headers=seller_headers).status_code == 404
+    replay = create(harness, seller_headers)
+    assert replay.status_code == 410
+    assert replay.json["error"]["code"] == "generation_deleted"
     response = harness.client.post(f"/v2/marketplace/listings/{listing_id}/purchase", headers=buyer_headers, json={"expected_price_units": 3000})
     assert response.status_code == 404
     with app.app.app_context():

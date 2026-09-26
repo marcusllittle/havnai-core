@@ -37,6 +37,21 @@ def deleted(conn, job_id):
     return bool(conn.execute("SELECT 1 FROM artifact_lifecycle WHERE job_id=? AND restored_at IS NULL", (job_id,)).fetchone())
 
 
+def derived_asset_deleted(conn, asset_id):
+    return bool(conn.execute("""SELECT 1 FROM account_video_frames f
+        JOIN artifacts a ON a.id=f.artifact_id
+        JOIN artifact_lifecycle d ON d.job_id=a.job_id
+        WHERE f.asset_id=? AND d.restored_at IS NULL""", (asset_id,)).fetchone())
+
+
+def chain_deleted(conn, chain_id):
+    return bool(conn.execute("""SELECT 1 FROM artifact_lifecycle d
+        WHERE d.restored_at IS NULL AND d.job_id IN (
+            SELECT job_id FROM account_video_chain_clips WHERE chain_id=?
+            UNION SELECT job_id FROM account_video_chain_outputs WHERE chain_id=?)""",
+        (chain_id, chain_id)).fetchone())
+
+
 def _owner(conn, account, job_id):
     job = conn.execute("SELECT * FROM jobs WHERE id=? AND owner_account_id=?", (job_id, account)).fetchone()
     if not job:

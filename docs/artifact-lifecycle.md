@@ -16,10 +16,14 @@ copy or a stream authorized before deletion cannot be recalled.
 republishes, relists or restores playlist placement. Retry does not reset the
 original deadline. A new deletion after restoration starts a new window.
 
-The music studio exposes a confirmation action and `/account/deleted` exposes
-private restoration. No wallet operation is used. Collection and other studio
-delete controls, comprehensive cross-surface review and live browser acceptance
-remain part of HAVN-28; this implementation checkpoint does not close that ticket.
+The music studio and Collection expose confirmation actions; Collection keeps
+its existing hide action separate. `/account/deleted` exposes private restoration.
+No wallet operation is used. The video source, extracted-frame and sequence paths
+also reject deleted generations, including deletion during frame extraction.
+Stale submission recovery returns `generation_deleted` without re-enqueueing or
+charging again. Other studio delete controls, comprehensive cross-surface review
+and live browser acceptance remain part of HAVN-28; this implementation checkpoint
+does not close that ticket.
 
 ## Purge operation
 

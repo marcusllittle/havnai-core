@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 import platform_v1
+import artifact_lifecycle
 
 
 class VideoInputError(ValueError):
@@ -25,7 +26,7 @@ def initialize(conn):
 
 def source(conn, account, job_id, outputs):
     job = conn.execute("SELECT status FROM jobs WHERE id=? AND owner_account_id=?", (job_id, account)).fetchone()
-    if not job:
+    if not job or artifact_lifecycle.deleted(conn, job_id):
         raise VideoInputError("job_not_found", 404)
     if platform_v1.canonical_job_state(job["status"]) != "succeeded":
         raise VideoInputError("video_not_ready", 409)

@@ -5399,7 +5399,7 @@ def _job_artifacts(job_id: str) -> List[Dict[str, Any]]:
 
 def _v1_job_payload(job: Dict[str, Any]) -> Dict[str, Any]:
     if job.get("owner_account_id") and artifact_lifecycle.deleted(get_db(), job.get("id")):
-        return {"id": job.get("id"), "status": "deleted", "artifacts": []}
+        abort(app.make_response((jsonify({"error": "generation_deleted"}), 410)))
     settings = platform_v1.parse_json_object(job.get("data"))
     resolved_spec = platform_v1.parse_json_object(job.get("resolved_spec"))
     status = platform_v1.canonical_job_state(job.get("status"))
@@ -5730,6 +5730,8 @@ def v1_asset_content(asset_id: str) -> Any:
         return jsonify({"error": "asset_not_found"}), 404
     if request.path.startswith("/v2/") and row["owner_account_id"] != g.account_id:
         return jsonify({"error": "asset_not_found"}), 404
+    if request.path.startswith("/v2/") and artifact_lifecycle.derived_asset_deleted(get_db(), asset_id):
+        return jsonify({"error": "asset_not_found"}), 404
     if not request.path.startswith("/v2/") and row["owner_account_id"] and not _authorized(NODE_API_TOKEN):
         return jsonify({"error": "asset_not_found"}), 404
     path = Path(str(row["path"]))
@@ -5853,7 +5855,11 @@ def account_video_chain(chain_id=None) -> Any:
             if request.method == "POST":
                 return jsonify(account_video_chains.create(conn, g.account_id, request.headers.get("Idempotency-Key", ""), request.get_json(silent=True)))
             offset = max(0, int(request.args.get("offset", "0")))
-            rows = conn.execute("SELECT id FROM account_video_chains WHERE account_id=? ORDER BY created_at DESC,id DESC LIMIT 50 OFFSET ?", (g.account_id, offset)).fetchall()
+            rows = conn.execute("""SELECT c.id FROM account_video_chains c WHERE c.account_id=?
+                AND NOT EXISTS (SELECT 1 FROM artifact_lifecycle d WHERE d.restored_at IS NULL AND d.job_id IN (
+                    SELECT job_id FROM account_video_chain_clips WHERE chain_id=c.id
+                    UNION SELECT job_id FROM account_video_chain_outputs WHERE chain_id=c.id))
+                ORDER BY c.created_at DESC,c.id DESC LIMIT 50 OFFSET ?""", (g.account_id, offset)).fetchall()
             return jsonify({"chains": [account_video_chains.read(conn, g.account_id, row["id"]) for row in rows]})
         if request.method == "DELETE":
             return jsonify(account_video_chains.stop(conn, g.account_id, chain_id))

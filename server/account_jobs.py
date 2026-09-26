@@ -105,6 +105,8 @@ def enqueue(conn: sqlite3.Connection, account_id: str, *, request_key: str, requ
             if asset_id and not conn.execute("SELECT 1 FROM assets WHERE id=? AND owner_account_id=? AND kind=?",
                                               (asset_id, account_id, kind)).fetchone():
                 raise ValueError("asset_not_found")
+            if asset_id and artifact_lifecycle.derived_asset_deleted(conn, asset_id):
+                raise ValueError("asset_not_found")
         if settings.get("identity_anchor_slug") and not conn.execute(
             "SELECT 1 FROM account_identity_anchors WHERE account_id=? AND slug=? AND asset_id=?",
             (account_id, settings["identity_anchor_slug"], settings.get("face_asset_id"))).fetchone():

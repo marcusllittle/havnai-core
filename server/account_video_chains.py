@@ -5,6 +5,7 @@ import time
 import uuid
 
 import platform_v1
+import artifact_lifecycle
 from account_video import VideoInputError
 
 
@@ -30,7 +31,7 @@ def initialize(conn):
 
 def read(conn, account, chain_id):
     row = conn.execute("SELECT * FROM account_video_chains WHERE id=? AND account_id=?", (chain_id, account)).fetchone()
-    if not row:
+    if not row or artifact_lifecycle.chain_deleted(conn, chain_id):
         raise VideoInputError("video_chain_not_found", 404)
     clips = conn.execute("""SELECT c.clip_index,j.id,j.status,j.owner_account_id FROM account_video_chain_clips c
         JOIN jobs j ON j.id=c.job_id WHERE c.chain_id=? ORDER BY c.clip_index""", (chain_id,)).fetchall()
@@ -89,6 +90,8 @@ def create(conn, account, request_key, body):
                 raise VideoInputError("invalid_video_chain")
             if value and not conn.execute(
                 "SELECT 1 FROM assets WHERE id=? AND owner_account_id=? AND kind=?", (value, account, kind)).fetchone():
+                raise VideoInputError("asset_not_found", 404)
+            if value and artifact_lifecycle.derived_asset_deleted(conn, value):
                 raise VideoInputError("asset_not_found", 404)
         template = {**template, "seed": spec["parameters"]["seed"]}
         chain_id = "chain-" + uuid.uuid4().hex

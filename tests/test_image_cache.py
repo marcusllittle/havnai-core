@@ -116,6 +116,33 @@ class ImagePipelineCacheTests(unittest.TestCase):
         self.assertEqual(load2, 0)
         self.assertEqual(build_calls["count"], 1)
 
+    def test_successful_model_switch_evicts_previous_pipeline_without_marking_unhealthy(self) -> None:
+        entry_a = SimpleNamespace(name="m1")
+        entry_b = SimpleNamespace(name="m2")
+        pipe_a = _FakePipe()
+        pipe_b = _FakePipe()
+
+        def _build(entry, *_args):
+            return (pipe_a if entry.name == "m1" else pipe_b), 10
+
+        with patch.object(client_module, "_construct_base_image_pipeline", side_effect=_build), patch.object(
+            client_module, "_release_image_pipeline"
+        ) as release:
+            acquired_a, hit_a, _ = client_module._acquire_base_image_pipeline(
+                entry_a, Path("/tmp/model-a.safetensors"), "sdxl", "float16", True, "cpu"
+            )
+            acquired_b, hit_b, _ = client_module._acquire_base_image_pipeline(
+                entry_b, Path("/tmp/model-b.safetensors"), "sdxl", "float16", True, "cpu"
+            )
+
+        self.assertIs(acquired_a, pipe_a)
+        self.assertIs(acquired_b, pipe_b)
+        self.assertFalse(hit_a)
+        self.assertFalse(hit_b)
+        release.assert_called_once_with(pipe_a)
+        self.assertIsNone(client_module._model_unhealthy_reason("IMAGE_GEN", "m1"))
+        self.assertIsNone(client_module._model_unhealthy_reason("IMAGE_GEN", "m2"))
+
     def test_lora_run_uses_transient_pipeline_and_does_not_use_cache_path(self) -> None:
         entry = SimpleNamespace(name="m2", pipeline="sd15")
         model_path = Path("/tmp/model-b.safetensors")

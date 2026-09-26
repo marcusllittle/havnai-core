@@ -103,6 +103,11 @@ class AccountClient:
     def job(self, job_id: str) -> dict[str, Any]:
         return self._json("GET", f"/v2/jobs/{parse.quote(job_id)}")
 
+    def account_preflight(self) -> dict[str, Any]:
+        account = self._json("GET", "/v2/account")
+        credits = self._json("GET", "/v2/account/credits")
+        return {"account": account, "credits": credits}
+
 
 def build_payload(args: argparse.Namespace) -> dict[str, Any]:
     payload: dict[str, Any] = {
@@ -229,6 +234,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--music-duration", type=int, default=30)
     parser.add_argument("--poll-seconds", type=float, default=10.0)
     parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS)
+    parser.add_argument("--preflight", action="store_true",
+                        help="check private account identity and credit balance without submitting a job")
     parser.add_argument("--execute", action="store_true")
     return parser.parse_args(argv)
 
@@ -237,6 +244,30 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
     payload = build_payload(args)
     print(json.dumps(summarize(args, payload), indent=2, sort_keys=True), flush=True)
+    if args.preflight:
+        if not args.account_token.strip():
+            raise SystemExit("--preflight requires --account-token or HAVNAI_DRILL_ACCOUNT_TOKEN")
+        client = AccountClient(args.base_url, args.account_token)
+        preflight = client.account_preflight()
+        account = preflight.get("account") or {}
+        credits = preflight.get("credits") or {}
+        account_id = str(account.get("id") or account.get("account_id") or "").strip()
+        available_units = int(credits.get("available_units") or credits.get("available") or 0)
+        result = {
+            "schema": "havn-45-account-restart-recovery-drill-preflight.v1",
+            "generated_at": utc_now(),
+            "base_url": clean_base_url(args.base_url),
+            "account_token_present": True,
+            "account_id_hash": account_hash(account_id),
+            "account_present": bool(account_id),
+            "account_status": account.get("status"),
+            "available_units": available_units,
+            "reserved_units": int(credits.get("reserved_units") or credits.get("reserved") or 0),
+            "restart_command_configured": bool(args.restart_command.strip()),
+            "passed": bool(account_id) and available_units > 0,
+        }
+        print(json.dumps(result, indent=2, sort_keys=True), flush=True)
+        return 0 if result["passed"] else 2
     if not args.execute:
         return 0
     if not args.account_token.strip():

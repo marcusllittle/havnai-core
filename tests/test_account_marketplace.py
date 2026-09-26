@@ -277,7 +277,9 @@ def test_adult_outputs_keep_private_access_but_are_not_marketplace_public(market
                          (listing_id,))
     assert harness.client.get("/v2/marketplace/listings").json["total"] == 0
     assert harness.client.get(f"/v2/marketplace/listings/{listing_id}").status_code == 404
-    assert harness.client.get(f"/v2/marketplace/listings/{listing_id}/preview").status_code == 404
+    preview = harness.client.get(f"/v2/marketplace/listings/{listing_id}/preview")
+    assert preview.status_code == 404
+    assert "no-store" in preview.headers["Cache-Control"]
     assert harness.client.get(private_url, headers=headers).status_code == 200
 
 

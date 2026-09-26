@@ -701,6 +701,12 @@ def log_event(message: str, level: str = "info", **extra: Any) -> None:
     EVENT_LOGS.append({"timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "level": level, "message": message})
 
 
+def _no_store_json(payload: dict[str, Any], status: int) -> Any:
+    response = jsonify(payload)
+    response.headers["Cache-Control"] = "no-store"
+    return response, status
+
+
 @app.errorhandler(HTTPException)
 def api_http_error(error: HTTPException) -> Any:
     response = error.get_response()
@@ -9163,12 +9169,12 @@ def api_music_audio(publication_id: str) -> Any:
         (publication_id,),
     ).fetchone()
     if not row:
-        return jsonify({"error": "publication_not_found"}), 404
+        return _no_store_json({"error": "publication_not_found"}, 404)
     if not _artifact_url(str(row["path"] or "")):
-        return jsonify({"error": "audio_unavailable"}), 404
+        return _no_store_json({"error": "audio_unavailable"}, 404)
     path = Path(str(row["path"])).resolve()
     if not path.is_file():
-        return jsonify({"error": "audio_missing"}), 410
+        return _no_store_json({"error": "audio_missing"}, 410)
     return send_file(
         path,
         mimetype=str(row["content_type"] or "audio/mpeg"),
@@ -9181,7 +9187,7 @@ def api_music_audio(publication_id: str) -> Any:
 def api_music_cover(publication_id: str) -> Any:
     publication = music_discover.get_publication(publication_id, include_internal=True)
     if not publication:
-        return jsonify({"error": "publication_not_found"}), 404
+        return _no_store_json({"error": "publication_not_found"}, 404)
     seed = str(publication.get("cover_art_seed") or publication_id)
     title = html.escape(str(publication.get("title") or "HavnAI"), quote=True)
     hue_a = int(seed[:2], 16) % 360
@@ -9210,7 +9216,7 @@ def api_music_cover(publication_id: str) -> Any:
 def api_music_playlist_cover(playlist_id: str) -> Any:
     row = get_db().execute("SELECT * FROM music_playlists WHERE id=?", (playlist_id,)).fetchone()
     if not row or not bool(row["is_public"]):
-        return jsonify({"error": "playlist_not_found"}), 404
+        return _no_store_json({"error": "playlist_not_found"}, 404)
     seed = str(row["artwork_seed"] or playlist_id)
     hue_a = int(seed[:2], 16) % 360
     hue_b = (hue_a + 118) % 360

@@ -351,6 +351,11 @@ def create_blueprint(get_db: Callable[[], sqlite3.Connection], rate_limit: Calla
         map_id = str(data.get("map_id") or "").strip() or "unknown"
         return jsonify(account_astra.start_run(get_db(), g.account_id, map_id)), 201
 
+    @api.get("/astra/generate-preflight")
+    @authenticate()
+    def astra_account_generate_preflight():
+        return jsonify(account_astra.generate_preflight(g.account_id))
+
     @api.post("/astra/reward")
     @authenticate()
     def astra_account_reward():

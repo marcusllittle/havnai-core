@@ -40,6 +40,7 @@ Response:
   "endpoints": {
     "start_run": "/v2/astra/run/start",
     "reward": "/v2/astra/reward",
+    "generate_preflight": "/v2/astra/generate-preflight",
     "spend": "/v2/astra/spend",
     "stats": "/v2/astra/stats"
   }
@@ -127,6 +128,33 @@ Core computes the reward amount. The client-supplied `duration_s` is advisory;
 core uses the server-side `started_at` timestamp. Reward units are written to
 `account_credit_ledger` with operation `astra_reward`.
 
+## Reward image generation preflight
+
+```http
+GET /v2/astra/generate-preflight
+```
+
+Response:
+
+```json
+{
+  "mode": "account",
+  "account_id": "acct_...",
+  "auth": "bearer",
+  "wallet_required": false,
+  "available": false,
+  "reason": "account_reward_image_not_enabled",
+  "generate_reward_endpoint": null
+}
+```
+
+This account-mode compatibility endpoint lets Astra clients probe reward-image
+support without falling back to wallet signatures. Account-owned reward image
+generation is explicitly disabled in this contract because the existing
+`/astra/generate-reward` implementation stores ownership in legacy wallet
+columns. The Astra client should continue normal account reward/spend play and
+hide or disable account reward-image UI while `available` is false.
+
 ## Spend
 
 ```http
@@ -198,6 +226,9 @@ Response:
 - Existing wallet-era `/astra/*` routes remain intact for older clients.
 - Account routes use separate `account_astra_*` tables. They do not write
   `acct_...` values into legacy wallet columns.
+- Account reward-image generation is disabled through
+  `/v2/astra/generate-preflight` until a separate account-owned artifact path is
+  implemented.
 - Legacy wallet-earned Astra rewards are not silently moved. A future migration
   must use the explicit HAVN-18 wallet-link/import path.
 - Astra client should treat account mode as the commercial-launch path. MetaMask

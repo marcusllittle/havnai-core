@@ -131,9 +131,23 @@ def session(account_id: str) -> dict[str, Any]:
         "endpoints": {
             "start_run": "/v2/astra/run/start",
             "reward": "/v2/astra/reward",
+            "generate_preflight": "/v2/astra/generate-preflight",
             "spend": "/v2/astra/spend",
             "stats": "/v2/astra/stats",
         },
+    }
+
+
+def generate_preflight(account_id: str) -> dict[str, Any]:
+    """Describe account-mode reward-image support for Astra clients."""
+    return {
+        "mode": "account",
+        "account_id": account_id,
+        "auth": "bearer",
+        "wallet_required": False,
+        "available": False,
+        "reason": "account_reward_image_not_enabled",
+        "generate_reward_endpoint": None,
     }
 
 

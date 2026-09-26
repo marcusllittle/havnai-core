@@ -11,6 +11,12 @@ rollout, content migration, reference-sheet video
 support, and live paid acceptance remain.
 Those require HAVN-19 through HAVN-23 and the evidence below.
 
+Adult-content launch policy is documented in
+[`docs/adult-content-policy.md`](adult-content-policy.md). That policy defines
+the HAVN-14/HAVN-41 moderation, reporting, takedown, audit, and public-isolation
+boundary, but it does not by itself prove HAVN-39 enforcement, HAVN-40 public
+surface tests, or HAVN-42 live production verification.
+
 ## Decision and trust boundary
 
 Account workflows now have additive immutable-creator/current-owner account

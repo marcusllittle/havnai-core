@@ -276,7 +276,7 @@ def purge_batch(conn, *, outputs_dir, assets_dir=None, limit=25, now=None):
     return results
 
 
-def main():
+def main(argv=None):
     import argparse
     import sqlite3
     parser = argparse.ArgumentParser(description="Purge expired soft-deleted generation artifacts")
@@ -290,7 +290,7 @@ def main():
     parser.add_argument("--hold-id")
     parser.add_argument("--actor")
     parser.add_argument("--reason", choices=["admin", "legal", "support", "dispute", "settlement"])
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if not 1 <= args.limit <= 100:
         parser.error("limit must be between 1 and 100")
     if args.hold or args.release_hold:

@@ -5,12 +5,44 @@ import threading
 import subprocess
 import sys
 import json
+import os
 
 import pytest
 from tests.test_account_auth import keys
 from tests.test_account_music import music
 import app
 import artifact_lifecycle as lifecycle
+
+
+def test_legacy_retention_timer_obeys_deletion_holds_and_keeps_records(music, tmp_path):
+    _, _, account = music
+    conn = app.get_db()
+    original = Path(conn.execute("SELECT path FROM artifacts WHERE id='artifact-1'").fetchone()[0])
+    conn.execute("UPDATE artifacts SET created_at=0")
+    conn.commit()
+    env = {**os.environ, "HAVNAI_DB_PATH": str(app.DB_PATH),
+           "HAVNAI_OUTPUTS_DIR": str(app.OUTPUTS_DIR), "HAVNAI_ASSETS_DIR": str(tmp_path / "assets"),
+           "HAVNAI_ARTIFACT_RETENTION_DAYS": "1"}
+    command = [sys.executable, "-B", str(Path(lifecycle.__file__).parents[1] / "scripts" / "retain_artifacts.py")]
+    def run():
+        return subprocess.run(command, env=env, capture_output=True, text=True, timeout=15)
+    assert run().returncode == 0
+    assert original.exists()
+    lifecycle.delete(conn, account, "job-1")
+    assert run().returncode == 0
+    assert original.exists()
+    conn.execute("UPDATE artifact_lifecycle SET recover_until=1")
+    conn.commit()
+    lifecycle.set_hold(conn, "job-1", "timer-hold", actor="ops", reason="legal")
+    assert run().returncode == 0
+    assert original.exists()
+    lifecycle.set_hold(conn, "job-1", "timer-hold", actor="ops", release=True)
+    assert run().returncode == 0
+    assert not original.exists()
+    assert conn.execute("SELECT count(*) FROM artifacts WHERE id='artifact-1'").fetchone()[0] == 1
+    assert conn.execute("SELECT purged_at FROM artifact_lifecycle WHERE job_id='job-1'").fetchone()[0] is not None
+    del env["HAVNAI_OUTPUTS_DIR"]
+    assert run().returncode == 2
 
 
 def derived_frame(conn, account, root):

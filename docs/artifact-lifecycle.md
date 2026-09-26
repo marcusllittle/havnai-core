@@ -73,3 +73,11 @@ the creation purged, and the next attempt safely handles already-removed files.
 
 Production activation, storage inventory, operational hold procedures and live recovery
 evidence remain open. Do not infer launch readiness from fixture tests.
+
+The older `havnai-retention.service` entry point (`scripts/retain_artifacts.py`)
+now delegates to this same lifecycle implementation. It no longer deletes live
+creations by `created_at`, removes artifact audit rows, or uses
+`HAVNAI_ARTIFACT_RETENTION_DAYS`. All three explicit path variables and the
+migrated schema are required. Prefer one retention timer; both entry points use
+the same serialized, idempotent purge if an operator temporarily has both enabled.
+This source change does not update or restart an installed production timer.

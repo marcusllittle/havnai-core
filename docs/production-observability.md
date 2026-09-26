@@ -4,6 +4,10 @@ This document records the launch-readiness observability surface for HAVN-43.
 It separates production endpoints from local/test evidence so acceptance can be
 audited without exposing secrets.
 
+Backup, restore, accepted-work restart, rollback, RPO/RTO, and redacted
+evidence capture procedures live in
+[`production-operations-runbook.md`](production-operations-runbook.md).
+
 ## Production Health Checks
 
 | Area | Endpoint or check | Expected healthy signal |
@@ -90,3 +94,5 @@ returned schema `network-alert-dry-run.v1`, `delivery.mode=dry_run`,
   or record explicit launch waivers for those notification paths.
 - Cross-link restore, restart-recovery, and rollback drill evidence from
   HAVN-44, HAVN-45, and HAVN-46 before closing HAVN-17/HAVN-11.
+  Use `docs/production-operations-runbook.md` as the evidence template for
+  those drills.

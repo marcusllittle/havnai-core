@@ -18,6 +18,7 @@ from urllib.request import Request, urlopen
 
 JsonFetcher = Callable[[str, float], tuple[int, Any]]
 StatusFetcher = Callable[[str, float], int]
+TextFetcher = Callable[[str, float], tuple[int, str]]
 
 
 @dataclass
@@ -61,6 +62,17 @@ def fetch_status(url: str, timeout: float) -> int:
         return 0
 
 
+def fetch_text(url: str, timeout: float) -> tuple[int, str]:
+    request = Request(url, method="GET", headers={"User-Agent": "havnai-launch-smoke/1"})
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            return response.status, response.read(512 * 1024).decode("utf-8", errors="replace")
+    except HTTPError as exc:
+        return exc.code, exc.read(64 * 1024).decode("utf-8", errors="replace")
+    except (TimeoutError, URLError) as exc:
+        return 0, str(exc)
+
+
 def run_smoke(
     *,
     api_base: str,
@@ -69,6 +81,7 @@ def run_smoke(
     allow_legacy_gallery: bool = False,
     json_fetcher: JsonFetcher = fetch_json,
     status_fetcher: StatusFetcher = fetch_status,
+    text_fetcher: TextFetcher = fetch_text,
 ) -> list[Check]:
     checks: list[Check] = []
 
@@ -126,6 +139,23 @@ def run_smoke(
     for path in ["/", "/create", "/pricing", "/support", "/terms/credits-v1", "/refunds/credits-v1"]:
         status = status_fetcher(_url(web_base, path), timeout)
         checks.append(Check(f"web{path if path != '/' else '_home'}", status == 200, f"status={status}"))
+
+    create_status, create_text = text_fetcher(_url(web_base, "/create"), timeout)
+    legacy_prompts = [
+        "Legacy alpha access code",
+        "Add legacy code",
+        "Edit legacy code",
+        "Legacy access code saved",
+        "currently requires a Public Alpha access code",
+        "Studio access key",
+        "requires an access key",
+    ]
+    found_prompts = [prompt for prompt in legacy_prompts if prompt in create_text]
+    checks.append(Check(
+        "create_no_invite_copy",
+        create_status == 200 and not found_prompts,
+        f"status={create_status} legacy_prompts={found_prompts}",
+    ))
 
     return checks
 

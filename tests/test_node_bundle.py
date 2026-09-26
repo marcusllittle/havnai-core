@@ -24,6 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # advertises. Missing any one of these is a broken node, not a degraded one.
 CAPABILITY_MODULES = [
     "client/client.py",
+    "client/artifact_cleanup.py",
     "client/registry.py",
     "client/pipeline_stable_diffusion_xl_instantid.py",
     "client/pipeline_stable_diffusion_xl_instantid_inpaint.py",

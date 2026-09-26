@@ -6360,6 +6360,32 @@ def v1_node_progress(job_id: str) -> Any:
     return jsonify({"ok": True})
 
 
+@app.route("/v1/node/artifact-purges", methods=["POST"])
+def v1_node_artifact_purges() -> Any:
+    auth_error = require_node()
+    if auth_error:
+        return auth_error
+    body = request.get_json(silent=True)
+    if (not isinstance(body, dict) or set(body) != {"node_id", "job_ids"}
+            or not isinstance(body["node_id"], str) or not 1 <= len(body["node_id"]) <= 120
+            or not isinstance(body["job_ids"], list) or not 1 <= len(body["job_ids"]) <= 25
+            or any(not isinstance(job, str) or not re.fullmatch(r"job-[A-Za-z0-9-]{1,160}", job) for job in body["job_ids"])):
+        return jsonify({"error": "invalid_cleanup_request"}), 422
+    approved = []
+    conn = get_db()
+    for job in set(body["job_ids"]):
+        row = conn.execute("""SELECT j.status FROM jobs j JOIN artifact_lifecycle d ON d.job_id=j.id
+            WHERE j.id=? AND j.owner_account_id IS NOT NULL AND d.purged_at IS NOT NULL
+            AND d.restored_at IS NULL AND (j.node_id=? OR EXISTS
+                (SELECT 1 FROM job_attempts a WHERE a.job_id=j.id AND a.node_id=?))""",
+            (job, body["node_id"], body["node_id"])).fetchone()
+        if row and platform_v1.canonical_job_state(row["status"]) in platform_v1.FINAL_JOB_STATES:
+            approved.append(job)
+    response = jsonify({"job_ids": sorted(approved)})
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
+
+
 @app.route("/v1/node/jobs/<job_id>/control", methods=["GET"])
 def v1_node_control(job_id: str) -> Any:
     auth_error = require_node()

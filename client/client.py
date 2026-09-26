@@ -4018,6 +4018,8 @@ def heartbeat_loop() -> None:
 
 def poll_tasks_loop() -> None:
     backoff = BACKOFF_BASE
+    cleanup_after = ""
+    cleanup_at = 0.0
     while True:
         try:
             resp = SESSION.get(
@@ -4036,6 +4038,19 @@ def poll_tasks_loop() -> None:
                     execute_video_task_isolated(task)
                 else:
                     execute_task(task)
+            if time.monotonic() >= cleanup_at:
+                cleanup_at = time.monotonic() + 300
+                try:
+                    try:
+                        from .artifact_cleanup import run_batch
+                    except ImportError:
+                        from artifact_cleanup import run_batch
+                    cleanup_after, cleanup_failures = run_batch(SESSION, SERVER_BASE, _node_auth_headers(), NODE_NAME,
+                                                                HAVNAI_HOME, after=cleanup_after)
+                    if cleanup_failures:
+                        log(f"Artifact cleanup deferred for {cleanup_failures} job(s); will retry", prefix="⚠️")
+                except Exception:
+                    log("Artifact cleanup deferred; local files retained for retry", prefix="⚠️")
             backoff = BACKOFF_BASE
         except Exception as exc:
             log(f"Task poll failed: {exc}", prefix="⚠️")

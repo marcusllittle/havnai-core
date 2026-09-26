@@ -30,6 +30,7 @@ from typing import Dict, List, Optional, Tuple
 # Directories are included recursively (Python sources only).
 BUNDLE_FILES: List[str] = [
     "client/client.py",
+    "client/artifact_cleanup.py",
     "client/registry.py",
     "client/task_executor.py",
     "client/model_sources.py",

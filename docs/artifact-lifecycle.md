@@ -105,4 +105,22 @@ check. Coordinator purge cannot reclaim these worker-local copies. Completing
 worker reclamation requires coordinator-authorized purge eligibility plus a
 bounded worker job-file inventory; file age or HTTP 409 settlement responses
 alone must not authorize deletion. Model/checkpoint directories are outside this
-cleanup scope. HAVN-27 physical reclamation therefore remains incomplete.
+cleanup scope.
+
+The worker now scans those known job paths between task batches, at most once
+every five minutes, and asks `/v1/node/artifact-purges` about up to 25 job IDs.
+The authenticated node endpoint authorizes only terminal account jobs already
+physically purged by the coordinator and assigned to that node (including attempt
+history). An expired soft-delete or a hold alone never authorizes worker cleanup.
+Responses carry IDs only, never caller-provided filesystem paths. Worker cleanup
+validates bounded job names, home containment and symlink ancestors before any
+unlink, preserves model directories and other jobs, and retries residual files.
+Its cursor cycles through later jobs even when some filesystem removals fail.
+The module is included in the distributed node bundle.
+
+Fixture tests exercise coordinator authorization through actual Flask requests
+into worker filesystem cleanup, plus authentication, owner-node scoping, invalid
+requests, symlinks, traversal, idempotency and bundle contents. These changes are
+not yet loaded on the local or production worker. Live multi-node cleanup,
+engine-specific temporary files, external ACE-Step service storage, and operational
+cleanup monitoring remain unverified; full physical reclamation is not yet proven.

@@ -14,7 +14,7 @@ waived with mitigation.
 | Surface | Current candidate | Evidence | Status |
 | --- | --- | --- | --- |
 | Core baseline | Production `https://api.joinhavn.io` reports `/health` ok, one ready node, empty queue, no control-plane alerts | 2026-09-26 live probes; control-plane schema `network-control-plane.v1` | Healthy but not launch complete |
-| Core no-invite, worker drill, gallery guard | PR #91 `codex/havn-47-mixed-model-drill` at `be0fd43784191d27c14459d6fe7566050807b8a0` | PR #91 clean; tests `23 passed, 2 subtests passed`; mixed-model preflight tests `8 passed`; py_compile passed | Implemented, not deployed |
+| Core no-invite, worker drill, gallery guard | PR #91 `codex/havn-47-mixed-model-drill` at `16f3c2942cf9be6da028acce190d84f55b1b36ad` | PR #91 clean; tests `25 passed, 2 subtests passed`; mixed-model preflight tests `8 passed`; legacy gallery cleanup tests `5 passed`; py_compile passed | Implemented, not deployed |
 | Web no-invite and dashboard preview hardening | PR #108 `codex/havn-web-no-invite-required` at `c7a50a79bb21c0a0de1036b0a15ca30e528cb1fe` | Focused web tests `17 passed`; marketplace fallback tests `15 passed`; `npx tsc --noEmit`; GitHub web checks and Vercel green | Implemented, not deployed |
 | Private content cache hardening | PR #96 `codex/havn-14-cache-isolation` at `70096e8aa6d9f992cb770168d269b5c6d620893f` | Focused/private denial cache tests, content-isolation collector tests, and broad marketplace/music tests in PR evidence | Implemented, not deployed |
 | Observability and rollback evidence | PR #97 `codex/havn-43-observability-doc-refresh` at `0f59f43782cc9e8700958695e2082e0001c2a2b6` | `/health`, control-plane, metrics/alert collector, rollback audit helper, and ops runbook evidence recorded in PR/Jira | Implemented, pending final token-backed refresh and web/node rollback exercise or waiver |
@@ -37,7 +37,7 @@ waived with mitigation.
 | Restart recovery | Codex platform; operator supplies live restart action | PR #95 private restart harness and tests; one restart drill can cover HAVN-45/HAVN-49 | Needs funded bearer token and explicit operator restart action |
 | Rollback | Codex platform; operator owns web/node rollback action or waiver | Coordinator rollback report completed; Vercel rollback inventory captured; `rollback_evidence_audit.py` gives the final redacted packet command | Web/Vercel rollback exercise or waiver and node-runtime rollback exercise or waiver still open |
 | Public Astra, marketplace, reward paths | Claude for Astra game/client; Codex for core APIs | PR #94 records core Astra account/reward/spend/stats contract; HAVN-58 evidence consumed | Claude-owned Astra client and game-quality gates HAVN-65/HAVN-73-HAVN-78 remain open |
-| Public content quality | Codex platform for web/core; Claude for Astra assets | PR #108 withholds dashboard job previews and filters non-account-backed legacy gallery rows in the web fallback; PR #91 defaults legacy public gallery closed | Production still returns `total: 7` from `/gallery/browse`; PR #91 or row delist/review must deploy before launch |
+| Public content quality | Codex platform for web/core; Claude for Astra assets | PR #108 withholds dashboard job previews and filters non-account-backed legacy gallery rows in the web fallback; PR #91 defaults legacy public gallery closed and adds `scripts/legacy_gallery_cleanup.py` for audited delisting of active wallet-era rows | Production still returns `total: 7` from `/gallery/browse`; PR #91 deploy or coordinator DB cleanup evidence must land before launch |
 | Invite/access-code launch removal | Codex platform | Core PR #91 makes invite gating opt-in; Web PR #108 removes visible legacy access-code/operator-key prompts | Deploy/reprobe required; stale coordinators may still return `invite_required` until refreshed |
 | Security, trust/privacy, licensing, accessibility/device | Marcus/Codex/Claude by issue | HAVN-68, HAVN-69, HAVN-70, HAVN-71 linked to HAVN-72 | All four remain To Do and cannot be silently waived |
 | Launch-day owner, stop/rollback triggers, known limitations, post-launch smoke | Marcus final owner; Codex supplies operations material | `docs/production-operations-runbook.md` evidence template and rollback/restore procedures | Final owner roster, support owner, monitoring links, stop triggers, and smoke checklist not yet signed off |
@@ -74,6 +74,7 @@ ticket.
 | Gate | Command | Passing signal |
 | --- | --- | --- |
 | Public smoke | `python3 scripts/launch_public_smoke.py --json` | `ok=true` without `--allow-legacy-gallery` |
+| Legacy gallery cleanup, if deploy is not immediate | `python3 scripts/legacy_gallery_cleanup.py --db-path <coordinator-db> --json` then `python3 scripts/legacy_gallery_cleanup.py --db-path <coordinator-db> --apply --include-job-ids --json` | Audit/apply packet schema `havn-72-legacy-gallery-cleanup.v1`; active legacy rows delisted, deleted rows `0`, account-owned rows excluded; public smoke passes after cleanup |
 | Content isolation | `python3 scripts/content_isolation_evidence.py ...` | `passed=true`; public denial, no-store cache, owner access, cross-account denial, and social-preview denial proven |
 | Mixed-model stability | `python3 scripts/mixed_model_worker_drill.py --preflight --account-token <redacted>` then private 30-job drill | funded account preflight passes; private `/v2/jobs` drill completes without public rough outputs |
 | Monitoring | `HAVNAI_ADMIN_TOKEN=<redacted> python3 scripts/collect_observability_evidence.py` | `passed=true`; required metrics present; alert dry-run schema returned |
@@ -85,7 +86,8 @@ ticket.
 
 - Live production `/gallery/browse?limit=1` still returns `total: 7` and
   legacy listing `id=15` (`job-6aa52ed839c8`). Public launch remains blocked
-  until PR #91 is deployed or those rows are curated/delisted and reprobed.
+  until PR #91 is deployed or the coordinator DB cleanup helper delists the
+  active legacy rows and public smoke is rerun clean.
 - HAVN-12 mixed-model acceptance still lacks a funded commercial account bearer
   token for private `/v2/jobs`; public `/submit-job` rough outputs do not count.
 - HAVN-14 cannot close until deployed owner/private adult generation,

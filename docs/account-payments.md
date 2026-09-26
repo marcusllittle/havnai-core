@@ -2,8 +2,8 @@
 
 This branch implements account Checkout, provider reconciliation, account receipts,
 and refund/dispute ledger adjustments. It is not a completed production rollout:
-production Clerk configuration, approved terms/refund policy, and a real
-Stripe sandbox acceptance run are still required before enabling Checkout.
+production Clerk configuration and production Checkout acceptance are still
+required before enabling account Checkout.
 
 ## Boundary and configuration
 
@@ -33,6 +33,14 @@ HTTPS. Test and live account purchases cannot share a database. Use a separate
 staging coordinator/database and Clerk development application. Changing the
 Stripe key to live does not convert test credit balances into paid balances.
 Disabling checkout does not disable webhook processing or refund reconciliation.
+
+As of 2026-09-26, `joinhavn.io` serves `/pricing`, `/terms/credits-v1`,
+`/refunds/credits-v1`, and `/support` from the HAVN-11 web production deployment.
+That proves the public policy/support pages are deployed, but it does not prove
+coordinator policy configuration, account auth readiness, or a paid production
+checkout path. Use admin `GET /v1/account/readiness` after deploying core PR #86
+to capture the redacted live state of account auth, lifecycle webhook, payments,
+and checkout policy config.
 
 For the isolated local account preview, pass `--sandbox-payments-env /private/path/payments.env`
 to `scripts/account_preview.py` alongside its existing `--web-env` argument.
@@ -158,9 +166,10 @@ The local preview has verified development Clerk sign-in, actual Stripe sandbox
 purchase and refund, webhook funding and receipt visibility, decline handling,
 missed-webhook recovery, and two real account-funded GPU images visible in
 Collection. See `docs/havn-11-verification.md` for evidence and its limits.
-Production Clerk configuration, conventional production funding, approved
-commercial policies, and remaining browser publication/management acceptance
-are still open. Sandbox evidence does not prove production readiness.
+Production Clerk configuration, conventional production funding, coordinator
+policy config, and remaining browser publication/management acceptance are still
+open. Sandbox evidence and deployed policy pages do not prove production
+Checkout readiness.
 
 References: [Stripe idempotency](https://docs.stripe.com/api/idempotent_requests),
 [dispute states](https://docs.stripe.com/api/disputes/object),

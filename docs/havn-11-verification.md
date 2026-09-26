@@ -187,3 +187,26 @@ All three generation reservations remained captured at 1,000 units each.
 This verifies live deletion writes, not browser refresh/no-resurrection or restore
 acceptance. The purge scheduler remains uninstalled; fixture-based CLI tests are
 not evidence of production activation.
+
+The user then confirmed that restore worked and requested improvements to the
+recovery page and sign-in/sign-out controls. Web `c746ad9` supplies the blue
+recovery layout and a shared header position for sign-in/sign-out. Seventeen
+targeted web tests, TypeScript, and the production build passed. This accepts the
+user-reported local restoration check; it is not evidence of production purge,
+cross-device recovery, or live sign-out/re-authentication acceptance.
+
+## HAVN-32 policy page checkpoint
+
+The web feature branch now implements `/terms/credits-v1`, `/refunds/credits-v1`
+and `/support`, with links from pricing, account, receipt details and public
+navigation/footer surfaces. See web `docs/credit-policy-release.md` for the exact
+scope, signed-out desktop/mobile browser evidence, 28 passing targeted tests,
+TypeScript and production build checks, and the required policy configuration.
+
+Owner approval of the proposed manual refund-review wording and confirmation of
+the existing support mailbox remain open. Normal public HTTPS probes to all three
+joinhavn.io routes returned 404 on this check; they are not yet deployed. The local
+catalog still reports the original explicit sandbox policy. No coordinator
+configuration or production service was changed. Public deployment, allowlisted
+running policy-config evidence, a live receipt bound to the approved revision,
+and Jira evidence linkage remain unproven. HAVN-11 is not complete.

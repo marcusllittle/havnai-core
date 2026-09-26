@@ -181,7 +181,7 @@ def set_hold(conn, job_id, hold_id, *, actor, reason=None, release=False, now=No
         _event(conn, "operator:" + actor, job_id, ("release_hold:" if release else "hold:") + hold_id, now)
 
 
-def purge(conn, job_id, *, outputs_dir, now=None):
+def purge(conn, job_id, *, outputs_dir, assets_dir=None, now=None):
     """Scheduled purge. A write lock serializes holds/restore and publication.
 
     A crash between unlink and commit leaves a deleted, non-restorable item for
@@ -200,12 +200,45 @@ def purge(conn, job_id, *, outputs_dir, now=None):
         if conn.execute("SELECT 1 FROM artifact_lifecycle_holds WHERE job_id=? AND released_at IS NULL", (job_id,)).fetchone():
             raise LifecycleError("artifact_on_hold")
         artifacts = conn.execute("SELECT path FROM artifacts WHERE job_id=?", (job_id,)).fetchall()
+        frames = conn.execute("""SELECT DISTINCT s.id,s.path,s.owner_account_id
+            FROM account_video_frames f JOIN artifacts a ON a.id=f.artifact_id
+            JOIN assets s ON s.id=f.asset_id WHERE a.job_id=?""", (job_id,)).fetchall()
+        frame_ids = {frame["id"] for frame in frames}
+        if frames and assets_dir is None:
+            raise LifecycleError("assets_root_required")
+        asset_root = Path(assets_dir).resolve() if assets_dir is not None else None
+        for frame in frames:
+            if frame["owner_account_id"] != row["owner_account_id"] or conn.execute("""
+                SELECT 1 FROM account_video_frames f JOIN artifacts a ON a.id=f.artifact_id
+                WHERE f.asset_id=? AND a.job_id<>?""", (frame["id"], job_id)).fetchone():
+                raise LifecycleError("shared_artifact_storage")
+        # An accepted continuation may still need its source frame. Enqueue uses
+        # this same write lock and rejects newly submitted deleted inputs.
+        if frame_ids:
+            import platform_v1
+            for consumer in conn.execute("SELECT status,data FROM jobs WHERE id<>?", (job_id,)):
+                if platform_v1.canonical_job_state(consumer["status"]) in platform_v1.FINAL_JOB_STATES:
+                    continue
+                try:
+                    pending = [json.loads(consumer["data"])]
+                except (ValueError, TypeError):
+                    raise LifecycleError("unreadable_active_job_inputs") from None
+                while pending:
+                    value = pending.pop()
+                    if isinstance(value, dict):
+                        pending.extend(value.values())
+                    elif isinstance(value, list):
+                        pending.extend(value)
+                    elif isinstance(value, str) and value in frame_ids:
+                        raise LifecycleError("derived_asset_in_use")
         referenced_paths = {Path(other[0]).resolve() for other in conn.execute(
-            "SELECT path FROM artifacts WHERE job_id<>? UNION SELECT path FROM assets", (job_id,))}
+            "SELECT path FROM artifacts WHERE job_id<>?", (job_id,))}
+        referenced_paths.update(Path(other["path"]).resolve() for other in conn.execute(
+            "SELECT id,path FROM assets") if other["id"] not in frame_ids)
         paths = set()
-        for artifact in artifacts:
+        for artifact, allowed_root in [(item, root) for item in artifacts] + [(item, asset_root) for item in frames]:
             path = Path(artifact["path"]).resolve()
-            if not path.is_relative_to(root) or path == root or (path.exists() and not path.is_file()):
+            if not path.is_relative_to(allowed_root) or path == allowed_root or (path.exists() and not path.is_file()):
                 raise LifecycleError("unsafe_artifact_path")
             # Do not destroy bytes another generation still references, even if
             # a legacy writer used an aliased path spelling.
@@ -218,7 +251,7 @@ def purge(conn, job_id, *, outputs_dir, now=None):
         _event(conn, row["owner_account_id"], job_id, "purge", now)
 
 
-def purge_batch(conn, *, outputs_dir, limit=25, now=None):
+def purge_batch(conn, *, outputs_dir, assets_dir=None, limit=25, now=None):
     if type(limit) is not int or not 1 <= limit <= 100:
         raise LifecycleError("invalid_purge_limit", 422)
     now = time.time() if now is None else now
@@ -231,7 +264,7 @@ def purge_batch(conn, *, outputs_dir, limit=25, now=None):
     for row in rows:
         outcome = "purged"
         try:
-            purge(conn, row[0], outputs_dir=outputs_dir, now=now)
+            purge(conn, row[0], outputs_dir=outputs_dir, assets_dir=assets_dir, now=now)
         except LifecycleError as exc:
             outcome = str(exc)
         except OSError:
@@ -249,6 +282,7 @@ def main():
     parser = argparse.ArgumentParser(description="Purge expired soft-deleted generation artifacts")
     parser.add_argument("--database", required=True)
     parser.add_argument("--outputs-dir")
+    parser.add_argument("--assets-dir")
     parser.add_argument("--limit", type=int, default=25)
     actions = parser.add_mutually_exclusive_group()
     actions.add_argument("--hold", metavar="JOB_ID")
@@ -278,7 +312,7 @@ def main():
                 failed = True
                 print(str(exc))
         else:
-            for result in purge_batch(conn, outputs_dir=args.outputs_dir, limit=args.limit):
+            for result in purge_batch(conn, outputs_dir=args.outputs_dir, assets_dir=args.assets_dir, limit=args.limit):
                 print(result["job_id"], result["outcome"])
                 failed |= result["outcome"] not in {"purged", "artifact_on_hold", "purge_not_eligible"}
     finally:

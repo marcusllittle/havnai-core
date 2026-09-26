@@ -47,18 +47,29 @@ Holds and purge serialize under the same database lock.
 After migration and a backup/restore check, the scheduler can invoke:
 
 ```sh
-python server/artifact_lifecycle.py --database /path/to/coordinator.db --outputs-dir /path/to/outputs --limit 25
+python server/artifact_lifecycle.py --database /path/to/coordinator.db --outputs-dir /path/to/outputs --assets-dir /path/to/assets --limit 25
 ```
 
 The service/timer templates in `deploy/systemd/havnai-artifact-purge.*` are not
-installed or enabled by this change. Configure both paths explicitly. Purge
+installed or enabled by this change. Configure the database, outputs and assets
+paths explicitly (including `HAVNAI_ASSETS_DIR` for the service). Purge
 rechecks expiry and holds under a write lock, refuses shared or out-of-root
-paths (including upload references), removes registered artifact files and retains
+paths (including upload references), removes registered artifact files and derived
+last-frame files, and retains
 database audit rows. Missing files are safe on retry. Failures return a nonzero
 exit status and must be monitored. Last-attempt ordering prevents a failed oldest
 item from starving the remainder of the batch. Apply the additive schema migration
 before running the scheduler. Unregistered worker caches/original copies require a separate inventory
 and cleanup review before claiming complete physical reclamation.
+
+Derived frames require an explicit assets root; omission fails before any file
+is removed. All paths and ownership/shared-storage checks run before unlinking.
+An accepted nonterminal job referencing a frame postpones purge until it finishes.
+New account jobs cannot enqueue a deleted source under the same database lock.
+Terminal consumer job metadata is retained and does not extend source retention.
+Asset and frame mapping rows remain as audit/provenance records; deleted-source
+access guards still deny their content. A partial filesystem failure never marks
+the creation purged, and the next attempt safely handles already-removed files.
 
 Production activation, storage inventory, operational hold procedures and live recovery
 evidence remain open. Do not infer launch readiness from fixture tests.

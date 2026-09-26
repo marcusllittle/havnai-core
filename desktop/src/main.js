@@ -261,7 +261,7 @@ async function loadConfig() {
 
 function currentConfig() {
   return {
-    serverUrl: $("cfg-server").value.trim() || "https://api.joinhavn.io",
+    serverUrl: $("cfg-server").value.trim() || "https://joinhavn.io/api",
     joinToken: $("cfg-token").value.trim(),
     wallet: $("cfg-wallet").value.trim(),
     nodeName: $("cfg-name").value.trim(),

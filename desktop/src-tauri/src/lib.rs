@@ -59,6 +59,10 @@ struct StreamDone {
     code: i32,
 }
 
+/// The coordinator a fresh install points at. This is the address the website's
+/// install command uses; the bare `api.` host does not answer.
+const DEFAULT_SERVER_URL: &str = "https://joinhavn.io/api";
+
 // ---------------------------------------------------------------------------
 // Paths
 // ---------------------------------------------------------------------------
@@ -238,6 +242,9 @@ fn node_env() -> HashMap<String, String> {
     // arriving in one lump when the child exits.
     env.insert("PYTHONUNBUFFERED".into(), "1".into());
     env.insert("NO_COLOR".into(), "1".into());
+    // The node prints emoji; on Windows a piped stdout otherwise defaults to
+    // cp1252 and the child dies with UnicodeEncodeError.
+    env.insert("PYTHONUTF8".into(), "1".into());
     env
 }
 
@@ -245,9 +252,25 @@ fn node_env() -> HashMap<String, String> {
 // Process helpers
 // ---------------------------------------------------------------------------
 
+/// Stop every child process from flashing up a console window on Windows.
+///
+/// The release build runs in the GUI subsystem, so each `python`, `pip` or
+/// `curl` it spawns would otherwise open a console of its own.
+fn hide_console(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = command;
+}
+
 fn run_capture(program: &str, args: &[&str], cwd: Option<PathBuf>) -> CommandOutput {
     let mut command = Command::new(program);
     command.args(args);
+    hide_console(&mut command);
     restore_host_environment(&mut command);
     for (key, value) in node_env() {
         command.env(key, value);
@@ -289,7 +312,7 @@ where
     R: std::io::Read + Send + 'static,
 {
     std::thread::spawn(move || {
-        for line in BufReader::new(handle).lines().map_while(Result::ok) {
+        forward_lines(handle, |line| {
             let _ = app.emit(
                 &event,
                 StreamLine {
@@ -297,7 +320,7 @@ where
                     line,
                 },
             );
-        }
+        });
     })
 }
 
@@ -318,6 +341,7 @@ fn run_streaming(
         .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    hide_console(&mut command);
     restore_host_environment(&mut command);
     for (key, value) in node_env() {
         command.env(key, value);
@@ -355,25 +379,33 @@ fn run_streaming(
     Ok(())
 }
 
-fn emit_install(app: &AppHandle, line: impl Into<String>) {
-    let _ = app.emit(
-        "install-output",
-        StreamLine {
-            stream: "stdout".into(),
-            line: line.into(),
-        },
-    );
-}
+// ---------------------------------------------------------------------------
+// Native Windows install
+// ---------------------------------------------------------------------------
 
-fn emit_install_error(app: &AppHandle, line: impl Into<String>) {
-    let _ = app.emit(
-        "install-output",
-        StreamLine {
-            stream: "stderr".into(),
-            line: line.into(),
-        },
-    );
-}
+/// Where install progress goes: the app forwards it to the UI, tests collect it.
+type InstallSink<'a> = &'a (dyn Fn(&str, String) + Sync);
+
+/// PyPI's Windows torch wheels are CPU-only (the Linux ones bundle CUDA), so on
+/// a machine with an NVIDIA driver torch has to come from PyTorch's own index.
+const TORCH_CUDA_INDEX: &str = "https://download.pytorch.org/whl/cu128";
+
+/// Requirements that cannot be part of the required set on Windows. triton
+/// publishes no Windows wheels, xformers pins its own torch build and would
+/// replace the CUDA one, and insightface ships only as source, so it needs
+/// Microsoft's C++ Build Tools. Any of them would fail the whole install.
+const WINDOWS_OPTIONAL_PACKAGES: &[&str] = &["triton", "xformers", "insightface"];
+
+/// Optional packages worth attempting after the required set is in, with what
+/// the operator loses if one does not install.
+const WINDOWS_BEST_EFFORT: &[(&str, &str)] = &[(
+    "insightface",
+    "face swap stays unavailable until Microsoft C++ Build Tools are installed; image generation is unaffected",
+)];
+
+/// Python versions every required package publishes Windows wheels for.
+const WINDOWS_PYTHON_CHECK: &str =
+    "import sys; raise SystemExit(0 if (3, 10) <= sys.version_info[:2] <= (3, 13) else 1)";
 
 fn emit_install_done(app: &AppHandle, success: bool, code: i32) {
     let _ = app.emit("install-output-done", StreamDone { success, code });
@@ -382,6 +414,7 @@ fn emit_install_done(app: &AppHandle, success: bool, code: i32) {
 fn run_plain_capture(program: &str, args: &[&str], cwd: Option<&Path>) -> CommandOutput {
     let mut command = Command::new(program);
     command.args(args);
+    hide_console(&mut command);
     if let Some(dir) = cwd {
         command.current_dir(dir);
     }
@@ -403,9 +436,12 @@ fn run_plain_capture(program: &str, args: &[&str], cwd: Option<&Path>) -> Comman
 }
 
 fn windows_python_command() -> Result<(String, Vec<String>, String), String> {
+    // The py launcher is preferred because it finds installs that were never
+    // added to PATH; bare `python` may be the Microsoft Store stub.
     let candidates: Vec<(&str, Vec<&str>)> = vec![
         ("py", vec!["-3.12"]),
         ("py", vec!["-3.11"]),
+        ("py", vec!["-3.13"]),
         ("py", vec!["-3.10"]),
         ("python", vec![]),
         ("python3", vec![]),
@@ -413,9 +449,8 @@ fn windows_python_command() -> Result<(String, Vec<String>, String), String> {
 
     for (program, prefix) in candidates {
         let mut args = prefix.clone();
-        args.extend(["-c", "import sys; raise SystemExit(0 if sys.version_info[:2] >= (3, 10) else 1)"]);
-        let output = run_plain_capture(program, &args, None);
-        if output.success {
+        args.extend(["-c", WINDOWS_PYTHON_CHECK]);
+        if run_plain_capture(program, &args, None).success {
             let mut version_args = prefix.clone();
             version_args.extend(["-c", "import sys; print('%d.%d.%d' % sys.version_info[:3])"]);
             let version = run_plain_capture(program, &version_args, None)
@@ -430,235 +465,384 @@ fn windows_python_command() -> Result<(String, Vec<String>, String), String> {
         }
     }
 
-    Err("Python 3.10 or newer was not found. Install Python from python.org, check 'Add python.exe to PATH', then run this installer again.".into())
+    Err("Python 3.10 to 3.13 was not found. Install Python 3.12 from python.org, tick 'Add python.exe to PATH', then click Install node again.".into())
 }
 
-fn run_windows_checked(
-    app: &AppHandle,
+fn has_nvidia_gpu() -> bool {
+    run_plain_capture("nvidia-smi", &["-L"], None).success
+}
+
+/// The normalised package name a requirements line installs, if any.
+fn requirement_name(line: &str) -> Option<String> {
+    let line = line.split('#').next().unwrap_or("").trim();
+    if line.is_empty() || line.starts_with('-') {
+        return None;
+    }
+    let end = line
+        .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
+        .unwrap_or(line.len());
+    Some(line[..end].to_ascii_lowercase().replace('_', "-"))
+}
+
+/// The node's requirements with the Windows-optional packages removed.
+fn windows_requirements(contents: &str) -> String {
+    contents
+        .lines()
+        .filter(|line| {
+            requirement_name(line)
+                .map(|name| !WINDOWS_OPTIONAL_PACKAGES.contains(&name.as_str()))
+                .unwrap_or(true)
+        })
+        .map(|line| format!("{line}\n"))
+        .collect()
+}
+
+/// Forward a child's output pipe line by line, tolerating non-UTF-8 bytes.
+///
+/// Windows tools write in the console code page, and `BufRead::lines` stops at
+/// the first invalid byte - which would stop draining the pipe and leave the
+/// child blocked on a full buffer.
+fn forward_lines<R: std::io::Read>(handle: R, mut forward: impl FnMut(String)) {
+    let mut reader = BufReader::new(handle);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                let line = String::from_utf8_lossy(&buf);
+                let line = line.trim_end();
+                if !line.trim().is_empty() {
+                    forward(line.to_string());
+                }
+            }
+        }
+    }
+}
+
+/// Run one install step, streaming its output as it arrives.
+///
+/// Resolving and downloading CUDA torch takes minutes; buffering until exit
+/// would leave the operator watching a console that looks frozen.
+fn run_install_step(
+    emit: InstallSink,
     program: &str,
     args: &[String],
     cwd: Option<&Path>,
     label: &str,
-) -> Result<CommandOutput, String> {
-    emit_install(app, label);
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let output = run_plain_capture(program, &arg_refs, cwd);
-    for line in output.stdout.lines().filter(|line| !line.trim().is_empty()) {
-        emit_install(app, line);
+) -> Result<(), String> {
+    emit("stdout", label.to_string());
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("PYTHONUNBUFFERED", "1")
+        .env("PYTHONUTF8", "1");
+    hide_console(&mut command);
+    if let Some(dir) = cwd {
+        command.current_dir(dir);
     }
-    for line in output.stderr.lines().filter(|line| !line.trim().is_empty()) {
-        emit_install_error(app, line);
-    }
-    if output.success {
-        Ok(output)
+
+    let step = label.trim();
+    let mut child = command
+        .spawn()
+        .map_err(|err| format!("{step}: could not start {program}: {err}"))?;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    std::thread::scope(|scope| {
+        if let Some(handle) = stdout {
+            scope.spawn(move || forward_lines(handle, |line| emit("stdout", line)));
+        }
+        if let Some(handle) = stderr {
+            scope.spawn(move || forward_lines(handle, |line| emit("stderr", line)));
+        }
+    });
+
+    let status = child.wait().map_err(|err| format!("{step}: {err}"))?;
+    if status.success() {
+        Ok(())
     } else {
-        Err(format!("{label} failed with exit code {}", output.code))
+        Err(format!("{step} failed with exit code {}", status.code().unwrap_or(-1)))
     }
 }
 
+/// A `.cmd` launcher that runs a node module the way the Linux systemd unit does.
+///
+/// The unit loads `.env` with `EnvironmentFile=`, and the client depends on
+/// that: its `SERVER_URL` comes from the process environment, falling back to a
+/// hard-coded host rather than to `.env`. So the launcher exports every `.env`
+/// line before starting Python. PYTHONUTF8 because the node logs emoji, which
+/// the default cp1252 encoding cannot represent.
+fn windows_launcher_body(home: &Path, runtime: &Path, python: &Path, module: &str) -> String {
+    let env = home.join(".env");
+    format!(
+        "@echo off\r\n\
+         set \"HAVNAI_HOME={home}\"\r\n\
+         if exist \"{env}\" for /f \"usebackq eol=# tokens=1,* delims==\" %%A in (\"{env}\") do set \"%%A=%%B\"\r\n\
+         set \"PYTHONUTF8=1\"\r\n\
+         cd /d \"{runtime}\"\r\n\
+         \"{python}\" -m {module} %*\r\n",
+        home = home.display(),
+        env = env.display(),
+        runtime = runtime.display(),
+        python = python.display(),
+    )
+}
+
 fn write_windows_launcher(path: &Path, module: &str) -> Result<(), String> {
-    let home = havnai_home().to_string_lossy().to_string();
-    let runtime = runtime_dir().to_string_lossy().to_string();
-    let python = venv_python().to_string_lossy().to_string();
-    let body = format!(
-        "@echo off\r\nset \"HAVNAI_HOME={home}\"\r\ncd /d \"{runtime}\"\r\n\"{python}\" -m {module} %*\r\n"
-    );
+    let body = windows_launcher_body(&havnai_home(), &runtime_dir(), &venv_python(), module);
     std::fs::write(path, body).map_err(|err| err.to_string())
+}
+
+/// `pip install` with a wheel preferred over a newer source release: building
+/// from source on Windows needs Microsoft's C++ Build Tools, which operators
+/// generally do not have (albumentations' stringzilla dependency hit this).
+fn pip_args(extra: &[&str]) -> Vec<String> {
+    let mut args: Vec<String> = ["-m", "pip", "install", "--prefer-binary", "--progress-bar", "off"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    args.extend(extra.iter().map(|arg| arg.to_string()));
+    args
+}
+
+/// Install the node runtime natively under `%USERPROFILE%\.havnai`.
+///
+/// Mirrors what `install-node.sh` does on Linux and macOS: download the runtime
+/// bundle, build a virtualenv, write `.env`, and create launchers.
+fn install_windows_runtime(
+    config: &NodeConfig,
+    skip_models: bool,
+    emit: InstallSink,
+) -> Result<(), String> {
+    let say = |line: String| emit("stdout", line);
+    let path = |p: &Path| p.to_string_lossy().to_string();
+
+    let server = config.server_url.trim_end_matches('/').to_string();
+    let home = havnai_home();
+    let staging = staging_dir();
+    let staging_runtime = staging.join("runtime");
+    let bundle_path = staging.join("runtime.tar.gz");
+    let venv = home.join("venv");
+    let bin = home.join("bin");
+
+    say("[1/7] Preparing install folders".into());
+    for dir in [
+        home.clone(),
+        bin.clone(),
+        home.join("logs"),
+        home.join("models").join("creator"),
+        home.join("outputs"),
+        home.join("loras"),
+    ] {
+        std::fs::create_dir_all(dir).map_err(|err| err.to_string())?;
+    }
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging_runtime).map_err(|err| err.to_string())?;
+
+    say("[2/7] Finding Python".into());
+    let (python_program, python_prefix, python_version) = windows_python_command()?;
+    say(format!("      Python {python_version} found"));
+
+    say("[3/7] Downloading node runtime".into());
+    run_install_step(
+        emit,
+        "curl.exe",
+        &[
+            "-fsSL".into(),
+            "--retry".into(),
+            "3".into(),
+            format!("{server}/client/bundle.tar.gz"),
+            "-o".into(),
+            path(&bundle_path),
+        ],
+        None,
+        "      Downloading runtime bundle",
+    )?;
+    let bytes = std::fs::metadata(&bundle_path)
+        .map_err(|err| err.to_string())?
+        .len();
+    if bytes < 1024 {
+        return Err(format!("runtime bundle looks truncated ({bytes} bytes)"));
+    }
+    say(format!("      runtime bundle: {bytes} bytes"));
+    run_install_step(
+        emit,
+        "tar.exe",
+        &[
+            "-xzf".into(),
+            path(&bundle_path),
+            "-C".into(),
+            path(&staging_runtime),
+        ],
+        None,
+        "      Extracting runtime bundle",
+    )?;
+    for required in [
+        "client/client.py",
+        "client/doctor.py",
+        "client/fetch_models.py",
+        "client/requirements-node.txt",
+    ] {
+        if !staging_runtime.join(required).is_file() {
+            return Err(format!("runtime bundle is incomplete: missing {required}"));
+        }
+    }
+
+    say("[4/7] Installing Python environment".into());
+    if venv.exists() {
+        say("      Reusing existing Python environment".into());
+    } else {
+        let mut args = python_prefix.clone();
+        args.extend(["-m".into(), "venv".into(), path(&venv)]);
+        run_install_step(emit, &python_program, &args, None, "      Creating Python environment")?;
+    }
+    let venv_py = venv_python();
+    if !venv_py.is_file() {
+        return Err(format!("virtualenv is missing {}", venv_py.display()));
+    }
+    let py = path(&venv_py);
+    run_install_step(
+        emit,
+        &py,
+        &pip_args(&["--upgrade", "pip", "wheel"]),
+        None,
+        "      Updating pip",
+    )?;
+    if has_nvidia_gpu() {
+        run_install_step(
+            emit,
+            &py,
+            &pip_args(&["torch", "--index-url", TORCH_CUDA_INDEX]),
+            None,
+            "      Installing PyTorch with CUDA (about 3 GB, this takes a while)",
+        )?;
+    } else {
+        emit(
+            "stderr",
+            "      No NVIDIA GPU detected - installing CPU-only PyTorch. The node needs an NVIDIA GPU to serve jobs.".into(),
+        );
+    }
+    let requirements = std::fs::read_to_string(
+        staging_runtime.join("client").join("requirements-node.txt"),
+    )
+    .map_err(|err| err.to_string())?;
+    let windows_reqs = staging.join("requirements-windows.txt");
+    std::fs::write(&windows_reqs, windows_requirements(&requirements))
+        .map_err(|err| err.to_string())?;
+    run_install_step(
+        emit,
+        &py,
+        &pip_args(&["-r", &path(&windows_reqs)]),
+        None,
+        "      Installing node dependencies",
+    )?;
+    for (package, consequence) in WINDOWS_BEST_EFFORT {
+        let step = format!("      Installing optional {package}");
+        if run_install_step(emit, &py, &pip_args(&[package]), None, &step).is_err() {
+            emit("stderr", format!("      {package} did not install: {consequence}."));
+        }
+    }
+
+    say("[5/7] Activating runtime".into());
+    // A running node holds files open under current\, and Windows refuses to
+    // rename a directory while it does.
+    if windows_node_command("status").success {
+        say("      Stopping the running node first".into());
+        let _ = windows_node_command("stop");
+    }
+    let runtime = runtime_dir();
+    let previous = home.join("previous");
+    if runtime.exists() {
+        let _ = std::fs::remove_dir_all(&previous);
+        std::fs::rename(&runtime, &previous).map_err(|err| {
+            format!("could not replace the existing runtime (is a node still running?): {err}")
+        })?;
+    }
+    std::fs::rename(&staging_runtime, &runtime).map_err(|err| err.to_string())?;
+    if run_install_step(
+        emit,
+        "curl.exe",
+        &[
+            "-fsSL".into(),
+            format!("{server}/client/version"),
+            "-o".into(),
+            path(&home.join("VERSION")),
+        ],
+        None,
+        "      Fetching runtime version",
+    )
+    .is_err()
+    {
+        let _ = std::fs::write(home.join("VERSION"), "unknown");
+    }
+
+    say("[6/7] Writing configuration and launchers".into());
+    write_env_file(config)?;
+    let mut values = parse_env_file(&env_file());
+    values.insert("HAVNAI_HOME".into(), path(&home));
+    values.insert("HAVNAI_OUTPUTS_DIR".into(), path(&home.join("outputs")));
+    let mut keys: Vec<&String> = values.keys().collect();
+    keys.sort();
+    let body: String = keys
+        .iter()
+        .map(|key| format!("{}={}\n", key, values[*key]))
+        .collect();
+    std::fs::write(env_file(), body).map_err(|err| err.to_string())?;
+    write_windows_launcher(&bin.join("havnai-node.cmd"), "client.client")?;
+    write_windows_launcher(&bin.join("havnai-doctor.cmd"), "client.doctor")?;
+    write_windows_launcher(&bin.join("havnai-fetch-models.cmd"), "client.fetch_models")?;
+
+    say("[7/7] Checking models and preflight".into());
+    if skip_models {
+        say("      Skipped model download".into());
+    } else if config.creator_mode {
+        if let Err(err) = run_install_step(
+            emit,
+            &py,
+            &["-m".into(), "client.fetch_models".into(), "--face-assets".into()],
+            Some(&runtime),
+            "      Downloading model weights",
+        ) {
+            emit("stderr", format!("      {err}; retry from the Models tab."));
+        }
+    } else {
+        say("      Worker mode selected; no model weights required".into());
+    }
+    // doctor exits non-zero when a check fails, which is a result to show, not
+    // an install failure.
+    if let Err(err) = run_install_step(
+        emit,
+        &py,
+        &["-m".into(), "client.doctor".into()],
+        Some(&runtime),
+        "      Running preflight",
+    ) {
+        emit("stderr", format!("      {err}; see the Health tab."));
+    }
+
+    let _ = std::fs::remove_dir_all(&staging);
+    say("Windows install complete. Use Start node when preflight is ready.".into());
+    Ok(())
 }
 
 fn install_node_windows(app: AppHandle, config: NodeConfig, skip_models: bool) -> Result<(), String> {
     std::thread::spawn(move || {
-        let result = (|| -> Result<(), String> {
-            let server = config.server_url.trim_end_matches('/').to_string();
-            let home = havnai_home();
-            let staging = staging_dir();
-            let staging_runtime = staging.join("runtime");
-            let bundle_path = staging.join("runtime.tar.gz");
-            let venv = home.join("venv");
-            let bin = home.join("bin");
-
-            emit_install(&app, "[1/7] Preparing install folders");
-            for dir in [
-                home.clone(),
-                bin.clone(),
-                home.join("logs"),
-                home.join("models").join("creator"),
-                home.join("outputs"),
-                home.join("loras"),
-            ] {
-                std::fs::create_dir_all(dir).map_err(|err| err.to_string())?;
-            }
-            let _ = std::fs::remove_dir_all(&staging);
-            std::fs::create_dir_all(&staging_runtime).map_err(|err| err.to_string())?;
-
-            emit_install(&app, "[2/7] Finding Python 3.10+");
-            let (python_program, python_prefix, python_version) = windows_python_command()?;
-            emit_install(&app, format!("      Python {python_version} found"));
-
-            emit_install(&app, "[3/7] Downloading node runtime");
-            let bundle_url = format!("{server}/client/bundle.tar.gz");
-            run_windows_checked(
-                &app,
-                "curl.exe",
-                &[
-                    "-fL".into(),
-                    "--retry".into(),
-                    "3".into(),
-                    bundle_url,
-                    "-o".into(),
-                    bundle_path.to_string_lossy().to_string(),
-                ],
-                None,
-                "      Downloading runtime bundle",
-            )?;
-            let bytes = std::fs::metadata(&bundle_path)
-                .map_err(|err| err.to_string())?
-                .len();
-            if bytes < 1024 {
-                return Err(format!("runtime bundle looks truncated ({bytes} bytes)"));
-            }
-            emit_install(&app, format!("      runtime bundle: {bytes} bytes"));
-            run_windows_checked(
-                &app,
-                "tar.exe",
-                &[
-                    "-xzf".into(),
-                    bundle_path.to_string_lossy().to_string(),
-                    "-C".into(),
-                    staging_runtime.to_string_lossy().to_string(),
-                ],
-                None,
-                "      Extracting runtime bundle",
-            )?;
-
-            for required in [
-                "client/client.py",
-                "client/doctor.py",
-                "client/fetch_models.py",
-                "client/requirements-node.txt",
-            ] {
-                if !staging_runtime.join(required).is_file() {
-                    return Err(format!("runtime bundle is incomplete: missing {required}"));
-                }
-            }
-
-            emit_install(&app, "[4/7] Installing Python environment");
-            if !venv.exists() {
-                let mut args = python_prefix.clone();
-                args.extend(["-m".into(), "venv".into(), venv.to_string_lossy().to_string()]);
-                run_windows_checked(&app, &python_program, &args, None, "      Creating Python environment")?;
-            } else {
-                emit_install(&app, "      Reusing existing Python environment");
-            }
-
-            let venv_py = venv_python();
-            if !venv_py.is_file() {
-                return Err(format!("virtualenv is missing {}", venv_py.display()));
-            }
-            run_windows_checked(
-                &app,
-                &venv_py.to_string_lossy(),
-                &["-m".into(), "pip".into(), "install".into(), "--upgrade".into(), "pip".into(), "wheel".into()],
-                None,
-                "      Updating pip",
-            )?;
-            run_windows_checked(
-                &app,
-                &venv_py.to_string_lossy(),
-                &[
-                    "-m".into(),
-                    "pip".into(),
-                    "install".into(),
-                    "--no-cache-dir".into(),
-                    "-r".into(),
-                    staging_runtime
-                        .join("client")
-                        .join("requirements-node.txt")
-                        .to_string_lossy()
-                        .to_string(),
-                ],
-                None,
-                "      Installing node dependencies",
-            )?;
-
-            emit_install(&app, "[5/7] Activating runtime");
-            let runtime = runtime_dir();
-            let previous = home.join("previous");
-            if runtime.exists() {
-                let _ = std::fs::remove_dir_all(&previous);
-                std::fs::rename(&runtime, &previous).map_err(|err| err.to_string())?;
-            }
-            std::fs::rename(&staging_runtime, &runtime).map_err(|err| err.to_string())?;
-
-            if run_windows_checked(
-                &app,
-                "curl.exe",
-                &[
-                    "-fsSL".into(),
-                    format!("{server}/client/version"),
-                    "-o".into(),
-                    home.join("VERSION").to_string_lossy().to_string(),
-                ],
-                None,
-                "      Fetching runtime version",
-            )
-            .is_err()
-            {
-                let _ = std::fs::write(home.join("VERSION"), "unknown");
-            }
-
-            emit_install(&app, "[6/7] Writing configuration and launchers");
-            write_env_file(&config)?;
-            let mut values = parse_env_file(&env_file());
-            values.insert("HAVNAI_HOME".into(), home.to_string_lossy().to_string());
-            values.insert("HAVNAI_OUTPUTS_DIR".into(), home.join("outputs").to_string_lossy().to_string());
-            let mut keys: Vec<&String> = values.keys().collect();
-            keys.sort();
-            let mut body = String::new();
-            for key in keys {
-                body.push_str(&format!("{}={}\n", key, values[key]));
-            }
-            std::fs::write(env_file(), body).map_err(|err| err.to_string())?;
-
-            write_windows_launcher(&bin.join("havnai-node.cmd"), "client.client")?;
-            write_windows_launcher(&bin.join("havnai-doctor.cmd"), "client.doctor")?;
-            write_windows_launcher(&bin.join("havnai-fetch-models.cmd"), "client.fetch_models")?;
-
-            emit_install(&app, "[7/7] Checking models and preflight");
-            if skip_models {
-                emit_install(&app, "      Skipped model download");
-            } else if config.creator_mode {
-                let _ = run_windows_checked(
-                    &app,
-                    &venv_py.to_string_lossy(),
-                    &["-m".into(), "client.fetch_models".into(), "--face-assets".into()],
-                    Some(&runtime),
-                    "      Downloading model weights",
-                );
-            } else {
-                emit_install(&app, "      Worker mode selected; no model weights required");
-            }
-
-            let doctor = run_windows_checked(
-                &app,
-                &venv_py.to_string_lossy(),
-                &["-m".into(), "client.doctor".into()],
-                Some(&runtime),
-                "      Running preflight",
+        let emit = |stream: &str, line: String| {
+            let _ = app.emit(
+                "install-output",
+                StreamLine {
+                    stream: stream.into(),
+                    line,
+                },
             );
-            if let Err(err) = doctor {
-                emit_install_error(&app, err);
-            }
-
-            let _ = std::fs::remove_dir_all(&staging);
-            emit_install(&app, "Windows install complete. Use Start node when preflight is ready.");
-            Ok(())
-        })();
-
-        match result {
+        };
+        match install_windows_runtime(&config, skip_models, &emit) {
             Ok(()) => emit_install_done(&app, true, 0),
             Err(err) => {
-                emit_install_error(&app, err);
+                emit("stderr", err);
                 emit_install_done(&app, false, 1);
             }
         }
@@ -705,7 +889,7 @@ fn load_config() -> NodeConfig {
     let get = |key: &str| values.get(key).cloned().unwrap_or_default();
 
     let server_url = if get("SERVER_URL").is_empty() {
-        "https://api.joinhavn.io".to_string()
+        DEFAULT_SERVER_URL.to_string()
     } else {
         get("SERVER_URL")
     };
@@ -1099,6 +1283,110 @@ mod tests {
             std::env::remove_var("LD_LIBRARY_PATH");
             std::env::remove_var("LD_LIBRARY_PATH_ORIG");
         }
+    }
+
+    #[test]
+    fn windows_requirements_drop_only_packages_without_windows_wheels() {
+        let input = "# GPU\ntorch\nTriton>=2.0\nxformers ; sys_platform == 'linux'\n\
+                     insightface==0.7.3\ninsightface_extra\n-r base.txt\nalbumentations<2\n";
+        let output = windows_requirements(input);
+        let kept: Vec<&str> = output.lines().collect();
+        assert_eq!(
+            kept,
+            vec!["# GPU", "torch", "insightface_extra", "-r base.txt", "albumentations<2"]
+        );
+    }
+
+    #[test]
+    fn requirement_name_normalises_and_skips_options() {
+        assert_eq!(requirement_name("Opencv_Python-Headless>=4"), Some("opencv-python-headless".into()));
+        assert_eq!(requirement_name("diffusers>=0.32.0  # pipelines"), Some("diffusers".into()));
+        assert_eq!(requirement_name("--index-url https://example.test"), None);
+        assert_eq!(requirement_name("   # only a comment"), None);
+    }
+
+    #[test]
+    fn forward_lines_survives_bytes_that_are_not_utf8() {
+        // cp1252 output from a Windows tool: 0x92 is a curly apostrophe there
+        // and invalid UTF-8. Reading must continue past it, not stop.
+        let input: &[u8] = b"first\r\nit\x92s cp1252\n\nlast";
+        let mut lines = Vec::new();
+        forward_lines(input, |line| lines.push(line));
+        assert_eq!(lines, vec!["first", "it\u{FFFD}s cp1252", "last"]);
+    }
+
+    /// The launcher must hand `.env` to the node the way systemd's
+    /// EnvironmentFile does, or a Windows node ignores its configured
+    /// coordinator. Runs the generated .cmd for real with a probe module.
+    #[cfg(windows)]
+    #[test]
+    fn windows_launcher_exports_env_file_to_the_node() {
+        let Ok((program, prefix, _)) = windows_python_command() else {
+            eprintln!("skipping: no Python 3.10-3.13 on this machine");
+            return;
+        };
+        let mut args = prefix;
+        args.extend(["-c".into(), "import sys; print(sys.executable)".into()]);
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let python = PathBuf::from(run_plain_capture(&program, &arg_refs, None).stdout.trim());
+
+        let home = std::env::temp_dir().join("havnai-launcher-test");
+        let runtime = home.join("current");
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::write(
+            home.join(".env"),
+            "# comment\nSERVER_URL=https://joinhavn.io/api\nWALLET=0xabc\nJOIN_TOKEN=\n",
+        )
+        .unwrap();
+        std::fs::write(
+            runtime.join("envprobe.py"),
+            "import os\nfor k in ('SERVER_URL', 'WALLET', 'PYTHONUTF8', 'HAVNAI_HOME'):\n    print(k, os.environ.get(k))\n",
+        )
+        .unwrap();
+        let launcher = home.join("probe.cmd");
+        std::fs::write(&launcher, windows_launcher_body(&home, &runtime, &python, "envprobe")).unwrap();
+
+        let output = run_plain_capture("cmd", &["/c", &launcher.to_string_lossy()], None);
+        assert!(output.success, "launcher failed: {}", output.stderr);
+        assert!(output.stdout.contains("SERVER_URL https://joinhavn.io/api"), "{}", output.stdout);
+        assert!(output.stdout.contains("WALLET 0xabc"), "{}", output.stdout);
+        assert!(output.stdout.contains("PYTHONUTF8 1"), "{}", output.stdout);
+        assert!(output.stdout.contains(&format!("HAVNAI_HOME {}", home.display())), "{}", output.stdout);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Runs the real native install against a live coordinator. Slow (it pulls
+    /// CUDA torch), so it only runs on request:
+    ///
+    /// ```text
+    /// set HAVNAI_E2E_HOME=C:\some\empty\dir
+    /// cargo test windows_install_end_to_end -- --ignored --nocapture
+    /// ```
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn windows_install_end_to_end() {
+        let home = std::env::var("HAVNAI_E2E_HOME").expect("set HAVNAI_E2E_HOME");
+        unsafe {
+            std::env::set_var("HAVNAI_HOME", &home);
+        }
+        let config = NodeConfig {
+            server_url: std::env::var("HAVNAI_E2E_SERVER")
+                .unwrap_or_else(|_| DEFAULT_SERVER_URL.into()),
+            join_token: String::new(),
+            wallet: String::new(),
+            node_name: "desktop-e2e".into(),
+            creator_mode: false,
+        };
+        let emit = |stream: &str, line: String| println!("[{stream}] {line}");
+        install_windows_runtime(&config, true, &emit).expect("install succeeds");
+
+        let home = PathBuf::from(home);
+        assert!(home.join("venv").join("Scripts").join("python.exe").is_file());
+        assert!(home.join("current").join("client").join("client.py").is_file());
+        assert!(home.join("bin").join("havnai-node.cmd").is_file());
+        let env = parse_env_file(&home.join(".env"));
+        assert_eq!(env.get("NODE_NAME").map(String::as_str), Some("desktop-e2e"));
     }
 
     #[test]

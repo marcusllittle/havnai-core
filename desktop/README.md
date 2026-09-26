@@ -68,7 +68,8 @@ progress as it happens.
 
 The Windows app is intended for non-technical operators:
 
-1. Install Python 3.10+ from python.org and enable **Add python.exe to PATH**.
+1. Install Python 3.12 from python.org (3.10 to 3.13 work) and enable
+   **Add python.exe to PATH**.
 2. Open HavnAI Node.
 3. Enter the coordinator URL, join token, wallet and node name.
 4. Click **Install node**.
@@ -79,9 +80,42 @@ The app creates `%USERPROFILE%\.havnai`, downloads the runtime bundle from
 dependencies, writes `.env`, and creates `.cmd` launchers for the node, doctor
 and model fetcher.
 
+Two things differ from the Linux dependency install, both because of what PyPI
+publishes for Windows:
+
+- **torch** comes from PyTorch's CUDA index when `nvidia-smi` finds a GPU. The
+  PyPI Windows wheel is CPU-only, so a plain `pip install torch` would leave a
+  GPU node unable to serve jobs.
+- **triton**, **xformers** and **insightface** are left out of the required
+  set. triton has no Windows wheels, xformers would replace the CUDA torch with
+  its own pinned build, and insightface builds from source. insightface is
+  attempted separately afterwards; if it fails (no C++ Build Tools), face swap
+  is reported unavailable by the Health tab and everything else still works.
+
+To exercise the real install end to end on a Windows machine (slow - it
+downloads CUDA torch):
+
+```bat
+set HAVNAI_E2E_HOME=C:\path	o\empty\dir
+cargo test windows_install_end_to_end -- --ignored --nocapture
+```
+
 ## Notes
 
 - The app never invents state. If no node is installed, Health says so and
   points at the Setup tab rather than reporting a false diagnosis.
 - The join token is written to `~/.havnai/.env` with `0600` permissions.
 - Windows installs are native and do not require WSL2.
+
+## Releasing
+
+Bump `version` in `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml`, merge,
+then push a matching tag:
+
+```bash
+git tag desktop-v0.2.0 && git push havnai-core desktop-v0.2.0
+```
+
+`.github/workflows/desktop-release.yml` builds every platform and publishes the
+installers to a GitHub release. The website's download panel picks the newest
+`desktop-v*` release that has installers attached.

@@ -2708,6 +2708,34 @@ def execute_task(task: Dict[str, Any]) -> None:
         lease_thread.join(timeout=2.0)
 
 
+def _stop_executor(process: subprocess.Popen) -> None:
+    """Stop an isolated executor and everything it spawned.
+
+    POSIX kills the session the executor was started in. Windows has neither
+    os.killpg nor SIGKILL, so it asks taskkill to end the whole process tree.
+    """
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/T", "/F", "/PID", str(process.pid)],
+            capture_output=True,
+            check=False,
+        )
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
+    except ProcessLookupError:
+        pass
+
+
 def _submit_isolated_terminal(task: Dict[str, Any], status: str, error: str) -> None:
     payload = {
         "node_id": NODE_NAME,
@@ -2775,14 +2803,7 @@ def execute_video_task_isolated(task: Dict[str, Any]) -> None:
             time.sleep(2.0)
 
         if terminal_status:
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait()
-            except ProcessLookupError:
-                pass
+            _stop_executor(process)
             _submit_isolated_terminal(task, terminal_status, terminal_error)
         elif process.returncode:
             _submit_isolated_terminal(task, "failed", f"executor_exit_{process.returncode}")

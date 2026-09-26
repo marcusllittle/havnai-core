@@ -7,6 +7,8 @@ audited without exposing secrets.
 Backup, restore, accepted-work restart, rollback, RPO/RTO, and redacted
 evidence capture procedures live in
 [`production-operations-runbook.md`](production-operations-runbook.md).
+The production component and ownership map lives in
+[`production-architecture-map.md`](production-architecture-map.md).
 
 ## Production Health Checks
 

@@ -5,6 +5,10 @@ HAVN-45, and HAVN-46. It records what can be verified from committed tooling,
 what must be captured during a production or production-like drill, and what
 must be redacted before evidence is attached to Jira.
 
+The deployed component, data ownership, trust-boundary, and evidence ownership
+map for HAVN-4 lives in
+[`production-architecture-map.md`](production-architecture-map.md).
+
 ## Scope
 
 The commercial launch state includes:

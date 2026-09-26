@@ -99,7 +99,7 @@ production database/media restore readiness.
 | Adult-content public isolation | `docs/adult-content-policy.md` now defines the moderation, reporting, takedown, audit and public-isolation policy. Server-side enforcement, full public-surface tests, and live production verification remain open under HAVN-39, HAVN-40 and HAVN-42. |
 | Legacy association and launch | Signed selective migration now includes song likes/saves and workflows. Source uploads have an explicit account re-upload path because legacy labels do not establish ownership. Legacy Stripe credit provenance, audited reversal/compensation, production backup/restore and migration review remain rollout gates. Import execution remains disabled by default. |
 | Production authentication | Clerk production configuration and lifecycle webhook delivery/revocation evidence. Earlier user-confirmed development Google sign-in is not production proof. |
-| Operational delivery | Reviewed deployment, scheduler/alert activation and evidence collection. Timer templates are committed but have not been installed or enabled. |
+| Operational delivery | Reviewed deployment, scheduler/alert activation and evidence collection. Timer templates are committed but have not been installed or enabled. `docs/production-operations-runbook.md` now defines the backup/restore, accepted-work restart, rollback, RPO/RTO, retention/access-control, and redacted evidence checklist for HAVN-17/HAVN-44/HAVN-45/HAVN-46. |
 
 Keep the feature branches and homepage revert intact. Do not close HAVN-11 on
 test counts alone or turn this checkpoint into an assertion of live readiness.

@@ -51,7 +51,7 @@ def _check_restore_report(path: str) -> tuple[bool, list[str], dict[str, Any]]:
     if fk not in (0, [], None):
         failures.append("foreign_key_violations is not zero/empty")
     table_count = data.get("table_count")
-    tables = data.get("tables")
+    tables = data.get("tables") or data.get("table_counts")
     if table_count is None and isinstance(tables, dict):
         table_count = len(tables)
     if int(table_count or 0) <= 0:

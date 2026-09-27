@@ -80,6 +80,33 @@ def test_backup_audit_accepts_dated_remote_waiver(tmp_path):
     assert report["summary"]["remote_configured"] is False
 
 
+def test_backup_audit_accepts_restore_table_counts_shape(tmp_path):
+    manifest = _write_json(tmp_path, "manifest.json", {
+        "integrity_check": "ok",
+        "backup_size_bytes": 1024,
+        "local_mode_octal": "0o600",
+        "local_retention_count": 5,
+        "backup_sha256": "abc123",
+        "remote": {"configured": True},
+    })
+    restore = _write_json(tmp_path, "restore.json", {
+        "verified": True,
+        "integrity": "ok",
+        "foreign_key_violations": 0,
+        "table_counts": {"accounts": 2, "jobs": 2103},
+    })
+
+    report = audit_backup_evidence(
+        backup_manifest=manifest,
+        restore_report=restore,
+        media_reports=[],
+        remote_waiver=None,
+        require_remote=True,
+    )
+
+    assert report["passed"] is True
+
+
 def test_rollback_audit_requires_all_surfaces_or_waivers(tmp_path):
     coordinator = _write_json(tmp_path, "coordinator.json", {
         "environment": "production-like",

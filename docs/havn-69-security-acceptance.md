@@ -2,9 +2,9 @@
 
 Date: 2026-09-27
 
-Release branch: `feat/havn-11-commercial-accounts`
+Release branch: current `main` evidence port for HAVN-72 launch hardening
 
-Core evidence branch: `codex/havn-69-security-acceptance`
+Core evidence branch: `codex/havn-69-security-main`
 
 ## Scope
 
@@ -58,6 +58,16 @@ Coverage:
   SQLite database path leaks.
 - This is a pattern audit for accidental public exposure; it does not replace
   credentialed two-account authorization tests.
+
+Latest production result, 2026-09-27:
+
+- `python3 -m py_compile scripts/security_bundle_audit.py` passed.
+- `python3 scripts/security_bundle_audit.py --web-base https://joinhavn.io`
+  passed.
+- Report schema: `havn-69-public-bundle-secret-audit.v1`.
+- Generated at `2026-09-27T11:20:14Z`.
+- Scanned 46 anonymous page/static asset responses from current production.
+- Findings: none.
 
 ## Account Boundary Regression Slice
 

@@ -29,7 +29,7 @@ explicit owner-approved waiver with mitigation and expiration.
 | Stripe funding and idempotent replay | HAVN-25 Done evidence |
 | Signed-in funded account generation | |
 | Mixed-model worker drill | Missing-token blocker: `docs/evidence/havn-12-mixed-model-preflight-missing-token-tracked-20260927T125005Z.json`; final drill still required |
-| Backup/restore audit | `docs/evidence/havn-44-backup-audit-20260927T115159Z.json` |
+| Backup/restore audit | `docs/evidence/havn-44-backup-audit-20260927T115159Z.json`; fresh production backup/restart packet `docs/evidence/havn-17-prod-backup-restart-20260927T125611Z.json` |
 | Observability/alert evidence | `docs/evidence/havn-43-observability-join-token-tracked-20260927T124055Z.json`; attach real webhook receipt / join-token config proof or approved waivers |
 | Rollback audit | `docs/evidence/havn-46-rollback-audit-20260927T121000Z.json`; web/node rollback packet or waiver still required |
 | Security and abuse controls | |
@@ -81,6 +81,7 @@ Also record:
 
 - `https://joinhavn.io` deployment ID and alias;
 - `https://api.joinhavn.io/health` version;
+- latest production backup/restart packet if restart occurs during launch;
 - exact Cloudflare private-media isolation check;
 - funded account generation job ID hash and ledger/receipt summary;
 - support inbox/contact path;

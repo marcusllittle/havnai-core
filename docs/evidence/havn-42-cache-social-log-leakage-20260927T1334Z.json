@@ -1,0 +1,99 @@
+{
+  "schema_version": "havnai.public-content-isolation-cache-log.v1",
+  "checked_at": "2026-09-27T13:34:14Z",
+  "environment": "production",
+  "operator": "Codex",
+  "restricted_fixture": {
+    "publication_id": "music-e73798ff0a7bf6a1305a4ba1",
+    "database_state": "published",
+    "adult_content": true,
+    "adult_policy_reason": "adult_content_signal",
+    "title_redaction": "known fixture title withheld from this public evidence packet"
+  },
+  "cache_and_social_preview_routes": [
+    {
+      "url": "https://api.joinhavn.io/music/discover/music-e73798ff0a7bf6a1305a4ba1",
+      "method": "HEAD",
+      "status": 404,
+      "content_type": "application/json",
+      "cf_cache_status": "DYNAMIC",
+      "ok": true
+    },
+    {
+      "url": "https://api.joinhavn.io/music/publications/music-e73798ff0a7bf6a1305a4ba1/audio",
+      "method": "HEAD",
+      "status": 404,
+      "content_type": "application/json",
+      "cf_cache_status": "DYNAMIC",
+      "ok": true
+    },
+    {
+      "url": "https://api.joinhavn.io/music/publications/music-e73798ff0a7bf6a1305a4ba1/cover",
+      "method": "HEAD",
+      "status": 404,
+      "content_type": "application/json",
+      "cf_cache_status": "DYNAMIC",
+      "ok": true
+    },
+    {
+      "url": "https://joinhavn.io/music/discover/music-e73798ff0a7bf6a1305a4ba1",
+      "method": "HEAD",
+      "status": 404,
+      "content_type": "text/html; charset=utf-8",
+      "cache_control": "private, no-cache, no-store, max-age=0, must-revalidate",
+      "cf_cache_status": "DYNAMIC",
+      "x_vercel_cache": "MISS",
+      "x_matched_path": "/404",
+      "ok": true
+    },
+    {
+      "url": "https://joinhavn.io/music/publications/music-e73798ff0a7bf6a1305a4ba1/audio",
+      "method": "HEAD",
+      "status": 404,
+      "content_type": "text/html; charset=utf-8",
+      "cache_control": "private, no-cache, no-store, max-age=0, must-revalidate",
+      "cf_cache_status": "DYNAMIC",
+      "x_vercel_cache": "MISS",
+      "x_matched_path": "/404",
+      "ok": true
+    },
+    {
+      "url": "https://joinhavn.io/music/publications/music-e73798ff0a7bf6a1305a4ba1/cover",
+      "method": "HEAD",
+      "status": 404,
+      "content_type": "text/html; charset=utf-8",
+      "cache_control": "private, no-cache, no-store, max-age=0, must-revalidate",
+      "cf_cache_status": "DYNAMIC",
+      "x_vercel_cache": "MISS",
+      "x_matched_path": "/404",
+      "ok": true
+    }
+  ],
+  "log_review": {
+    "source": "journalctl -u havnai-coordinator.service --since 2026-09-27 00:00:00",
+    "line_count_reviewed": 7285,
+    "restricted_pattern_match_count": 53,
+    "findings": [
+      "Matches for the restricted publication ID were access-log route/status lines for denied 404/405 probes.",
+      "No reviewed matches exposed the fixture title, adult policy reason, model name, prompt text, or classifier internals.",
+      "Internal access logs do include route paths and historical static output filenames from earlier probes; this is not public response leakage, but it means a zero-filename logging requirement still needs a logging change or explicit waiver."
+    ],
+    "public_logs_endpoint": {
+      "url": "https://api.joinhavn.io/logs",
+      "status": 401,
+      "leaked_terms": [],
+      "source_evidence": "docs/evidence/havn-42-public-leakage-probe-20260927T1305Z.json"
+    },
+    "ok_for_public_response_leakage": true,
+    "ok_for_zero_internal_filename_logging": false
+  },
+  "related_evidence": [
+    "docs/evidence/havn-42-public-leakage-probe-20260927T1305Z.json",
+    "docs/evidence/havn-14-forbidden-url-smoke-resolved-20260927T130022Z.json"
+  ],
+  "remaining_blockers": [
+    "Signed-in owner and cross-account private adult media checks still require production account auth/session evidence or an explicit waiver.",
+    "If HAVN-42 requires zero filenames in internal production access logs, add a logging redaction change or attach an owner-approved waiver."
+  ],
+  "ok": false
+}

@@ -1,0 +1,67 @@
+{
+  "schema_version": "havnai.web-rollback-inventory.v1",
+  "captured_at": "2026-09-27T12:18:02Z",
+  "environment": "production web",
+  "operator": "Codex",
+  "project": {
+    "name": "havnai-web",
+    "project_id": "prj_41KTJsGstZ9bHYJpajM4qH9d8wAl",
+    "team_id": "team_RTwC7IqreYfA9zEcCgl2zy5H",
+    "framework": "nextjs"
+  },
+  "current_production": {
+    "deployment_id": "dpl_GnYQ31UvFaE675xmdgdT5aGSFpME",
+    "url": "havnai-2nwk5m3wj-marcus-littles-projects.vercel.app",
+    "state": "READY",
+    "target": "production",
+    "ready_at_unix_ms": 1790507466643,
+    "aliases": [
+      "joinhavn.io",
+      "www.joinhavn.io",
+      "havnai-web.vercel.app",
+      "havnai-web-marcus-littles-projects.vercel.app"
+    ],
+    "is_rollback_candidate": true
+  },
+  "prior_production_candidate": {
+    "deployment_id": "dpl_DfqBCeKmRnj7ouZZE5o3sXbM2zy3",
+    "url": "havnai-lwmhroc2e-marcus-littles-projects.vercel.app",
+    "state": "READY",
+    "target": "production",
+    "ready_at_unix_ms": 1790506889024,
+    "aliases_observed": [
+      "joinhavn.io",
+      "www.joinhavn.io",
+      "havnai-web.vercel.app",
+      "havnai-web-marcus-littles-projects.vercel.app"
+    ],
+    "is_rollback_candidate": true
+  },
+  "public_route_smoke": {
+    "base_url": "https://joinhavn.io",
+    "routes": {
+      "/": 200,
+      "/create": 200,
+      "/pricing": 200,
+      "/support": 200,
+      "/terms/credits-v1": 200,
+      "/refunds/credits-v1": 200
+    },
+    "all_ok": true
+  },
+  "actions_performed": [
+    "listed recent Vercel deployments for project",
+    "fetched current production deployment details",
+    "fetched prior production rollback-candidate deployment details",
+    "smoked public production routes on joinhavn.io"
+  ],
+  "actions_not_performed": [
+    "no Vercel alias promotion was executed",
+    "no production rollback was executed"
+  ],
+  "outcome": "Rollback candidate is identified and current public web routes are healthy. This is inventory/readiness evidence only; HAVN-46 still needs an exercised Vercel rollback packet or an approved dated web rollback waiver before final launch acceptance.",
+  "remaining_blockers": [
+    "web rollback exercise or approved web rollback waiver",
+    "node-runtime rollback exercise or approved node rollback waiver"
+  ]
+}

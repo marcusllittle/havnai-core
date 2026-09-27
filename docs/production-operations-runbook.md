@@ -42,7 +42,11 @@ private keys, and unlisted media URLs.
 ## Backup Procedure
 
 Before a coordinator release, `scripts/deploy_coordinator_release.sh` runs
-against the live coordinator checkout:
+against the live coordinator checkout. Deploy from the launch branch that
+contains the current deployment script, normally `main`; older feature branches
+may still contain stale `/opt/havnai` release commands and must not be used for
+the production coordinator without first merging or rebasing the deploy-script
+fixes.
 
 ```bash
 cd /home/marcus/Downloads/source-code/havnai-core

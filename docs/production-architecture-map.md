@@ -13,7 +13,7 @@ authority for HAVN-17 acceptance.
 | Component | Production role | Primary owner | Source of truth |
 | --- | --- | --- | --- |
 | `havnai-web` | Public Next.js application at `joinhavn.io`; account UI, create studios, pricing/policy pages, library, marketplace, Discover, operator pages, and same-origin API proxy routes. | Platform web owner | Web GitHub repo, Vercel production deployment, web environment variables |
-| `havnai-core` coordinator | Flask API behind `https://api.joinhavn.io`; account auth, job queue, node control plane, account ledger, payments, publications, marketplace, observability, backup/restore tooling. | Platform core owner | Core GitHub repo, coordinator release directory/`RELEASE_SHA`, private systemd environment |
+| `havnai-core` coordinator | Flask API behind `https://api.joinhavn.io`; account auth, job queue, node control plane, account ledger, payments, publications, marketplace, observability, backup/restore tooling. | Platform core owner | Core GitHub repo, live coordinator checkout, private systemd environment |
 | Creator worker node(s) | Polls/leases queued jobs, runs image/video/music model engines, uploads progress and artifacts back to coordinator. | Node operator with platform runbook ownership | Worker install bundle, `~/.havnai/current`, node wallet/config, coordinator node telemetry |
 | Clerk | Managed account identity provider. Core verifies short-lived bearer tokens and lifecycle webhooks. | Platform account owner | Clerk dashboard, core private auth environment, lifecycle webhook delivery logs |
 | Stripe | Account credit Checkout, webhook events, refunds/disputes, provider reconciliation. | Platform payments owner | Stripe dashboard, `/v2/payments/stripe/webhook`, account payment tables |
@@ -84,18 +84,23 @@ following invariants are launch gates:
 | `GET /v1/network/control-plane` | Queue, worker, claim, receipt, and health state | Primary restart/recovery and alert evidence |
 | `GET /v1/network/alerts/dry-run` | Admin-gated alert rule evaluation without notification delivery | Prove alert matchers and injected model/GPU cases |
 | `GET /v1/account/readiness` | Admin-gated account auth/payment readiness booleans | Capture redacted readiness after auth/payment config changes |
-| Systemd `havnai-coordinator.service` | Runs the coordinator release | Restart/rollback only through documented runbook unless emergency |
+| Systemd `havnai-coordinator.service` | Runs the coordinator from the live checkout at `/home/marcus/Downloads/source-code/havnai-core` as user `marcus` | Restart/rollback only through documented runbook unless emergency |
 | Worker `~/.havnai/current` | Runs node bundle and engine environment | Roll forward/back using `RUN_A_NODE.md` and heartbeat checks |
 
 ## Release and rollback ownership
 
-Coordinator releases are built from a Git commit into a host release directory
-with a `RELEASE_SHA`. `scripts/deploy_coordinator_release.sh` requires a commit
-on the configured branch, creates a verified SQLite backup, switches the
-`/opt/havnai/current` symlink, restarts the coordinator, and rolls back the
-symlink if local `/healthz` does not recover. Web rollback is a Vercel deployment
-promotion/restoration. Worker rollback uses `~/.havnai/previous` and must prove
-heartbeat/model capability after restart.
+Coordinator releases are applied to the live host checkout at
+`/home/marcus/Downloads/source-code/havnai-core`. Current production systemd
+configuration runs `.venv/bin/python server/app.py` as user `marcus`, with
+`HAVNAI_DB_PATH=/home/marcus/Downloads/source-code/havnai-core/db/ledger.db`.
+`scripts/deploy_coordinator_release.sh` requires a commit on the configured
+branch, preserves the production `nodes.json`, creates a verified SQLite backup
+under the configured backup directory, fast-forwards the live checkout, restarts
+the coordinator, and switches the checkout back to the previous commit if local
+`/healthz` does not recover. The older `/opt/havnai/current`, `/var/lib/havnai`,
+and Linux user `havnai` release layout is not the active launch host topology.
+Web rollback is a Vercel deployment promotion/restoration. Worker rollback uses
+`~/.havnai/previous` and must prove heartbeat/model capability after restart.
 
 Rollback is not automatically safe after schema, provider, or filesystem changes.
 Every rollback drill must record whether a backward move is safe, or whether a

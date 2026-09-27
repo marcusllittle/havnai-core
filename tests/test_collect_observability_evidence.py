@@ -123,3 +123,29 @@ def test_live_metric_aliases_satisfy_required_observability_groups() -> None:
         "workers_online": "havnai_nodes_online",
         "disk_free": "havnai_output_disk_free_bytes",
     }
+
+
+def test_alert_dry_run_summary_counts_current_rule_payload_shape() -> None:
+    summary = evidence.summarize_alert_dry_run({
+        "status": 200,
+        "content_type": "application/json",
+        "body": json.dumps({
+            "schema_version": "network-alert-dry-run.v1",
+            "delivery": {"mode": "dry_run", "sent": False},
+            "matched_count": 3,
+            "rules": [
+                {"code": "offline_workers", "matched": False},
+                {"code": "job_error_spike", "matched": True},
+                {"code": "model_load_failures", "matched": True, "dry_run_injected": True},
+                {"code": "gpu_vram_exhaustion", "matched": True, "dry_run_injected": True},
+            ],
+        }),
+    })
+
+    assert summary == {
+        "status": 200,
+        "schema_version": "network-alert-dry-run.v1",
+        "delivery_mode": "dry_run",
+        "sent": False,
+        "match_count": 3,
+    }

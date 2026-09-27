@@ -148,5 +148,22 @@ lanes are complete:
 - HAVN-42: live production verification with exact URLs, status codes,
   screenshots or logs, and redacted account details.
 
+Use the read-only evidence collector for the final deployed packet:
+
+```bash
+python scripts/content_isolation_evidence.py \
+  --forbidden-term <redacted-title-or-id> \
+  --expect-denied /redacted/public/media/path \
+  --owner-url /redacted/owner/private/path \
+  --cross-account-url /redacted/owner/private/path \
+  --social-preview-url /redacted/social/preview/path
+```
+
+Set `HAVNAI_ISOLATION_OWNER_TOKEN` and `HAVNAI_ISOLATION_OTHER_TOKEN` in the
+operator shell for authenticated owner and cross-account checks. The collector
+hashes tokens before printing Jira evidence and reports `passed=false` until
+public denial, owner access, cross-account denial, and social-preview denial are
+all proven.
+
 Until those lanes are complete or explicitly waived as launch risk, HAVN-14 and
 HAVN-11 remain open.

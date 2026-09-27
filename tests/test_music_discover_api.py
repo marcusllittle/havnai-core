@@ -283,7 +283,9 @@ class MusicDiscoverApiTests(unittest.TestCase):
         self.assertEqual(self.client.get("/music/discover?style=Synthwave").get_json()["total"], 0)
         self.assertEqual(self.client.get(f"/music/discover/{publication_id}").status_code, 404)
         self.assertEqual(self.client.get(f"/music/publications/{publication_id}/audio").status_code, 404)
-        self.assertEqual(self.client.get(f"/music/publications/{publication_id}/cover.svg").status_code, 404)
+        adult_cover = self.client.get(f"/music/publications/{publication_id}/cover.svg")
+        self.assertEqual(adult_cover.status_code, 404)
+        self.assertIn("no-store", adult_cover.headers["Cache-Control"])
         self.assertEqual(self.client.post(f"/music/publications/{publication_id}/play", json={"seconds_listened": 8}).status_code, 404)
         self.assertEqual(self.client.get(f"/static/outputs/artifacts/job-1/song.mp3").status_code, 404)
 
@@ -309,7 +311,11 @@ class MusicDiscoverApiTests(unittest.TestCase):
         self.assertEqual(update.status_code, 409, update.get_data(as_text=True))
         self.assertEqual(update.get_json()["error"], "adult_content_restricted")
         self.assertEqual(self.client.get(f"/music/playlists/{playlist_id}").status_code, 404)
-        self.assertEqual(self.client.get(f"/music/playlists/{playlist_id}/cover.svg").status_code, 404)
+        playlist_cover = self.client.get(f"/music/playlists/{playlist_id}/cover.svg")
+        self.assertEqual(playlist_cover.status_code, 404)
+        self.assertIn("no-store", playlist_cover.headers["Cache-Control"])
+        self.assertEqual(playlist_cover.headers["Pragma"], "no-cache")
+        self.assertEqual(playlist_cover.headers["Expires"], "0")
 
     def test_legacy_adult_metadata_is_backfilled_and_hidden_from_public_music(self) -> None:
         publish_payload = {
@@ -338,7 +344,11 @@ class MusicDiscoverApiTests(unittest.TestCase):
         self.assertEqual(discover.status_code, 200)
         self.assertEqual(discover.get_json()["publications"], [])
         self.assertEqual(self.client.get(f"/music/discover/{publication_id}").status_code, 404)
-        self.assertEqual(self.client.get(f"/music/publications/{publication_id}/audio").status_code, 404)
+        audio = self.client.get(f"/music/publications/{publication_id}/audio")
+        self.assertEqual(audio.status_code, 404)
+        self.assertIn("no-store", audio.headers["Cache-Control"])
+        self.assertEqual(audio.headers["Pragma"], "no-cache")
+        self.assertEqual(audio.headers["Expires"], "0")
 
         row = conn.execute(
             "SELECT adult_content,adult_policy_reason FROM music_publications WHERE id=?",

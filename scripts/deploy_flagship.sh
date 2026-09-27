@@ -2,8 +2,11 @@
 set -euo pipefail
 
 BRANCH="${BRANCH:-feat/havn-11-commercial-accounts}"
-PI_HOST="${PI_HOST:-marcus@100.122.73.117}"
+PI_HOST="${PI_HOST:-marcus@192.168.4.105}"
 GPU_HOST="${GPU_HOST:-localhost}"
+COORDINATOR_REPO="${COORDINATOR_REPO:-/home/marcus/Downloads/source-code/havnai-core}"
+COORDINATOR_DB_PATH="${COORDINATOR_DB_PATH:-/home/marcus/Downloads/source-code/havnai-core/db/ledger.db}"
+COORDINATOR_BACKUP_DIR="${COORDINATOR_BACKUP_DIR:-/home/marcus/Downloads/source-code/havnai-core/db/backups}"
 SHA="${1:-$(git rev-parse HEAD)}"
 
 test "$(git branch --show-current)" = "$BRANCH" || {
@@ -21,22 +24,27 @@ trap 'rm -f "$archive"' EXIT
 git archive --format=tar.gz --output="$archive" "$SHA"
 
 deploy_pi() {
-  scp "$archive" "$PI_HOST:/tmp/havnai-$SHA.tar.gz"
-  ssh "$PI_HOST" "SHA='$SHA' bash -s" <<'REMOTE'
+  ssh "$PI_HOST" "SHA='$SHA' BRANCH='$BRANCH' COORDINATOR_REPO='$COORDINATOR_REPO' COORDINATOR_DB_PATH='$COORDINATOR_DB_PATH' COORDINATOR_BACKUP_DIR='$COORDINATOR_BACKUP_DIR' bash -s" <<'REMOTE'
 set -euo pipefail
-release="/opt/havnai/releases/$SHA"
-previous="$(readlink -f /opt/havnai/current 2>/dev/null || true)"
+repo="$COORDINATOR_REPO"
+cd "$repo"
+previous="$(git rev-parse HEAD)"
 printf '%s' "$previous" | sudo tee "/tmp/havnai-$SHA.previous" >/dev/null
-sudo mkdir -p "$release" /var/lib/havnai/backups
-sudo tar -xzf "/tmp/havnai-$SHA.tar.gz" -C "$release"
-printf '%s\n' "$SHA" | sudo tee "$release/RELEASE_SHA" >/dev/null
-sudo chown -R havnai:havnai "$release"
-sudo -u havnai /opt/havnai/venv/bin/pip install -r "$release/server/requirements.txt"
-sudo -u havnai HAVNAI_DB_PATH=/var/lib/havnai/ledger.db /opt/havnai/venv/bin/python "$release/scripts/backup_coordinator.py"
-sudo ln -sfn "$release" /opt/havnai/current
+nodes_backup="/tmp/havnai-$SHA.nodes.json"
+if [ -f nodes.json ]; then cp nodes.json "$nodes_backup"; fi
+git fetch origin "$BRANCH"
+git switch "$BRANCH"
+git checkout -- nodes.json 2>/dev/null || true
+git merge --ff-only "$SHA"
+if [ -f "$nodes_backup" ]; then cp "$nodes_backup" nodes.json; fi
+.venv/bin/python -m pip install -r server/requirements.txt
+HAVNAI_DB_PATH="$COORDINATOR_DB_PATH" HAVNAI_BACKUP_DIR="$COORDINATOR_BACKUP_DIR" .venv/bin/python scripts/backup_coordinator.py
 sudo systemctl restart havnai-coordinator.service
 for _ in $(seq 1 20); do curl -fsS http://127.0.0.1:5001/healthz && exit 0; sleep 2; done
-if [ -n "$previous" ]; then sudo ln -sfn "$previous" /opt/havnai/current; fi
+if [ -n "$previous" ]; then
+  if [ -f "$nodes_backup" ]; then cp "$nodes_backup" nodes.json; fi
+  git switch --detach "$previous"
+fi
 sudo systemctl restart havnai-coordinator.service
 exit 1
 REMOTE
@@ -44,12 +52,17 @@ REMOTE
 }
 
 rollback_pi() {
-  ssh "$PI_HOST" "SHA='$SHA' bash -s" <<'REMOTE'
+  ssh "$PI_HOST" "SHA='$SHA' BRANCH='$BRANCH' COORDINATOR_REPO='$COORDINATOR_REPO' bash -s" <<'REMOTE'
 set -euo pipefail
 marker="/tmp/havnai-$SHA.previous"
 previous="$(sudo cat "$marker" 2>/dev/null || true)"
-if [ -n "$previous" ] && [ -d "$previous" ]; then
-  sudo ln -sfn "$previous" /opt/havnai/current
+if [ -n "$previous" ]; then
+  cd "$COORDINATOR_REPO"
+  nodes_backup="/tmp/havnai-$SHA.nodes.json"
+  if [ -f nodes.json ]; then cp nodes.json "$nodes_backup"; fi
+  git checkout -- nodes.json 2>/dev/null || true
+  git switch --detach "$previous"
+  if [ -f "$nodes_backup" ]; then cp "$nodes_backup" nodes.json; fi
   sudo systemctl restart havnai-coordinator.service
 fi
 REMOTE

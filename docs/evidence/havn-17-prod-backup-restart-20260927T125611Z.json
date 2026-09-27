@@ -1,0 +1,77 @@
+{
+  "schema_version": "havnai.prod-backup-restart.v1",
+  "ticket_scope": ["HAVN-17", "HAVN-44", "HAVN-45", "HAVN-49", "HAVN-72"],
+  "captured_at": "2026-09-27T12:56:18Z",
+  "host": {
+    "ssh_target": "marcus@192.168.4.105",
+    "hostname": "havnai-core",
+    "service": "havnai-coordinator.service"
+  },
+  "service_topology": {
+    "user": "marcus",
+    "working_directory": "/home/marcus/Downloads/source-code/havnai-core",
+    "exec_start": "/home/marcus/Downloads/source-code/havnai-core/.venv/bin/python server/app.py",
+    "db_path": "/home/marcus/Downloads/source-code/havnai-core/db/ledger.db",
+    "static_dir": "/home/marcus/Downloads/source-code/havnai-core/static",
+    "nodes_path": "/home/marcus/Downloads/source-code/havnai-core/nodes.json",
+    "stale_topology_notes": [
+      "/opt/havnai/current is not the active service path on this host",
+      "/var/lib/havnai/ledger.db is not the active database path on this host",
+      "the Linux user havnai does not exist on this host"
+    ]
+  },
+  "backup": {
+    "command": "HAVNAI_DB_PATH=/home/marcus/Downloads/source-code/havnai-core/db/ledger.db HAVNAI_BACKUP_DIR=/home/marcus/havnai-backups/coordinator .venv/bin/python scripts/backup_coordinator.py",
+    "path": "/home/marcus/havnai-backups/coordinator/ledger-20260927T125611Z.sqlite.gz",
+    "manifest": "/home/marcus/havnai-backups/coordinator/ledger-20260927T125611Z.manifest.json",
+    "backup_sha256": "28e65f9785f7c37818c2bcadf211f49834e1391cbe0ef915c1325a172de54127",
+    "backup_size_bytes": 43958103,
+    "integrity_check": "ok",
+    "local_mode_octal": "0o600",
+    "local_retention_count": 7,
+    "remote": {
+      "configured": false,
+      "blocker": "HAVNAI_BACKUP_REMOTE is still missing; this evidence proves local backup integrity only."
+    }
+  },
+  "restart": {
+    "command": "sudo systemctl restart havnai-coordinator.service",
+    "active_state": "active",
+    "sub_state": "running",
+    "exec_main_start_timestamp": "Sun 2026-09-27 08:56:15 EDT",
+    "exec_main_pid": 272813,
+    "journal_evidence": [
+      "Stopped havnai-coordinator.service - HavnAI Coordinator API.",
+      "Started havnai-coordinator.service - HavnAI Coordinator API.",
+      "Telemetry online with 1 cached node(s).",
+      "SERVER_JOIN_TOKEN is not set - legacy join-token routes are unprotected."
+    ]
+  },
+  "post_restart_health": {
+    "health": {
+      "nodes": 1,
+      "queue_depth": 0,
+      "status": "ok",
+      "version": "07aa5c4"
+    },
+    "healthz": {
+      "ok": true,
+      "concurrency": {
+        "attempts": 5,
+        "success": 5,
+        "errors": []
+      }
+    }
+  },
+  "acceptance": {
+    "local_backup_before_restart": "passed",
+    "coordinator_restart_smoke": "passed",
+    "accepted_work_restart_recovery": "blocked",
+    "mixed_model_worker_stability": "blocked",
+    "blockers": [
+      "HAVNAI_DRILL_ACCOUNT_TOKEN is not configured; funded private account token is required for accepted-work restart recovery and mixed-model worker acceptance.",
+      "HAVNAI_BACKUP_REMOTE is not configured; remote/offsite backup proof or approved waiver remains required.",
+      "SERVER_JOIN_TOKEN is not configured; join-token config proof or approved waiver remains required."
+    ]
+  }
+}

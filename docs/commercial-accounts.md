@@ -362,6 +362,25 @@ running database. Run on a private Linux filesystem (directory mode 0700, files
 0600); this report contains table counts but no row values or credentials.
 Database copies still contain private application data and must remain private.
 
+`scripts/backup_coordinator.py` is the production coordinator backup entry point.
+It reads `HAVNAI_DB_PATH`, writes `ledger-<timestamp>.sqlite.gz` under
+`HAVNAI_BACKUP_DIR`, validates SQLite integrity before compression, verifies the
+gzip stream is readable, and keeps seven local database archives. Each archive
+and its `ledger-<timestamp>.manifest.json` sidecar are written mode 0600. Set
+`HAVNAI_BACKUP_REPORT=/private/path/report.json` to copy the same redacted
+manifest for Jira/evidence collection.
+
+Optional offsite copy is controlled by `HAVNAI_BACKUP_REMOTE=host:/path`,
+`HAVNAI_BACKUP_SSH_KEY=/private/key`, and
+`HAVNAI_BACKUP_REMOTE_RETENTION_DAYS` (default 30). When configured, the script
+creates the remote directory, copies both the archive and manifest, and prunes
+old archive/manifest files on the remote host. The manifest records source path,
+backup path, size, SHA-256, local mode, remote host/path, and retention days; it
+does not include SSH key material or secret values. This proves backup artifact
+creation and command intent. Launch acceptance still requires an actual
+production/offsite run or an explicit waiver, plus media/artifact recovery
+evidence.
+
 On 2026-09-25 the isolated local account-preview database passed this drill with
 71 tables and matching snapshot/restore SHA-256
 `110b7bff81551d3a6009e48cda8ec85966ec6ccac36f521b33e080fe0323cf98`.

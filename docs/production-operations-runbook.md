@@ -72,6 +72,44 @@ Launch evidence must record:
 - owner of the backup schedule and failed-backup alert path;
 - redacted storage location and access-control group.
 
+## Remote Backup Approval Or Waiver
+
+HAVN-44 cannot close for launch until either remote backups are enabled and
+verified or an explicit launch waiver is attached to Jira. The decision must be
+written in the HAVN-44 evidence packet and include:
+
+- selected remote target type and retention period, or waiver rationale;
+- encryption-at-rest owner and key-rotation owner;
+- access-control group with at least two named operator roles;
+- restore-read permission test from an operator account that is not the
+  coordinator service account;
+- redacted remote listing showing the newest backup and retention boundary;
+- failed-upload alert path and on-call owner;
+- statement that provider/payment secrets, bearer tokens, and private prompts
+  are not included in the Jira evidence packet.
+
+If the decision is a waiver, record the temporary compensating controls, expiry
+date, and the person accountable for enabling remote retention after launch.
+
+Use the read-only audit helper to create the redacted evidence packet:
+
+```bash
+python scripts/backup_evidence_audit.py \
+  --backup-dir /redacted/local/backups \
+  --remote-listing /redacted/remote-listing.json \
+  --remote-retention-days 30 \
+  --encryption-owner platform-ops \
+  --access-group havnai-backup-operators \
+  --restore-read-test operator-read-YYYYMMDD \
+  --alert-owner on-call
+```
+
+If remote retention is waived, replace the remote fields with
+`--waiver-id <jira-comment-or-approval-id> --waiver-expires YYYY-MM-DD`.
+The helper reports `passed=false` unless local backups are present and either
+remote evidence or an explicit waiver is supplied. It hashes paths before
+printing evidence for Jira.
+
 ## Restore Drill
 
 Run restore verification only into a new private output directory:

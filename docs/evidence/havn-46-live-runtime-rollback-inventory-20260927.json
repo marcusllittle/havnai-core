@@ -1,0 +1,53 @@
+{
+  "schema": "havn-46-live-runtime-rollback-inventory.v1",
+  "generated_at": "2026-09-27T07:56:59Z",
+  "scope": "read-only live runtime inventory; not an exercised rollback drill",
+  "coordinator": {
+    "host": "marcus@192.168.4.105",
+    "checkout": "/home/marcus/Downloads/source-code/havnai-core",
+    "current_version": "cc69a24",
+    "service": "havnai-coordinator.service",
+    "service_active": true,
+    "systemd_user": "marcus",
+    "working_directory": "/home/marcus/Downloads/source-code/havnai-core",
+    "exec_start": "/home/marcus/Downloads/source-code/havnai-core/.venv/bin/python server/app.py",
+    "db_path": "/home/marcus/Downloads/source-code/havnai-core/db/ledger.db",
+    "static_dir": "/home/marcus/Downloads/source-code/havnai-core/static",
+    "nodes_path": "/home/marcus/Downloads/source-code/havnai-core/nodes.json",
+    "rollback_action": "inventory_only",
+    "rollback_exercised": false
+  },
+  "node_runtime": {
+    "node_id_hash": "sha256:8eb388a507ca",
+    "node_name": "DESKTOP-A26E195",
+    "version": "2cfc817",
+    "last_seen": "2026-09-27T07:56:59.980276Z",
+    "pipelines": [
+      "ace_step",
+      "ltx2",
+      "ltx23_wangp",
+      "ltx_video",
+      "sd15",
+      "sdxl"
+    ],
+    "supports": [
+      "face_swap",
+      "image",
+      "ltx_video",
+      "music",
+      "video"
+    ],
+    "rollback_action": "inventory_only",
+    "rollback_exercised": false
+  },
+  "known_rollback_coverage": {
+    "web": "Inventory of current and previous READY Vercel production deployment exists in havn-46-web-rollback-inventory-20260927.json.",
+    "coordinator": "Live service/current checkout inventory is captured here; production rollback exercise still missing.",
+    "node": "Live node runtime/capability inventory is captured here; node rollback exercise or waiver still missing."
+  },
+  "remaining_gaps": [
+    "coordinator rollback exercise with rollback/restored health checks or approved waiver",
+    "node runtime rollback exercise with heartbeat/model capability checks or approved waiver",
+    "post-rollback smoke for auth, pricing/checkout, account library, static/media routes, queue state, and worker heartbeat"
+  ]
+}

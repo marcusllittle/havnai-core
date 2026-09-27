@@ -84,6 +84,19 @@ def scan_body(body: str) -> list[str]:
     return [name for name, pattern in SECRET_PATTERNS.items() if pattern.search(body)]
 
 
+def protection_findings(status: int, headers: dict[str, str], body: str) -> list[str]:
+    location = headers.get("location", "")
+    if (
+        "vercel.com/sso-api" in location
+        or location.startswith("/login")
+        or "<title>Login – Vercel" in body
+        or "<title>Login - Vercel" in body
+        or "Vercel Authentication" in body
+    ):
+        return ["protected_vercel_preview"]
+    return []
+
+
 def should_follow(url: str, base: str) -> bool:
     parsed = parse.urlparse(url)
     base_parsed = parse.urlparse(base)
@@ -127,11 +140,12 @@ def audit(base: str, paths: list[str], timeout: float, max_assets: int, max_byte
         visited.add(url)
         result = fetch(url, timeout, max_bytes)
         body = str(result.get("body") or "")
-        findings = scan_body(body)
+        status = int(result.get("status") or 0)
+        findings = protection_findings(status, result.get("headers") or {}, body) + scan_body(body)
         rows.append({
             "url": url,
             "kind": kind,
-            "status": result.get("status"),
+            "status": status,
             "bytes_scanned": len(body.encode("utf-8")),
             "truncated": bool(result.get("truncated")),
             "findings": findings,

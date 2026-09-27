@@ -1,0 +1,61 @@
+{
+  "generated_at": "2026-09-27T08:11:36.322652Z",
+  "missing": [
+    "coordinator",
+    "node"
+  ],
+  "passed": false,
+  "schema": "havn-46-rollback-evidence-audit.v1",
+  "surfaces": {
+    "coordinator": {
+      "evidence_present": true,
+      "health_checks": {
+        "before_ok": true,
+        "restored_ok": false,
+        "rollback_ok": false
+      },
+      "passed": false,
+      "restored_version": "",
+      "rollback_safety_reviewed": true,
+      "rollback_version": "23722971516c",
+      "source_version": "cc69a241f420"
+    },
+    "node": {
+      "evidence_present": true,
+      "heartbeat_ok": true,
+      "model_capability_count": 5,
+      "node_id_hash": "sha256:8eb388a507ca",
+      "passed": false,
+      "previous_runtime_present": false,
+      "rollback_action": "inventory_only",
+      "rollback_safety_reviewed": true
+    },
+    "web": {
+      "current_deployment_hash": "sha256:a2dd4135c134",
+      "evidence_present": true,
+      "passed": true,
+      "rollback_action": "inventory_only",
+      "rollback_deployment_hash": "sha256:7769bc130da1",
+      "rollback_safety_reviewed": true,
+      "smoke_route_count": 4,
+      "smoke_routes_ok": true
+    }
+  },
+  "waivers": {
+    "coordinator": {
+      "expires": "",
+      "id": "",
+      "present": false
+    },
+    "node": {
+      "expires": "",
+      "id": "",
+      "present": false
+    },
+    "web": {
+      "expires": "",
+      "id": "",
+      "present": false
+    }
+  }
+}

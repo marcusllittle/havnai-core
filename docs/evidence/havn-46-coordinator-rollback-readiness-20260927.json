@@ -1,0 +1,39 @@
+{
+  "schema": "havn-46-coordinator-rollback-readiness.v1",
+  "generated_at": "2026-09-27T08:12:00Z",
+  "surface": "coordinator",
+  "source": "read-only live coordinator rollback readiness inventory",
+  "host": "marcus@192.168.4.105",
+  "checkout": "/home/marcus/Downloads/source-code/havnai-core",
+  "service": "havnai-coordinator.service",
+  "service_active": true,
+  "systemd_user": "marcus",
+  "working_directory": "/home/marcus/Downloads/source-code/havnai-core",
+  "exec_start": "/home/marcus/Downloads/source-code/havnai-core/.venv/bin/python server/app.py",
+  "db_path": "/home/marcus/Downloads/source-code/havnai-core/db/ledger.db",
+  "static_dir": "/home/marcus/Downloads/source-code/havnai-core/static",
+  "nodes_path": "/home/marcus/Downloads/source-code/havnai-core/nodes.json",
+  "source_version": "cc69a241f4205aa6053c9c77c67fa60fb5e9e6dc",
+  "previous_version": "23722971516c0457706036b84e559800a7dfeb82",
+  "restored_version": "",
+  "rollback_action": "inventory_only",
+  "rollback_exercised": false,
+  "rollback_safety_reviewed": true,
+  "health_checks": {
+    "before_ok": true,
+    "rollback_ok": false,
+    "restored_ok": false,
+    "health": {
+      "status": "ok",
+      "nodes": 1,
+      "queue_depth": 0,
+      "version": "cc69a24"
+    },
+    "healthz_ok": true
+  },
+  "readiness_notes": [
+    "Live coordinator service is active and the current/prior Git versions are identifiable.",
+    "A fresh DB backup and separate-directory SQLite restore were captured under HAVN-44.",
+    "No coordinator rollback was exercised in production during this evidence capture."
+  ]
+}

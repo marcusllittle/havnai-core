@@ -1,0 +1,36 @@
+{
+  "schema": "havn-46-node-rollback-readiness.v1",
+  "generated_at": "2026-09-27T08:12:00Z",
+  "surface": "node",
+  "source": "read-only live nodes.json rollback readiness inventory",
+  "node_id_hash": "sha256:8eb388a507ca",
+  "node_name": "DESKTOP-A26E195",
+  "node_os": "Linux",
+  "version": "2cfc817",
+  "role": "creator",
+  "previous_runtime_present": false,
+  "rollback_action": "inventory_only",
+  "rollback_exercised": false,
+  "heartbeat_ok": true,
+  "rollback_safety_reviewed": true,
+  "model_capabilities": [
+    "face_swap",
+    "image",
+    "ltx_video",
+    "music",
+    "video"
+  ],
+  "pipelines": [
+    "ace_step",
+    "ltx2",
+    "ltx23_wangp",
+    "ltx_video",
+    "sd15",
+    "sdxl"
+  ],
+  "readiness_notes": [
+    "The live coordinator sees one creator node with heartbeat/capabilities present.",
+    "This capture does not prove a node previous-runtime directory exists on the node host.",
+    "No node runtime rollback was exercised during this evidence capture."
+  ]
+}

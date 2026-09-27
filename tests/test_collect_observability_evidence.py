@@ -1,4 +1,5 @@
 from scripts.collect_observability_evidence import collect_observability
+import json
 
 
 METRICS = "\n".join([
@@ -74,6 +75,58 @@ def test_collect_observability_reports_webhook_gap_as_blocker():
         "HAVNAI_ALERT_WEBHOOK is not configured; external alert delivery receipt still required or waived."
     ]
     assert all(check["ok"] for check in report["checks"])
+
+
+def test_collect_observability_accepts_dated_alert_waiver(tmp_path):
+    waiver = tmp_path / "alert-waiver.json"
+    waiver.write_text(json.dumps({
+        "approved_by": "Marcus Little",
+        "expires_at": "2026-10-04T00:00:00Z",
+        "mitigation": "Manual health/control-plane review every hour while webhook is unavailable.",
+        "reason": "Webhook destination not available during launch hardening.",
+    }), encoding="utf-8")
+
+    report = collect_observability(
+        api_base="https://api.example",
+        admin_token="admin-token",
+        timeout=1,
+        alert_waiver=str(waiver),
+        json_fetcher=_json_fetcher(),
+        text_fetcher=_text_fetcher(),
+    )
+
+    checks = {check["name"]: check for check in report["checks"]}
+    assert report["passed"] is True
+    assert report["blockers"] == []
+    assert checks["alert_delivery_waiver"]["ok"] is True
+    assert report["summary"]["alert_waiver"] == {
+        "provided": True,
+        "approved_by": "Marcus Little",
+        "expires_at": "2026-10-04T00:00:00Z",
+        "mitigation_present": True,
+    }
+
+
+def test_collect_observability_rejects_incomplete_alert_waiver(tmp_path):
+    waiver = tmp_path / "alert-waiver.json"
+    waiver.write_text(json.dumps({
+        "approved_by": "Marcus Little",
+        "reason": "Webhook destination not available during launch hardening.",
+    }), encoding="utf-8")
+
+    report = collect_observability(
+        api_base="https://api.example",
+        admin_token="admin-token",
+        timeout=1,
+        alert_waiver=str(waiver),
+        json_fetcher=_json_fetcher(),
+        text_fetcher=_text_fetcher(),
+    )
+
+    assert report["passed"] is False
+    assert "alert waiver missing expires_at" in report["blockers"]
+    assert "alert waiver missing mitigation" in report["blockers"]
+    assert "HAVNAI_ALERT_WEBHOOK is not configured; external alert delivery receipt still required or waived." in report["blockers"]
 
 
 def test_collect_observability_passes_when_alert_delivery_sends():

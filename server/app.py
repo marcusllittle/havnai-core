@@ -4814,8 +4814,8 @@ def _verify_wallet_signature(
     conn = get_db()
     row = conn.execute(
         "SELECT wallet, nonce, purpose, amount, message, issued_at, expires_at, used_at "
-        "FROM wallet_nonces WHERE wallet=? AND nonce=?",
-        (wallet, nonce_str),
+        "FROM wallet_nonces WHERE lower(wallet)=? AND nonce=?",
+        (wallet.lower(), nonce_str),
     ).fetchone()
     if not row:
         log_event(f"{log_label} rejected", level="warning", wallet=wallet, reason="nonce_not_found")
@@ -4862,8 +4862,8 @@ def _verify_wallet_signature(
     try:
         conn.execute("BEGIN IMMEDIATE")
         cur = conn.execute(
-            "UPDATE wallet_nonces SET used_at=? WHERE wallet=? AND nonce=? AND used_at IS NULL",
-            (now_ts, wallet, nonce_str),
+            "UPDATE wallet_nonces SET used_at=? WHERE lower(wallet)=? AND nonce=? AND used_at IS NULL",
+            (now_ts, wallet.lower(), nonce_str),
         )
         if cur.rowcount != 1:
             conn.rollback()
@@ -4879,8 +4879,8 @@ def _verify_wallet_signature(
 
 def _nonce_message_has(wallet: str, nonce_str: str, line: str) -> bool:
     row = get_db().execute(
-        "SELECT message FROM wallet_nonces WHERE wallet=? AND nonce=?",
-        (wallet, nonce_str),
+        "SELECT message FROM wallet_nonces WHERE lower(wallet)=? AND nonce=?",
+        (wallet.lower(), nonce_str),
     ).fetchone()
     message = str(row["message"] or "") if row else ""
     return line in message.splitlines()
@@ -4971,11 +4971,11 @@ def wallet_nonce() -> Any:
     if not isinstance(data, dict):
         return jsonify({"error": "malformed_payload", "message": "JSON object payload required"}), 400
 
-    # Normalize here too
-    wallet = str(data.get("wallet", "")).strip().lower()
+    wallet = str(data.get("wallet", "")).strip()
     if not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid wallet"}), 400
-    if not rate_limit(f"wallet-nonce:wallet:{wallet}", limit=20):
+    wallet_key = wallet.lower()
+    if not rate_limit(f"wallet-nonce:wallet:{wallet_key}", limit=20):
         return jsonify({"error": "rate limit", "detail": "per-wallet limit exceeded"}), 429
 
     purpose = str(data.get("purpose") or WALLET_NONCE_PURPOSE_CONVERT).strip()
@@ -5153,7 +5153,8 @@ def credits_convert() -> Any:
     wallet = str(data.get("wallet", "")).strip()
     if not wallet or not WALLET_REGEX.match(wallet):
         return jsonify({"error": "invalid wallet"}), 400
-    if not rate_limit(f"credits-convert:wallet:{wallet}", limit=15):
+    wallet_key = wallet.lower()
+    if not rate_limit(f"credits-convert:wallet:{wallet_key}", limit=15):
         return jsonify({"error": "rate limit", "detail": "per-wallet limit exceeded"}), 429
 
     amount, amount_error = _parse_positive_amount(data.get("amount"))
@@ -5176,9 +5177,9 @@ def credits_convert() -> Any:
         """
         SELECT wallet, nonce, purpose, amount, message, issued_at, expires_at, used_at
         FROM wallet_nonces
-        WHERE wallet=? AND nonce=?
+        WHERE lower(wallet)=? AND nonce=?
         """,
-        (wallet, nonce),
+        (wallet_key, nonce),
     ).fetchone()
     if not row:
         log_event("Credit conversion rejected", level="warning", wallet=wallet, reason="nonce_not_found")
@@ -5233,8 +5234,8 @@ def credits_convert() -> Any:
     try:
         conn.execute("BEGIN IMMEDIATE")
         cur = conn.execute(
-            "UPDATE wallet_nonces SET used_at=? WHERE wallet=? AND nonce=? AND used_at IS NULL",
-            (now_ts, wallet, nonce),
+            "UPDATE wallet_nonces SET used_at=? WHERE lower(wallet)=? AND nonce=? AND used_at IS NULL",
+            (now_ts, wallet_key, nonce),
         )
         if cur.rowcount != 1:
             conn.rollback()
@@ -5245,7 +5246,7 @@ def credits_convert() -> Any:
         conn.rollback()
         raise
 
-    success, remaining = credits.convert_credits_to_hai(wallet, amount)
+    success, remaining = credits.convert_credits_to_hai(wallet_key, amount)
     if not success:
         return jsonify({
             "error": "insufficient_credits",
@@ -5254,7 +5255,7 @@ def credits_convert() -> Any:
             "cost": amount,
         }), 402
     return jsonify({
-        "wallet": wallet,
+        "wallet": wallet_key,
         "converted": amount,
         "balance": remaining,
         "remaining": remaining,

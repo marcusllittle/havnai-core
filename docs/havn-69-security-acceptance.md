@@ -53,10 +53,11 @@ uv run --with-requirements server/requirements.txt --with pytest --with pillow \
   tests/test_account_jobs.py::test_revoked_session_cannot_recover_or_submit_studio_jobs \
   tests/test_account_jobs.py::test_source_assets_and_worker_artifacts_are_private \
   tests/test_account_marketplace.py \
+  tests/test_recovery_plan.py::CreditConversionNonceTests \
   -q
 ```
 
-Result: `100 passed in 131.06s`.
+Result: `104 passed in 122.81s`.
 
 Coverage represented:
 
@@ -68,11 +69,15 @@ Coverage represented:
 - Revoked account sessions cannot recover or submit studio jobs.
 - Source assets and worker artifacts remain private to the owner.
 - Marketplace account purchase/listing/receipt boundaries remain covered.
+- Legacy wallet credit conversion nonce behavior now accepts checksum-case
+  wallet clients while doing case-insensitive nonce lookup/update; signed
+  conversion succeeds once, replay is rejected, expired nonces report
+  `nonce_expired`, and signature wallet mismatch is rejected.
 
-## Open Finding: Legacy Credit-Convert Nonce Regression
+## Fixed Finding: Legacy Credit-Convert Nonce Regression
 
-The broader security run included two legacy `/credits/convert` nonce tests and
-failed:
+The first broader security run included two legacy `/credits/convert` nonce
+tests and failed:
 
 ```bash
 uv run --with-requirements server/requirements.txt --with pytest --with pillow \
@@ -98,15 +103,30 @@ Failures:
 - `test_nonce_expired_rejected`: expected `nonce_expired`; received
   `invalid_nonce`.
 
-Launch interpretation:
+Root cause:
 
-- The account-first commercial flow and account-owned wallet linking boundaries
-  are not invalidated by this result.
-- The legacy wallet credit-conversion endpoint should be triaged before any
-  launch claim that legacy wallet credit conversion remains supported.
-- If the endpoint is intentionally out of commercial launch scope, record an
-  explicit release waiver/disablement decision and make sure public product copy
-  does not advertise that path.
+- `/wallet/nonce` stored the nonce wallet in lowercase, while clients and tests
+  can send checksum-case wallet addresses back to `/credits/convert`.
+- `/credits/convert` used exact-case `wallet_nonces` lookup/update, so a valid
+  signed nonce was not found.
+
+Fix:
+
+- Preserve submitted wallet casing when issuing nonces.
+- Rate-limit and credit-ledger operations still use lowercase wallet keys.
+- Wallet nonce verification helpers and `/credits/convert` now perform
+  case-insensitive nonce lookup/update using `lower(wallet)=?`.
+
+Verification:
+
+```bash
+uv run --with-requirements server/requirements.txt --with pytest --with pillow \
+  python -m pytest tests/test_recovery_plan.py::CreditConversionNonceTests -q
+```
+
+Result: `4 passed in 2.26s`.
+
+Full security slice after fix: `104 passed in 122.81s`.
 
 ## Remaining HAVN-69 Gaps
 
@@ -117,5 +137,3 @@ Launch interpretation:
   a live or production-equivalent browser flow.
 - Run dependency/security scanning for core and web package sets and record
   critical/high findings or dated exceptions.
-- Triage the legacy `/credits/convert` nonce regression above or explicitly
-  waive/disable the legacy path for commercial launch.

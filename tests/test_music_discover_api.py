@@ -276,6 +276,10 @@ class MusicDiscoverApiTests(unittest.TestCase):
             "UPDATE music_publications SET adult_content=1, adult_policy_reason='test_adult_flag' WHERE id=?",
             (publication_id,),
         )
+        audio_path = app_module.STATIC_DIR / "outputs" / "audio" / "job-1.mp3"
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        audio_path.write_bytes(b"audio")
+        conn.execute("UPDATE artifacts SET path=? WHERE id='artifact-1'", (str(audio_path),))
         conn.commit()
 
         self.assertEqual(self.client.get("/music/discover").get_json()["publications"], [])
@@ -286,6 +290,7 @@ class MusicDiscoverApiTests(unittest.TestCase):
         self.assertEqual(self.client.get(f"/music/publications/{publication_id}/cover.svg").status_code, 404)
         self.assertEqual(self.client.post(f"/music/publications/{publication_id}/play", json={"seconds_listened": 8}).status_code, 404)
         self.assertEqual(self.client.get(f"/static/outputs/artifacts/job-1/song.mp3").status_code, 404)
+        self.assertEqual(self.client.get(f"/static/outputs/audio/job-1.mp3").status_code, 404)
 
         like_payload = {**self._signed_payload("music_like", publication_id=publication_id), "liked": True}
         self.assertEqual(self.client.post(f"/music/publications/{publication_id}/like", json=like_payload).status_code, 404)

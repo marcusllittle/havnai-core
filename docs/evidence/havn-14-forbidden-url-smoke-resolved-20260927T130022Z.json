@@ -1,0 +1,70 @@
+{
+  "ok": true,
+  "checks": [
+    {
+      "name": "api_health",
+      "ok": true,
+      "detail": "status=200 payload_status='ok' version='07aa5c4'"
+    },
+    {
+      "name": "api_healthz",
+      "ok": true,
+      "detail": "status=200 ok=True"
+    },
+    {
+      "name": "control_plane",
+      "ok": true,
+      "detail": "status=200 health=healthy ready=1 queued=0 running=0"
+    },
+    {
+      "name": "legacy_gallery_hidden",
+      "ok": true,
+      "detail": "status=200 total=0 allow_legacy_gallery=False"
+    },
+    {
+      "name": "music_discover_public",
+      "ok": true,
+      "detail": "status=200 total=2"
+    },
+    {
+      "name": "web_home",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "name": "web/create",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "name": "web/pricing",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "name": "web/support",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "name": "web/terms/credits-v1",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "name": "web/refunds/credits-v1",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "name": "create_no_invite_copy",
+      "ok": true,
+      "detail": "status=200 legacy_prompts=[]"
+    },
+    {
+      "name": "forbidden_public_url_1",
+      "ok": true,
+      "detail": "status=404 content_type='application/json' cache_control='private, no-store' cf_cache_status='BYPASS' url='https://joinhavn.io/api/static/outputs/audio/job-e634fd8d8f32.mp3'"
+    }
+  ]
+}

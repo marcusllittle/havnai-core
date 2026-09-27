@@ -41,21 +41,24 @@ private keys, and unlisted media URLs.
 
 ## Backup Procedure
 
-Before a coordinator release, `scripts/deploy_coordinator_release.sh` runs:
+Before a coordinator release, `scripts/deploy_coordinator_release.sh` runs
+against the live coordinator checkout:
 
 ```bash
-sudo -u havnai HAVNAI_DB_PATH=/var/lib/havnai/ledger.db \
-  /opt/havnai/venv/bin/python "$release/scripts/backup_coordinator.py"
+cd /home/marcus/Downloads/source-code/havnai-core
+HAVNAI_DB_PATH=/home/marcus/Downloads/source-code/havnai-core/db/ledger.db \
+HAVNAI_BACKUP_DIR=/home/marcus/Downloads/source-code/havnai-core/db/backups \
+  .venv/bin/python scripts/backup_coordinator.py
 ```
 
 Manual backup uses the same script:
 
 ```bash
-sudo -u havnai \
-  HAVNAI_DB_PATH=/var/lib/havnai/ledger.db \
-  HAVNAI_BACKUP_DIR=/var/lib/havnai/backups \
+cd /home/marcus/Downloads/source-code/havnai-core
+HAVNAI_DB_PATH=/home/marcus/Downloads/source-code/havnai-core/db/ledger.db \
+  HAVNAI_BACKUP_DIR=/home/marcus/havnai-backups/coordinator \
   HAVNAI_BACKUP_REMOTE='backup-host:/redacted/havnai/backups' \
-  /opt/havnai/venv/bin/python /opt/havnai/current/scripts/backup_coordinator.py
+  .venv/bin/python scripts/backup_coordinator.py
 ```
 
 The backup script opens the source SQLite database read-only, uses the SQLite

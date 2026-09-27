@@ -40,6 +40,25 @@ Evidence captured at `2026-09-27T06:05:04Z`:
   `/v2/astra/session`, and `/v2/astra/stats` returned HTTP 401 with
   `Cache-Control: private, no-store` and no secret/internal-path findings.
 
+## Public Bundle / Static Asset Secret Audit
+
+Command:
+
+```bash
+python3 scripts/security_bundle_audit.py \
+  --web-base https://joinhavn.io
+```
+
+Coverage:
+
+- Fetches selected public pages anonymously.
+- Discovers same-origin linked Next.js/static assets from those pages.
+- Scans bounded page and asset bodies for obvious Stripe/Clerk/GitHub secret
+  keys, webhook secrets, private-key blocks, internal workstation paths, and
+  SQLite database path leaks.
+- This is a pattern audit for accidental public exposure; it does not replace
+  credentialed two-account authorization tests.
+
 ## Account Boundary Regression Slice
 
 Command:

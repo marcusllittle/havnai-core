@@ -54,6 +54,21 @@ matched alerts to `HAVNAI_ALERT_WEBHOOK` when that HTTPS URL is configured. Its
 response includes the destination host and delivery status, but not the full
 webhook URL.
 
+Use `scripts/collect_observability_evidence.py` for the redacted HAVN-43
+evidence packet:
+
+```bash
+HAVNAI_ADMIN_TOKEN=<redacted> \
+  python3 scripts/collect_observability_evidence.py \
+    --api-base https://api.joinhavn.io \
+    --output docs/evidence/havn-43-observability-$(date -u +%Y%m%dT%H%M%SZ).json
+```
+
+The script captures public health, control-plane health, admin-gated metrics,
+alert dry-run, and alert send results. It records `HAVNAI_ALERT_WEBHOOK` absence
+as a blocker rather than a successful delivery receipt, and it does not print
+the admin token or full webhook URL.
+
 Required alert classes and current evidence path:
 
 | Alert class | Evidence path |

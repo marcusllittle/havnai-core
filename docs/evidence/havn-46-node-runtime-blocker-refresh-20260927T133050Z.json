@@ -1,0 +1,39 @@
+{
+  "schema_version": "havnai.node-rollback-blocker.v1",
+  "captured_at": "2026-09-27T13:30:50Z",
+  "environment": "production worker runtime",
+  "operator": "Codex",
+  "source": {
+    "worker_host": "DESKTOP-A26E195",
+    "service_scope": "systemd --user",
+    "service_name": "havnai-node.service",
+    "service_active_state": "active (running)",
+    "service_since": "2026-09-27 00:51:05 EDT"
+  },
+  "runtime": {
+    "start_wrapper": "/home/marcus/.local/bin/havnai-node-start",
+    "runtime_mount": "/mnt/havnai-runtime",
+    "runtime_home": "/mnt/havnai-runtime/havnai",
+    "runtime_python": "/mnt/havnai-runtime/havnai/venv/bin/python",
+    "source_root": "/mnt/c/Users/marcu/OneDrive/Documents/source-code/_worktrees/havn-50-core",
+    "source_root_commit": "b9513fe",
+    "source_root_branch": "feat/havn-11-commercial-accounts",
+    "source_root_remote_state": "behind origin/feat/havn-11-commercial-accounts by 13 commits",
+    "configured_coordinator_url": "https://api.joinhavn.io"
+  },
+  "heartbeat_evidence": {
+    "node_id": "DESKTOP-A26E195",
+    "recent_log_pattern": "Heartbeat OK (creator)",
+    "last_observed_heartbeat_local_time": "2026-09-27 09:30:17 EDT"
+  },
+  "rollback_not_attempted": true,
+  "reason_not_attempted": "The worker service and runtime paths are now identified, but no operator-approved node rollback command, target rollback artifact, or production rollback window was supplied. Performing a worker rollback would interrupt the live worker and could affect accepted work, so this packet remains blocker evidence rather than acceptance evidence.",
+  "required_to_clear": [
+    "operator-approved node rollback command or approved dated waiver",
+    "target previous runtime/source artifact or explicit forward-fix rationale",
+    "pre-rollback queue/claim idle check or accepted-work preservation plan",
+    "post-rollback service heartbeat and model capability evidence",
+    "post-restore heartbeat and model capability evidence"
+  ],
+  "outcome": "Node rollback remains unexercised. The previous blocker is narrowed from unknown service/runtime details to missing approval, target artifact/waiver, and post-rollback heartbeat/capability evidence."
+}

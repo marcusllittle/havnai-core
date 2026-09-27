@@ -104,12 +104,21 @@ def summarize_control_plane(result: dict[str, Any]) -> dict[str, Any]:
 def summarize_alert_dry_run(result: dict[str, Any]) -> dict[str, Any]:
     payload = parse_json(result)
     matches = payload.get("matches") or payload.get("alerts") or []
+    rules = payload.get("rules") or []
+    if isinstance(payload.get("matched_count"), int):
+        match_count = payload["matched_count"]
+    elif isinstance(matches, list) and matches:
+        match_count = len(matches)
+    elif isinstance(rules, list):
+        match_count = sum(1 for rule in rules if isinstance(rule, dict) and rule.get("matched") is True)
+    else:
+        match_count = 0
     return {
         "status": result.get("status"),
         "schema_version": payload.get("schema_version"),
         "delivery_mode": (payload.get("delivery") or {}).get("mode"),
         "sent": (payload.get("delivery") or {}).get("sent"),
-        "match_count": len(matches) if isinstance(matches, list) else 0,
+        "match_count": match_count,
     }
 
 

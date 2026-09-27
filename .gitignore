@@ -5,3 +5,16 @@ server/__pycache__/
 tmp_gpu/
 server/logs/
 db/
+
+# Environment files (never commit real secrets)
+.env
+.env.*
+!.env.example
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# SQLite WAL files
+*.db-wal
+*.db-shm

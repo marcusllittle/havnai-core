@@ -1,0 +1,22 @@
+{
+  "schema": "havn-43-external-alert-config-gap.v1",
+  "generated_at": "2026-09-27T08:22:00Z",
+  "source": {
+    "host": "marcus@192.168.4.105",
+    "env_file": "/home/marcus/.havnai/.env",
+    "checkout": "/home/marcus/Downloads/source-code/havnai-core",
+    "coordinator_commit": "cc69a241f4205aa6053c9c77c67fa60fb5e9e6dc"
+  },
+  "probe": {
+    "command": "env | cut -d= -f1 | sort | grep -E \"ALERT|WEBHOOK|SLACK|DISCORD|PAGER|OPS|SENTRY|DATADOG\"",
+    "printed_secret_values": false
+  },
+  "matching_env_keys": [
+    "CLERK_WEBHOOK_SIGNING_SECRET",
+    "STRIPE_ACCOUNT_WEBHOOK_SECRET",
+    "STRIPE_WEBHOOK_SECRET"
+  ],
+  "external_alert_destination_keys_found": [],
+  "interpretation": "The live coordinator has provider webhook secrets, but no visible alert/on-call destination such as HAVNAI_ALERT_WEBHOOK, Slack, Discord, PagerDuty, Sentry, or Datadog. HAVN-43 can prove admin metrics and non-sending dry-run alerts, but cannot prove external alert delivery without adding a destination or recording an explicit waiver.",
+  "acceptance_status": "blocked_on_external_alert_destination_or_waiver"
+}

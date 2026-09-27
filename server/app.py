@@ -5591,8 +5591,10 @@ def protect_account_content_from_legacy_routes() -> Optional[Any]:
             return jsonify({"error": "job_not_found"}), 404
     if request.endpoint == "static":
         filename = str((request.view_args or {}).get("filename", ""))
-        path = str((STATIC_DIR / filename).resolve())
-        if filename.startswith("outputs/private-chains/") or Path(path).is_relative_to((OUTPUTS_DIR / "private-chains").resolve()):
+        resolved_path = (STATIC_DIR / filename).resolve()
+        path = str(resolved_path)
+        outputs_root = OUTPUTS_DIR.resolve()
+        if filename.startswith("outputs/private-chains/") or resolved_path.is_relative_to((OUTPUTS_DIR / "private-chains").resolve()):
             return jsonify({"error": "artifact_not_found"}), 404
         conn = get_db()
         # Also protect the brief interval between a worker writing a file and
@@ -5602,6 +5604,22 @@ def protect_account_content_from_legacy_routes() -> Optional[Any]:
         private_asset = conn.execute("SELECT 1 FROM assets WHERE path=? AND owner_account_id IS NOT NULL", (path,)).fetchone()
         if private_job or private_asset:
             return jsonify({"error": "artifact_not_found"}), 404
+        if resolved_path.is_relative_to(outputs_root):
+            adult_artifact = conn.execute(
+                "SELECT 1 FROM artifacts WHERE path=? AND COALESCE(adult_content,0)!=0 LIMIT 1",
+                (path,),
+            ).fetchone()
+            adult_job = conn.execute("""SELECT 1 FROM jobs WHERE COALESCE(adult_content,0)!=0
+                AND instr(?, id)>0 LIMIT 1""", (filename,)).fetchone()
+            adult_publication = conn.execute("""SELECT 1 FROM music_publications p
+                JOIN artifacts a ON a.id=p.audio_artifact_id
+                WHERE a.path=? AND COALESCE(p.adult_content,0)!=0 LIMIT 1""", (path,)).fetchone()
+            if adult_artifact or adult_job or adult_publication:
+                return jsonify({"error": "artifact_not_found"}), 404
+            if filename.startswith("outputs/artifacts/") and not conn.execute(
+                "SELECT 1 FROM artifacts WHERE path=? LIMIT 1", (path,)
+            ).fetchone():
+                return jsonify({"error": "artifact_not_found"}), 404
     return None
 
 

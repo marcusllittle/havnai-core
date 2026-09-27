@@ -1,0 +1,45 @@
+{
+  "environment": "production coordinator",
+  "operator": "Marcus Little / Codex",
+  "utc_start": "2026-09-26T21:16:24Z",
+  "utc_end": "2026-09-26T21:16:30Z",
+  "source_version": "2f8c8e38cd98da991e71a64de89ba9a2b85060b1",
+  "target_version": "ad7164dbacc5a0351546b88ca7b1558a0b34f36e",
+  "restored_version": "2f8c8e38cd98da991e71a64de89ba9a2b85060b1",
+  "private_report": "redacted production ops path: havn46-rollback-20260926T211624Z.txt",
+  "actions": [
+    "captured pre-drill local health and healthz",
+    "switched coordinator systemd release override to rollback release and restarted service",
+    "waited for local healthz to recover",
+    "captured rollback health and healthz",
+    "switched coordinator systemd release override back to source release and restarted service",
+    "captured restored local health, public health, public healthz, and public control-plane state"
+  ],
+  "health_checks": {
+    "pre_health_status": "ok",
+    "pre_healthz": "ok",
+    "rollback_health_status": "ok",
+    "rollback_healthz": "ok",
+    "restored_health_status": "ok",
+    "restored_healthz": "ok",
+    "public_health_status": "ok",
+    "public_healthz": "ok",
+    "control_plane_health": "ok",
+    "control_plane_ready_nodes": "ok",
+    "control_plane_queue_idle": "ok",
+    "control_plane_claims_idle": "ok",
+    "control_plane_alerts_empty": "ok"
+  },
+  "rollback_safe": true,
+  "outcome": "Coordinator rollback to prior compatible release and restoration to source release both recovered with local and public smoke checks green. This packet covers coordinator/API only; web/Vercel and node-runtime rollback still require packets or dated waivers.",
+  "residual_risks": [
+    "Does not prove rollback safety across schema/provider-breaking migrations.",
+    "Does not cover Vercel alias rollback.",
+    "Does not cover node-runtime rollback or worker heartbeat after rollback."
+  ],
+  "redactions": [
+    "private host paths reduced to report basename",
+    "raw command transcript omitted",
+    "no secrets, account identifiers, tokens, prompts, or private media URLs included"
+  ]
+}

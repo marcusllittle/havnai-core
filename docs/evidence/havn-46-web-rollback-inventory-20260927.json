@@ -1,0 +1,33 @@
+{
+  "schema": "havn-46-web-rollback-inventory.v1",
+  "generated_at": "2026-09-27T07:19:00Z",
+  "surface": "web",
+  "source": "vercel-cli-and-public-route-smoke",
+  "current_deployment_id": "dpl_EveZREW24UNrXUBfDt9aryD2L1Dq",
+  "current_deployment_url": "https://havnai-4hyjn1khu-marcus-littles-projects.vercel.app",
+  "current_target": "production",
+  "current_status": "ready",
+  "current_aliases": [
+    "https://joinhavn.io",
+    "https://www.joinhavn.io",
+    "https://havnai-web.vercel.app",
+    "https://havnai-web-marcus-littles-projects.vercel.app"
+  ],
+  "rollback_deployment_id": "dpl_GS1V5fev2NeNCmUieuGiB4aj8aau",
+  "rollback_deployment_url": "https://havnai-1ewjauwyz-marcus-littles-projects.vercel.app",
+  "rollback_target": "production",
+  "rollback_status": "ready",
+  "rollback_action": "inventory_only",
+  "rollback_safety_reviewed": true,
+  "smoke_routes": [
+    { "path": "/", "status": 200 },
+    { "path": "/create", "status": 200 },
+    { "path": "/pricing", "status": 200 },
+    { "path": "/support", "status": 200 }
+  ],
+  "notes": [
+    "This inventory proves that a previous READY production deployment exists and current public routes respond with HTTP 200.",
+    "This is not an exercised production rollback.",
+    "Coordinator and node rollback evidence remain missing."
+  ]
+}

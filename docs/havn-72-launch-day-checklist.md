@@ -70,7 +70,8 @@ Stop launch or roll back/disable affected surfaces when any of these are true:
 Run and attach these within the launch window:
 
 ```bash
-python3 scripts/launch_public_smoke.py --json
+python3 scripts/launch_public_smoke.py --json \
+  --forbid-public-url https://joinhavn.io/api/static/outputs/audio/job-e634fd8d8f32.mp3
 HAVNAI_ADMIN_TOKEN=<redacted> python3 scripts/collect_observability_evidence.py --json \
   --alert-waiver docs/evidence/<approved-alert-waiver>.json \
   --join-token-waiver docs/evidence/<approved-join-token-waiver>.json

@@ -703,6 +703,14 @@ def log_event(message: str, level: str = "info", **extra: Any) -> None:
     EVENT_LOGS.append({"timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "level": level, "message": message})
 
 
+def _no_store_json(payload: dict[str, Any], status: int) -> Any:
+    response = jsonify(payload)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response, status
+
+
 @app.errorhandler(HTTPException)
 def api_http_error(error: HTTPException) -> Any:
     response = error.get_response()
@@ -9094,12 +9102,12 @@ def api_music_audio(publication_id: str) -> Any:
         (publication_id,),
     ).fetchone()
     if not row:
-        return jsonify({"error": "publication_not_found"}), 404
+        return _no_store_json({"error": "publication_not_found"}, 404)
     if not _artifact_url(str(row["path"] or "")):
-        return jsonify({"error": "audio_unavailable"}), 404
+        return _no_store_json({"error": "audio_unavailable"}, 404)
     path = Path(str(row["path"])).resolve()
     if not path.is_file():
-        return jsonify({"error": "audio_missing"}), 410
+        return _no_store_json({"error": "audio_missing"}, 410)
     return send_file(
         path,
         mimetype=str(row["content_type"] or "audio/mpeg"),
@@ -9109,10 +9117,11 @@ def api_music_audio(publication_id: str) -> Any:
 
 
 @app.route("/music/publications/<publication_id>/cover.svg", methods=["GET"])
+@app.route("/music/publications/<publication_id>/cover", methods=["GET"])
 def api_music_cover(publication_id: str) -> Any:
     publication = music_discover.get_publication(publication_id, include_internal=True)
     if not publication:
-        return jsonify({"error": "publication_not_found"}), 404
+        return _no_store_json({"error": "publication_not_found"}, 404)
     seed = str(publication.get("cover_art_seed") or publication_id)
     title = html.escape(str(publication.get("title") or "HavnAI"), quote=True)
     hue_a = int(seed[:2], 16) % 360

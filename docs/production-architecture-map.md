@@ -137,6 +137,8 @@ checks returned HTTP 200 for `/`, `/pricing`, `/support`, `/marketplace`,
   duplicate-charge/reward/receipt evidence.
 - HAVN-46 has coordinator rollback evidence and Vercel rollback inventory. It
   still needs web/Vercel and node-runtime rollback exercise or waiver.
+- `scripts/rollback_evidence_audit.py` is the redacted HAVN-46 packet builder
+  for coordinator, web, and node rollback evidence or approved waivers.
 - HAVN-43 still needs external alert delivery evidence or explicit launch
   waivers for thresholds not wired to notifications.
 - HAVN-14 consumed Claude's Astra HAVN-58 evidence; remaining platform gap is

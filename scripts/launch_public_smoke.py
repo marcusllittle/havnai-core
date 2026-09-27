@@ -19,6 +19,7 @@ from urllib.request import Request, urlopen
 JsonFetcher = Callable[[str, float], tuple[int, Any]]
 StatusFetcher = Callable[[str, float], int]
 TextFetcher = Callable[[str, float], tuple[int, str]]
+HeaderFetcher = Callable[[str, float], tuple[int, dict[str, str]]]
 
 
 @dataclass
@@ -73,15 +74,30 @@ def fetch_text(url: str, timeout: float) -> tuple[int, str]:
         return 0, str(exc)
 
 
+def fetch_headers(url: str, timeout: float) -> tuple[int, dict[str, str]]:
+    request = Request(url, method="GET", headers={"User-Agent": "havnai-launch-smoke/1"})
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            response.read(1)
+            return response.status, {key.lower(): value for key, value in response.headers.items()}
+    except HTTPError as exc:
+        exc.read(1)
+        return exc.code, {key.lower(): value for key, value in exc.headers.items()}
+    except (TimeoutError, URLError):
+        return 0, {}
+
+
 def run_smoke(
     *,
     api_base: str,
     web_base: str,
     timeout: float,
     allow_legacy_gallery: bool = False,
+    forbidden_public_urls: list[str] | None = None,
     json_fetcher: JsonFetcher = fetch_json,
     status_fetcher: StatusFetcher = fetch_status,
     text_fetcher: TextFetcher = fetch_text,
+    header_fetcher: HeaderFetcher = fetch_headers,
 ) -> list[Check]:
     checks: list[Check] = []
 
@@ -157,6 +173,23 @@ def run_smoke(
         f"status={create_status} legacy_prompts={found_prompts}",
     ))
 
+    for index, url in enumerate(forbidden_public_urls or [], start=1):
+        status, headers = header_fetcher(url, timeout)
+        content_type = headers.get("content-type", "")
+        cache_status = headers.get("cf-cache-status", "")
+        cache_control = headers.get("cache-control", "")
+        checks.append(Check(
+            f"forbidden_public_url_{index}",
+            status in {401, 403, 404, 410},
+            "status={} content_type={!r} cache_control={!r} cf_cache_status={!r} url={!r}".format(
+                status,
+                content_type,
+                cache_control,
+                cache_status,
+                url,
+            ),
+        ))
+
     return checks
 
 
@@ -170,6 +203,12 @@ def main() -> int:
         action="store_true",
         help="Allow nonzero /gallery/browse totals only when rows have explicit product-quality review.",
     )
+    parser.add_argument(
+        "--forbid-public-url",
+        action="append",
+        default=[],
+        help="Public URL that must deny anonymous access with 401/403/404/410. Repeat for exact stale cache URLs.",
+    )
     parser.add_argument("--json", action="store_true", help="Print JSON report instead of text lines.")
     args = parser.parse_args()
 
@@ -178,6 +217,7 @@ def main() -> int:
         web_base=args.web_base,
         timeout=args.timeout,
         allow_legacy_gallery=args.allow_legacy_gallery,
+        forbidden_public_urls=args.forbid_public_url,
     )
     failed = [check for check in checks if not check.ok]
 

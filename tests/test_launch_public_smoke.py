@@ -31,6 +31,14 @@ def _text_fixture(body="No access code needed"):
     return fetch
 
 
+def _headers_fixture(status=404, **headers):
+    normalized = {key.lower(): value for key, value in headers.items()}
+
+    def fetch(url, timeout):
+        return status, normalized
+    return fetch
+
+
 def test_launch_smoke_passes_when_public_surfaces_are_clean():
     checks = run_smoke(
         api_base="https://api.example",
@@ -39,6 +47,7 @@ def test_launch_smoke_passes_when_public_surfaces_are_clean():
         json_fetcher=_json_fixture(gallery_total=0),
         status_fetcher=_status_fixture,
         text_fetcher=_text_fixture(),
+        header_fetcher=_headers_fixture(),
     )
 
     assert all(check.ok for check in checks)
@@ -58,6 +67,7 @@ def test_launch_smoke_fails_nonzero_legacy_gallery_by_default():
         json_fetcher=_json_fixture(gallery_total=7),
         status_fetcher=_status_fixture,
         text_fetcher=_text_fixture(),
+        header_fetcher=_headers_fixture(),
     )
 
     failures = {check.name: check for check in checks if not check.ok}
@@ -74,6 +84,7 @@ def test_launch_smoke_can_record_explicit_legacy_gallery_waiver():
         json_fetcher=_json_fixture(gallery_total=7),
         status_fetcher=_status_fixture,
         text_fetcher=_text_fixture(),
+        header_fetcher=_headers_fixture(),
     )
 
     assert all(check.ok for check in checks)
@@ -89,8 +100,57 @@ def test_launch_smoke_fails_when_create_exposes_legacy_access_code_copy():
         json_fetcher=_json_fixture(gallery_total=0),
         status_fetcher=_status_fixture,
         text_fetcher=_text_fixture("Legacy alpha access code"),
+        header_fetcher=_headers_fixture(),
     )
 
     failures = {check.name: check for check in checks if not check.ok}
     assert set(failures) == {"create_no_invite_copy"}
     assert "Legacy alpha access code" in failures["create_no_invite_copy"].detail
+
+
+def test_launch_smoke_passes_when_forbidden_url_denies_anonymous_access():
+    checks = run_smoke(
+        api_base="https://api.example",
+        web_base="https://web.example",
+        timeout=1,
+        forbidden_public_urls=[
+            "https://web.example/api/static/outputs/audio/private.mp3",
+        ],
+        json_fetcher=_json_fixture(gallery_total=0),
+        status_fetcher=_status_fixture,
+        text_fetcher=_text_fixture(),
+        header_fetcher=_headers_fixture(status=404, **{"cache-control": "private, no-store"}),
+    )
+
+    assert all(check.ok for check in checks)
+    forbidden = next(check for check in checks if check.name == "forbidden_public_url_1")
+    assert "status=404" in forbidden.detail
+    assert "private, no-store" in forbidden.detail
+
+
+def test_launch_smoke_fails_when_forbidden_url_serves_public_media():
+    checks = run_smoke(
+        api_base="https://api.example",
+        web_base="https://web.example",
+        timeout=1,
+        forbidden_public_urls=[
+            "https://web.example/api/static/outputs/audio/private.mp3",
+        ],
+        json_fetcher=_json_fixture(gallery_total=0),
+        status_fetcher=_status_fixture,
+        text_fetcher=_text_fixture(),
+        header_fetcher=_headers_fixture(
+            status=200,
+            **{
+                "content-type": "audio/mpeg",
+                "cache-control": "max-age=14400",
+                "cf-cache-status": "HIT",
+            },
+        ),
+    )
+
+    failures = {check.name: check for check in checks if not check.ok}
+    assert set(failures) == {"forbidden_public_url_1"}
+    assert "status=200" in failures["forbidden_public_url_1"].detail
+    assert "audio/mpeg" in failures["forbidden_public_url_1"].detail
+    assert "HIT" in failures["forbidden_public_url_1"].detail

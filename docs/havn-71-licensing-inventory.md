@@ -1,9 +1,10 @@
 # HAVN-71 Creative Platform Licensing Inventory
 
 Date: 2026-09-27
-Core branch: `codex/havn-71-licensing-inventory`
-Core base: `origin/feat/havn-11-commercial-accounts` at `cc69a24`
-Web evidence checkout: `havnai-web/_worktrees/havn-71-web-licensing` at `dc2285e`
+Core branch: `codex/havn-71-licensing-main`
+Core base: current `origin/main` for HAVN-72 launch hardening
+Web evidence: current `havnai-web` production branch `feat/havn-11-commercial-accounts`
+through merge `82e1e9f`, deployed as `dpl_GnYQ31UvFaE675xmdgdT5aGSFpME`
 
 ## Scope
 
@@ -60,7 +61,8 @@ These entries are enabled in the release manifest and are served by the coordina
 
 ## Web Asset Inventory Summary
 
-Source checkout: `havnai-web/_worktrees/havn-71-web-licensing`
+Source checkout: `havnai-web` production branch evidence as of deploy
+`dpl_GnYQ31UvFaE675xmdgdT5aGSFpME`
 
 - `public/HavnAI-logo.png`: HavnAI brand asset. Owner/provenance should be recorded by Marcus/HavnAI.
 - `public/music-default-cover.png`: shipped fallback cover art used by Discover, playlist, player, and music library surfaces. Owner/provenance/license not recorded in repo.

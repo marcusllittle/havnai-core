@@ -1,0 +1,47 @@
+{
+  "schema": "havn-45-49-restart-readiness-evidence.v1",
+  "generated_at": "2026-09-27T07:47:56.112330Z",
+  "live_coordinator": {
+    "host": "marcus@192.168.4.105",
+    "checkout": "/home/marcus/Downloads/source-code/havnai-core",
+    "version": "cc69a24",
+    "health": {
+      "status": "ok",
+      "nodes": 1,
+      "queue_depth": 0
+    },
+    "healthz": {
+      "ok": true,
+      "concurrency": {
+        "attempts": 5,
+        "success": 5,
+        "errors": []
+      }
+    }
+  },
+  "command": ".venv/bin/python scripts/account_restart_recovery_drill.py --base-url http://127.0.0.1:5001 --restart-command \"sudo systemctl restart havnai-coordinator.service\" --db-path /home/marcus/Downloads/source-code/havnai-core/db/ledger.db",
+  "dry_run": {
+    "schema": "havn-45-account-restart-recovery-drill-plan.v1",
+    "base_url": "http://127.0.0.1:5001",
+    "execute": false,
+    "has_account_token": false,
+    "account_token_hash": "",
+    "restart_command_configured": true,
+    "db_checks_configured": true,
+    "idempotency_key": "havn-45-1790495276",
+    "job_type": "image",
+    "model": "juggernautxl_ragnarokby",
+    "payload": {
+      "type": "image",
+      "model": "juggernautxl_ragnarokby",
+      "seed": 45049,
+      "sfw_mode": true,
+      "steps": 32,
+      "width": 832,
+      "height": 1216,
+      "guidance": 6.5
+    }
+  },
+  "acceptance_status": "blocked",
+  "blocker": "Live HAVN-45/HAVN-49 acceptance requires HAVNAI_DRILL_ACCOUNT_TOKEN for a funded commercial account. This dry run proves restart command and read-only DB duplicate-charge checks are wired to the current live coordinator paths only."
+}

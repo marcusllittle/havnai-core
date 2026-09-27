@@ -1,0 +1,88 @@
+{
+  "schema": "havn-12-mixed-model-readiness-evidence.v1",
+  "generated_at": "2026-09-27T07:47:56.119806Z",
+  "live_coordinator": {
+    "host": "marcus@192.168.4.105",
+    "checkout": "/home/marcus/Downloads/source-code/havnai-core",
+    "version": "cc69a24",
+    "health": {
+      "status": "ok",
+      "nodes": 1,
+      "queue_depth": 0
+    },
+    "healthz": {
+      "ok": true,
+      "concurrency": {
+        "attempts": 5,
+        "success": 5,
+        "errors": []
+      }
+    }
+  },
+  "command": ".venv/bin/python scripts/mixed_model_worker_drill.py --base-url http://127.0.0.1:5001 --count 9",
+  "dry_run": {
+    "schema": "havn-47-mixed-model-worker-drill-plan.v1",
+    "base_url": "http://127.0.0.1:5001",
+    "execute": false,
+    "private_account_jobs": false,
+    "job_count": 9,
+    "mix": [
+      {
+        "index": 1,
+        "task_type": "IMAGE_GEN",
+        "account_type": "image",
+        "model": "juggernautxl_ragnarokby"
+      },
+      {
+        "index": 2,
+        "task_type": "LTX_VIDEO_GEN",
+        "account_type": "text_to_video",
+        "model": "ltx23_wangp"
+      },
+      {
+        "index": 3,
+        "task_type": "MUSIC_GEN",
+        "account_type": "text_to_music",
+        "model": "ace_step_1_5_turbo"
+      },
+      {
+        "index": 4,
+        "task_type": "IMAGE_GEN",
+        "account_type": "image",
+        "model": "juggernautxl_ragnarokby"
+      },
+      {
+        "index": 5,
+        "task_type": "LTX_VIDEO_GEN",
+        "account_type": "text_to_video",
+        "model": "ltx23_wangp"
+      },
+      {
+        "index": 6,
+        "task_type": "MUSIC_GEN",
+        "account_type": "text_to_music",
+        "model": "ace_step_1_5_turbo"
+      },
+      {
+        "index": 7,
+        "task_type": "IMAGE_GEN",
+        "account_type": "image",
+        "model": "juggernautxl_ragnarokby"
+      },
+      {
+        "index": 8,
+        "task_type": "LTX_VIDEO_GEN",
+        "account_type": "text_to_video",
+        "model": "ltx23_wangp"
+      },
+      {
+        "index": 9,
+        "task_type": "MUSIC_GEN",
+        "account_type": "text_to_music",
+        "model": "ace_step_1_5_turbo"
+      }
+    ]
+  },
+  "acceptance_status": "blocked",
+  "blocker": "Live HAVN-12 acceptance requires HAVNAI_DRILL_ACCOUNT_TOKEN for a funded commercial account so the drill can submit private account-owned /v2/jobs. This dry run proves current coordinator readiness and task/model mix only."
+}

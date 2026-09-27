@@ -1,0 +1,62 @@
+{
+  "schema": "havn-43-observability-evidence.v1",
+  "generated_at": "2026-09-27T08:07:37.171248Z",
+  "source": {
+    "host": "marcus@192.168.4.105",
+    "checkout": "/home/marcus/Downloads/source-code/havnai-core",
+    "coordinator_commit": "cc69a241f4205aa6053c9c77c67fa60fb5e9e6dc",
+    "base_url": "http://127.0.0.1:5001"
+  },
+  "health": {
+    "status": 200,
+    "payload_status": "ok",
+    "nodes": 1,
+    "queue_depth": 0,
+    "version": "cc69a24"
+  },
+  "healthz": {
+    "status": 200,
+    "ok": true
+  },
+  "control_plane": {
+    "status": 200,
+    "schema_version": "network-control-plane.v1",
+    "health": "healthy",
+    "ready_nodes": 1,
+    "queued": 0,
+    "running": 0,
+    "alerts": 0
+  },
+  "metrics": {
+    "status": 200,
+    "content_type": "text/plain; version=0.0.4; charset=utf-8",
+    "line_count": 13,
+    "required_metrics_present": [
+      "havnai_jobs",
+      "havnai_nodes_online",
+      "havnai_output_disk_free_bytes"
+    ],
+    "required_metrics_missing": []
+  },
+  "alert_dry_run": {
+    "status": 200,
+    "schema_version": "network-alert-dry-run.v1",
+    "delivery_mode": "dry_run",
+    "match_count": 3,
+    "sent": false,
+    "injected_categories": [
+      "model_load_failures",
+      "gpu_vram_exhaustion"
+    ]
+  },
+  "admin_token": {
+    "present": true,
+    "hash": "sha256:756cba65b5c9"
+  },
+  "public_ok": true,
+  "admin_ok": true,
+  "missing": [],
+  "passed": true,
+  "command": "set -a; . /home/marcus/.havnai/.env; set +a; .venv/bin/python scripts/collect_observability_evidence.py --base-url http://127.0.0.1:5001 --admin-token \"$HAVNAI_ADMIN_TOKEN\" --inject model_load_failures,gpu_vram_exhaustion",
+  "scope_note": "This proves live coordinator health, admin metrics access, and non-sending alert dry-run. It does not replace external dashboard screenshots or real alert delivery proof unless explicitly accepted as a waiver."
+}

@@ -1,0 +1,140 @@
+{
+  "schema": "havn-56-57-astra-account-contract-evidence.v1",
+  "generated_at": "2026-09-27T08:16:00Z",
+  "source": {
+    "repository": "marcusllittle/havnai-core",
+    "branch": "codex/havn-56-57-astra-account-contract",
+    "base_branch": "feat/havn-11-commercial-accounts",
+    "base_commit": "cc69a241f4205aa6053c9c77c67fa60fb5e9e6dc"
+  },
+  "owner_split": {
+    "core_owner": "Codex / havnai-core",
+    "client_owner": "Claude / Astra client",
+    "boundary": "Core owns the /v2/astra/* backend contract and ledger/reward invariants. Astra owns client sign-in, bearer-token forwarding, refresh behavior, and UI integration."
+  },
+  "contract_doc": "docs/astra-account-api-contract.md",
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/v2/astra/session",
+      "authorization": "Authorization: Bearer <HavnAI account session token>",
+      "purpose": "Account-mode capability discovery; returns wallet_required=false and endpoint map."
+    },
+    {
+      "method": "POST",
+      "path": "/v2/astra/run/start",
+      "authorization": "Authorization: Bearer <HavnAI account session token>",
+      "request": {
+        "map_id": "nebula-runway"
+      },
+      "purpose": "Creates an account-bound single-use run token."
+    },
+    {
+      "method": "POST",
+      "path": "/v2/astra/reward",
+      "authorization": "Authorization: Bearer <HavnAI account session token>",
+      "request": {
+        "run_token": "<opaque token from start_run>",
+        "score": 100000,
+        "grade": "S",
+        "duration_s": 120,
+        "map_id": "nebula-runway"
+      },
+      "purpose": "Computes reward server-side from account-bound run evidence; writes account ledger operation astra_reward."
+    },
+    {
+      "method": "GET",
+      "path": "/v2/astra/generate-preflight",
+      "authorization": "Authorization: Bearer <HavnAI account session token>",
+      "purpose": "Compatibility preflight; account reward-image generation is explicitly disabled until account-owned artifact path exists."
+    },
+    {
+      "method": "POST",
+      "path": "/v2/astra/spend",
+      "authorization": "Authorization: Bearer <HavnAI account session token>",
+      "request": {
+        "action": "gacha_10"
+      },
+      "required_header": "Idempotency-Key",
+      "purpose": "Charges account credits once; repeated matching idempotency key replays without a duplicate debit."
+    },
+    {
+      "method": "GET",
+      "path": "/v2/astra/stats",
+      "authorization": "Authorization: Bearer <HavnAI account session token>",
+      "purpose": "Returns account-keyed run/reward stats."
+    }
+  ],
+  "security_and_compatibility": [
+    "Every route requires a verified HavnAI account bearer token and returns Vary: Authorization through the /v2 account route stack.",
+    "Client request bodies must not include account_id, wallet, reward amount, or balance.",
+    "Legacy wallet-era /astra/* routes remain intact for older clients but are not the commercial account path.",
+    "Legacy Astra session tokens cannot authorize /v2/astra/* account routes.",
+    "Account data is stored in account_astra_* tables and account_credit_ledger, not legacy wallet columns.",
+    "Legacy wallet-earned Astra rewards are not silently migrated; future migration must use the HAVN-18 wallet-link/import path."
+  ],
+  "test_evidence": {
+    "command": "/tmp/havn-11-ledger-venv/bin/python -m pytest tests/test_account_astra.py -q",
+    "result": "8 passed in 11.04s",
+    "covered_behaviors": [
+      "bearer account session works without wallet and unauthenticated session returns 401",
+      "generate-preflight is bearer-only and explicitly disabled for account reward images",
+      "legacy Astra session token cannot authorize account routes",
+      "reward is server-timed, capped, and written to account ledger without legacy wallet run writes",
+      "fake duration is rejected as run_too_short and burns the token to prevent replay",
+      "run token is bound to the issuing account",
+      "spend is idempotent and debits account ledger once",
+      "failed spend is audited and not replayed as success"
+    ]
+  },
+  "live_unauthenticated_probe": {
+    "host": "marcus@192.168.4.105",
+    "coordinator_commit": "cc69a241f4205aa6053c9c77c67fa60fb5e9e6dc",
+    "base_url": "http://127.0.0.1:5001",
+    "responses": [
+      {
+        "method": "GET",
+        "path": "/v2/astra/session",
+        "status": 401,
+        "error_code": "account_required"
+      },
+      {
+        "method": "GET",
+        "path": "/v2/astra/generate-preflight",
+        "status": 401,
+        "error_code": "account_required"
+      },
+      {
+        "method": "GET",
+        "path": "/v2/astra/stats",
+        "status": 401,
+        "error_code": "account_required"
+      },
+      {
+        "method": "POST",
+        "path": "/v2/astra/run/start",
+        "status": 401,
+        "error_code": "account_required"
+      },
+      {
+        "method": "POST",
+        "path": "/v2/astra/reward",
+        "status": 401,
+        "error_code": "account_required"
+      },
+      {
+        "method": "POST",
+        "path": "/v2/astra/spend",
+        "status": 401,
+        "error_code": "account_required"
+      }
+    ]
+  },
+  "remaining_client_acceptance": [
+    "Astra client must use shared HavnAI account sign-in or redirect handoff and forward the account bearer token.",
+    "Astra browser acceptance must prove signed-in refresh keeps reward eligibility without MetaMask signature prompts.",
+    "Astra guest play must remain available while reward/spend UI clearly requires sign-in.",
+    "Wallet-linked prior Astra balances/history need explicit import/link verification, not silent transfer."
+  ],
+  "scope_note": "This evidence proves the core API contract and server-side reward/spend invariants. It does not close Astra client integration or game-side browser acceptance."
+}

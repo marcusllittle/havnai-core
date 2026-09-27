@@ -667,9 +667,38 @@ class JSONFormatter(logging.Formatter):
         return json.dumps(payload)
 
 
+OUTPUT_ACCESS_LOG_REDACTION = "[output-redacted]"
+OUTPUT_ACCESS_LOG_PATTERN = re.compile(
+    r"(?P<prefix>/(?:api/)?(?:static/)?outputs/)"
+    r"(?P<path>[^\s\"']+)"
+)
+
+
+def redact_output_access_log_text(value: str) -> str:
+    return OUTPUT_ACCESS_LOG_PATTERN.sub(
+        lambda match: f"{match.group('prefix')}{OUTPUT_ACCESS_LOG_REDACTION}",
+        value,
+    )
+
+
+class OutputAccessLogRedactionFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str):
+            record.msg = redact_output_access_log_text(record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(redact_output_access_log_text(arg) if isinstance(arg, str) else arg for arg in record.args)
+        elif isinstance(record.args, dict):
+            record.args = {
+                key: redact_output_access_log_text(arg) if isinstance(arg, str) else arg
+                for key, arg in record.args.items()
+            }
+        return True
+
+
 def setup_logging() -> logging.Logger:
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger("havnai")
+    logging.getLogger("werkzeug").addFilter(OutputAccessLogRedactionFilter())
     if logger.handlers:
         return logger
     logger.setLevel(logging.INFO)

@@ -71,6 +71,7 @@ import account_lifecycle
 import account_payments
 import account_routes
 import account_auth
+import account_astra
 import account_jobs
 import artifact_lifecycle
 import account_anchors
@@ -1252,6 +1253,7 @@ def init_db() -> None:
     workflows.init_workflow_tables(conn)
     account_import.initialize(conn)
     account_ledger.initialize(conn)
+    account_astra.initialize(conn)
     account_payments.initialize(conn)
     account_jobs.initialize(conn)
     account_anchors.initialize(conn)

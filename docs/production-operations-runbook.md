@@ -5,6 +5,10 @@ HAVN-45, and HAVN-46. It records what can be verified from committed tooling,
 what must be captured during a production or production-like drill, and what
 must be redacted before evidence is attached to Jira.
 
+The deployed component, data ownership, trust-boundary, and evidence ownership
+map for HAVN-4 lives in
+[`production-architecture-map.md`](production-architecture-map.md).
+
 ## Scope
 
 The commercial launch state includes:
@@ -94,9 +98,12 @@ Launch evidence must include a redacted report with:
   publication, playlist, payment receipt, marketplace receipt, and import
   receipt smoke checks.
 
-The committed local evidence as of 2026-09-26 is useful implementation proof,
-but it is not sufficient for launch by itself. HAVN-44 needs a production or
-production-like restore report and media/artifact recovery sample.
+The 2026-09-26 production/prod-like evidence includes a verified SQLite restore
+report with zero foreign-key violations, selected account/ledger/job/artifact
+table counts, an orphan-attempt repair report, a local backup timer, and a
+representative media/artifact recovery sample. HAVN-44 still needs either a
+configured remote backup target with retention/access-control evidence or an
+explicit waiver for remote retention/encryption before launch closeout.
 
 ## Media And Artifact Recovery
 
@@ -179,6 +186,13 @@ smoke `joinhavn.io` routes after the action. For node rollback, follow
 `docs/RUN_A_NODE.md`: stop the node, replace `~/.havnai/current` from
 `~/.havnai/previous`, start the node, then verify heartbeat and model
 capabilities.
+
+As of 2026-09-26, coordinator rollback was exercised and restored with
+local/public health checks and control-plane smoke evidence. Vercel deployment
+inventory for `havnai-web` identified production rollback candidates and
+production route smoke checks, but no Vercel promotion/rollback was executed.
+Node-runtime rollback is documented in `docs/RUN_A_NODE.md` and still requires a
+heartbeat/model-capability exercise or waiver.
 
 ## Evidence Packet Template
 

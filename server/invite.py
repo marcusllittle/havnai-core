@@ -41,9 +41,7 @@ def load_invite_config() -> Dict[str, Dict[str, Any]]:
 
 
 def invite_gating_enabled(invite_config: Dict[str, Dict[str, Any]]) -> bool:
-    if INVITE_GATING:
-        return True
-    return bool(invite_config)
+    return INVITE_GATING
 
 
 def extract_invite_code(payload: Dict[str, Any]) -> str:

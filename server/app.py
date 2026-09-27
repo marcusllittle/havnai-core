@@ -609,6 +609,9 @@ def _merge_negative_prompts(*prompts: Any) -> str:
 def resolve_version() -> str:
     if VERSION_FILE.exists():
         return VERSION_FILE.read_text().strip()
+    release_file = BASE_DIR / "RELEASE_SHA"
+    if release_file.exists():
+        return release_file.read_text().strip()[:12]
     try:
         return (
             subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], cwd=BASE_DIR)

@@ -25,13 +25,13 @@ explicit owner-approved waiver with mitigation and expiration.
 | --- | --- |
 | Release commits and deployments | |
 | Public smoke report | `docs/evidence/havn-72-public-smoke-20260927T115706Z.json` |
-| Public/private content isolation | |
+| Public/private content isolation | NO-GO until exact stale Cloudflare URL rechecks private/not-found without query params |
 | Stripe funding and idempotent replay | HAVN-25 Done evidence |
 | Signed-in funded account generation | |
 | Mixed-model worker drill | |
 | Backup/restore audit | `docs/evidence/havn-44-backup-audit-20260927T115159Z.json` |
-| Observability/alert evidence | `docs/evidence/havn-43-observability-20260927T114343Z.json` |
-| Rollback audit | `docs/evidence/havn-46-rollback-audit-20260927T115508Z.json` |
+| Observability/alert evidence | `docs/evidence/havn-43-observability-20260927T114343Z.json`; attach real webhook receipt or approved `--alert-waiver` packet |
+| Rollback audit | `docs/evidence/havn-46-rollback-audit-20260927T121000Z.json`; web/node rollback packet or waiver still required |
 | Security and abuse controls | |
 | Licensing/provenance | |
 | Astra client/game-quality acceptance | |
@@ -71,7 +71,8 @@ Run and attach these within the launch window:
 
 ```bash
 python3 scripts/launch_public_smoke.py --json
-HAVNAI_ADMIN_TOKEN=<redacted> python3 scripts/collect_observability_evidence.py --json
+HAVNAI_ADMIN_TOKEN=<redacted> python3 scripts/collect_observability_evidence.py --json \
+  --alert-waiver docs/evidence/<approved-alert-waiver>.json
 ```
 
 Also record:
@@ -82,6 +83,9 @@ Also record:
 - funded account generation job ID hash and ledger/receipt summary;
 - support inbox/contact path;
 - manual monitoring owner while any alert waiver is active.
+
+Omit `--alert-waiver` only when `HAVNAI_ALERT_WEBHOOK` is configured and the
+collector records a real webhook delivery receipt.
 
 ## Conditional GO Exceptions
 

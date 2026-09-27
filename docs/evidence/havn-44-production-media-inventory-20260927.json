@@ -1,0 +1,141 @@
+{
+  "backup_manifest": {
+    "backup_sha256": "42b3cf00b7d9055e7deb8d46b320bfd092f176e10e3d41476d9770d656e29543",
+    "backup_size_bytes": 43958099,
+    "integrity_check": "ok",
+    "remote": {
+      "configured": false
+    },
+    "report": "db/backups/ledger-20260927T100837Z.manifest.json"
+  },
+  "collected_at_utc": "2026-09-27T10:36:15Z",
+  "conclusion": "Production SQLite backup/restore is verified; media files are inventoried locally but not backed up/restored offsite in this evidence. Launch still needs media/offsite proof or waiver.",
+  "configuration_gaps": {
+    "alert_webhook_configured": false,
+    "drill_account_token_configured": false,
+    "media_file_restore_verified": false,
+    "offsite_backup_remote_configured": false
+  },
+  "coordinator_version": "5c92891",
+  "database": "db/ledger.db",
+  "database_rows": {
+    "artifacts": {
+      "declared_bytes": 1355107115,
+      "missing_files": 10,
+      "rows": 755
+    },
+    "assets": {
+      "declared_bytes": 16237527,
+      "missing_files": 0,
+      "rows": 10
+    }
+  },
+  "host": "marcus@192.168.4.105",
+  "media_directories": [
+    {
+      "file_count": 3338,
+      "largest_files": [
+        {
+          "path": "static/outputs/audio/job-b8057105951c.flac",
+          "size_bytes": 49210068
+        },
+        {
+          "path": "static/outputs/videos/stitched_1785526255.mp4",
+          "size_bytes": 46635518
+        },
+        {
+          "path": "static/outputs/audio/job-fd158abfc7ed.flac",
+          "size_bytes": 37992475
+        },
+        {
+          "path": "static/outputs/audio/job-98cd773ac7d4-take-2.flac",
+          "size_bytes": 36555255
+        },
+        {
+          "path": "static/outputs/audio/job-c5260936d012.flac",
+          "size_bytes": 36524058
+        },
+        {
+          "path": "static/outputs/audio/job-5c78ab11971a.flac",
+          "size_bytes": 36424829
+        },
+        {
+          "path": "static/outputs/audio/job-98cd773ac7d4.flac",
+          "size_bytes": 36190404
+        },
+        {
+          "path": "static/outputs/audio/job-805dd4348dc3.flac",
+          "size_bytes": 36068279
+        },
+        {
+          "path": "static/outputs/audio/job-da622184727e.flac",
+          "size_bytes": 36032124
+        },
+        {
+          "path": "static/outputs/audio/job-086d497c2dd7.flac",
+          "size_bytes": 35825983
+        }
+      ],
+      "path": "static/outputs",
+      "total_bytes": 4958931848
+    },
+    {
+      "file_count": 10,
+      "largest_files": [
+        {
+          "path": "static/assets/asset-fa699b7566ca44f2ba1826b6313bc85c/inthedepths.mp3",
+          "size_bytes": 2880813
+        },
+        {
+          "path": "static/assets/asset-415b793852cc4d87be29c47a24081505/job-4fc558a7b436.mp3",
+          "size_bytes": 2880813
+        },
+        {
+          "path": "static/assets/asset-31b084be24b24f4cb4c9c47d080cc22b/inthedepths.mp3",
+          "size_bytes": 2880813
+        },
+        {
+          "path": "static/assets/asset-5e16c4373ccd494bbc3dadbb3f3fe530/job-7bf294379159.png",
+          "size_bytes": 1489430
+        },
+        {
+          "path": "static/assets/asset-85f1115b1167409d8b057f0fb83b25fd/job-10a02accac3e.png",
+          "size_bytes": 1339989
+        },
+        {
+          "path": "static/assets/asset-bdc30adfa1d24b77aae47b55a275f37d/job-c9c2a7de4107.png",
+          "size_bytes": 1305794
+        },
+        {
+          "path": "static/assets/asset-7aed33c5ab214a999d5cad31b216dd35/job-c9c2a7de4107.png",
+          "size_bytes": 1305794
+        },
+        {
+          "path": "static/assets/asset-3f37fc62c6674b8d815ed40e1a543c1a/job-76a4ceb7f51d.png",
+          "size_bytes": 1032327
+        },
+        {
+          "path": "static/assets/asset-0bf99152500747b78846b442a1c43179/job-328fe3ec7273.mp3",
+          "size_bytes": 960813
+        },
+        {
+          "path": "static/assets/asset-03f510f44a07418788ba7cf06382f6aa/capability-smoke.mp3",
+          "size_bytes": 160941
+        }
+      ],
+      "path": "static/assets",
+      "total_bytes": 16237527
+    }
+  ],
+  "schema_version": "havnai.launch-hardening.media-evidence.v1",
+  "sqlite_restore_drill": {
+    "foreign_key_violations": 0,
+    "integrity": "ok",
+    "report": "db/restore-drills/restore-20260927T103332Z/report.json",
+    "restored_sha256": "f9c56190246c338420fecc78fa21cac69fb74ce81a07e788907553ca6af8419a",
+    "scope": "SQLite only; media files and external payment/provider state are not backed up",
+    "snapshot_sha256": "f9c56190246c338420fecc78fa21cac69fb74ce81a07e788907553ca6af8419a",
+    "table_count": 84,
+    "verified": true
+  }
+}

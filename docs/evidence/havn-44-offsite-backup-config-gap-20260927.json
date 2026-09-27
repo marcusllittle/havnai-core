@@ -1,0 +1,23 @@
+{
+  "schema": "havn-44-offsite-backup-config-gap.v1",
+  "generated_at": "2026-09-27T08:22:00Z",
+  "source": {
+    "host": "marcus@192.168.4.105",
+    "env_file": "/home/marcus/.havnai/.env",
+    "checkout": "/home/marcus/Downloads/source-code/havnai-core",
+    "coordinator_commit": "cc69a241f4205aa6053c9c77c67fa60fb5e9e6dc"
+  },
+  "probe": {
+    "command": "env | cut -d= -f1 | sort | grep -E \"BACKUP|RESTORE|R2|S3|AWS|B2|REMOTE|OFFSITE|RETENTION|ENCRYPT\"",
+    "printed_secret_values": false
+  },
+  "matching_env_keys": [],
+  "offsite_backup_destination_keys_found": [],
+  "local_backup_evidence": {
+    "latest_known_backup": "db/backups/ledger-20260927T080148Z.sqlite.gz",
+    "latest_known_restore_report": "db/restore-drills/restore-20260927T080653Z/report.json",
+    "sqlite_restore_verified": true
+  },
+  "interpretation": "The live coordinator has local SQLite backup and restore proof, but no visible remote/offsite backup destination, retention, encryption-owner, or access-control configuration in the operator env. HAVN-44 remains blocked on remote/offsite backup evidence or an approved waiver, plus media/artifact backup and restore proof.",
+  "acceptance_status": "blocked_on_offsite_backup_or_waiver_and_media_restore"
+}

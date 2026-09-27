@@ -1,0 +1,40 @@
+{
+  "schema_version": "havnai.production-log-redaction-evidence.v1",
+  "checked_at": "2026-09-27T13:40:17Z",
+  "environment": "production coordinator",
+  "operator": "Codex",
+  "code_fix": {
+    "main_commit": "bc19bb103851ae8dce982b11c3badd03b8d3a6a4",
+    "pull_request": "https://github.com/marcusllittle/havnai-core/pull/174",
+    "change": "Werkzeug access-log filter redacts generated output filenames to [output-redacted]"
+  },
+  "deployment_note": {
+    "production_checkout": "/home/marcus/Downloads/source-code/havnai-core",
+    "checkout_state": "main was divergent from origin/main, so only the reviewed server/app.py patch from PR #174 was applied to the live checkout",
+    "backup_file": "server/app.py.bak-havn42-redact-20260927T1339Z",
+    "compile_check": ".venv/bin/python -m py_compile server/app.py",
+    "service_restart": "sudo -n systemctl restart havnai-coordinator.service"
+  },
+  "post_restart_health": {
+    "url": "http://127.0.0.1:5001/health",
+    "status": "ok",
+    "nodes": 1,
+    "queue_depth": 0,
+    "version": "8bf40e2"
+  },
+  "probe": {
+    "url_path": "/static/outputs/audio/job-havn42-redaction-secret.mp3?codex_redaction=20260927T1340Z",
+    "response_status": 404,
+    "journal_line": "127.0.0.1 - - [27/Sep/2026 09:40:17] \"GET /static/outputs/[output-redacted] HTTP/1.1\" 404 -",
+    "generated_filename_present_in_journal_line": false,
+    "redaction_marker_present": true
+  },
+  "result": {
+    "ok": true,
+    "summary": "Production coordinator access logs redacted the generated output filename for a denied static output probe while preserving route family and status."
+  },
+  "remaining_blockers": [
+    "Signed-in owner and cross-account private adult media checks still require production account auth/session evidence or an explicit waiver.",
+    "HAVN-14 final closure still requires accepted Claude-owned HAVN-58 Astra evidence."
+  ]
+}

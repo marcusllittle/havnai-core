@@ -1,0 +1,66 @@
+{
+  "schema": "havn-42-live-public-isolation-evidence.v1",
+  "generated_at": "2026-09-27T07:54:05.708307Z",
+  "host": "marcus@192.168.4.105",
+  "checkout": "/home/marcus/Downloads/source-code/havnai-core",
+  "coordinator_version": "cc69a24",
+  "known_adult_publication_id": "music-e73798ff0a7bf6a1305a4ba1",
+  "probes": {
+    "discover": {
+      "path": "/music/discover?limit=10",
+      "status": 200,
+      "total": 2,
+      "publication_ids": [
+        "music-46ffa38fc769af7de2959c23",
+        "music-b75b57d9b580e3b0b36bb84a"
+      ],
+      "known_adult_id_present": false
+    },
+    "search_sexual": {
+      "path": "/music/discover?search=sexual&limit=10",
+      "status": 200,
+      "total": 0,
+      "publication_ids": []
+    },
+    "adult_audio": {
+      "path": "/music/publications/music-e73798ff0a7bf6a1305a4ba1/audio",
+      "status": 404,
+      "body": {
+        "error": "publication_not_found"
+      },
+      "cache_control": "no-store",
+      "pragma": "no-cache",
+      "expires": "0"
+    },
+    "adult_cover": {
+      "path": "/music/publications/music-e73798ff0a7bf6a1305a4ba1/cover",
+      "status": 404,
+      "body": {
+        "error": "publication_not_found"
+      },
+      "cache_control": "no-store",
+      "pragma": "no-cache",
+      "expires": "0"
+    },
+    "gallery": {
+      "path": "/gallery/browse?limit=20",
+      "status": 200,
+      "total": 0,
+      "listing_count": 0
+    }
+  },
+  "summary": {
+    "passed_anonymous_public_surface_probe": true,
+    "adult_absent_from_discover": true,
+    "sexual_search_empty": true,
+    "adult_direct_media_denied": true,
+    "direct_media_denials_non_cacheable": true,
+    "public_gallery_empty": true
+  },
+  "remaining_gaps": [
+    "signed-in private adult visibility and cross-account denial require account tokens",
+    "public cache/social preview evidence or waiver is still required",
+    "production log-leak review evidence or waiver is still required",
+    "Claude-owned HAVN-58 Astra evidence must be accepted before HAVN-14 closes"
+  ]
+}

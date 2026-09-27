@@ -135,7 +135,7 @@ ticket.
 | Legacy gallery cleanup, if regression returns | `python3 scripts/legacy_gallery_cleanup.py --db-path <coordinator-db> --json` then `python3 scripts/legacy_gallery_cleanup.py --db-path <coordinator-db> --apply --include-job-ids --json` | Audit/apply packet schema `havn-72-legacy-gallery-cleanup.v1`; active legacy rows delisted, deleted rows `0`, account-owned rows excluded; public smoke passes after cleanup |
 | Content isolation | `python3 scripts/content_isolation_evidence.py ...` | `passed=true`; public denial, no-store cache, owner access, cross-account denial, and social-preview denial proven |
 | Mixed-model stability | `python3 scripts/mixed_model_worker_drill.py --preflight --account-token <redacted>` then private 30-job drill | funded account preflight passes; private `/v2/jobs` drill completes without public rough outputs |
-| Monitoring | `HAVNAI_ADMIN_TOKEN=<redacted> python3 scripts/collect_observability_evidence.py --alert-waiver <waiver.json>` when no webhook is configured | `passed=true`; required metrics present; alert dry-run schema returned; webhook delivery sent or dated alert waiver accepted |
+| Monitoring | `HAVNAI_ADMIN_TOKEN=<redacted> python3 scripts/collect_observability_evidence.py --alert-waiver <waiver.json> --join-token-waiver <waiver.json>` when no webhook or join token is configured | `passed=true`; required metrics present; alert dry-run schema returned; webhook delivery sent or dated alert waiver accepted; `SERVER_JOIN_TOKEN` configured or dated join-token waiver accepted |
 | Backup/restore | `python3 scripts/backup_evidence_audit.py --backup-manifest <manifest.json> --restore-report <report.json> --media-report <media-report.json> --remote-waiver <waiver.json> --json` | `passed=true`; local backup plus remote retention evidence or dated waiver containing `approved_by`, `expires_at`, `mitigation`, and `reason` |
 | Restart recovery | `python3 scripts/account_restart_recovery_drill.py --preflight --account-token <redacted> --restart-command '<approved command>'` then live drill | preflight passes; accepted job survives restart without duplicate charge, receipt, or payout |
 | Rollback | `python3 scripts/rollback_evidence_audit.py --coordinator-packet <packet.json> --web-packet <packet.json> --node-waiver <waiver.json> --json` | `passed=true`; coordinator, web, and node rollback evidence or dated waivers present |
@@ -150,7 +150,8 @@ ticket.
   accepted before final closure.
 - HAVN-17 cannot close until remote backup/offsite waiver, accepted-work
   restart recovery, rollback evidence or waiver, alert webhook receipt or
-  waiver, and final operations owner checklist are recorded.
+  waiver, join-token configuration proof or waiver, and final operations owner
+  checklist are recorded.
 - Claude-owned Astra game-quality gates and client integration evidence are
   outside Codex's platform branch and remain release blockers.
 

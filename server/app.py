@@ -8092,6 +8092,128 @@ def astra_spend() -> Any:
     return jsonify(result), status_code
 
 
+def _astra_account_principal(account_id: str) -> str:
+    return f"account:{account_id}"
+
+
+def _astra_credit_units(amount: float) -> int:
+    units = int(round(float(amount) * account_ledger.SCALE))
+    if units <= 0:
+        raise account_ledger.LedgerError("invalid_credit_units")
+    return units
+
+
+def _account_astra_result(result: Dict[str, Any], status_code: int) -> Any:
+    if result.get("ok"):
+        return jsonify({**result, "account_id": g.account_id}), status_code
+    error = str(result.get("reason") or result.get("error") or "astra_request_failed")
+    return jsonify({"error": error, **result, "account_id": g.account_id}), status_code
+
+
+@app.route("/v2/account/astra/run/start", methods=["POST"])
+def account_astra_run_start() -> Any:
+    error = _require_studio_user()
+    if error:
+        return error
+    if not rate_limit(f"account-astra-run-start:{g.account_id}", limit=20):
+        return jsonify({"error": "rate_limited"}), 429
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict) or set(data) - {"map_id"}:
+        return jsonify({"error": "invalid_payload"}), 422
+    map_id = str(data.get("map_id", "")).strip() or "unknown"
+    result = astra_rewards.start_run(_astra_account_principal(g.account_id), map_id)
+    return jsonify({**result, "account_id": g.account_id})
+
+
+@app.route("/v2/account/astra/reward", methods=["POST"])
+def account_astra_reward() -> Any:
+    error = _require_studio_user()
+    if error:
+        return error
+    if not rate_limit(f"account-astra-reward:{g.account_id}", limit=10):
+        return jsonify({"error": "rate_limited"}), 429
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict) or set(data) - {"score", "grade", "duration_s", "map_id", "run_token"}:
+        return jsonify({"error": "invalid_payload"}), 422
+    principal = _astra_account_principal(g.account_id)
+
+    def deposit_to_account(_principal: str, amount: float, reason: str) -> float:
+        match = re.search(r"\((?:run )?(astra_[^)]+)\)", reason)
+        run_id = match.group(1) if match else f"astra_reward:{hashlib.sha256(reason.encode()).hexdigest()[:16]}"
+        account_ledger.astra_reward_in_transaction(
+            get_db(), g.account_id, _astra_credit_units(amount), run_id=run_id
+        )
+        return account_ledger.balance(get_db(), g.account_id)["settled_units"] / account_ledger.SCALE
+
+    result = astra_rewards.submit_reward(
+        wallet=principal,
+        score=_coerce_int(data.get("score"), 0),
+        grade=str(data.get("grade", "")).strip() or "?",
+        duration_s=_clamp_float(data.get("duration_s"), 0.0, 0.0, 7200.0),
+        map_id=str(data.get("map_id", "")).strip() or "unknown",
+        deposit_fn=deposit_to_account,
+        ledger_fn=lambda *args, **kwargs: None,
+        run_token=str(data.get("run_token", "")).strip(),
+    )
+    status_code = 200 if result.get("ok") else 422
+    return _account_astra_result(result, status_code)
+
+
+@app.route("/v2/account/astra/spend", methods=["POST"])
+def account_astra_spend() -> Any:
+    error = _require_studio_user()
+    if error:
+        return error
+    if not ASTRA_SPEND_ENABLED:
+        return jsonify({"error": "astra spend disabled"}), 503
+    if not rate_limit(f"account-astra-spend:{g.account_id}", limit=20):
+        return jsonify({"error": "rate_limited"}), 429
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict) or set(data) - {"action", "idempotency_key"}:
+        return jsonify({"error": "invalid_payload"}), 422
+    action = str(data.get("action", "")).strip()
+    idempotency_key = str(data.get("idempotency_key") or request.headers.get("Idempotency-Key") or "").strip()
+    if not action or not idempotency_key:
+        return jsonify({"error": "invalid_payload"}), 422
+
+    def deduct_from_account(_principal: str, amount: float, _reason: str) -> Tuple[bool, float]:
+        try:
+            conn = get_db()
+            conn.execute("BEGIN IMMEDIATE")
+            with conn:
+                account_ledger.astra_spend_in_transaction(
+                    conn, g.account_id, _astra_credit_units(amount),
+                    action=action, idempotency_key=idempotency_key,
+                )
+        except account_ledger.LedgerError as exc:
+            if str(exc) == "insufficient_credits":
+                return False, account_ledger.balance(get_db(), g.account_id)["available_units"] / account_ledger.SCALE
+            raise
+        balance = account_ledger.balance(get_db(), g.account_id)
+        return True, balance["available_units"] / account_ledger.SCALE
+
+    result = astra_rewards.process_spend(
+        wallet=_astra_account_principal(g.account_id),
+        action=action,
+        deduct_fn=deduct_from_account,
+        ledger_fn=lambda *args, **kwargs: None,
+        idempotency_key=idempotency_key,
+        balance_fn=lambda _principal: account_ledger.balance(get_db(), g.account_id)["available_units"] / account_ledger.SCALE,
+    )
+    status_code = 200 if result.get("ok") else 422
+    return _account_astra_result(result, status_code)
+
+
+@app.route("/v2/account/astra/stats", methods=["GET"])
+def account_astra_stats() -> Any:
+    error = _require_studio_user()
+    if error:
+        return error
+    stats = astra_rewards.get_player_stats(_astra_account_principal(g.account_id))
+    stats.pop("wallet", None)
+    return jsonify({**stats, "account_id": g.account_id, "balance": account_ledger.balance(get_db(), g.account_id)})
+
+
 @app.route("/astra/leaderboard", methods=["GET"])
 def astra_leaderboard() -> Any:
     """Top Astra players by best score."""

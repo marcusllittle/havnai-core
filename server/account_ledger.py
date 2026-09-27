@@ -145,6 +145,24 @@ def fund_in_transaction(conn: sqlite3.Connection, account_id: str, units: int, *
                   settled_delta=units, reserved_delta=0, actor=actor, reason="paid_credit_purchase")
 
 
+def astra_reward_in_transaction(conn: sqlite3.Connection, account_id: str, units: int, *,
+                                run_id: str) -> dict:
+    _units(units)
+    return _apply(conn, account_id, operation="reward", key=f"astra_reward:{run_id}",
+                  resource=run_id, settled_delta=units, reserved_delta=0,
+                  actor=account_id, reason="astra_game_reward")
+
+
+def astra_spend_in_transaction(conn: sqlite3.Connection, account_id: str, units: int, *,
+                               action: str, idempotency_key: str) -> dict:
+    _units(units)
+    if not idempotency_key:
+        raise LedgerError("missing_idempotency_key")
+    return _apply(conn, account_id, operation="spend", key=f"astra_spend:{idempotency_key}",
+                  resource=action, settled_delta=-units, reserved_delta=0,
+                  actor=account_id, reason="astra_game_spend", require_available=units)
+
+
 def import_legacy_in_transaction(conn: sqlite3.Connection, account_id: str, wallet: str,
                                  units: int, *, migration_id: str) -> dict:
     """Move the exact available legacy balance into the account, with paired audit.

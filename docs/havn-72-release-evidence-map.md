@@ -41,7 +41,7 @@ waived with mitigation.
 | Public content quality | Codex platform for web/core; Claude for Astra assets | Web public creator audit passed across desktop/iPhone/Android; trust/privacy surfaces deployed; production dashboard/gallery invite copy removed. | Claude-owned Astra asset/game-quality gates remain open. |
 | Invite/access-code launch removal | Codex platform | Core invite gating is opt-in; web direct route scan found no invite/access-code/operator-key copy on checked public routes. | No longer a platform launch blocker. |
 | Security, trust/privacy, licensing, accessibility/device | Marcus/Codex/Claude by issue | HAVN-68 In Review with live public audit; HAVN-70 trust/privacy surfaces deployed; HAVN-69 bundle/static asset audit merged in PR #137 with 46 production assets scanned and no findings; HAVN-71 licensing inventory merged in PR #138 with model/web/Astra provenance gaps recorded. | Do not silently waive unresolved security/licensing/accessibility gates. HAVN-69 still needs credentialed/session/upload/rate-limit/dependency evidence or exceptions; HAVN-71 still needs model and public-asset clearance evidence or waivers. |
-| Launch-day owner, stop/rollback triggers, known limitations, post-launch smoke | Marcus final owner; Codex supplies operations material | `docs/production-operations-runbook.md` evidence template and rollback/restore procedures | Final owner roster, support owner, monitoring links, stop triggers, and smoke checklist not yet signed off |
+| Launch-day owner, stop/rollback triggers, known limitations, post-launch smoke | Marcus final owner; Codex supplies operations material | `docs/production-operations-runbook.md` evidence template and rollback/restore procedures; `docs/havn-72-launch-day-checklist.md` signoff template | Final owner roster, support owner, monitoring links, stop triggers, and smoke checklist not yet signed off |
 
 ## Public Launch Smoke Command
 
@@ -133,7 +133,7 @@ Marcus should not record GO until this document points to dated evidence for:
 - Astra client/game-quality acceptance from Claude-owned tickets;
 - security, trust/privacy, licensing, accessibility/device acceptance;
 - launch-day operator, support owner, stop triggers, rollback owner, and
-  post-launch smoke route list.
+  post-launch smoke route list in `docs/havn-72-launch-day-checklist.md`.
 
 Any CONDITIONAL GO must list the exception owner, expiration date, mitigation,
 disabled public surface if applicable, and rollback trigger.

@@ -24,13 +24,13 @@ explicit owner-approved waiver with mitigation and expiration.
 | Gate | Evidence or waiver |
 | --- | --- |
 | Release commits and deployments | |
-| Public smoke report | `docs/evidence/havn-72-public-smoke-20260927T115706Z.json` |
-| Public/private content isolation | NO-GO until exact stale Cloudflare URL rechecks private/not-found without query params |
+| Public smoke report | Latest tracked smoke with forbidden URL: `docs/evidence/havn-14-forbidden-url-smoke-tracked-20260927T124624Z.json`; currently `ok=false` until stale URL is purged/expired |
+| Public/private content isolation | NO-GO until exact stale Cloudflare URL rechecks private/not-found without query params and forbidden-URL smoke returns `ok=true` |
 | Stripe funding and idempotent replay | HAVN-25 Done evidence |
 | Signed-in funded account generation | |
-| Mixed-model worker drill | |
+| Mixed-model worker drill | Missing-token blocker: `docs/evidence/havn-12-mixed-model-preflight-missing-token-tracked-20260927T125005Z.json`; final drill still required |
 | Backup/restore audit | `docs/evidence/havn-44-backup-audit-20260927T115159Z.json` |
-| Observability/alert evidence | `docs/evidence/havn-43-observability-20260927T114343Z.json`; attach real webhook receipt or approved `--alert-waiver` packet |
+| Observability/alert evidence | `docs/evidence/havn-43-observability-join-token-tracked-20260927T124055Z.json`; attach real webhook receipt / join-token config proof or approved waivers |
 | Rollback audit | `docs/evidence/havn-46-rollback-audit-20260927T121000Z.json`; web/node rollback packet or waiver still required |
 | Security and abuse controls | |
 | Licensing/provenance | |

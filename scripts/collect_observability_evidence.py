@@ -84,16 +84,32 @@ def _metric_value(metrics: str, name: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _load_alert_waiver(path: str | None) -> tuple[dict[str, Any] | None, list[str]]:
+    if not path:
+        return None, []
+    failures = []
+    with open(path, "r", encoding="utf-8") as handle:
+        waiver = json.load(handle)
+    if not isinstance(waiver, dict):
+        return None, ["alert waiver must be a JSON object"]
+    for field in ("approved_by", "expires_at", "mitigation", "reason"):
+        if not waiver.get(field):
+            failures.append(f"alert waiver missing {field}")
+    return waiver, failures
+
+
 def collect_observability(
     *,
     api_base: str,
     admin_token: str | None,
     timeout: float,
+    alert_waiver: str | None = None,
     json_fetcher: JsonFetcher = fetch_json,
     text_fetcher: TextFetcher = fetch_text,
 ) -> dict[str, Any]:
     generated_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     checks: list[Check] = []
+    waiver, waiver_failures = _load_alert_waiver(alert_waiver)
 
     health_status, health = json_fetcher(_url(api_base, "/health"), "GET", timeout, None, None)
     checks.append(Check(
@@ -177,7 +193,19 @@ def collect_observability(
     failures = [check for check in checks if not check.ok]
     blockers = []
     if delivery_blocked:
-        blockers.append("HAVNAI_ALERT_WEBHOOK is not configured; external alert delivery receipt still required or waived.")
+        if waiver and not waiver_failures:
+            checks.append(Check(
+                "alert_delivery_waiver",
+                True,
+                "approved_by={} expires_at={} mitigation_present=True".format(
+                    waiver.get("approved_by"),
+                    waiver.get("expires_at"),
+                ),
+            ))
+        else:
+            blockers.append("HAVNAI_ALERT_WEBHOOK is not configured; external alert delivery receipt still required or waived.")
+    if waiver_failures:
+        blockers.extend(waiver_failures)
     if not admin_token:
         blockers.append("HAVNAI_ADMIN_TOKEN was not provided; admin-gated evidence is expected to fail.")
 
@@ -203,6 +231,12 @@ def collect_observability(
                 "reason": delivery_reason,
                 "destination_host_present": bool(send_delivery.get("destination_host")),
             },
+            "alert_waiver": {
+                "provided": bool(waiver),
+                "approved_by": waiver.get("approved_by") if waiver else None,
+                "expires_at": waiver.get("expires_at") if waiver else None,
+                "mitigation_present": bool(waiver and waiver.get("mitigation")),
+            },
         },
         "blockers": blockers,
     }
@@ -213,6 +247,8 @@ def main() -> int:
     parser.add_argument("--api-base", default="https://api.joinhavn.io")
     parser.add_argument("--admin-token", default=os.getenv("HAVNAI_ADMIN_TOKEN", ""))
     parser.add_argument("--timeout", type=float, default=10.0)
+    parser.add_argument("--alert-waiver", help="Optional dated waiver JSON when HAVNAI_ALERT_WEBHOOK is not configured.")
+    parser.add_argument("--json", action="store_true", help="Accepted for consistency; output is always JSON.")
     parser.add_argument("--output", help="Optional JSON report path.")
     args = parser.parse_args()
 
@@ -220,6 +256,7 @@ def main() -> int:
         api_base=args.api_base,
         admin_token=args.admin_token.strip() or None,
         timeout=args.timeout,
+        alert_waiver=args.alert_waiver,
     )
     text = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:

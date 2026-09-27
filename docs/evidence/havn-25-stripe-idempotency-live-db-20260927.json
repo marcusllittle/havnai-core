@@ -1,0 +1,77 @@
+{
+  "schema": "havn-25-stripe-idempotency-live-db-evidence.v1",
+  "generated_at": "2026-09-27T07:58:50.475731Z",
+  "host": "marcus@192.168.4.105",
+  "checkout": "/home/marcus/Downloads/source-code/havnai-core",
+  "coordinator_version": "cc69a24",
+  "events": [
+    {
+      "event_id": "evt_1UK1SqFWBrjj49xVbrD9L4AS",
+      "event_type": "checkout.session.completed",
+      "payment_id": "pi_3UK1SoFWBrjj49xV2mNDH44x",
+      "count": 1
+    }
+  ],
+  "purchases": [
+    {
+      "id": "pur_889711ac10204534b7620d69a7b2ea4d",
+      "request_key": "9e7d99b5-e9d8-401d-b522-0f2473a1e6b3",
+      "payment_id": "pi_3UK1SoFWBrjj49xV2mNDH44x",
+      "state": "paid",
+      "units": 50000,
+      "payment_purchase_count": 1
+    }
+  ],
+  "receipts": [
+    {
+      "purchase_id": "pur_889711ac10204534b7620d69a7b2ea4d",
+      "payment_id": "pi_3UK1SoFWBrjj49xV2mNDH44x",
+      "account_hash": "sha256:af3e8d457aab",
+      "units": 50000,
+      "count": 1
+    }
+  ],
+  "ledger_rows": [
+    {
+      "operation": "capture",
+      "operation_key": "finish:job-0d8eb2a3de2e41dd889111831d5043ba",
+      "resource_id": "job-0d8eb2a3de2e41dd889111831d5043ba",
+      "settled_delta": -1000,
+      "reserved_delta": -1000,
+      "count": 1
+    },
+    {
+      "operation": "fund",
+      "operation_key": "fund:pi_3UK1SoFWBrjj49xV2mNDH44x",
+      "resource_id": "pi_3UK1SoFWBrjj49xV2mNDH44x",
+      "settled_delta": 50000,
+      "reserved_delta": 0,
+      "count": 1
+    },
+    {
+      "operation": "reserve",
+      "operation_key": "reserve:job-0d8eb2a3de2e41dd889111831d5043ba",
+      "resource_id": "job-0d8eb2a3de2e41dd889111831d5043ba",
+      "settled_delta": 0,
+      "reserved_delta": 1000,
+      "count": 1
+    }
+  ],
+  "balances": [
+    {
+      "account_hash": "sha256:af3e8d457aab",
+      "settled_units": 49000,
+      "reserved_units": 0
+    }
+  ],
+  "summary": {
+    "event_count": 1,
+    "paid_purchase_count": 1,
+    "receipt_count": 1,
+    "fund_ledger_count": 1,
+    "duplicate_event_ids": [],
+    "duplicate_receipt_keys": [],
+    "duplicate_funding_ledger_keys": [],
+    "automatic_funding_without_duplicate_credit": true
+  }
+}

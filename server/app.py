@@ -5581,6 +5581,14 @@ def _studio_job_access(job: Dict[str, Any]) -> bool:
     return not job.get("owner_account_id")
 
 
+def _static_artifact_not_found() -> Response:
+    response = jsonify({"error": "artifact_not_found"})
+    response.status_code = 404
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Vary"] = "Authorization"
+    return response
+
+
 @app.before_request
 def protect_account_content_from_legacy_routes() -> Optional[Any]:
     # Legacy public job/result/receipt handlers must not become account-data bypasses.
@@ -5595,7 +5603,7 @@ def protect_account_content_from_legacy_routes() -> Optional[Any]:
         path = str(resolved_path)
         outputs_root = OUTPUTS_DIR.resolve()
         if filename.startswith("outputs/private-chains/") or resolved_path.is_relative_to((OUTPUTS_DIR / "private-chains").resolve()):
-            return jsonify({"error": "artifact_not_found"}), 404
+            return _static_artifact_not_found()
         conn = get_db()
         # Also protect the brief interval between a worker writing a file and
         # inserting its artifact row, using the durable job ID in the path.
@@ -5603,7 +5611,7 @@ def protect_account_content_from_legacy_routes() -> Optional[Any]:
             AND instr(?, id)>0 LIMIT 1""", (filename,)).fetchone()
         private_asset = conn.execute("SELECT 1 FROM assets WHERE path=? AND owner_account_id IS NOT NULL", (path,)).fetchone()
         if private_job or private_asset:
-            return jsonify({"error": "artifact_not_found"}), 404
+            return _static_artifact_not_found()
         if resolved_path.is_relative_to(outputs_root):
             adult_artifact = conn.execute(
                 "SELECT 1 FROM artifacts WHERE path=? AND COALESCE(adult_content,0)!=0 LIMIT 1",
@@ -5615,11 +5623,11 @@ def protect_account_content_from_legacy_routes() -> Optional[Any]:
                 JOIN artifacts a ON a.id=p.audio_artifact_id
                 WHERE a.path=? AND COALESCE(p.adult_content,0)!=0 LIMIT 1""", (path,)).fetchone()
             if adult_artifact or adult_job or adult_publication:
-                return jsonify({"error": "artifact_not_found"}), 404
+                return _static_artifact_not_found()
             if filename.startswith("outputs/artifacts/") and not conn.execute(
                 "SELECT 1 FROM artifacts WHERE path=? LIMIT 1", (path,)
             ).fetchone():
-                return jsonify({"error": "artifact_not_found"}), 404
+                return _static_artifact_not_found()
     return None
 
 

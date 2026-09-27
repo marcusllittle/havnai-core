@@ -133,7 +133,23 @@ def test_preflight_requires_account_token() -> None:
     )
 
     assert completed.returncode != 0
-    assert "requires --account-token" in completed.stderr
+    decoder = json.JSONDecoder()
+    reports = []
+    index = 0
+    while index < len(completed.stdout):
+        while index < len(completed.stdout) and completed.stdout[index].isspace():
+            index += 1
+        if index >= len(completed.stdout):
+            break
+        payload, index = decoder.raw_decode(completed.stdout, index)
+        reports.append(payload)
+    preflight = reports[-1]
+    assert preflight["schema"] == "havn-47-mixed-model-worker-drill-preflight.v1"
+    assert preflight["account_token_present"] is False
+    assert preflight["passed"] is False
+    assert preflight["blockers"] == [
+        "HAVNAI_DRILL_ACCOUNT_TOKEN is not configured; funded private account token required."
+    ]
 
 
 def test_preflight_reports_funded_account_without_printing_token(monkeypatch, capsys) -> None:

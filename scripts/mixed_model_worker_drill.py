@@ -285,7 +285,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.preflight:
         account_token = args.account_token.strip()
         if not account_token:
-            raise SystemExit("--preflight requires --account-token or HAVNAI_DRILL_ACCOUNT_TOKEN")
+            print(json.dumps({
+                "schema": "havn-47-mixed-model-worker-drill-preflight.v1",
+                "generated_at": _utc_now(),
+                "base_url": _clean_base_url(args.base_url),
+                "account_token_present": False,
+                "account_id_present": False,
+                "available_units": None,
+                "reserved_units": None,
+                "passed": False,
+                "blockers": ["HAVNAI_DRILL_ACCOUNT_TOKEN is not configured; funded private account token required."],
+            }, indent=2, sort_keys=True))
+            return 2
         client = CoordinatorClient(args.base_url, node_token=args.node_token, submit_retry_seconds=args.submit_retry_seconds,
                                    account_token=account_token)
         preflight = client.account_preflight()

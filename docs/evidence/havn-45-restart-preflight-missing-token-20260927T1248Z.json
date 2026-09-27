@@ -1,0 +1,39 @@
+{
+  "account_token_hash": "",
+  "base_url": "https://api.joinhavn.io",
+  "db_checks_configured": false,
+  "execute": false,
+  "generated_at": "2026-09-27T12:48:27.020380Z",
+  "has_account_token": false,
+  "idempotency_key": "havn-45-1790513307",
+  "job_type": "image",
+  "model": "juggernautxl_ragnarokby",
+  "payload": {
+    "guidance": 6.5,
+    "height": 1216,
+    "model": "juggernautxl_ragnarokby",
+    "seed": 45049,
+    "sfw_mode": true,
+    "steps": 32,
+    "type": "image",
+    "width": 832
+  },
+  "restart_command_configured": true,
+  "schema": "havn-45-account-restart-recovery-drill-plan.v1"
+}
+{
+  "account_id_hash": null,
+  "account_present": false,
+  "account_status": null,
+  "account_token_present": false,
+  "available_units": null,
+  "base_url": "https://api.joinhavn.io",
+  "blockers": [
+    "HAVNAI_DRILL_ACCOUNT_TOKEN is not configured; funded private account token required."
+  ],
+  "generated_at": "2026-09-27T12:48:27.020896Z",
+  "passed": false,
+  "reserved_units": null,
+  "restart_command_configured": true,
+  "schema": "havn-45-account-restart-recovery-drill-preflight.v1"
+}

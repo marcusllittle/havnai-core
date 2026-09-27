@@ -1,0 +1,36 @@
+{
+  "generated_at": "2026-09-27T07:23:24.208739Z",
+  "local": {
+    "backup_dir_hash": "sha256:4cdf5689d1a2",
+    "count": 2,
+    "newest": {
+      "name": "ledger-20260927T060004Z.sqlite.gz",
+      "path_hash": "sha256:22eb56d88646",
+      "size_bytes": 43958099,
+      "timestamp": "2026-09-27T06:00:04Z"
+    },
+    "retention_policy_count": 7
+  },
+  "missing": [
+    "remote_backup_evidence_or_waiver"
+  ],
+  "passed": false,
+  "remote": {
+    "access_group_present": false,
+    "alert_owner_present": false,
+    "configured": false,
+    "count": 0,
+    "encryption_owner_present": false,
+    "newest": null,
+    "restore_read_test_present": false,
+    "retention_days": 0,
+    "target_hash": "",
+    "verified": false
+  },
+  "schema": "havn-44-backup-evidence-audit.v1",
+  "waiver": {
+    "expires": "",
+    "id": "",
+    "present": false
+  }
+}

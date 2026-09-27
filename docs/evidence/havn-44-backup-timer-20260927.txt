@@ -1,0 +1,47 @@
+# havnai-backup unit evidence
+# /etc/systemd/system/havnai-backup.service
+[Unit]
+Description=Back up HavnAI coordinator database
+After=havnai-coordinator.service
+
+[Service]
+Type=oneshot
+User=marcus
+Group=marcus
+EnvironmentFile=/etc/havnai/backup.env
+ExecStart=/home/marcus/Downloads/source-code/havnai-core/.venv/bin/python /home/marcus/Downloads/source-code/havnai-core/scripts/backup_coordinator.py
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/marcus/havnai-backups/coordinator /home/marcus/Downloads/source-code/havnai-core/db
+
+# /etc/systemd/system/havnai-backup.timer
+[Unit]
+Description=Nightly HavnAI coordinator backup
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+RandomizedDelaySec=15min
+Persistent=true
+Unit=havnai-backup.service
+
+[Install]
+WantedBy=timers.target
+
+# timer status
+NextElapseUSecRealtime=Sun 2026-09-27 03:27:08 EDT
+LastTriggerUSec=
+ActiveState=active
+UnitFileState=enabled
+
+# recent backup journal
+Sep 26 17:15:03 havnai-core systemd[1]: Starting havnai-backup.service - Back up HavnAI coordinator database...
+Sep 26 17:15:08 havnai-core python[152637]: /home/marcus/havnai-backups/coordinator/ledger-20260926T211504Z.sqlite.gz
+Sep 26 17:15:08 havnai-core systemd[1]: havnai-backup.service: Deactivated successfully.
+Sep 26 17:15:08 havnai-core systemd[1]: Finished havnai-backup.service - Back up HavnAI coordinator database.
+Sep 26 17:15:08 havnai-core systemd[1]: havnai-backup.service: Consumed 3.327s CPU time.
+Sep 27 02:00:04 havnai-core systemd[1]: Starting havnai-backup.service - Back up HavnAI coordinator database...
+Sep 27 02:00:09 havnai-core python[218023]: /home/marcus/havnai-backups/coordinator/ledger-20260927T060004Z.sqlite.gz
+Sep 27 02:00:09 havnai-core systemd[1]: havnai-backup.service: Deactivated successfully.
+Sep 27 02:00:09 havnai-core systemd[1]: Finished havnai-backup.service - Back up HavnAI coordinator database.
+Sep 27 02:00:09 havnai-core systemd[1]: havnai-backup.service: Consumed 3.335s CPU time.

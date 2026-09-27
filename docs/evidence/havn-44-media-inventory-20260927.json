@@ -1,0 +1,127 @@
+{
+  "generated_at": "2026-09-27T07:23:30Z",
+  "notes": [
+    "Paths are hashed; this inventory proves local media scope only.",
+    "No offsite media backup or restore-read proof is included."
+  ],
+  "rows": [
+    {
+      "exists": true,
+      "file_count": 10,
+      "newest": [
+        {
+          "mtime": "2026-09-19T21:26:45Z",
+          "path_hash": "b1e64bc7af59",
+          "size": 2880813
+        },
+        {
+          "mtime": "2026-09-19T00:11:19Z",
+          "path_hash": "06006a0b9a5f",
+          "size": 2880813
+        },
+        {
+          "mtime": "2026-09-18T23:45:13Z",
+          "path_hash": "2d3f90674fa2",
+          "size": 160941
+        },
+        {
+          "mtime": "2026-09-18T23:23:05Z",
+          "path_hash": "705fcc2a4861",
+          "size": 2880813
+        },
+        {
+          "mtime": "2026-09-09T17:48:40Z",
+          "path_hash": "43d88c20e4c6",
+          "size": 960813
+        },
+        {
+          "mtime": "2026-09-09T17:48:40Z",
+          "path_hash": "9c0a7f09c039",
+          "size": 1489430
+        },
+        {
+          "mtime": "2026-07-28T19:25:48Z",
+          "path_hash": "78ffb408dcef",
+          "size": 1339989
+        },
+        {
+          "mtime": "2026-07-28T14:35:09Z",
+          "path_hash": "e59d475c0af3",
+          "size": 1305794
+        },
+        {
+          "mtime": "2026-07-28T14:06:10Z",
+          "path_hash": "47862e295790",
+          "size": 1305794
+        },
+        {
+          "mtime": "2026-07-28T13:24:14Z",
+          "path_hash": "ca76679646b9",
+          "size": 1032327
+        }
+      ],
+      "root": "static/assets",
+      "total_bytes": 16237527
+    },
+    {
+      "exists": true,
+      "file_count": 3338,
+      "newest": [
+        {
+          "mtime": "2026-09-26T19:50:13Z",
+          "path_hash": "4e585496c1a9",
+          "size": 2386
+        },
+        {
+          "mtime": "2026-09-26T19:50:12Z",
+          "path_hash": "ec9d961d077e",
+          "size": 1666673
+        },
+        {
+          "mtime": "2026-09-23T23:49:20Z",
+          "path_hash": "f72bd5170693",
+          "size": 2964
+        },
+        {
+          "mtime": "2026-09-23T23:49:20Z",
+          "path_hash": "67808d1cfe14",
+          "size": 36068279
+        },
+        {
+          "mtime": "2026-09-23T23:46:49Z",
+          "path_hash": "7c61e4f0e826",
+          "size": 2965
+        },
+        {
+          "mtime": "2026-09-23T23:46:48Z",
+          "path_hash": "659a9ae2a8cf",
+          "size": 33527140
+        },
+        {
+          "mtime": "2026-09-23T23:06:59Z",
+          "path_hash": "54cb77dc3c6c",
+          "size": 1775
+        },
+        {
+          "mtime": "2026-09-23T23:06:59Z",
+          "path_hash": "d2f8be5b7b84",
+          "size": 1543363
+        },
+        {
+          "mtime": "2026-09-23T22:59:24Z",
+          "path_hash": "80b85ee3cfee",
+          "size": 1792
+        },
+        {
+          "mtime": "2026-09-23T22:59:24Z",
+          "path_hash": "90f8336c3cc7",
+          "size": 1412287
+        }
+      ],
+      "root": "static/outputs",
+      "total_bytes": 4958931848
+    }
+  ],
+  "schema": "havn-44-media-inventory.v1",
+  "source": "coordinator-static-tree"
+}

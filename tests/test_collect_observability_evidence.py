@@ -104,3 +104,22 @@ def test_collect_passes_token_backed_metrics_and_alerts_without_printing_token(m
     assert "secret-token" not in stdout
     assert report["metrics"]["required_metrics_missing"] == []
     assert report["alert_dry_run"]["schema_version"] == "network-alert-dry-run.v1"
+
+
+def test_live_metric_aliases_satisfy_required_observability_groups() -> None:
+    summary = evidence.summarize_metrics({
+        "status": 200,
+        "content_type": "text/plain",
+        "body": "\n".join([
+            'havnai_jobs{state="cancelled"} 69',
+            "havnai_nodes_online 1",
+            "havnai_output_disk_free_bytes 100000",
+        ]),
+    })
+
+    assert summary["required_metrics_missing"] == []
+    assert summary["required_metric_groups"] == {
+        "jobs": "havnai_jobs",
+        "workers_online": "havnai_nodes_online",
+        "disk_free": "havnai_output_disk_free_bytes",
+    }

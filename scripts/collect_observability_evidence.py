@@ -20,11 +20,11 @@ from urllib import parse, request
 from urllib.error import HTTPError, URLError
 
 
-REQUIRED_METRICS = [
-    "havnai_jobs_total",
-    "havnai_worker_online",
-    "havnai_output_disk_free_bytes",
-]
+REQUIRED_METRIC_GROUPS = {
+    "jobs": ["havnai_jobs_total", "havnai_jobs"],
+    "workers_online": ["havnai_worker_online", "havnai_nodes_online"],
+    "disk_free": ["havnai_output_disk_free_bytes"],
+}
 
 
 def utc_now() -> str:
@@ -74,12 +74,16 @@ def parse_json(result: dict[str, Any]) -> Any:
 
 def summarize_metrics(result: dict[str, Any]) -> dict[str, Any]:
     body = str(result.get("body") or "")
-    present = [name for name in REQUIRED_METRICS if name in body]
+    matched = {
+        group: next((name for name in names if name in body), "")
+        for group, names in REQUIRED_METRIC_GROUPS.items()
+    }
     return {
         "status": result.get("status"),
         "content_type": result.get("content_type"),
-        "required_metrics_present": present,
-        "required_metrics_missing": [name for name in REQUIRED_METRICS if name not in present],
+        "required_metric_groups": matched,
+        "required_metrics_present": [name for name in matched.values() if name],
+        "required_metrics_missing": [group for group, name in matched.items() if not name],
         "line_count": len([line for line in body.splitlines() if line and not line.startswith("#")]),
     }
 

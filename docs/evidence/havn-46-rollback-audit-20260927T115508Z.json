@@ -1,0 +1,18 @@
+{
+  "blockers": [
+    "coordinator rollback packet or dated waiver is missing",
+    "web rollback packet or dated waiver is missing",
+    "node rollback packet or dated waiver is missing"
+  ],
+  "checks": [],
+  "passed": false,
+  "schema_version": "havnai.rollback-evidence-audit.v1",
+  "summary": {
+    "missing_surfaces": [
+      "coordinator",
+      "web",
+      "node"
+    ],
+    "surfaces_checked": []
+  }
+}

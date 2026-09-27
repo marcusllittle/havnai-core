@@ -1,0 +1,60 @@
+{
+  "schema_version": "havnai.node-rollback-blocker.v1",
+  "captured_at": "2026-09-27T12:25:41Z",
+  "environment": "production coordinator",
+  "operator": "Codex",
+  "source": {
+    "coordinator_host": "marcus@192.168.4.105",
+    "coordinator_checkout": "/home/marcus/Downloads/source-code/havnai-core",
+    "control_plane_generated_at": "2026-09-27T12:25:41.472229Z"
+  },
+  "coordinator_control_plane": {
+    "health_status": "healthy",
+    "nodes": {
+      "tracked": 1,
+      "online": 1,
+      "ready": 1,
+      "busy": 0,
+      "offline": 0
+    },
+    "queue": {
+      "queued": 0,
+      "running": 0,
+      "oldest_wait_seconds": 0
+    },
+    "claims": {
+      "active_count": 0,
+      "at_risk": 0
+    },
+    "alerts": []
+  },
+  "coordinator_node_metadata": {
+    "node_id": "DESKTOP-A26E195",
+    "node_runtime_paths_reported": [
+      "/home/marcus/.havnai/models/creator"
+    ],
+    "capability_evidence": [
+      "node metadata includes model files under /home/marcus/.havnai/models/creator",
+      "control plane reports one ready online node",
+      "queue and active claims were idle at capture time"
+    ]
+  },
+  "reachability_check": {
+    "tailscale_status": "Logged out",
+    "authoritative_node_host": null,
+    "authoritative_node_service": null,
+    "authoritative_node_runtime_current_path": null,
+    "authoritative_node_runtime_previous_path": null
+  },
+  "rollback_not_attempted": true,
+  "reason_not_attempted": "Coordinator evidence proves node heartbeat/capability presence but does not prove node host login, service name, install path, current/previous runtime paths, or an approved rollback command. Tailscale on the coordinator is logged out, so node reachability cannot be established through that channel.",
+  "required_to_clear": [
+    "authoritative node host or access path",
+    "node service name or start/stop command",
+    "current runtime path",
+    "previous runtime path or rollback artifact",
+    "operator-approved rollback command or approved dated waiver",
+    "post-rollback heartbeat and model capability evidence"
+  ],
+  "outcome": "Node rollback remains unexercised and should remain a HAVN-46/HAVN-17/HAVN-72 blocker until the required node access/runtime evidence is supplied or a dated waiver is approved."
+}

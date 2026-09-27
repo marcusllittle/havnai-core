@@ -29,8 +29,8 @@ def _json_fetcher(*, delivery=None):
                 "schema_version": "network-alert-dry-run.v1",
                 "delivery": {"mode": "dry_run", "sent": False},
                 "rules": [
-                    {"name": "model_load_failures", "matched": True},
-                    {"name": "gpu_vram_exhaustion", "matched": True},
+                    {"code": "model_load_failures", "matched": True},
+                    {"code": "gpu_vram_exhaustion", "matched": True},
                 ],
             }
         if url.endswith("/v1/network/alerts/send"):

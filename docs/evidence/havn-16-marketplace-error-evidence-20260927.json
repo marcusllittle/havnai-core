@@ -50,5 +50,10 @@
     "Retry after funding still needs live browser evidence.",
     "Do not claim HAVN-16 Done until HAVN-38 live/browser acceptance is attached or explicitly waived."
   ],
-  "scope_note": "This is core/API evidence for HAVN-16/HAVN-36/HAVN-38. It does not replace web browser acceptance."
+  "scope_note": "This is core/API evidence for HAVN-16/HAVN-36/HAVN-38. It does not replace web browser acceptance.",
+  "ported_to_main": {
+    "branch": "codex/havn-15-16-evidence-main",
+    "base_branch": "origin/main",
+    "note": "Evidence artifact was ported from the old commercial branch onto current main for HAVN-72 launch evidence hygiene; original test results and remaining acceptance gaps are preserved."
+  }
 }

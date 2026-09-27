@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import sys
 import tempfile
 import time
@@ -33,6 +34,7 @@ class MusicDiscoverApiTests(unittest.TestCase):
         self._orig_static_dir = app_module.STATIC_DIR
         self._orig_nodes = copy.deepcopy(app_module.NODES)
         self._orig_tasks = copy.deepcopy(app_module.TASKS)
+        self._orig_legacy_gallery_public = os.environ.get("HAVNAI_LEGACY_GALLERY_PUBLIC_ENABLED")
 
         self._tmpdir = tempfile.TemporaryDirectory()
         app_module.DB_PATH = Path(self._tmpdir.name) / "ledger.db"
@@ -64,6 +66,10 @@ class MusicDiscoverApiTests(unittest.TestCase):
         app_module.NODES.update(self._orig_nodes)
         app_module.TASKS.clear()
         app_module.TASKS.update(self._orig_tasks)
+        if self._orig_legacy_gallery_public is None:
+            os.environ.pop("HAVNAI_LEGACY_GALLERY_PUBLIC_ENABLED", None)
+        else:
+            os.environ["HAVNAI_LEGACY_GALLERY_PUBLIC_ENABLED"] = self._orig_legacy_gallery_public
         self._tmpdir.cleanup()
 
     def _insert_completed_music_job(self, job_id: str = "job-1", artifact_id: str = "artifact-1") -> None:
@@ -97,6 +103,19 @@ class MusicDiscoverApiTests(unittest.TestCase):
             (artifact_id, job_id, str(artifact_path), json.dumps({"duration": 61, "bpm": 122, "keyscale": "C Minor"}), now),
         )
         conn.commit()
+
+    def _insert_completed_image_job(self, job_id: str) -> None:
+        now = time.time()
+        app_module.get_db().execute(
+            """
+            INSERT INTO jobs (
+                id, wallet, model, data, task_type, weight, status, timestamp,
+                completed_at, stage, progress, updated_at
+            ) VALUES (?, ?, 'fixture-model', '{}', 'IMAGE_GEN', 1, 'succeeded', ?, ?, 'succeeded', 100, ?)
+            """,
+            (job_id, self.wallet, now, now, now),
+        )
+        app_module.get_db().commit()
 
     def _signed_payload(
         self,
@@ -169,6 +188,9 @@ class MusicDiscoverApiTests(unittest.TestCase):
             self.assertEqual(response.get_json()["error"], "malformed_payload")
 
     def test_gallery_signature_is_bound_to_listing_and_delisting_requires_it(self) -> None:
+        os.environ["HAVNAI_LEGACY_GALLERY_PUBLIC_ENABLED"] = "1"
+        self._insert_completed_image_job("gallery-a")
+        self._insert_completed_image_job("gallery-b")
         first = app_module.gallery.create_listing("gallery-a", self.wallet, "First", 2.0)
         second = app_module.gallery.create_listing("gallery-b", self.wallet, "Second", 2.0)
         signed = self._signed_payload("gallery_purchase", wallet=self.other_wallet,

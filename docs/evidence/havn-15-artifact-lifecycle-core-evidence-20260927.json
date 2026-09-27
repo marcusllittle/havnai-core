@@ -1,0 +1,59 @@
+{
+  "schema": "havn-15-artifact-lifecycle-core-evidence.v1",
+  "generated_at": "2026-09-27T08:38:00Z",
+  "source": {
+    "repository": "marcusllittle/havnai-core",
+    "branch": "codex/havn-15-artifact-lifecycle-evidence",
+    "base_branch": "feat/havn-11-commercial-accounts",
+    "base_commit": "cc69a241f4205aa6053c9c77c67fa60fb5e9e6dc"
+  },
+  "policy_contract": {
+    "remove_from_collection": "reversible hide/remove-from-view action; not deletion",
+    "delete_artifact": "owner-only soft delete with 30-day recovery window",
+    "public_effect": "deleted artifacts disappear from normal user/public surfaces immediately",
+    "restore_effect": "restored artifacts return to private visibility only",
+    "purge_effect": "physical storage reclamation only after purge eligibility and absent holds",
+    "immutable_records": [
+      "payment receipts",
+      "credit ledger rows",
+      "purchase/sale/import records",
+      "audit events",
+      "anchored/on-chain references"
+    ]
+  },
+  "verification": {
+    "command": "/tmp/havn-11-ledger-venv/bin/python -m pytest tests/test_artifact_lifecycle.py tests/test_artifact_lifecycle_races.py tests/test_artifact_lifecycle_video.py tests/test_artifact_purge_operations.py tests/test_artifact_recovery_pages.py tests/test_artifact_lifecycle_marketplace.py -q",
+    "result": "43 passed in 37.76s"
+  },
+  "covered_behaviors": [
+    "owner-only delete and restore",
+    "anonymous and cross-account lifecycle denial",
+    "active-job deletion rejection",
+    "repeated delete/restore idempotency",
+    "30-day recovery window behavior",
+    "deleted public music/audio/video/frame/read routes blocked",
+    "restore returns private visibility only",
+    "playlist unlinking with likes and plays retained",
+    "marketplace delist on delete with ledger retention",
+    "purge deadline, legal/support holds, audit, and storage safety",
+    "unsafe/shared storage purge rejection",
+    "partial purge retry behavior",
+    "failed oldest purge does not starve other eligible items",
+    "concurrent delete/hold/purge serialization",
+    "deleted recovery pagination/cursor ownership/bounds",
+    "video continuation and cached-frame blocking after deletion"
+  ],
+  "web_ui_evidence_reused_from_jira": {
+    "source": "HAVN-28 current evidence",
+    "command": "npm test -- components/__tests__/AccountCollection.test.tsx components/__tests__/AccountMusic.test.tsx components/__tests__/DeletedCreations.test.tsx",
+    "result": "3 passed test files, 19 passed tests, duration 12.72s",
+    "note": "This artifact does not rerun web tests because it is a core evidence PR; web/UI evidence remains in havnai-web and Jira."
+  },
+  "remaining_live_acceptance": [
+    "Production/prod-like signed-in browser evidence must prove delete/restore UI works across refresh.",
+    "Deleted content must not resurrect in library, public, marketplace, playlist, media, or download surfaces after refresh/reopen.",
+    "Live storage/media purge behavior remains unproven outside focused tests.",
+    "HAVN-15/HAVN-27/HAVN-28 should remain open or In Review until live/browser evidence is attached or explicitly waived."
+  ],
+  "scope_note": "This is current backend/API/storage evidence only. It does not close HAVN-15 without live browser acceptance or an approved waiver."
+}

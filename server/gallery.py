@@ -17,6 +17,7 @@ import credits
 import account_marketplace
 
 import json
+import os
 import sqlite3
 import time
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
@@ -37,6 +38,16 @@ def _account_owned_job(conn: sqlite3.Connection, job_id: str) -> bool:
     return bool(conn.execute(
         "SELECT 1 FROM jobs WHERE id=? AND owner_account_id IS NOT NULL", (job_id,)
     ).fetchone())
+
+
+def legacy_public_gallery_enabled() -> bool:
+    """Return whether pre-account wallet gallery routes are publicly browseable."""
+    return os.getenv("HAVNAI_LEGACY_GALLERY_PUBLIC_ENABLED", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def init_gallery_tables(conn: sqlite3.Connection) -> None:
@@ -181,6 +192,8 @@ def create_listing(
 
 def get_listing(listing_id: int) -> Optional[Dict[str, Any]]:
     """Get a listing by ID."""
+    if not legacy_public_gallery_enabled():
+        return None
     conn = get_db()
     row = conn.execute(
         "SELECT * FROM gallery_listings WHERE id = ?", (listing_id,)
@@ -194,6 +207,8 @@ def get_listing(listing_id: int) -> Optional[Dict[str, Any]]:
 
 def delist(listing_id: int, owner_wallet: str) -> bool:
     """Remove a listing (current owner only).  Returns True if delisted."""
+    if not legacy_public_gallery_enabled():
+        return False
     conn = get_db()
     cur = conn.execute(
         """UPDATE gallery_listings SET listed = 0, updated_at = ?
@@ -218,6 +233,9 @@ def browse_gallery(
     offset: int = 0,
 ) -> Dict[str, Any]:
     """Browse listed (unsold) gallery items."""
+    if not legacy_public_gallery_enabled():
+        limit_int = max(1, min(limit, 200))
+        return {"listings": [], "total": 0, "limit": limit_int, "offset": max(0, offset), "sort": sort}
     conn = get_db()
     conditions = ["listed = 1", "sold = 0", """NOT EXISTS
         (SELECT 1 FROM jobs WHERE jobs.id=gallery_listings.job_id
@@ -274,6 +292,8 @@ def browse_gallery(
 def purchase_listing(listing_id: int, buyer_wallet: str, *, settle_credits: bool = False,
                      expected_price: Optional[float] = None) -> Dict[str, Any]:
     """Transfer ownership, sale history and (for API purchases) credits atomically."""
+    if not legacy_public_gallery_enabled():
+        return {"ok": False, "error": "listing_not_found"}
     conn = get_db()
     buyer_wallet = buyer_wallet.strip().lower()
     conn.execute("BEGIN IMMEDIATE")
@@ -333,6 +353,8 @@ def relist_owned_asset(
     This creates a new listing row.  The caller must be the current owner
     (verified via the most recent sold listing or ownership log).
     """
+    if not legacy_public_gallery_enabled():
+        return {"ok": False, "error": "not_owner"}
     conn = get_db()
 
     if _account_owned_job(conn, job_id):
@@ -398,6 +420,8 @@ def relist_owned_asset(
 
 def get_owned_assets(wallet: str) -> List[Dict[str, Any]]:
     """Get all assets currently owned by a wallet (most recent listing per job_id)."""
+    if not legacy_public_gallery_enabled():
+        return []
     conn = get_db()
     rows = conn.execute(
         """SELECT gl.* FROM gallery_listings gl WHERE LOWER(gl.owner_wallet)=?
@@ -410,6 +434,8 @@ def get_owned_assets(wallet: str) -> List[Dict[str, Any]]:
 
 def get_ownership_history(job_id: str) -> List[Dict[str, Any]]:
     """Get the full ownership provenance chain for an asset."""
+    if not legacy_public_gallery_enabled():
+        return []
     conn = get_db()
     if _account_owned_job(conn, job_id):
         return []
@@ -426,6 +452,8 @@ def get_ownership_history(job_id: str) -> List[Dict[str, Any]]:
 
 def get_asset_owner(job_id: str) -> Optional[str]:
     """Return the current owner wallet for a given job_id, or None if never listed."""
+    if not legacy_public_gallery_enabled():
+        return None
     conn = get_db()
     if _account_owned_job(conn, job_id):
         return None
@@ -444,6 +472,8 @@ def get_asset_owner(job_id: str) -> Optional[str]:
 
 def seller_listings(wallet: str, include_sold: bool = False) -> List[Dict[str, Any]]:
     """Get all listings for a seller."""
+    if not legacy_public_gallery_enabled():
+        return []
     conn = get_db()
     if include_sold:
         rows = conn.execute(
@@ -460,6 +490,8 @@ def seller_listings(wallet: str, include_sold: bool = False) -> List[Dict[str, A
 
 def buyer_purchases(wallet: str) -> List[Dict[str, Any]]:
     """Get purchase history for a buyer."""
+    if not legacy_public_gallery_enabled():
+        return []
     conn = get_db()
     rows = conn.execute(
         """

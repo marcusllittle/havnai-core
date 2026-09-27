@@ -1,0 +1,70 @@
+{
+  "schema": "havn-50-worker-model-metrics-evidence.v1",
+  "generated_at": "2026-09-27T07:49:49.236711Z",
+  "live_coordinator": {
+    "host": "marcus@192.168.4.105",
+    "checkout": "/home/marcus/Downloads/source-code/havnai-core",
+    "version": "cc69a24",
+    "base_url": "http://127.0.0.1:5001"
+  },
+  "metrics_probe": {
+    "endpoint": "/metrics",
+    "status": 200,
+    "required_core_metrics_present": [
+      "havnai_jobs",
+      "havnai_nodes_online",
+      "havnai_output_disk_free_bytes"
+    ],
+    "observed_core_samples": [
+      "havnai_jobs{state=\"cancelled\"} 69",
+      "havnai_jobs{state=\"failed\"} 26",
+      "havnai_jobs{state=\"succeeded\"} 371",
+      "havnai_jobs{state=\"succeeded\"} 1637",
+      "havnai_nodes_online 1",
+      "havnai_output_disk_free_bytes 27617828864"
+    ],
+    "worker_model_metric_families_configured": [
+      "havnai_worker_model_failures",
+      "havnai_worker_model_unhealthy"
+    ],
+    "worker_model_samples_observed": false,
+    "worker_model_sample_gap": "No real worker model-load failure or unhealthy samples were present in live /metrics during this probe. Focused tests cover export format; a mixed-model failure/unhealthy live sample still requires production or production-like drill evidence."
+  },
+  "alert_dry_run": {
+    "endpoint": "/v1/network/alerts/dry-run?inject=model_load_failures,gpu_vram_exhaustion",
+    "schema_version": "network-alert-dry-run.v1",
+    "status": "critical",
+    "matched_count": 3,
+    "delivery": {
+      "mode": "dry_run",
+      "sent": false
+    },
+    "matched_rules": [
+      {
+        "code": "job_error_spike",
+        "severity": "warning",
+        "dry_run_injected": false
+      },
+      {
+        "code": "model_load_failures",
+        "severity": "warning",
+        "dry_run_injected": true
+      },
+      {
+        "code": "gpu_vram_exhaustion",
+        "severity": "critical",
+        "dry_run_injected": true
+      }
+    ],
+    "not_matched_rules": [
+      "offline_workers",
+      "no_online_creators",
+      "stuck_queue",
+      "claims_at_risk",
+      "worker_model_unhealthy",
+      "public_ingress"
+    ]
+  },
+  "acceptance_status": "partial",
+  "remaining_gap": "HAVN-50 still needs production or production-like mixed-model run metrics/dashboard/API output showing real worker model-load failure/unhealthy samples, or an explicit waiver. This evidence proves the live metric endpoint, core metrics, and injected model-load/GPU alert dry-run paths only."
+}

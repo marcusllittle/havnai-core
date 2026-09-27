@@ -1,0 +1,41 @@
+{
+  "blockers": [
+    "remote/offsite backup is not configured and no dated waiver was supplied"
+  ],
+  "checks": [
+    {
+      "failures": [],
+      "name": "backup_manifest",
+      "ok": true,
+      "path": "db/backups/restart-20260927T113154Z.manifest.json"
+    },
+    {
+      "failures": [],
+      "name": "restore_report",
+      "ok": true,
+      "path": "db/restore-drills/restore-20260927T103332Z/report.json"
+    },
+    {
+      "failures": [],
+      "name": "media_report",
+      "ok": true,
+      "path": "db/restore-drills/media-20260927T105029Z/report.json"
+    },
+    {
+      "failures": [],
+      "name": "media_report",
+      "ok": true,
+      "path": "db/restore-drills/media-output-20260927T105106Z/report.json"
+    }
+  ],
+  "passed": false,
+  "schema_version": "havnai.backup-evidence-audit.v1",
+  "summary": {
+    "backup_created_at": "20260927T113154Z",
+    "backup_size_bytes": 43958097,
+    "local_retention_count": 6,
+    "media_report_count": 2,
+    "remote_configured": false,
+    "restore_verified": true
+  }
+}

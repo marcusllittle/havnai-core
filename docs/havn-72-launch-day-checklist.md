@@ -25,7 +25,7 @@ explicit owner-approved waiver with mitigation and expiration.
 | --- | --- |
 | Release commits and deployments | |
 | Public smoke report | Latest tracked smoke with forbidden URL: `docs/evidence/havn-14-forbidden-url-smoke-resolved-20260927T130022Z.json`; historical failing stale-cache report: `docs/evidence/havn-14-forbidden-url-smoke-tracked-20260927T124624Z.json` |
-| Public/private content isolation | Platform forbidden-URL smoke now returns `ok=true`; HAVN-14 final closure still waits for accepted Claude-owned HAVN-58 Astra evidence |
+| Public/private content isolation | Platform forbidden-URL smoke now returns `ok=true`; anonymous public leakage probe: `docs/evidence/havn-42-public-leakage-probe-20260927T1305Z.json`; HAVN-14 final closure still waits for accepted Claude-owned HAVN-58 Astra evidence |
 | Stripe funding and idempotent replay | HAVN-25 Done evidence |
 | Signed-in funded account generation | |
 | Mixed-model worker drill | Missing-token blocker: `docs/evidence/havn-12-mixed-model-preflight-missing-token-tracked-20260927T125005Z.json`; final drill still required |

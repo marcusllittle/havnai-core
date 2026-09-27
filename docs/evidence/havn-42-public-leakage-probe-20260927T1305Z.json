@@ -1,0 +1,240 @@
+{
+  "api_base": "https://api.joinhavn.io",
+  "blocked_publication_id": "music-e73798ff0a7bf6a1305a4ba1",
+  "checked_at": "2026-09-27T13:04:56Z",
+  "checks": [
+    {
+      "detail": {
+        "blocked_publication_present": false,
+        "body_size_bytes": 1461,
+        "cache_control": "",
+        "cf_cache_status": "",
+        "content_type": "application/json",
+        "elapsed_ms": 162,
+        "leaked_terms": [],
+        "publication_count": 2,
+        "status": 200,
+        "url": "https://api.joinhavn.io/music/discover",
+        "x_vercel_cache": ""
+      },
+      "name": "music_discover_excludes_blocked_publication",
+      "ok": true
+    },
+    {
+      "detail": {
+        "blocked_publication_present": false,
+        "body_size_bytes": 68,
+        "cache_control": "",
+        "cf_cache_status": "",
+        "content_type": "application/json",
+        "elapsed_ms": 127,
+        "leaked_terms": [],
+        "publication_count": 0,
+        "status": 200,
+        "url": "https://api.joinhavn.io/music/discover?search=sexual",
+        "x_vercel_cache": ""
+      },
+      "name": "music_search_excludes_sensitive_query",
+      "ok": true
+    },
+    {
+      "detail": {
+        "body_size_bytes": 94,
+        "cache_control": "",
+        "cf_cache_status": "",
+        "content_type": "application/json",
+        "elapsed_ms": 119,
+        "leaked_terms": [],
+        "status": 405,
+        "url": "https://api.joinhavn.io/music/publications/music-e73798ff0a7bf6a1305a4ba1",
+        "x_vercel_cache": ""
+      },
+      "name": "api_denies_music_publications_music-e73798ff0a7bf6a1305a4ba1",
+      "ok": true
+    },
+    {
+      "detail": {
+        "body_size_bytes": 34,
+        "cache_control": "",
+        "cf_cache_status": "",
+        "content_type": "application/json",
+        "elapsed_ms": 131,
+        "leaked_terms": [],
+        "status": 404,
+        "url": "https://api.joinhavn.io/music/publications/music-e73798ff0a7bf6a1305a4ba1/audio",
+        "x_vercel_cache": ""
+      },
+      "name": "api_denies_music_publications_music-e73798ff0a7bf6a1305a4ba1_audio",
+      "ok": true
+    },
+    {
+      "detail": {
+        "body_size_bytes": 157,
+        "cache_control": "",
+        "cf_cache_status": "",
+        "content_type": "application/json",
+        "elapsed_ms": 115,
+        "leaked_terms": [],
+        "status": 404,
+        "url": "https://api.joinhavn.io/music/publications/music-e73798ff0a7bf6a1305a4ba1/cover",
+        "x_vercel_cache": ""
+      },
+      "name": "api_denies_music_publications_music-e73798ff0a7bf6a1305a4ba1_cover",
+      "ok": true
+    },
+    {
+      "detail": {
+        "body_size_bytes": 40,
+        "cache_control": "",
+        "cf_cache_status": "",
+        "content_type": "application/json",
+        "elapsed_ms": 123,
+        "leaked_terms": [],
+        "status": 401,
+        "url": "https://api.joinhavn.io/logs",
+        "x_vercel_cache": ""
+      },
+      "name": "public_logs_denied_without_leakage",
+      "ok": true
+    },
+    {
+      "detail": {
+        "body_size_bytes": 32457,
+        "cache_control": "public, max-age=0, must-revalidate",
+        "cf_cache_status": "",
+        "content_type": "text/html; charset=utf-8",
+        "elapsed_ms": 188,
+        "leaked_terms": [],
+        "leaked_terms_in_html": [],
+        "leaked_terms_in_meta": [],
+        "meta_count": 19,
+        "status": 200,
+        "title_present": true,
+        "url": "https://joinhavn.io/",
+        "x_vercel_cache": ""
+      },
+      "name": "web_home_no_restricted_meta_or_body",
+      "ok": true
+    },
+    {
+      "detail": {
+        "body_size_bytes": 8358,
+        "cache_control": "public, max-age=0, must-revalidate",
+        "cf_cache_status": "",
+        "content_type": "text/html; charset=utf-8",
+        "elapsed_ms": 147,
+        "leaked_terms": [],
+        "leaked_terms_in_html": [],
+        "leaked_terms_in_meta": [],
+        "meta_count": 3,
+        "status": 200,
+        "title_present": true,
+        "url": "https://joinhavn.io/music",
+        "x_vercel_cache": ""
+      },
+      "name": "web_music_no_restricted_meta_or_body",
+      "ok": true
+    },
+    {
+      "detail": {
+        "body_size_bytes": 9468,
+        "cache_control": "public, max-age=0, must-revalidate",
+        "cf_cache_status": "",
+        "content_type": "text/html; charset=utf-8",
+        "elapsed_ms": 167,
+        "leaked_terms": [],
+        "leaked_terms_in_html": [],
+        "leaked_terms_in_meta": [],
+        "meta_count": 16,
+        "status": 200,
+        "title_present": true,
+        "url": "https://joinhavn.io/create",
+        "x_vercel_cache": ""
+      },
+      "name": "web_create_no_restricted_meta_or_body",
+      "ok": true
+    },
+    {
+      "detail": {
+        "body_size_bytes": 10845,
+        "cache_control": "public, max-age=0, must-revalidate",
+        "cf_cache_status": "",
+        "content_type": "text/html; charset=utf-8",
+        "elapsed_ms": 366,
+        "leaked_terms": [],
+        "leaked_terms_in_html": [],
+        "leaked_terms_in_meta": [],
+        "meta_count": 19,
+        "status": 200,
+        "title_present": true,
+        "url": "https://joinhavn.io/pricing",
+        "x_vercel_cache": ""
+      },
+      "name": "web_pricing_no_restricted_meta_or_body",
+      "ok": true
+    },
+    {
+      "detail": {
+        "body_size_bytes": 18566,
+        "cache_control": "public, max-age=0, must-revalidate",
+        "cf_cache_status": "",
+        "content_type": "text/html; charset=utf-8",
+        "elapsed_ms": 142,
+        "leaked_terms": [],
+        "leaked_terms_in_html": [],
+        "leaked_terms_in_meta": [],
+        "meta_count": 19,
+        "status": 200,
+        "title_present": true,
+        "url": "https://joinhavn.io/support",
+        "x_vercel_cache": ""
+      },
+      "name": "web_support_no_restricted_meta_or_body",
+      "ok": true
+    },
+    {
+      "detail": {
+        "body_size_bytes": 14792,
+        "cache_control": "public, max-age=0, must-revalidate",
+        "cf_cache_status": "",
+        "content_type": "text/html; charset=utf-8",
+        "elapsed_ms": 152,
+        "leaked_terms": [],
+        "leaked_terms_in_html": [],
+        "leaked_terms_in_meta": [],
+        "meta_count": 19,
+        "status": 200,
+        "title_present": true,
+        "url": "https://joinhavn.io/terms/credits-v1",
+        "x_vercel_cache": ""
+      },
+      "name": "web_terms/credits-v1_no_restricted_meta_or_body",
+      "ok": true
+    },
+    {
+      "detail": {
+        "body_size_bytes": 15177,
+        "cache_control": "public, max-age=0, must-revalidate",
+        "cf_cache_status": "",
+        "content_type": "text/html; charset=utf-8",
+        "elapsed_ms": 209,
+        "leaked_terms": [],
+        "leaked_terms_in_html": [],
+        "leaked_terms_in_meta": [],
+        "meta_count": 19,
+        "status": 200,
+        "title_present": true,
+        "url": "https://joinhavn.io/refunds/credits-v1",
+        "x_vercel_cache": ""
+      },
+      "name": "web_refunds/credits-v1_no_restricted_meta_or_body",
+      "ok": true
+    }
+  ],
+  "ok": true,
+  "schema_version": "havnai.public-content-isolation-probe.v1",
+  "sensitive_terms_checked": [
+    "sexual"
+  ],
+  "web_base": "https://joinhavn.io"
+}

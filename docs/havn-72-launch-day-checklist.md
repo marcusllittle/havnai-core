@@ -30,7 +30,7 @@ explicit owner-approved waiver with mitigation and expiration.
 | Signed-in funded account generation | |
 | Mixed-model worker drill | Missing-token blocker: `docs/evidence/havn-12-mixed-model-preflight-missing-token-tracked-20260927T125005Z.json`; final drill still required |
 | Backup/restore audit | `docs/evidence/havn-44-backup-audit-20260927T115159Z.json`; fresh production backup/restart packet `docs/evidence/havn-17-prod-backup-restart-20260927T125611Z.json` |
-| Observability/alert evidence | `docs/evidence/havn-43-observability-admin-token-20260927T1313Z.json`; metrics scrape and alert dry-run pass with admin token; attach real webhook receipt / join-token config proof or approved waivers |
+| Observability/alert evidence | `docs/evidence/havn-43-observability-join-token-configured-20260927T1321Z.json`; metrics scrape, alert dry-run, and join-token config pass; attach real webhook receipt or approved waiver |
 | Rollback audit | `docs/evidence/havn-46-rollback-audit-20260927T121000Z.json`; web/node rollback packet or waiver still required |
 | Security and abuse controls | |
 | Licensing/provenance | |

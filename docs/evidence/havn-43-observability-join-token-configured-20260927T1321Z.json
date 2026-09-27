@@ -1,0 +1,76 @@
+{
+  "api_base": "http://127.0.0.1:5001",
+  "blockers": [
+    "HAVNAI_ALERT_WEBHOOK is not configured; external alert delivery receipt still required or waived."
+  ],
+  "checks": [
+    {
+      "detail": "required=True configured=True waiver_provided=False",
+      "name": "join_token_config",
+      "ok": true
+    },
+    {
+      "detail": "status=200 version=8bf40e2",
+      "name": "public_health",
+      "ok": true
+    },
+    {
+      "detail": "status=200 health=healthy ready=1 queued=0 running=0",
+      "name": "control_plane",
+      "ok": true
+    },
+    {
+      "detail": "status=200 missing=[]",
+      "name": "metrics_scrape",
+      "ok": true
+    },
+    {
+      "detail": "status=200 delivery_mode=dry_run matched=['job_error_spike', 'model_load_failures', 'gpu_vram_exhaustion']",
+      "name": "alert_dry_run",
+      "ok": true
+    },
+    {
+      "detail": "status=200 configured=False sent=False reason=alert_webhook_not_configured",
+      "name": "alert_delivery",
+      "ok": true
+    }
+  ],
+  "generated_at": "2026-09-27T13:21:15Z",
+  "passed": false,
+  "schema_version": "havnai.observability-evidence.v1",
+  "summary": {
+    "alert_delivery": {
+      "configured": false,
+      "destination_host_present": false,
+      "reason": "alert_webhook_not_configured",
+      "sent": false
+    },
+    "alert_dry_run_matched": [
+      "job_error_spike",
+      "model_load_failures",
+      "gpu_vram_exhaustion"
+    ],
+    "alert_waiver": {
+      "approved_by": null,
+      "expires_at": null,
+      "mitigation_present": false,
+      "provided": false
+    },
+    "control_plane_status": "healthy",
+    "health_status": "ok",
+    "health_version": "8bf40e2",
+    "join_token_config": {
+      "configured": true,
+      "required": true,
+      "waiver_approved_by": null,
+      "waiver_expires_at": null,
+      "waiver_mitigation_present": false,
+      "waiver_provided": false
+    },
+    "metrics_status": 200,
+    "nodes_ready": 1,
+    "output_disk_free_bytes": "26970443776",
+    "queue_queued": 0,
+    "queue_running": 0
+  }
+}

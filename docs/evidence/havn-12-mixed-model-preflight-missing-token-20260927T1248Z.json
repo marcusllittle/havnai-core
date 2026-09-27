@@ -1,0 +1,41 @@
+{
+  "base_url": "https://api.joinhavn.io",
+  "execute": false,
+  "generated_at": "2026-09-27T12:48:26.919971Z",
+  "job_count": 3,
+  "mix": [
+    {
+      "account_type": "image",
+      "index": 1,
+      "model": "juggernautxl_ragnarokby",
+      "task_type": "IMAGE_GEN"
+    },
+    {
+      "account_type": "text_to_video",
+      "index": 2,
+      "model": "ltx23_wangp",
+      "task_type": "LTX_VIDEO_GEN"
+    },
+    {
+      "account_type": "text_to_music",
+      "index": 3,
+      "model": "ace_step_1_5_turbo",
+      "task_type": "MUSIC_GEN"
+    }
+  ],
+  "private_account_jobs": false,
+  "schema": "havn-47-mixed-model-worker-drill-plan.v1"
+}
+{
+  "account_id_present": false,
+  "account_token_present": false,
+  "available_units": null,
+  "base_url": "https://api.joinhavn.io",
+  "blockers": [
+    "HAVNAI_DRILL_ACCOUNT_TOKEN is not configured; funded private account token required."
+  ],
+  "generated_at": "2026-09-27T12:48:26.920032Z",
+  "passed": false,
+  "reserved_units": null,
+  "schema": "havn-47-mixed-model-worker-drill-preflight.v1"
+}

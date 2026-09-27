@@ -246,7 +246,21 @@ def main(argv: list[str] | None = None) -> int:
     print(json.dumps(summarize(args, payload), indent=2, sort_keys=True), flush=True)
     if args.preflight:
         if not args.account_token.strip():
-            raise SystemExit("--preflight requires --account-token or HAVNAI_DRILL_ACCOUNT_TOKEN")
+            print(json.dumps({
+                "schema": "havn-45-account-restart-recovery-drill-preflight.v1",
+                "generated_at": utc_now(),
+                "base_url": clean_base_url(args.base_url),
+                "account_token_present": False,
+                "account_id_hash": None,
+                "account_present": False,
+                "account_status": None,
+                "available_units": None,
+                "reserved_units": None,
+                "restart_command_configured": bool(args.restart_command.strip()),
+                "passed": False,
+                "blockers": ["HAVNAI_DRILL_ACCOUNT_TOKEN is not configured; funded private account token required."],
+            }, indent=2, sort_keys=True), flush=True)
+            return 2
         client = AccountClient(args.base_url, args.account_token)
         preflight = client.account_preflight()
         account = preflight.get("account") or {}

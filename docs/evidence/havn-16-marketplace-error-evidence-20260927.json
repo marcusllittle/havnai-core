@@ -1,0 +1,54 @@
+{
+  "schema": "havn-16-marketplace-error-evidence.v1",
+  "generated_at": "2026-09-27T08:27:00Z",
+  "source": {
+    "repository": "marcusllittle/havnai-core",
+    "branch": "codex/havn-16-marketplace-error-evidence",
+    "base_branch": "feat/havn-11-commercial-accounts",
+    "base_commit": "cc69a241f4205aa6053c9c77c67fa60fb5e9e6dc"
+  },
+  "launch_path": {
+    "surface": "account marketplace",
+    "routes": [
+      "POST /v2/marketplace/listings",
+      "POST /v2/marketplace/listings/{listing_id}/purchase",
+      "GET /v2/marketplace/listings",
+      "GET /v2/marketplace/listings/{listing_id}",
+      "GET /v2/marketplace/listings/{listing_id}/preview",
+      "DELETE /v2/marketplace/listings/{listing_id}"
+    ],
+    "auth": "Authorization: Bearer <HavnAI account session token>"
+  },
+  "verification": [
+    {
+      "command": "/tmp/havn-11-ledger-venv/bin/python -m pytest tests/test_account_marketplace.py tests/test_legacy_gallery_guard.py -q",
+      "result": "33 passed in 70.84s",
+      "covered_behaviors": [
+        "insufficient account balance returns product-safe insufficient_credits with required and available units",
+        "failed insufficient-credit purchase does not transfer ownership",
+        "failed insufficient-credit purchase does not create a sale or duplicate ledger debit",
+        "listing, purchase, relist, delist, preview, search, pagination, and receipts stay account-scoped",
+        "adult/account-private outputs are not exposed on public marketplace surfaces",
+        "legacy wallet gallery public browse/purchase surface remains disabled by default"
+      ]
+    },
+    {
+      "command": "/tmp/havn-11-ledger-venv/bin/python -m pytest tests/test_account_marketplace.py tests/test_settlement_convergence.py::SettlementConvergenceTests::test_gallery_purchase_insufficient_credits_preserves_ownership -q",
+      "result": "31 passed, 1 failed",
+      "interpretation": "The failing case targets the legacy wallet /gallery/listings/{id}/purchase route. That route now returns 404 before purchase because legacy_public_gallery_enabled() is false by default for launch. This is not the account marketplace launch path and should not be fixed by reopening the legacy public gallery without an explicit product decision."
+    }
+  ],
+  "legacy_gallery_policy": {
+    "function": "server/gallery.py::legacy_public_gallery_enabled",
+    "default": false,
+    "enable_env": "HAVNAI_LEGACY_GALLERY_PUBLIC_ENABLED",
+    "guard_test": "tests/test_legacy_gallery_guard.py",
+    "launch_interpretation": "The old wallet-gallery route that produced the original nonce-not-found symptom is not public by default. Launch marketplace acceptance should use account-owned /v2/marketplace routes."
+  },
+  "remaining_live_acceptance": [
+    "Browser evidence for account marketplace insufficient-balance UI must still prove product-safe copy and Buy Credits recovery link in the production/prod-like signed-in flow.",
+    "Retry after funding still needs live browser evidence.",
+    "Do not claim HAVN-16 Done until HAVN-38 live/browser acceptance is attached or explicitly waived."
+  ],
+  "scope_note": "This is core/API evidence for HAVN-16/HAVN-36/HAVN-38. It does not replace web browser acceptance."
+}

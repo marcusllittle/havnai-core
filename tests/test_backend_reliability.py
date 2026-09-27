@@ -275,6 +275,55 @@ class BackendReliabilityTests(unittest.TestCase):
         self.assertTrue(rules["gpu_vram_exhaustion"]["matched"])
         self.assertTrue(rules["gpu_vram_exhaustion"]["dry_run_injected"])
 
+    def test_network_alert_send_requires_admin_and_webhook_configuration(self):
+        api.ADMIN_API_TOKEN = "test-admin-token"
+        unauthorized = self.client.post("/v1/network/alerts/send", json={"inject": ["model_load_failures"]})
+        self.assertEqual(unauthorized.status_code, 401)
+
+        with patch.dict(api.os.environ, {}, clear=True):
+            response = self.client.post(
+                "/v1/network/alerts/send",
+                headers={"X-HavnAI-Token": "test-admin-token"},
+                json={"inject": ["model_load_failures"]},
+            )
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        payload = response.get_json()
+        self.assertEqual(payload["schema_version"], "network-alert-send.v1")
+        self.assertEqual(payload["delivery"]["mode"], "webhook")
+        self.assertFalse(payload["delivery"]["sent"])
+        self.assertFalse(payload["delivery"]["configured"])
+        self.assertEqual(payload["delivery"]["reason"], "alert_webhook_not_configured")
+
+    def test_network_alert_send_posts_matched_alerts_without_echoing_secret_url(self):
+        api.ADMIN_API_TOKEN = "test-admin-token"
+
+        class Sent:
+            status_code = 202
+
+            def raise_for_status(self):
+                return None
+
+        with patch.dict(api.os.environ, {"HAVNAI_ALERT_WEBHOOK": "https://hooks.example.test/havn"}, clear=True):
+            with patch.object(api.requests, "post", return_value=Sent()) as post:
+                response = self.client.post(
+                    "/v1/network/alerts/send",
+                    headers={"X-HavnAI-Token": "test-admin-token"},
+                    json={"inject": ["model_load_failures", "gpu_vram_exhaustion"]},
+                )
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        payload = response.get_json()
+        self.assertTrue(payload["delivery"]["sent"])
+        self.assertEqual(payload["delivery"]["destination_host"], "hooks.example.test")
+        self.assertNotIn("havn", payload["delivery"].values())
+        self.assertEqual(post.call_args.kwargs["timeout"], 5.0)
+        body = post.call_args.kwargs["json"]
+        self.assertEqual(body["schema_version"], "network-alert-delivery.v1")
+        self.assertGreaterEqual(body["matched_count"], 2)
+        self.assertLessEqual(body["matched_count"], len(body["alerts"]))
+        self.assertTrue({"model_load_failures", "gpu_vram_exhaustion"}.issubset(
+            {item["code"] for item in body["alerts"]}
+        ))
+
     def test_account_readiness_is_admin_gated_and_redacted(self):
         api.ADMIN_API_TOKEN = "test-admin-token"
 

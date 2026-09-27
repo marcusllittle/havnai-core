@@ -9982,6 +9982,48 @@ def _network_alert_dry_run(
     }
 
 
+def _network_alert_snapshot(inject: Optional[Set[str]] = None) -> Dict[str, Any]:
+    with LOCK:
+        nodes = [(node_id, dict(info)) for node_id, info in NODES.items()]
+    workers = [_worker_snapshot(node_id, node_info=info) for node_id, info in nodes]
+    summary, control = network_status.snapshot(
+        get_db(), workers, version=APP_VERSION, lease_seconds=job_helpers.LEASE_SECONDS,
+        receipt_count=merkle_batches.count_unbatched_receipts(),
+        receipt_batches=merkle_batches.list_batches(5),
+    )
+    return _network_alert_dry_run(summary, control, workers, inject=inject)
+
+
+def _send_network_alert(payload: Dict[str, Any]) -> Dict[str, Any]:
+    webhook = os.getenv("HAVNAI_ALERT_WEBHOOK", "").strip()
+    if not webhook:
+        return {"mode": "webhook", "sent": False, "configured": False, "reason": "alert_webhook_not_configured"}
+    parsed = urlparse(webhook)
+    if parsed.scheme != "https" or not parsed.netloc:
+        return {"mode": "webhook", "sent": False, "configured": False, "reason": "invalid_alert_webhook"}
+    matched = [rule for rule in payload.get("rules", []) if rule.get("matched")]
+    if not matched:
+        return {"mode": "webhook", "sent": False, "configured": True, "reason": "no_matched_alerts",
+                "destination_host": parsed.netloc}
+    body = {
+        "schema_version": "network-alert-delivery.v1",
+        "generated_at": payload.get("generated_at"),
+        "status": payload.get("status"),
+        "matched_count": len(matched),
+        "alerts": matched,
+    }
+    timeout = _clamp_float(os.getenv("HAVNAI_ALERT_WEBHOOK_TIMEOUT"), 5.0, 1.0, 30.0)
+    try:
+        response = requests.post(webhook, json=body, timeout=timeout)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        log_event("Network alert delivery failed", level="error", error=str(exc), destination_host=parsed.netloc)
+        return {"mode": "webhook", "sent": False, "configured": True, "reason": "delivery_failed",
+                "destination_host": parsed.netloc}
+    return {"mode": "webhook", "sent": True, "configured": True, "destination_host": parsed.netloc,
+            "status_code": response.status_code}
+
+
 @app.route("/v1/network/alerts/dry-run", methods=["GET"])
 def network_alerts_dry_run() -> Any:
     auth_error = require_admin()
@@ -9993,17 +10035,30 @@ def network_alerts_dry_run() -> Any:
         for item in raw_inject.split(",")
         if item.strip()
     }
-    with LOCK:
-        nodes = [(node_id, dict(info)) for node_id, info in NODES.items()]
-    workers = [_worker_snapshot(node_id, node_info=info) for node_id, info in nodes]
-    summary, control = network_status.snapshot(
-        get_db(), workers, version=APP_VERSION, lease_seconds=job_helpers.LEASE_SECONDS,
-        receipt_count=merkle_batches.count_unbatched_receipts(),
-        receipt_batches=merkle_batches.list_batches(5),
-    )
-    response = jsonify(_network_alert_dry_run(summary, control, workers, inject=inject))
+    response = jsonify(_network_alert_snapshot(inject))
     response.headers["Cache-Control"] = "no-store"
     return response
+
+
+@app.route("/v1/network/alerts/send", methods=["POST"])
+def network_alerts_send() -> Any:
+    auth_error = require_admin()
+    if auth_error:
+        return auth_error
+    data = request.get_json(silent=True) or {}
+    if data and (not isinstance(data, dict) or set(data) - {"inject"}):
+        return jsonify({"error": "invalid_payload"}), 422
+    raw_inject = data.get("inject", "") if isinstance(data, dict) else ""
+    if isinstance(raw_inject, list):
+        inject = {str(item).strip() for item in raw_inject if str(item).strip()}
+    else:
+        inject = {item.strip() for item in str(raw_inject).split(",") if item.strip()}
+    payload = _network_alert_snapshot(inject)
+    delivery = _send_network_alert(payload)
+    response = jsonify({**payload, "schema_version": "network-alert-send.v1", "delivery": delivery})
+    response.headers["Cache-Control"] = "no-store"
+    success = delivery.get("sent") or delivery.get("reason") in {"no_matched_alerts", "alert_webhook_not_configured"}
+    return response, 200 if success else 502
 
 
 @app.route("/v1/account/readiness", methods=["GET"])

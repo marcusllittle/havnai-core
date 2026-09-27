@@ -21,7 +21,8 @@ The production component and ownership map lives in
 | Metrics scrape | `GET /metrics` with admin token | Prometheus gauges/counters for jobs, artifacts, failures, workers, disk |
 | Storage/disk | `/metrics` | `havnai_output_disk_free_bytes` above operator threshold |
 | Public music surface | `GET /music/discover` | HTTP 200 with public-only rows; adult/private content omitted |
-| Alert route | `GET /v1/network/alerts/dry-run` with admin token | Dry-run payload reports matched alerts without sending external notifications |
+| Alert dry-run route | `GET /v1/network/alerts/dry-run` with admin token | Dry-run payload reports matched alerts without sending external notifications |
+| Alert delivery route | `POST /v1/network/alerts/send` with admin token | Sends matched alerts to `HAVNAI_ALERT_WEBHOOK` when configured; never echoes the secret URL |
 
 ## Metrics Coverage
 
@@ -47,7 +48,11 @@ The control-plane JSON endpoint complements Prometheus with:
 
 The admin-gated dry-run endpoint supports production-safe alert verification.
 It can evaluate real control-plane state and inject synthetic conditions for
-model/GPU paths without sending notifications.
+model/GPU paths without sending notifications. The separate admin-gated
+`POST /v1/network/alerts/send` endpoint uses the same evaluator and sends only
+matched alerts to `HAVNAI_ALERT_WEBHOOK` when that HTTPS URL is configured. Its
+response includes the destination host and delivery status, but not the full
+webhook URL.
 
 Required alert classes and current evidence path:
 
@@ -92,8 +97,9 @@ returned schema `network-alert-dry-run.v1`, `delivery.mode=dry_run`,
 - Run a live mixed-model worker drill so `havnai_worker_model_failures` and
   `havnai_worker_model_unhealthy` have real production samples rather than only
   dry-run alert injection.
-- Wire external alert delivery for disk/storage and payment/funding thresholds,
-  or record explicit launch waivers for those notification paths.
+- Configure a production `HAVNAI_ALERT_WEBHOOK`, exercise
+  `POST /v1/network/alerts/send`, and attach delivery evidence; otherwise record
+  explicit launch waivers for external notification paths.
 - Cross-link restore, restart-recovery, and rollback drill evidence from
   HAVN-44, HAVN-45, and HAVN-46 before closing HAVN-17/HAVN-11.
   Use `docs/production-operations-runbook.md` as the evidence template for

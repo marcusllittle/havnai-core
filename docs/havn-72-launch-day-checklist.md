@@ -72,7 +72,8 @@ Run and attach these within the launch window:
 ```bash
 python3 scripts/launch_public_smoke.py --json
 HAVNAI_ADMIN_TOKEN=<redacted> python3 scripts/collect_observability_evidence.py --json \
-  --alert-waiver docs/evidence/<approved-alert-waiver>.json
+  --alert-waiver docs/evidence/<approved-alert-waiver>.json \
+  --join-token-waiver docs/evidence/<approved-join-token-waiver>.json
 ```
 
 Also record:
@@ -83,9 +84,12 @@ Also record:
 - funded account generation job ID hash and ledger/receipt summary;
 - support inbox/contact path;
 - manual monitoring owner while any alert waiver is active.
+- node enrollment owner and mitigation while any join-token waiver is active.
 
 Omit `--alert-waiver` only when `HAVNAI_ALERT_WEBHOOK` is configured and the
-collector records a real webhook delivery receipt.
+collector records a real webhook delivery receipt. Omit `--join-token-waiver`
+only when `SERVER_JOIN_TOKEN` is configured and the collector records it as
+present.
 
 ## Conditional GO Exceptions
 

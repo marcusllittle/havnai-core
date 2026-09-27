@@ -65,21 +65,23 @@ HAVNAI_ADMIN_TOKEN=<redacted> \
 ```
 
 The script captures public health, control-plane health, admin-gated metrics,
-alert dry-run, and alert send results. It records `HAVNAI_ALERT_WEBHOOK` absence
-as a blocker rather than a successful delivery receipt unless an explicit dated
-alert waiver is supplied:
+alert dry-run, alert send results, and redacted `SERVER_JOIN_TOKEN` configuration
+presence. It records `HAVNAI_ALERT_WEBHOOK` absence and missing
+`SERVER_JOIN_TOKEN` as blockers rather than successful launch evidence unless an
+explicit dated waiver is supplied:
 
 ```bash
 HAVNAI_ADMIN_TOKEN=<redacted> \
   python3 scripts/collect_observability_evidence.py \
     --api-base https://api.joinhavn.io \
     --alert-waiver docs/evidence/<approved-alert-waiver>.json \
+    --join-token-waiver docs/evidence/<approved-join-token-waiver>.json \
     --output docs/evidence/havn-43-observability-$(date -u +%Y%m%dT%H%M%SZ).json
 ```
 
-The waiver JSON must include `approved_by`, `expires_at`, `mitigation`, and
+Each waiver JSON must include `approved_by`, `expires_at`, `mitigation`, and
 `reason`. The report records waiver approval/expiry/mitigation presence without
-printing the admin token or full webhook URL.
+printing the admin token, join token, or full webhook URL.
 
 Required alert classes and current evidence path:
 
@@ -127,6 +129,8 @@ returned schema `network-alert-dry-run.v1`, `delivery.mode=dry_run`,
 - Configure a production `HAVNAI_ALERT_WEBHOOK`, exercise
   `POST /v1/network/alerts/send`, and attach delivery evidence; otherwise pass
   an approved `--alert-waiver` packet for external notification paths.
+- Configure `SERVER_JOIN_TOKEN` for node enrollment hardening; otherwise pass an
+  approved `--join-token-waiver` packet with mitigation and expiry.
 - Cross-link restore, restart-recovery, and rollback drill evidence from
   HAVN-44, HAVN-45, and HAVN-46 before closing HAVN-17/HAVN-11.
   Use `docs/production-operations-runbook.md` as the evidence template for

@@ -61,6 +61,7 @@ def test_collect_observability_reports_webhook_gap_as_blocker():
         api_base="https://api.example",
         admin_token="admin-token",
         timeout=1,
+        join_token_present=True,
         json_fetcher=_json_fetcher(),
         text_fetcher=_text_fetcher(),
     )
@@ -91,6 +92,7 @@ def test_collect_observability_accepts_dated_alert_waiver(tmp_path):
         admin_token="admin-token",
         timeout=1,
         alert_waiver=str(waiver),
+        join_token_present=True,
         json_fetcher=_json_fetcher(),
         text_fetcher=_text_fetcher(),
     )
@@ -119,6 +121,7 @@ def test_collect_observability_rejects_incomplete_alert_waiver(tmp_path):
         admin_token="admin-token",
         timeout=1,
         alert_waiver=str(waiver),
+        join_token_present=True,
         json_fetcher=_json_fetcher(),
         text_fetcher=_text_fetcher(),
     )
@@ -134,6 +137,7 @@ def test_collect_observability_passes_when_alert_delivery_sends():
         api_base="https://api.example",
         admin_token="admin-token",
         timeout=1,
+        join_token_present=True,
         json_fetcher=_json_fetcher(delivery={
             "mode": "webhook",
             "configured": True,
@@ -156,6 +160,7 @@ def test_collect_observability_fails_missing_required_metric():
         api_base="https://api.example",
         admin_token="admin-token",
         timeout=1,
+        join_token_present=True,
         json_fetcher=_json_fetcher(delivery={"mode": "webhook", "configured": True, "sent": True}),
         text_fetcher=_text_fetcher(metrics="havnai_jobs{state=\"queued\"} 0\n"),
     )
@@ -164,3 +169,71 @@ def test_collect_observability_fails_missing_required_metric():
     assert report["passed"] is False
     assert checks["metrics_scrape"]["ok"] is False
     assert "havnai_nodes_online" in checks["metrics_scrape"]["detail"]
+
+
+def test_collect_observability_blocks_missing_join_token_config():
+    report = collect_observability(
+        api_base="https://api.example",
+        admin_token="admin-token",
+        timeout=1,
+        join_token_present=False,
+        json_fetcher=_json_fetcher(delivery={
+            "mode": "webhook",
+            "configured": True,
+            "sent": True,
+        }),
+        text_fetcher=_text_fetcher(),
+    )
+
+    checks = {check["name"]: check for check in report["checks"]}
+    assert report["passed"] is False
+    assert checks["join_token_config"]["ok"] is False
+    assert report["summary"]["join_token_config"] == {
+        "required": True,
+        "configured": False,
+        "waiver_provided": False,
+        "waiver_approved_by": None,
+        "waiver_expires_at": None,
+        "waiver_mitigation_present": False,
+    }
+    assert report["blockers"] == [
+        "SERVER_JOIN_TOKEN is not configured; node join-token hardening proof is required or waived."
+    ]
+
+
+def test_collect_observability_accepts_dated_join_token_waiver(tmp_path):
+    waiver = tmp_path / "join-token-waiver.json"
+    waiver.write_text(json.dumps({
+        "approved_by": "Marcus Little",
+        "expires_at": "2026-10-04T00:00:00Z",
+        "mitigation": "Restrict node enrollment to known hosts and review /register logs daily.",
+        "reason": "Existing production node has not been rotated to a new join token yet.",
+    }), encoding="utf-8")
+
+    report = collect_observability(
+        api_base="https://api.example",
+        admin_token="admin-token",
+        timeout=1,
+        join_token_present=False,
+        join_token_waiver=str(waiver),
+        json_fetcher=_json_fetcher(delivery={
+            "mode": "webhook",
+            "configured": True,
+            "sent": True,
+        }),
+        text_fetcher=_text_fetcher(),
+    )
+
+    checks = {check["name"]: check for check in report["checks"]}
+    assert report["passed"] is True
+    assert report["blockers"] == []
+    assert checks["join_token_config"]["ok"] is True
+    assert checks["join_token_waiver"]["ok"] is True
+    assert report["summary"]["join_token_config"] == {
+        "required": True,
+        "configured": False,
+        "waiver_provided": True,
+        "waiver_approved_by": "Marcus Little",
+        "waiver_expires_at": "2026-10-04T00:00:00Z",
+        "waiver_mitigation_present": True,
+    }

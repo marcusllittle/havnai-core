@@ -98,18 +98,48 @@ def _load_alert_waiver(path: str | None) -> tuple[dict[str, Any] | None, list[st
     return waiver, failures
 
 
+def _load_join_token_waiver(path: str | None) -> tuple[dict[str, Any] | None, list[str]]:
+    if not path:
+        return None, []
+    failures = []
+    with open(path, "r", encoding="utf-8") as handle:
+        waiver = json.load(handle)
+    if not isinstance(waiver, dict):
+        return None, ["join-token waiver must be a JSON object"]
+    for field in ("approved_by", "expires_at", "mitigation", "reason"):
+        if not waiver.get(field):
+            failures.append(f"join-token waiver missing {field}")
+    return waiver, failures
+
+
 def collect_observability(
     *,
     api_base: str,
     admin_token: str | None,
     timeout: float,
     alert_waiver: str | None = None,
+    join_token_present: bool | None = None,
+    require_join_token: bool = True,
+    join_token_waiver: str | None = None,
     json_fetcher: JsonFetcher = fetch_json,
     text_fetcher: TextFetcher = fetch_text,
 ) -> dict[str, Any]:
     generated_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     checks: list[Check] = []
     waiver, waiver_failures = _load_alert_waiver(alert_waiver)
+    join_waiver, join_waiver_failures = _load_join_token_waiver(join_token_waiver)
+
+    if join_token_present is None:
+        join_token_present = bool(os.getenv("SERVER_JOIN_TOKEN", "").strip())
+    checks.append(Check(
+        "join_token_config",
+        bool(join_token_present) or bool(join_waiver and not join_waiver_failures) or not require_join_token,
+        "required={} configured={} waiver_provided={}".format(
+            require_join_token,
+            bool(join_token_present),
+            bool(join_waiver),
+        ),
+    ))
 
     health_status, health = json_fetcher(_url(api_base, "/health"), "GET", timeout, None, None)
     checks.append(Check(
@@ -208,6 +238,20 @@ def collect_observability(
         blockers.extend(waiver_failures)
     if not admin_token:
         blockers.append("HAVNAI_ADMIN_TOKEN was not provided; admin-gated evidence is expected to fail.")
+    if require_join_token and not join_token_present:
+        if join_waiver and not join_waiver_failures:
+            checks.append(Check(
+                "join_token_waiver",
+                True,
+                "approved_by={} expires_at={} mitigation_present=True".format(
+                    join_waiver.get("approved_by"),
+                    join_waiver.get("expires_at"),
+                ),
+            ))
+        else:
+            blockers.append("SERVER_JOIN_TOKEN is not configured; node join-token hardening proof is required or waived.")
+    if join_waiver_failures:
+        blockers.extend(join_waiver_failures)
 
     return {
         "schema_version": "havnai.observability-evidence.v1",
@@ -237,6 +281,14 @@ def collect_observability(
                 "expires_at": waiver.get("expires_at") if waiver else None,
                 "mitigation_present": bool(waiver and waiver.get("mitigation")),
             },
+            "join_token_config": {
+                "required": require_join_token,
+                "configured": bool(join_token_present),
+                "waiver_provided": bool(join_waiver),
+                "waiver_approved_by": join_waiver.get("approved_by") if join_waiver else None,
+                "waiver_expires_at": join_waiver.get("expires_at") if join_waiver else None,
+                "waiver_mitigation_present": bool(join_waiver and join_waiver.get("mitigation")),
+            },
         },
         "blockers": blockers,
     }
@@ -248,6 +300,8 @@ def main() -> int:
     parser.add_argument("--admin-token", default=os.getenv("HAVNAI_ADMIN_TOKEN", ""))
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--alert-waiver", help="Optional dated waiver JSON when HAVNAI_ALERT_WEBHOOK is not configured.")
+    parser.add_argument("--join-token-waiver", help="Optional dated waiver JSON when SERVER_JOIN_TOKEN is not configured.")
+    parser.add_argument("--no-require-join-token", action="store_true", help="Do not require SERVER_JOIN_TOKEN presence in the evidence packet.")
     parser.add_argument("--json", action="store_true", help="Accepted for consistency; output is always JSON.")
     parser.add_argument("--output", help="Optional JSON report path.")
     args = parser.parse_args()
@@ -257,6 +311,8 @@ def main() -> int:
         admin_token=args.admin_token.strip() or None,
         timeout=args.timeout,
         alert_waiver=args.alert_waiver,
+        require_join_token=not args.no_require_join_token,
+        join_token_waiver=args.join_token_waiver,
     )
     text = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:

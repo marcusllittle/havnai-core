@@ -97,8 +97,13 @@ def audit_backup_evidence(
         blockers.append("remote/offsite backup is not configured and no dated waiver was supplied")
     if remote_waiver:
         waiver = _load_json(remote_waiver)
-        if not waiver.get("approved_by") or not waiver.get("expires_at") or not waiver.get("mitigation"):
-            blockers.append("remote waiver must include approved_by, expires_at, and mitigation")
+        missing = [
+            field
+            for field in ("approved_by", "expires_at", "mitigation", "reason")
+            if not waiver.get(field)
+        ]
+        if missing:
+            blockers.append(f"remote waiver missing required field(s): {', '.join(missing)}")
 
     return {
         "schema_version": "havnai.backup-evidence-audit.v1",

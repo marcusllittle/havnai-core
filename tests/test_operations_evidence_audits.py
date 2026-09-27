@@ -66,6 +66,7 @@ def test_backup_audit_accepts_dated_remote_waiver(tmp_path):
         "approved_by": "Marcus Little",
         "expires_at": "2026-10-01",
         "mitigation": "Daily local encrypted copies retained until remote target is configured.",
+        "reason": "Remote backup target is not configured for the launch-hardening window.",
     })
 
     report = audit_backup_evidence(
@@ -78,6 +79,41 @@ def test_backup_audit_accepts_dated_remote_waiver(tmp_path):
 
     assert report["passed"] is True
     assert report["summary"]["remote_configured"] is False
+
+
+def test_backup_audit_rejects_remote_waiver_without_reason(tmp_path):
+    manifest = _write_json(tmp_path, "manifest.json", {
+        "integrity_check": "ok",
+        "backup_size_bytes": 1024,
+        "local_mode_octal": "0o600",
+        "local_retention_count": 5,
+        "backup_sha256": "abc123",
+        "remote": {"configured": False},
+    })
+    restore = _write_json(tmp_path, "restore.json", {
+        "verified": True,
+        "integrity_check": "ok",
+        "foreign_key_violations": [],
+        "tables": {"accounts": 1},
+    })
+    waiver = _write_json(tmp_path, "waiver.json", {
+        "approved_by": "Marcus Little",
+        "expires_at": "2026-10-01",
+        "mitigation": "Daily local encrypted copies retained until remote target is configured.",
+    })
+
+    report = audit_backup_evidence(
+        backup_manifest=manifest,
+        restore_report=restore,
+        media_reports=[],
+        remote_waiver=waiver,
+        require_remote=True,
+    )
+
+    assert report["passed"] is False
+    assert report["blockers"] == [
+        "remote waiver missing required field(s): reason"
+    ]
 
 
 def test_backup_audit_accepts_restore_table_counts_shape(tmp_path):

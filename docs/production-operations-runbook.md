@@ -110,7 +110,9 @@ report with zero foreign-key violations, selected account/ledger/job/artifact
 table counts, an orphan-attempt repair report, a local backup timer, and a
 representative media/artifact recovery sample. HAVN-44 still needs either a
 configured remote backup target with retention/access-control evidence or an
-explicit waiver for remote retention/encryption before launch closeout.
+explicit waiver for remote retention/encryption before launch closeout. The
+waiver JSON must include `approved_by`, `expires_at`, `mitigation`, and
+`reason`.
 
 ## Media And Artifact Recovery
 

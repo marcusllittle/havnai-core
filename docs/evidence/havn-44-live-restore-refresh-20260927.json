@@ -1,0 +1,62 @@
+{
+  "schema": "havn-44-live-restore-refresh.v1",
+  "generated_at": "2026-09-27T08:07:15.166648Z",
+  "source": {
+    "host": "marcus@192.168.4.105",
+    "checkout": "/home/marcus/Downloads/source-code/havnai-core",
+    "coordinator_commit": "cc69a241f4205aa6053c9c77c67fa60fb5e9e6dc",
+    "database": "db/ledger.db"
+  },
+  "backup_created": {
+    "path": "db/backups/ledger-20260927T080148Z.sqlite.gz",
+    "size_bytes": 43958098
+  },
+  "restore_drill": {
+    "command": ".venv/bin/python scripts/account_restore_drill.py --source db/ledger.db --output db/restore-drills/restore-20260927T080653Z",
+    "report": "db/restore-drills/restore-20260927T080653Z/report.json",
+    "verified": true,
+    "integrity": "ok",
+    "foreign_key_violations": 0,
+    "table_count": 84,
+    "snapshot_sha256": "b2e914983b4ed69466500a35ea21e718b197d55f6824d44ab2bb8aa5d6f18f4f",
+    "restored_sha256": "b2e914983b4ed69466500a35ea21e718b197d55f6824d44ab2bb8aa5d6f18f4f",
+    "archive_sha256": "a6274b544706f3c681ad8205efc80112e4d6339080cf2b3caa0ba181c30d3c8e",
+    "scope": "SQLite only; media files and external payment/provider state are not backed up"
+  },
+  "selected_table_counts": {
+    "accounts": 2,
+    "account_identities": 2,
+    "account_credit_balances": 1,
+    "account_credit_ledger": 3,
+    "account_payment_events": 1,
+    "account_payment_receipts": 1,
+    "account_purchases": 1,
+    "account_job_requests": 1,
+    "jobs": 2103,
+    "job_settlement": 2567,
+    "artifacts": 755,
+    "music_publications": 3,
+    "gallery_listings": 15,
+    "node_payouts": 2309,
+    "astra_sessions": 1,
+    "astra_runs": 18,
+    "astra_spends": 30,
+    "wallet_links": 1
+  },
+  "backup_audit": {
+    "command": ".venv/bin/python scripts/backup_evidence_audit.py --backup-dir db/backups --restore-read-test db/restore-drills/restore-20260927T080653Z/report.json",
+    "exit_code": 2,
+    "local_backup_count": 6,
+    "newest_local_backup": "ledger-20260927T080148Z.sqlite.gz",
+    "restore_read_test_present": true,
+    "passed": false,
+    "missing": [
+      "remote_backup_evidence_or_waiver"
+    ]
+  },
+  "static_inventory": {
+    "static_size": "4.7G",
+    "media_restore_status": "not_proven"
+  },
+  "acceptance_note": "Live SQLite backup and separate-directory restore passed. HAVN-44 remains open for remote/offsite backup evidence or waiver plus media/artifact backup and restore proof."
+}

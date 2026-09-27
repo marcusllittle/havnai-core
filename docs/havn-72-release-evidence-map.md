@@ -13,30 +13,30 @@ waived with mitigation.
 
 | Surface | Current candidate | Evidence | Status |
 | --- | --- | --- | --- |
-| Core baseline | Production `https://api.joinhavn.io` reports `/health.version=2a61013`, one ready node, empty queue. The active systemd service runs from `/home/marcus/Downloads/source-code/havnai-core` as user `marcus`; the production checkout contains `origin/main` through PR #141 plus local merge `2a61013`. | 2026-09-27 live probes; HAVN-17 Jira comments `10864`, `10870`, `10873`, `10876`, `10911`; HAVN-72 comments `10867`, `10871`, `10874`, `10877`, `10915`. | Healthy but not launch complete. |
+| Core baseline | Production `https://api.joinhavn.io` reports `/health.version=2a61013`, one ready node, empty queue. The active systemd service runs from `/home/marcus/Downloads/source-code/havnai-core` as user `marcus`; the production checkout contains `origin/main` through PR #151 plus local merge `814b48b`. | 2026-09-27 live probes; HAVN-17 Jira comments `10864`, `10870`, `10873`, `10876`, `10911`; HAVN-72 comments through `10959`; public smoke report `docs/evidence/havn-72-public-smoke-20260927T115706Z.json`. | Healthy but not launch complete. |
 | Core no-invite, Stripe funding, gallery guard | Core production has invite gating opt-in only. `JOIN_TOKEN` can exist without requiring public invite codes unless `HAVNAI_INVITE_GATING` is explicitly enabled. HAVN-25 automatic Stripe funding/idempotent replay is accepted. | Core PR #134 merged (`a324ee9`) for invite-gating default tests; HAVN-25 live DB evidence shows one Stripe event, one receipt, one funding ledger row, no duplicate operation keys, and balance moved only by later generation spend; HAVN-25 Done. | Invite-code gate removed as blocker; full private mixed-model acceptance still open. |
 | Web account launch surfaces and no invite/access-code copy | Production `https://joinhavn.io` deployment `dpl_GnYQ31UvFaE675xmdgdT5aGSFpME`, from `havnai-web` commercial branch merge `82e1e9f` after PRs #112/#113/#119. | Local validation: `npx tsc --noEmit`, `npm test` (`80 files / 484 tests`), `npm run build`. Live validation: trust surface audit ok, creator public audit ok across desktop/iPhone/Android user agents, direct scan of `/`, `/create`, `/music`, `/video-studio`, `/pricing`, `/library`, `/privacy`, `/terms`, `/sign-in` found no invite/access-code/operator-key copy; sign-in CSP still includes Google/Clerk. | Deployed for account-first public surfaces; signed-in funded journey still requires account token evidence. |
-| Public/private content isolation | Origin behavior denies cache-busted private artifact URL with `404`, `Cache-Control: private, no-store`, `Vary: Authorization`, and `cf-cache-status: BYPASS`. Exact stale CDN URL still serves a cached private artifact as `HTTP/2 200`, `cf-cache-status: HIT`, `content-length: 960813` at 2026-09-27 11:33 UTC. | HAVN-14 comments `10865`, `10879`, `10882`, `10909`; HAVN-42 comments `10866`, `10881`, `10908`; HAVN-72 comment `10915`; Cloudflare purge attempt failed with API auth error 10000. | NO-GO until purge-capable Cloudflare action succeeds or the exact stale URL expires and rechecks as private/not found. HAVN-58 Astra evidence must also remain consumed before final closure. |
-| Observability and alerting | Coordinator health/control-plane and admin alert evaluation are deployed. Admin alert send works but `HAVNAI_ALERT_WEBHOOK` is not configured. | HAVN-43 comment `10850`; HAVN-17 comments `10851`, `10864`, `10873`; env recheck 2026-09-27 shows `HAVNAI_ADMIN_TOKEN=configured`, `HAVNAI_ALERT_WEBHOOK=missing`. | External alert delivery receipt or dated waiver still open. |
-| Backup/restore repair | Production local backups are scheduled and verified. `havnai-backup.timer` is active; systemd backup run created `ledger-20260927T104900Z.sqlite.gz` plus manifest with `integrity_check=ok`, `local_mode_octal=0o600`, `local_retention_count=5`; `gzip -t` passed. A backup-before-restart run created `ledger-20260927T113154Z.sqlite.gz` with manifest `integrity_check=ok`, `local_mode_octal=0o600`, `local_retention_count=6`, and sha256 `056fb176d60b56844f5d7f1b23e879bf21941b8cf03e587eaaeebe341b8fee2e`. Representative local media restore samples verified DB/source/restored SHA-256 matches for a manifest artifact, an audio asset, and a generated image artifact. | HAVN-44 comments `10872`, `10875`, `10912`; HAVN-17 comments `10873`, `10876`, `10911`. Older local backup file modes were tightened to `600`; restore drill outputs are `700` dirs / `600` files. | Remote/offsite backup target is not configured (`HAVNAI_BACKUP_REMOTE=missing`); offsite proof or explicit waiver is still required. |
+| Public/private content isolation | Origin behavior denies cache-busted private artifact URL with `404`, `Cache-Control: private, no-store`, `Vary: Authorization`, and `cf-cache-status: BYPASS`. Exact stale CDN URL still serves a cached private artifact as `HTTP/2 200`, `cf-cache-status: HIT`, `content-length: 960813`, `age=11637` at 2026-09-27 12:01 UTC. | HAVN-14 comments through `10955`; HAVN-42 comments through `10956`; HAVN-72 comments through `10959`; Cloudflare purge attempt failed with API auth error 10000. | NO-GO until purge-capable Cloudflare action succeeds or the exact stale URL expires and rechecks as private/not found. HAVN-58 Astra evidence must also remain consumed before final closure. |
+| Observability and alerting | Coordinator health/control-plane and admin alert evaluation are deployed. Admin alert dry-run and send route behavior are captured in a tracked evidence packet, but `HAVNAI_ALERT_WEBHOOK` is not configured. | HAVN-43 comments through `10934`; HAVN-17 comments through `10935`; evidence report `docs/evidence/havn-43-observability-20260927T114343Z.json` shows health/control-plane/metrics/dry-run checks pass and `alert_webhook_not_configured` remains. | External alert delivery receipt or dated waiver still open. |
+| Backup/restore repair | Production local backups are scheduled and verified. The tracked backup audit report shows backup manifest, SQLite restore report, and representative media restore reports all pass. Remote/offsite backup remains unconfigured. | HAVN-44 comments through `10944`; HAVN-17 comments through `10945`; evidence report `docs/evidence/havn-44-backup-audit-20260927T115159Z.json` shows local checks pass and `remote_configured=false`. | Remote/offsite backup target is not configured (`HAVNAI_BACKUP_REMOTE=missing`); offsite proof or explicit waiver is still required. |
 | Restart recovery and worker stability | Production coordinator was restarted cleanly after verified live DB backup and came back healthy on version `2a61013`. Drill tooling is present on production checkout (`scripts/mixed_model_worker_drill.py`, `scripts/account_restart_recovery_drill.py`), but env recheck shows `HAVNAI_DRILL_ACCOUNT_TOKEN=missing`. | HAVN-17 comment `10911`; HAVN-45 comment `10913`; HAVN-49 comment `10914`; HAVN-12 comment `10916`. Prior preflights refuse live execution without a funded account token; same accepted-work drill can cover HAVN-45 and HAVN-49 once the token is available. | Needs funded bearer token for mixed-model and accepted-work restart acceptance; coordinator restart smoke alone is not enough. |
-| Rollback and operations map | Deploy/runbook docs were corrected to the active live-checkout topology. PR #135 merged to `main` (`e510c69`); production checkout is now synced through PR #141 and the coordinator was restarted successfully on local merge `2a61013`. | Tests `pytest tests/test_deploy_scripts.py tests/test_backup_coordinator.py` -> `6 passed`; HAVN-17 comments `10868`, `10870`, `10911`; HAVN-72 comments `10869`, `10871`, `10915`. | Broader rollback evidence or waiver still open for final HAVN-17. |
+| Rollback and operations map | Deploy/runbook docs were corrected to the active live-checkout topology. Rollback audit tooling and tracked evidence now make missing coordinator/web/node rollback packets or waivers explicit. | Tests `pytest tests/test_deploy_scripts.py tests/test_backup_coordinator.py` -> `6 passed`; rollback report `docs/evidence/havn-46-rollback-audit-20260927T115508Z.json`; HAVN-46 comments through `10951`; HAVN-17 comments through `10952`; HAVN-72 comments through `10953`. | Coordinator, web, and node rollback packets or dated waivers still open for final HAVN-17. |
 | Astra account/reward core API | Core PR #129 merged (`17e2df8`) and deployed account Astra economy routes; HAVN-56/HAVN-57 moved to In Review. | Validation suite `156 passed` for account/Astra/economy/ledger/jobs; anonymous `/v2/account/astra/stats` returns `401 account_required`; request/response/auth/compatibility contract recorded on Jira. | Claude owns Astra client/game evidence; platform must not close HAVN-14/HAVN-72 until required Astra evidence is accepted. |
 
 ## Gate Matrix
 
 | HAVN-72 gate | Owner | Evidence recorded | Remaining blocker |
 | --- | --- | --- | --- |
-| Map each HAVN-1 gate to owner, issue, and dated evidence | Codex maintains this document; Marcus owns final decision | This file plus HAVN-72 Jira comments through `10915` | Keep updated until final GO/NO-GO |
-| Exact commits, deployments, schema/config compatibility, CI, URLs | Codex for web/core; Marcus for production deploy approval | Web production deployment `dpl_GnYQ31UvFaE675xmdgdT5aGSFpME`; core runtime `/health.version=2a61013`; core checkout includes `origin/main` through PR #141; live API health probes | Node/core/web rollback evidence or waiver still open; final GO/NO-GO not recorded |
+| Map each HAVN-1 gate to owner, issue, and dated evidence | Codex maintains this document; Marcus owns final decision | This file plus HAVN-72 Jira comments through `10959` | Keep updated until final GO/NO-GO |
+| Exact commits, deployments, schema/config compatibility, CI, URLs | Codex for web/core; Marcus for production deploy approval | Web production deployment `dpl_GnYQ31UvFaE675xmdgdT5aGSFpME`; core runtime `/health.version=2a61013`; core checkout includes `origin/main` through PR #151; live API health probes | Node/core/web rollback evidence or waiver still open; final GO/NO-GO not recorded |
 | Account sign-in, automatic Stripe funding/receipt delivery, idempotent replay | Codex platform | HAVN-25 Done. Corrected Stripe event replay remained idempotent: one provider event, one receipt, one funding ledger row, no duplicate operation keys. Web sign-in live CSP includes Clerk/Google after production deploy. | Signed-in production generation/publication journey still needs funded account token. |
 | Account-funded generation, artifact delivery, publication, recovery | Codex platform | HAVN-11/HAVN-14/HAVN-44 evidence across account images, deletion/restore tooling, and restore reports | Full signed-in production journey and private mixed-model drill need funded account bearer token |
-| Public/private content isolation | Codex platform; Claude provides Astra HAVN-58 evidence | Cache-busted private artifact denial proves origin fix, but exact stale CDN object remains public HIT at 2026-09-27 11:33 UTC. Web public account-studio audit now passes with no invite/access-code gating copy. | Cloudflare purge/expiry proof required before HAVN-14/HAVN-42 can close; HAVN-58 evidence must remain accepted. |
+| Public/private content isolation | Codex platform; Claude provides Astra HAVN-58 evidence | Cache-busted private artifact denial proves origin fix, but exact stale CDN object remains public HIT at 2026-09-27 12:01 UTC. Web public account-studio audit now passes with no invite/access-code gating copy. | Cloudflare purge/expiry proof required before HAVN-14/HAVN-42 can close; HAVN-58 evidence must remain accepted. |
 | Worker stability, mixed-model switching | Codex platform | Drill harness exists and refuses unsafe live execution without token. | Acceptance requires funded account bearer token for private `/v2/jobs`; public rough outputs excluded. |
-| Monitoring and alerting | Codex platform | Live coordinator health ok; admin alert send schema exercised; admin token configured. | `HAVNAI_ALERT_WEBHOOK` missing, so external alert delivery receipt or waiver still open. |
-| Backup and restore | Codex platform; Marcus approves remote backup target/waiver | Local backup timer/service verified, backup-before-restart manifest integrity ok, gzip ok, local files mode `600`, SQLite restore drill ok, representative media restore samples ok. | `HAVNAI_BACKUP_REMOTE` missing; remote target, retention, encryption/access-control evidence or waiver still open. |
+| Monitoring and alerting | Codex platform | Live observability report tracked; health/control-plane/metrics/dry-run/send route behavior captured. | `HAVNAI_ALERT_WEBHOOK` missing, so external alert delivery receipt or waiver still open. |
+| Backup and restore | Codex platform; Marcus approves remote backup target/waiver | Local backup/restore/media audit report tracked and passing for local evidence. | `HAVNAI_BACKUP_REMOTE` missing; remote target, retention, encryption/access-control evidence or waiver still open. |
 | Restart recovery | Codex platform; operator supplies live restart action | Coordinator backup/restart smoke passed on `2a61013`; drill tooling deployed; no-token preflight blocks accepted-work execution. | `HAVNAI_DRILL_ACCOUNT_TOKEN` missing; needs funded bearer token to prove no lost accepted work or duplicate charge/receipt. |
-| Rollback | Codex platform; operator owns web/node rollback action or waiver | Deploy/runbook topology corrected in PR #135 and production checkout synced. | Coordinator/web/node rollback evidence packets or dated waivers still open. |
+| Rollback | Codex platform; operator owns web/node rollback action or waiver | Rollback audit report tracked and failing with explicit missing surfaces. | Coordinator/web/node rollback evidence packets or dated waivers still open. |
 | Public Astra, marketplace, reward paths | Claude for Astra game/client; Codex for core APIs | Core Astra account/reward APIs deployed and contract recorded; HAVN-56/HAVN-57 In Review. | Claude-owned Astra client/browser acceptance and game-quality gates remain open. |
 | Public content quality | Codex platform for web/core; Claude for Astra assets | Web public creator audit passed across desktop/iPhone/Android; trust/privacy surfaces deployed; production dashboard/gallery invite copy removed. | Claude-owned Astra asset/game-quality gates remain open. |
 | Invite/access-code launch removal | Codex platform | Core invite gating is opt-in; web direct route scan found no invite/access-code/operator-key copy on checked public routes. | No longer a platform launch blocker. |
@@ -60,6 +60,10 @@ Latest live platform checks, 2026-09-27:
 - Core runtime `/health.version=2a61013` and coordinator health
   `{"nodes":1,"queue_depth":0,"status":"ok","version":"2a61013"}` after a
   verified backup-before-restart run.
+- Tracked public smoke report
+  `docs/evidence/havn-72-public-smoke-20260927T115706Z.json` passed with
+  `ok=true`: health, healthz, control-plane, hidden legacy gallery, music
+  Discover, key web routes, and no invite/access-code copy.
 - Web production deployment `dpl_GnYQ31UvFaE675xmdgdT5aGSFpME` is aliased to
   `https://joinhavn.io`.
 - Live `trust_surface_audit.mjs` passed against `https://joinhavn.io`.
@@ -69,11 +73,24 @@ Latest live platform checks, 2026-09-27:
   `/library`, `/privacy`, `/terms`, and `/sign-in` found no
   invite/access-code/operator-key copy; `/sign-in` CSP still includes
   Google/Clerk.
-- Exact stale private-media URL still returns a public Cloudflare `HIT`, so
-  public/private isolation is still NO-GO until purge or expiry proof.
+- Exact stale private-media URL still returns a public Cloudflare `HIT`:
+  `HTTP/2 200`, `content-type=audio/mpeg`, `content-length=960813`,
+  `age=11637`, `max-age=14400` at 2026-09-27 12:01 UTC. Public/private
+  isolation is still NO-GO until purge or expiry proof.
 - Backup-before-restart evidence is recorded in Jira: HAVN-17 comment `10911`,
   HAVN-44 comment `10912`, HAVN-45 comment `10913`, HAVN-49 comment `10914`,
   HAVN-72 comment `10915`, and HAVN-12 blocker comment `10916`.
+- Live observability evidence is tracked in
+  `docs/evidence/havn-43-observability-20260927T114343Z.json`; it records
+  passing health/control-plane/metrics/dry-run checks and the remaining
+  `alert_webhook_not_configured` blocker.
+- Backup evidence audit is tracked in
+  `docs/evidence/havn-44-backup-audit-20260927T115159Z.json`; local
+  backup/restore/media evidence passes and remote/offsite proof or waiver
+  remains missing.
+- Rollback evidence audit is tracked in
+  `docs/evidence/havn-46-rollback-audit-20260927T115508Z.json`; coordinator,
+  web, and node rollback packets or waivers remain missing.
 
 Deployment correction notes, 2026-09-27:
 
@@ -87,6 +104,8 @@ Deployment correction notes, 2026-09-27:
 - Core PR #135 updated the production architecture map and operations runbook
   to match this topology; the coordinator has since been backed up and
   restarted successfully on local merge `2a61013`.
+- Core PR #151 added `docs/havn-72-launch-day-checklist.md`; it is the launch
+  signoff packet template, not a launch approval.
 
 ## Final Platform Evidence Commands
 

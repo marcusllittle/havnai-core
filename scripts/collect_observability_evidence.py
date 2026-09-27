@@ -142,7 +142,11 @@ def collect_observability(
     )
     dry_delivery = dry_run.get("delivery", {}) if isinstance(dry_run, dict) else {}
     dry_rules = dry_run.get("rules", []) if isinstance(dry_run, dict) else []
-    dry_matched = [rule.get("name") for rule in dry_rules if isinstance(rule, dict) and rule.get("matched")]
+    dry_matched = [
+        rule.get("code") or rule.get("name") or "unknown"
+        for rule in dry_rules
+        if isinstance(rule, dict) and rule.get("matched")
+    ]
     checks.append(Check(
         "alert_dry_run",
         dry_status == 200 and isinstance(dry_run, dict) and dry_run.get("schema_version") == "network-alert-dry-run.v1",

@@ -1,0 +1,283 @@
+{
+  "schema": "havn-72-platform-gate-snapshot.v1",
+  "generated_at": "2026-09-27T08:30:00Z",
+  "scope": "Codex-owned HavnAI platform launch-hardening gates only. Astra game client/content acceptance remains Claude-owned and outside this artifact.",
+  "release_candidate": {
+    "core_branch": "feat/havn-11-commercial-accounts",
+    "live_coordinator_commit": "cc69a241f4205aa6053c9c77c67fa60fb5e9e6dc",
+    "live_coordinator_version": "cc69a24",
+    "live_coordinator_host": "marcus@192.168.4.105",
+    "live_coordinator_checkout": "/home/marcus/Downloads/source-code/havnai-core",
+    "health": {
+      "status": "ok",
+      "nodes": 1,
+      "queue_depth": 0
+    },
+    "environment_prerequisites": {
+      "HAVNAI_ADMIN_TOKEN": "present",
+      "HAVNAI_DRILL_ACCOUNT_TOKEN": "missing",
+      "external_alert_destination_keys": [],
+      "offsite_backup_destination_keys": []
+    }
+  },
+  "open_clean_platform_prs": [
+    {
+      "pr": 122,
+      "title": "HAVN-56 record Astra account API contract evidence",
+      "head": "fd4c346",
+      "status": "CLEAN",
+      "url": "https://github.com/marcusllittle/havnai-core/pull/122"
+    },
+    {
+      "pr": 121,
+      "title": "HAVN-25 record live Stripe idempotency evidence",
+      "head": "0f2434a",
+      "status": "CLEAN",
+      "url": "https://github.com/marcusllittle/havnai-core/pull/121"
+    },
+    {
+      "pr": 120,
+      "title": "HAVN-42 record live public isolation evidence",
+      "head": "b230d6b",
+      "status": "CLEAN",
+      "url": "https://github.com/marcusllittle/havnai-core/pull/120"
+    },
+    {
+      "pr": 119,
+      "title": "HAVN-50 record worker metric alert evidence",
+      "head": "acff2ea",
+      "status": "CLEAN",
+      "url": "https://github.com/marcusllittle/havnai-core/pull/119"
+    },
+    {
+      "pr": 118,
+      "title": "HAVN-12 record live drill readiness evidence",
+      "head": "378ce6b",
+      "status": "CLEAN",
+      "url": "https://github.com/marcusllittle/havnai-core/pull/118"
+    },
+    {
+      "pr": 117,
+      "title": "HAVN-68 disable invite file gating for launch",
+      "head": "6124b39",
+      "status": "CLEAN",
+      "url": "https://github.com/marcusllittle/havnai-core/pull/117"
+    },
+    {
+      "pr": 116,
+      "title": "HAVN-17 align coordinator deploy script with live host",
+      "head": "823a4fb",
+      "status": "CLEAN",
+      "url": "https://github.com/marcusllittle/havnai-core/pull/116"
+    },
+    {
+      "pr": 115,
+      "title": "HAVN-43 refresh observability evidence",
+      "head": "967de49",
+      "status": "CLEAN",
+      "url": "https://github.com/marcusllittle/havnai-core/pull/115"
+    },
+    {
+      "pr": 114,
+      "title": "HAVN-44 record backup and media evidence",
+      "head": "d0e9366",
+      "status": "CLEAN",
+      "url": "https://github.com/marcusllittle/havnai-core/pull/114"
+    },
+    {
+      "pr": 113,
+      "title": "HAVN-46 record web rollback inventory",
+      "head": "9b4c650",
+      "status": "CLEAN",
+      "url": "https://github.com/marcusllittle/havnai-core/pull/113"
+    }
+  ],
+  "gate_status": [
+    {
+      "gate": "HAVN-25 Stripe automatic funding and idempotent replay",
+      "owner": "Codex / havnai-core",
+      "status": "evidence_in_review",
+      "evidence": [
+        "Core PR #121 at 0f2434a",
+        "docs/evidence/havn-25-stripe-idempotency-live-db-20260927.json",
+        "tests/test_account_payments.py -> 31 passed"
+      ],
+      "proven": [
+        "one Stripe event",
+        "one paid purchase",
+        "one receipt",
+        "one funding ledger row",
+        "no duplicate event, receipt, or funding keys",
+        "account balance reflects a single automatic credit"
+      ],
+      "remaining": []
+    },
+    {
+      "gate": "HAVN-14 public/private content isolation",
+      "owner": "Codex platform with Claude-owned Astra HAVN-58 dependency consumed",
+      "status": "partial_evidence_blocked",
+      "evidence": [
+        "Core PR #120 at b230d6b",
+        "docs/evidence/havn-42-live-public-isolation-20260927.json",
+        "HAVN-58 PR #153 merged in Astra and consumed in Jira comments"
+      ],
+      "proven": [
+        "known adult legacy music absent from public Discover",
+        "sexual search returns zero public results",
+        "direct public adult audio/cover routes return safe 404-style responses",
+        "Astra mature media public-bundle blocker mitigated by Claude evidence"
+      ],
+      "remaining": [
+        "signed-in owner-private adult visibility evidence",
+        "cross-account denial evidence",
+        "cache/social-preview/log leak evidence or approved waiver"
+      ]
+    },
+    {
+      "gate": "HAVN-12 mixed-model worker stability acceptance",
+      "owner": "Codex / platform worker reliability",
+      "status": "blocked",
+      "evidence": [
+        "Core PR #118 at 378ce6b",
+        "docs/evidence/havn-12-mixed-model-dry-run-20260927.json",
+        "live coordinator health cc69a24 nodes=1 queue_depth=0"
+      ],
+      "proven": [
+        "mixed image/video/music drill plan exists",
+        "private /v2/jobs execution path exists in harness",
+        "live coordinator is healthy enough to start the drill"
+      ],
+      "remaining": [
+        "provide funded private commercial account bearer token as HAVNAI_DRILL_ACCOUNT_TOKEN",
+        "execute 30 private account-owned jobs",
+        "capture terminal statuses, artifacts, ledger/receipt checks, and no-manual-reboot statement"
+      ]
+    },
+    {
+      "gate": "HAVN-17/HAVN-43 monitoring and alerting",
+      "owner": "Codex / platform ops",
+      "status": "partial_evidence_blocked",
+      "evidence": [
+        "Core PR #115 at 967de49",
+        "docs/evidence/havn-43-admin-observability-refresh-20260927.json",
+        "docs/evidence/havn-43-external-alert-config-gap-20260927.json"
+      ],
+      "proven": [
+        "live public health OK",
+        "live healthz OK",
+        "control plane healthy with one ready node",
+        "admin metrics present",
+        "non-sending alert dry-run matched injected categories"
+      ],
+      "remaining": [
+        "configure external alert/on-call destination or approve waiver",
+        "attach saved dashboard/screenshot/link evidence or approve waiver"
+      ]
+    },
+    {
+      "gate": "HAVN-17/HAVN-44 backup and restore",
+      "owner": "Codex / platform ops",
+      "status": "partial_evidence_blocked",
+      "evidence": [
+        "Core PR #114 at d0e9366",
+        "docs/evidence/havn-44-live-restore-refresh-20260927.json",
+        "docs/evidence/havn-44-offsite-backup-config-gap-20260927.json"
+      ],
+      "proven": [
+        "local SQLite backup created",
+        "separate-directory SQLite restore verified true",
+        "integrity ok",
+        "foreign_key_violations=0",
+        "84 tables restored"
+      ],
+      "remaining": [
+        "configure or document remote/offsite backup evidence or approve waiver",
+        "prove media/artifact backup and restore-read scope",
+        "record retention, encryption owner, access group, RPO/RTO"
+      ]
+    },
+    {
+      "gate": "HAVN-17/HAVN-45/HAVN-49 restart recovery",
+      "owner": "Codex / platform ops and worker reliability",
+      "status": "blocked",
+      "evidence": [
+        "Core PR #118 at 378ce6b",
+        "docs/evidence/havn-45-49-restart-dry-run-20260927.json"
+      ],
+      "proven": [
+        "restart drill harness exists",
+        "restart command and live DB path are known"
+      ],
+      "remaining": [
+        "provide funded private account bearer token as HAVNAI_DRILL_ACCOUNT_TOKEN",
+        "execute accepted private /v2/jobs restart drill",
+        "verify same job/account across terminal state, ledger, reservations, receipts, artifacts, and no duplicate charges"
+      ]
+    },
+    {
+      "gate": "HAVN-17/HAVN-46 rollback",
+      "owner": "Codex / platform ops",
+      "status": "partial_evidence_blocked",
+      "evidence": [
+        "Core PR #113 at 9b4c650",
+        "docs/evidence/havn-46-rollback-readiness-audit-20260927.json"
+      ],
+      "proven": [
+        "web previous production deployment inventory and smoke pass",
+        "live coordinator rollback readiness inventory present",
+        "live node heartbeat/capability inventory present"
+      ],
+      "remaining": [
+        "exercise coordinator rollback and restore with health checks",
+        "exercise node runtime rollback or approve waiver",
+        "run post-rollback smoke checks"
+      ]
+    },
+    {
+      "gate": "HAVN-4 architecture and ownership map",
+      "owner": "Codex / platform ops",
+      "status": "done",
+      "evidence": [
+        "docs/production-architecture-map.md",
+        "HAVN-4 status Done"
+      ],
+      "proven": [
+        "web, coordinator, DB, storage, nodes, auth, payments, ledger, public surfaces, observability, rollback, and Astra integration ownership mapped",
+        "map reflects live repo-checkout coordinator layout, not stale /opt/havnai assumptions"
+      ],
+      "remaining": []
+    },
+    {
+      "gate": "HAVN-56/HAVN-57 Astra account/reward core API contract",
+      "owner": "Codex core contract; Claude owns Astra client integration",
+      "status": "core_evidence_in_review_client_blocked",
+      "evidence": [
+        "Core PR #122 at fd4c346",
+        "docs/evidence/havn-56-57-astra-account-contract-20260927.json",
+        "tests/test_account_astra.py -> 8 passed"
+      ],
+      "proven": [
+        "six /v2/astra/* routes documented",
+        "bearer auth required",
+        "server-side reward validation and single-use account-bound run token tested",
+        "idempotent spend tested",
+        "legacy Astra session token cannot authorize account routes"
+      ],
+      "remaining": [
+        "Claude/Astra browser integration evidence: sign-in, refresh, no MetaMask prompt, run, reward, spend"
+      ]
+    }
+  ],
+  "release_decision": {
+    "commercial_launch_ready": false,
+    "reason": "Required platform and Astra game-quality gates remain unproven or blocked. No Marcus GO/NO-GO/CONDITIONAL GO decision is attached.",
+    "next_unblockers": [
+      "Provision HAVNAI_DRILL_ACCOUNT_TOKEN for private worker/restart drills.",
+      "Configure or waive external alert delivery/dashboard evidence.",
+      "Configure or waive remote/offsite backup and media/artifact restore evidence.",
+      "Exercise rollback or approve explicit rollback waivers.",
+      "Capture signed-in content isolation owner/cross-account/cache/social/log evidence or waivers.",
+      "Consume Claude/Astra client and game-quality acceptance evidence."
+    ]
+  }
+}

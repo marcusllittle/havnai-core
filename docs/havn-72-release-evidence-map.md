@@ -1,0 +1,132 @@
+# HAVN-72 Release Evidence Map
+
+Updated: 2026-09-27. Owner: Marcus Little. Platform execution: Codex for
+`havnai-core` and `havnai-web`. Astra execution: Claude for the Astra game
+repository.
+
+This map is the HAVN-72 GO/NO-GO audit surface. It does not approve launch.
+Launch requires Marcus to record a dated GO, NO-GO, or CONDITIONAL GO in
+HAVN-72 after every open blocker below is either proven closed or explicitly
+waived with mitigation.
+
+## Release Candidate Inventory
+
+| Surface | Current candidate | Evidence | Status |
+| --- | --- | --- | --- |
+| Core baseline | Production `https://api.joinhavn.io` reports `/health` ok, one ready node, empty queue, no control-plane alerts | 2026-09-27 live probes; control-plane schema `network-control-plane.v1`; HAVN-72 Jira comment `10507` | Healthy but not launch complete |
+| Core no-invite, worker drill, gallery guard | PR #91 `codex/havn-47-mixed-model-drill` at `16f3c2942cf9be6da028acce190d84f55b1b36ad`; surgical production-branch gallery blocker PR #99 `codex/havn-72-core-launch-hardening-release` at `c481f4cefaf24af6afde541bb2b2dea342e5b085` | PR #91 clean; tests `25 passed, 2 subtests passed`; mixed-model preflight tests `8 passed`; PR #99 clean against `feat/havn-11-commercial-accounts`; gallery guard/cleanup tests `6 passed`; py_compile passed; HAVN-72 comment `10519` | Implemented, not deployed |
+| Web no-invite, dashboard preview hardening, Google auth restore | Production `https://joinhavn.io` build `kSKPK1O_mEzUFC5yLDaPB`, deployment `dpl_EveZREW24UNrXUBfDt9aryD2L1Dq`, from production branch commit `5c6c1863106a2a73d5f0dea6534b2557d27feb8d` | Public `/create` no-invite smoke passes; live bundle no longer contains hidden-social override; browser proof shows `Continue with Google` and Google handoff includes real `client_id`; HAVN-72 Jira comments `10506`, `10507` | Deployed for web auth/no-invite; wider launch still blocked by core/Astra/ops gates |
+| Private content cache hardening | PR #96 `codex/havn-14-cache-isolation` at `70096e8aa6d9f992cb770168d269b5c6d620893f` | PR #96 clean; focused isolation tests `5 passed`; py_compile passed; 2026-09-27 live legacy adult music Discover/public media probe shows no forbidden-term leak but deployed denial headers lack no-store; HAVN-14 comment `10508` | Implemented, not deployed |
+| Observability and rollback evidence | PR #97 `codex/havn-43-observability-doc-refresh` at `0f59f43782cc9e8700958695e2082e0001c2a2b6` | PR #97 clean; collector/rollback tests `5 passed`; py_compile passed; 2026-09-27 live public health/control-plane healthy; admin `/metrics` and alert dry-run 401 without token; HAVN-17 comment `10512` | Implemented, pending admin-token refresh or waiver plus web/node rollback evidence or waiver |
+| Backup/restore repair | PR #93 `codex/havn-44-restore-repair` at `1e5bf04f8bef2fae116904bf4e0f9c0e0a3625bc` | PR #93 clean; backup/restore/repair tests `9 passed`; py_compile passed; 2026-09-27 backup audit reports local count `0` and missing local/remote evidence; HAVN-44 comment `10514` | Implemented, remote-backup/local-backup evidence or waiver still open |
+| Restart recovery | PR #95 `codex/havn-45-restart-drill` at `8a89d91f35d8d1dc3fda798a85511fb22faec408` | PR #95 clean; restart drill tests `7 passed`; py_compile passed; 2026-09-27 no-token preflight emits redacted plan and refuses live execution; HAVN-45/HAVN-49 comments `10516`, `10517` | Implemented, live funded-account drill still open |
+| Astra account/reward core API | PR #94 `codex/havn-56-astra-account-core` at `2957d2298faa4ec9cd2e1711935b3b5f22356a42` | Account-auth session/start/reward/generate-preflight/spend/stats endpoints; tests `26 passed`; py_compile passed; API contract recorded | Core implemented; Claude owns Astra client acceptance |
+
+## Gate Matrix
+
+| HAVN-72 gate | Owner | Evidence recorded | Remaining blocker |
+| --- | --- | --- | --- |
+| Map each HAVN-1 gate to owner, issue, and dated evidence | Codex maintains this document; Marcus owns final decision | This file plus HAVN-72 Jira comments through `10507` | Keep updated until final GO/NO-GO |
+| Exact commits, deployments, schema/config compatibility, CI, URLs | Codex for web/core; Marcus for production deploy approval | Web production deployment `dpl_EveZREW24UNrXUBfDt9aryD2L1Dq`; live API health/control-plane probes; PR heads above | Core PRs #99/#91/#96/#97/#93/#95 are not deployed to coordinator |
+| Account sign-in, automatic Stripe funding/receipt delivery, idempotent replay | Codex platform | HAVN-25 evidence: corrected endpoint `we_1UK1YUFWBrjj49xVEhwYtzEL`, event `evt_1UK1SqFWBrjj49xVbrD9L4AS`, purchase `pur_889711ac10204534b7620d69a7b2ea4d`, duplicate replay stable at one receipt and one funding ledger row | Conventional production checkout acceptance and remaining browser publication/management proof still open |
+| Account-funded generation, artifact delivery, publication, recovery | Codex platform | HAVN-11/HAVN-14/HAVN-44 evidence across account images, deletion/restore tooling, and restore reports | Full signed-in production journey and private mixed-model drill need funded account bearer token |
+| Public/private content isolation | Codex platform; Claude provides Astra HAVN-58 evidence | PR #96 tests `5 passed`; live adult legacy music probe: Discover 200 with no leak, public audio/cover 404 with no leak; HAVN-58 currently `In Review`; `content_isolation_evidence.py` records owner/cross-account/social-preview packet requirements | Final deployed no-store denial headers plus signed-in owner/private adult generation, cross-account denial, social-preview proof, and HAVN-58 completion still open |
+| Worker stability, mixed-model switching | Codex platform | PR #91 adds 30-job private mixed-model drill harness and artifact-only success handling; 2026-09-27 preflight generated 30-job image/video/music plan | Acceptance requires funded account bearer token for private `/v2/jobs`; public rough outputs excluded |
+| Monitoring and alerting | Codex platform | PR #97 tests `5 passed`; live collector public signals pass with `/health` 200, `/healthz` ok, control-plane healthy, ready_nodes 1, queued/running 0, alerts 0 | Final `/metrics` and alert dry-run refresh need admin/node token or waiver; external disk/payment alert delivery still open |
+| Backup and restore | Codex platform; Marcus approves remote backup target/waiver | PR #93 tests `9 passed`; audit helper emits `havn-44-backup-evidence-audit.v1` and reports missing local/remote evidence in this non-coordinator context | Local backup listing plus remote target, 30-day retention, encryption/access-control evidence or waiver still open |
+| Restart recovery | Codex platform; operator supplies live restart action | PR #95 tests `7 passed`; no-token preflight emits redacted `havn-45-account-restart-recovery-drill-plan.v1`; one restart drill can cover HAVN-45/HAVN-49 | Needs funded bearer token and explicit operator restart action |
+| Rollback | Codex platform; operator owns web/node rollback action or waiver | PR #97 rollback audit helper emits `havn-46-rollback-evidence-audit.v1` and identifies coordinator/web/node evidence as missing without packet inputs | Coordinator/web/node rollback evidence packets or dated waivers still open |
+| Public Astra, marketplace, reward paths | Claude for Astra game/client; Codex for core APIs | PR #94 records account bearer auth, server-side reward validation, idempotent spend, disabled account reward-image preflight, and wallet-era compatibility boundaries | Claude-owned HAVN-58 remains `In Review`; Astra client/browser acceptance and game-quality gates HAVN-65/HAVN-73-HAVN-78 remain open |
+| Public content quality | Codex platform for web/core; Claude for Astra assets | PR #108 withholds dashboard job previews, removes public dashboard media URL exposure, and filters non-account-backed legacy gallery rows in the web fallback; PR #91 defaults legacy public gallery closed and adds `scripts/legacy_gallery_cleanup.py` for audited delisting of active wallet-era rows; PR #99 carries the same default-closed gallery blocker fix on the production release branch | Production still returns `total: 7` from `/gallery/browse`; PR #99 deploy, PR #91 deploy, or coordinator DB cleanup evidence must land before launch |
+| Invite/access-code launch removal | Codex platform | Core PR #91 makes invite gating opt-in; web production `/create` no-invite copy smoke passes with `legacy_prompts=[]` | Coordinator core refresh still needed for final account/private generation paths |
+| Security, trust/privacy, licensing, accessibility/device | Marcus/Codex/Claude by issue | HAVN-68, HAVN-69, HAVN-70, HAVN-71 linked to HAVN-72 | All four remain To Do and cannot be silently waived |
+| Launch-day owner, stop/rollback triggers, known limitations, post-launch smoke | Marcus final owner; Codex supplies operations material | `docs/production-operations-runbook.md` evidence template and rollback/restore procedures | Final owner roster, support owner, monitoring links, stop triggers, and smoke checklist not yet signed off |
+
+## Public Launch Smoke Command
+
+After deploying the release candidate, run the public smoke script and attach the
+redacted output to HAVN-72:
+
+```bash
+python3 scripts/launch_public_smoke.py --json
+```
+
+The command uses only public endpoints. It should fail while live
+`/gallery/browse` returns unreviewed legacy rows. Use `--allow-legacy-gallery`
+only if Marcus has explicitly approved those rows after product-quality review
+and the waiver is recorded in HAVN-72.
+
+Latest live run, 2026-09-27:
+
+- `python3 scripts/launch_public_smoke.py --json` -> exit `1`.
+- Passing checks: `api_health`, `api_healthz`, `control_plane`,
+  `music_discover_public`, web home/create/pricing/support/terms/refunds, and
+  `create_no_invite_copy` with `legacy_prompts=[]`.
+- Failing check: `legacy_gallery_hidden` with
+  `status=200 total=7 allow_legacy_gallery=False`.
+
+Deployment access note, 2026-09-27:
+
+- Coordinator deploy scripts target `marcus@100.122.73.117` and include backup,
+  health-check, and rollback behavior.
+- This shell could not reach the coordinator host: SSH to `100.122.73.117:22`
+  timed out; SSH to `api.joinhavn.io:22` reported network unreachable.
+  Operator-side deploy or DB cleanup is required before the gallery smoke can
+  pass.
+- PR #99 is the shortest deployable production-branch patch for this specific
+  blocker: `https://github.com/marcusllittle/havnai-core/pull/99`. It was
+  opened clean against `feat/havn-11-commercial-accounts` and verified with
+  gallery guard/cleanup tests plus `py_compile`.
+
+## Final Platform Evidence Commands
+
+Run these from the deployed release candidate or operator context before any
+GO/CONDITIONAL GO. Attach redacted JSON output or a dated waiver to the linked
+ticket.
+
+| Gate | Command | Passing signal |
+| --- | --- | --- |
+| Public smoke | `python3 scripts/launch_public_smoke.py --json` | `ok=true` without `--allow-legacy-gallery` |
+| Legacy gallery cleanup, if deploy is not immediate | `python3 scripts/legacy_gallery_cleanup.py --db-path <coordinator-db> --json` then `python3 scripts/legacy_gallery_cleanup.py --db-path <coordinator-db> --apply --include-job-ids --json` | Audit/apply packet schema `havn-72-legacy-gallery-cleanup.v1`; active legacy rows delisted, deleted rows `0`, account-owned rows excluded; public smoke passes after cleanup |
+| Content isolation | `python3 scripts/content_isolation_evidence.py ...` | `passed=true`; public denial, no-store cache, owner access, cross-account denial, and social-preview denial proven |
+| Mixed-model stability | `python3 scripts/mixed_model_worker_drill.py --preflight --account-token <redacted>` then private 30-job drill | funded account preflight passes; private `/v2/jobs` drill completes without public rough outputs |
+| Monitoring | `HAVNAI_ADMIN_TOKEN=<redacted> python3 scripts/collect_observability_evidence.py` | `passed=true`; required metrics present; alert dry-run schema returned |
+| Backup/restore | `python3 scripts/backup_evidence_audit.py ...` | `passed=true`; local backup plus remote retention evidence or dated waiver |
+| Restart recovery | `python3 scripts/account_restart_recovery_drill.py --preflight --account-token <redacted> --restart-command '<approved command>'` then live drill | preflight passes; accepted job survives restart without duplicate charge, receipt, or payout |
+| Rollback | `python3 scripts/rollback_evidence_audit.py ...` | `passed=true`; coordinator, web, and node rollback evidence or dated waivers present |
+
+## Current NO-GO Conditions
+
+- Live production `/gallery/browse?limit=1` still returns `total: 7` and
+  legacy listing `id=15` (`job-6aa52ed839c8`). Public launch remains blocked
+  until PR #99 or PR #91 is deployed, or the coordinator DB cleanup helper
+  delists the active legacy rows, and public smoke is rerun clean.
+- HAVN-12 mixed-model acceptance still lacks a funded commercial account bearer
+  token for private `/v2/jobs`; public `/submit-job` rough outputs do not count.
+- HAVN-14 cannot close until PR #96/equivalent is deployed and proves
+  no-store denial headers, owner/private adult generation, cross-account denial,
+  social-preview behavior, and Claude-owned HAVN-58 is completed/consumed.
+- HAVN-17 cannot close until remote backup/waiver, monitoring token-backed
+  refresh or waiver, restart recovery, web/node rollback evidence, and final
+  operations owner checklist are recorded.
+- Claude-owned Astra game-quality gates and client integration evidence are
+  outside Codex's platform branch and remain release blockers.
+
+## Final Decision Checklist
+
+Marcus should not record GO until this document points to dated evidence for:
+
+- release commits and deployed versions for web, core, workers, and config;
+- clean public gallery/discover/marketplace probes;
+- Stripe funding and idempotent replay evidence accepted for production scope;
+- private account generation, artifact delivery, publication, deletion/recovery,
+  and mixed-model drill;
+- content-isolation tests plus deployed adult/private denial proof;
+- monitoring, backup, restore, restart, and rollback packets;
+- Astra client/game-quality acceptance from Claude-owned tickets;
+- security, trust/privacy, licensing, accessibility/device acceptance;
+- launch-day operator, support owner, stop triggers, rollback owner, and
+  post-launch smoke route list.
+
+Any CONDITIONAL GO must list the exception owner, expiration date, mitigation,
+disabled public surface if applicable, and rollback trigger.

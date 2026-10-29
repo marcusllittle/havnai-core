@@ -113,7 +113,28 @@ class RewardTests(AstraTestCase):
         accepted = self._submit(score=100_000, run_token=token)
         self.assertTrue(accepted["ok"])
         replay = self._submit(score=100_000, run_token=token)
-        self.assertEqual(replay["reason"], "run_token_used")
+        self.assertEqual(replay["reason"], "duplicate_run")
+        self.assertEqual(len(self.deposited), 1)
+
+    def test_rewarded_replay_does_not_deposit_or_persist_twice(self):
+        token = self._open_run(age_seconds=300)
+        self.assertTrue(self._submit(score=100_000, run_token=token)["ok"])
+        replay = self._submit(score=100_000, run_token=token)
+        self.assertEqual(replay["reason"], "duplicate_run")
+        self.assertEqual(replay["reward"], 0)
+        self.assertEqual(len(self.deposited), 1)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM astra_runs").fetchone()[0], 1)
+
+    def test_rewarded_token_wrong_identity_cannot_probe_settlement(self):
+        token = self._open_run(age_seconds=300)
+        self.assertTrue(self._submit(score=100_000, run_token=token)["ok"])
+        for wallet, map_id, reason in [
+            (OTHER_WALLET, "nebula-runway", "run_token_wallet_mismatch"),
+            (WALLET, "other-map", "run_token_map_mismatch"),
+        ]:
+            result = astra.submit_reward(wallet=wallet, score=100_000, grade="S", duration_s=999,
+                map_id=map_id, deposit_fn=self._deposit_fn, ledger_fn=self._ledger_fn, run_token=token)
+            self.assertEqual(result["reason"], reason)
         self.assertEqual(len(self.deposited), 1)
 
     def test_tampered_high_score_cannot_exceed_server_reward_ceiling(self):

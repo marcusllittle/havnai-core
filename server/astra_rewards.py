@@ -215,6 +215,15 @@ def submit_reward(
     # cannot probe thresholds by resubmitting the same run with new scores.
     started_at, token_error = consume_run_token(wallet, run_token or "", map_id=map_id)
     if token_error:
+        if token_error == "run_token_used":
+            # A consumed token may also represent a rejected claim. Only an
+            # actual reward row proves the lost-response retry was settled.
+            rewarded = db.execute(
+                "SELECT 1 FROM astra_runs WHERE wallet=? AND run_hash=? AND map_id=?",
+                (wallet, _run_hash(wallet, run_token or ""), map_id),
+            ).fetchone()
+            if rewarded:
+                return {"ok": False, "reason": "duplicate_run", "reward": 0}
         return {"ok": False, "reason": token_error, "reward": 0}
 
     # The client's duration_s is advisory; the server's own clock decides.

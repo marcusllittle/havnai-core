@@ -291,6 +291,9 @@ class CoordinatorClient:
             "budget_basis": "current /credits/cost quotes for every planned submission; not a price lock",
         }
 
+    def model_eligibility(self, plan: list[DrillJob]) -> dict[str, Any]:
+        return validate_model_eligibility(plan, self._json("GET", "/models/list"))
+
     def metrics_text(self) -> str | None:
         if not self.node_token:
             return None
@@ -326,6 +329,35 @@ def has_primary_artifact(result: dict[str, Any], task_type: str) -> bool:
     )
 
 
+def validate_model_eligibility(plan: list[DrillJob], catalog: dict[str, Any]) -> dict[str, Any]:
+    models = catalog.get("models")
+    if not isinstance(models, list):
+        return {"passed": False, "blockers": [{"code": "invalid_model_catalog"}]}
+    by_name = {str(item.get("name") or "").lower(): item for item in models if isinstance(item, dict)}
+    blockers = []
+    checked = set()
+    compatible_tasks = {"image": {"IMAGE_GEN"}, "text_to_video": {"LTX_VIDEO_GEN", "VIDEO_GEN", "ANIMATEDIFF"},
+                        "text_to_music": {"MUSIC_GEN"}}
+    for job in plan:
+        key = (job.model.lower(), job.account_type)
+        if key in checked:
+            continue
+        checked.add(key)
+        model = by_name.get(key[0])
+        code = None
+        if model is None:
+            code = "model_not_found"
+        elif model.get("available") is not True:
+            code = "model_unavailable"
+        elif str(model.get("task_type") or "").upper() not in compatible_tasks[job.account_type]:
+            code = "model_task_mismatch"
+        elif job.account_type in {"text_to_video", "text_to_music"} and job.account_type not in (model.get("capabilities") or []):
+            code = "model_capability_missing"
+        if code:
+            blockers.append({"model": job.model, "type": job.account_type, "code": code})
+    return {"passed": not blockers, "blockers": blockers}
+
+
 def _split_models(value: str) -> list[str]:
     return [item.strip().lower() for item in value.split(",") if item.strip()]
 
@@ -335,7 +367,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--base-url", default=os.environ.get("HAVNAI_COORDINATOR_URL", "https://api.joinhavn.io"))
     parser.add_argument("--wallet", default=os.environ.get("HAVNAI_DRILL_WALLET", "0x0000000000000000000000000000000000000047"))
     parser.add_argument("--image-models", default=os.environ.get("HAVNAI_DRILL_IMAGE_MODELS", "juggernautxl_ragnarokby"))
-    parser.add_argument("--video-models", default=os.environ.get("HAVNAI_DRILL_VIDEO_MODELS", "ltx23_wangp"))
+    parser.add_argument("--video-models", default=os.environ.get("HAVNAI_DRILL_VIDEO_MODELS", "ltx_video_distilled"))
     parser.add_argument("--music-models", default=os.environ.get("HAVNAI_DRILL_MUSIC_MODELS", "ace_step_1_5_turbo"))
     parser.add_argument("--count", type=int, default=DEFAULT_JOB_COUNT)
     parser.add_argument("--poll-seconds", type=float, default=20.0)
@@ -373,6 +405,17 @@ def main(argv: list[str] | None = None) -> int:
         "private_account_jobs": bool(args.account_token.strip()),
         "mix": [{"index": job.index, "task_type": job.task_type, "account_type": job.account_type, "model": job.model} for job in plan],
     }, indent=2, sort_keys=True), flush=True)
+    if args.execute and not args.preflight and not args.account_token.strip() and not args.allow_production_visible:
+        raise SystemExit(PRODUCTION_VISIBLE_WARNING)
+    if args.execute or (args.preflight and args.account_token.strip()):
+        eligibility_client = CoordinatorClient(args.base_url, account_token=args.account_token.strip() or None)
+        try:
+            eligibility = eligibility_client.model_eligibility(plan)
+        except (ValueError, RuntimeError, error.URLError):
+            eligibility = {"passed": False, "blockers": [{"code": "model_catalog_unavailable"}]}
+        print(json.dumps({"schema": "havn-47-model-eligibility.v1", "run_id": run_id, **eligibility}, sort_keys=True), flush=True)
+        if not eligibility["passed"]:
+            return 2
     if args.preflight:
         account_token = args.account_token.strip()
         if not account_token:

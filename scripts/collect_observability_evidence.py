@@ -208,7 +208,7 @@ def collect_observability(
     )
     send_delivery = send.get("delivery", {}) if isinstance(send, dict) else {}
     delivery_reason = send_delivery.get("reason")
-    delivery_blocked = delivery_reason == "alert_webhook_not_configured"
+    delivery_blocked = delivery_reason in {"alert_webhook_not_configured", "alert_email_not_configured"}
     checks.append(Check(
         "alert_delivery",
         send_status == 200 and (send_delivery.get("sent") is True or delivery_blocked),
@@ -222,6 +222,8 @@ def collect_observability(
 
     failures = [check for check in checks if not check.ok]
     blockers = []
+    if send_delivery.get("receipt_scope") == "smtp_accepted":
+        blockers.append("SMTP accepted the alert; recipient inbox receipt must still be verified.")
     if delivery_blocked:
         if waiver and not waiver_failures:
             checks.append(Check(
@@ -233,7 +235,10 @@ def collect_observability(
                 ),
             ))
         else:
-            blockers.append("HAVNAI_ALERT_WEBHOOK is not configured; external alert delivery receipt still required or waived.")
+            if delivery_reason == "alert_email_not_configured":
+                blockers.append("Email alert transport is not configured; external alert delivery receipt still required or waived.")
+            else:
+                blockers.append("HAVNAI_ALERT_WEBHOOK is not configured; external alert delivery receipt still required or waived.")
     if waiver_failures:
         blockers.extend(waiver_failures)
     if not admin_token:

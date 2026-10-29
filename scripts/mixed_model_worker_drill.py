@@ -12,6 +12,12 @@ same account-owned requests with --run-id <recorded UUID> and identical plan
 arguments. The server rejects changed payloads for an existing key. Recovery
 may replay completed jobs: never count it as a fresh worker acceptance run.
 Run IDs are not credentials. Keep the account token in the private environment.
+
+The summary's passed field remains a strict all-jobs execution check. The
+separate success_threshold_met field reports Jira's 95% numerical criterion;
+neither field proves ledger integrity, artifact readability or no manual reboot.
+Preflight prices every planned submission using current coordinator quotes and
+the account credit scale. Quotes are not a reservation or a price lock.
 """
 
 from __future__ import annotations
@@ -23,6 +29,7 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from urllib import error, parse, request
 from uuid import UUID, uuid4
@@ -114,8 +121,10 @@ def build_plan(
             payload.update({"steps": 4, "frames": 33, "fps": 16, "duration_seconds": 3})
             account_payload.update({"steps": 4, "frames": 33, "fps": 16, "duration_seconds": 3})
         elif task_type == "MUSIC_GEN":
-            payload.update({"style": "cinematic synthwave", "instrumental": True, "duration": 30})
-            account_payload.update({"style": "cinematic synthwave", "instrumental": True, "duration": 30})
+            # Pin the batch rather than inheriting mutable manifest defaults:
+            # account charging multiplies the per-job price by resolved batch_size.
+            payload.update({"style": "cinematic synthwave", "instrumental": True, "duration": 30, "batch_size": 1})
+            account_payload.update({"style": "cinematic synthwave", "instrumental": True, "duration": 30, "batch_size": 1})
         plan.append(DrillJob(index=index + 1, task_type=task_type, account_type=account_type, model=model, prompt=prompt,
                              payload=payload, account_payload=account_payload))
     return plan
@@ -124,24 +133,59 @@ def build_plan(
 def summarize_results(plan: list[DrillJob], job_ids: dict[int, str], statuses: dict[str, dict[str, Any]]) -> dict[str, Any]:
     by_type: dict[str, dict[str, int]] = {}
     failures: list[dict[str, Any]] = []
+    job_evidence: list[dict[str, Any]] = []
+    submitted_indices: dict[str, list[int]] = {}
+    for planned in plan:
+        job_id = job_ids.get(planned.index)
+        if job_id:
+            submitted_indices.setdefault(job_id, []).append(planned.index)
+    duplicate_job_ids = {job_id: indices for job_id, indices in submitted_indices.items() if len(indices) > 1}
     for planned in plan:
         bucket = by_type.setdefault(planned.task_type, {"planned": 0, "succeeded": 0, "failed": 0, "other": 0})
         bucket["planned"] += 1
         job_id = job_ids.get(planned.index)
-        status = result_status(statuses.get(job_id or "") or {})
+        result = statuses.get(job_id or "") or {}
+        status = result_status(result)
+        artifact_present = has_primary_artifact(result, planned.task_type)
+        if job_id in duplicate_job_ids:
+            status = "duplicate_job_id"
+        elif status in {"succeeded", "completed"} and not artifact_present:
+            status = "missing_artifact"
+        job_evidence.append({
+            "index": planned.index, "job_id": job_id, "task_type": planned.task_type,
+            "model": planned.model, "terminal_status": result_status(result),
+            "artifact_present": artifact_present, "validation_status": status,
+            "created_at": result.get("created_at"), "completed_at": result.get("completed_at"),
+            "error_code": result.get("error_code"),
+        })
         if status in {"succeeded", "completed"}:
             bucket["succeeded"] += 1
-        elif status in {"failed", "cancelled", "expired", "not_submitted"}:
+        elif status in {"failed", "cancelled", "expired", "not_submitted", "duplicate_job_id", "missing_artifact"}:
             bucket["failed"] += 1
             failures.append({"index": planned.index, "job_id": job_id, "type": planned.task_type, "model": planned.model, "status": status})
         else:
             bucket["other"] += 1
             failures.append({"index": planned.index, "job_id": job_id, "type": planned.task_type, "model": planned.model, "status": status})
+    successful_jobs = sum(bucket["succeeded"] for bucket in by_type.values())
     return {
         "schema": "havn-47-mixed-model-worker-drill.v1",
         "generated_at": _utc_now(),
         "planned_jobs": len(plan),
         "submitted_jobs": len(job_ids),
+        "unique_submitted_jobs": len(submitted_indices),
+        "duplicate_job_ids": duplicate_job_ids,
+        "successful_jobs": successful_jobs,
+        "success_rate": successful_jobs / len(plan) if plan else 0,
+        "success_threshold": 0.95,
+        "success_threshold_met": bool(plan) and successful_jobs * 100 >= len(plan) * 95,
+        "minimum_acceptance_jobs_met": len(plan) >= DEFAULT_JOB_COUNT,
+        "job_evidence": job_evidence,
+        "acceptance_evidence_gaps": [
+            "artifact content retrieval is not verified",
+            "account ledger, receipt and reservation audit is not collected",
+            "retry counts and automatic recovery evidence are not collected",
+            "no-manual-reboot evidence requires operator confirmation",
+        ],
         "completed_jobs": sum(1 for data in statuses.values() if result_status(data) in TERMINAL_STATUSES),
         "by_type": by_type,
         "failures": failures,
@@ -213,17 +257,38 @@ class CoordinatorClient:
             raise RuntimeError("account token required")
         return self._json("GET", f"/v2/jobs/{parse.quote(job_id)}", headers={"Authorization": f"Bearer {self.account_token}"})
 
-    def account_preflight(self) -> dict[str, Any]:
+    def account_preflight(self, plan: list[DrillJob]) -> dict[str, Any]:
         if not self.account_token:
             raise RuntimeError("account token required")
         headers = {"Authorization": f"Bearer {self.account_token}"}
         account = self._json("GET", "/v2/account", headers=headers)
         credits = self._json("GET", "/v2/account/credits", headers=headers)
+        scale = int(credits.get("scale") or 0)
+        if scale <= 0:
+            raise ValueError("account credit scale must be positive")
+        quoted_units: dict[tuple[str, str], int] = {}
+        required_units = 0
+        for job in plan:
+            key = (job.model, job.task_type)
+            if key not in quoted_units:
+                quote = self._json("GET", "/credits/cost?" + parse.urlencode({"model": job.model, "task_type": job.task_type}))
+                try:
+                    units = Decimal(str(quote.get("cost"))) * scale
+                    if not units.is_finite() or units <= 0 or units != units.to_integral_value():
+                        raise ValueError("invalid quoted generation price")
+                    quoted_units[key] = int(units)
+                except InvalidOperation as exc:
+                    raise ValueError("invalid quoted generation price") from exc
+            required_units += quoted_units[key] * int(job.account_payload.get("batch_size", 1))
         return {
             "account_id_present": bool(str(account.get("id") or "").strip()),
             "status": account.get("status"),
             "available_units": credits.get("available_units"),
             "reserved_units": credits.get("reserved_units"),
+            "required_units": required_units,
+            "credit_scale": scale,
+            "budget_sufficient": int(credits.get("available_units") or 0) >= required_units,
+            "budget_basis": "current /credits/cost quotes for every planned submission; not a price lock",
         }
 
     def metrics_text(self) -> str | None:
@@ -246,6 +311,19 @@ def result_status(result: dict[str, Any]) -> str:
     if result.get("error"):
         return "failed"
     return "pending"
+
+
+def has_primary_artifact(result: dict[str, Any], task_type: str) -> bool:
+    kind, field = {"IMAGE_GEN": ("image", "image_url"), "LTX_VIDEO_GEN": ("video", "video_url"),
+                   "MUSIC_GEN": ("audio", "audio_url")}[task_type]
+    if isinstance(result.get(field), str) and result[field].strip():
+        return True
+    artifacts = result.get("artifacts")
+    return isinstance(artifacts, list) and any(
+        isinstance(item, dict) and item.get("kind") == kind
+        and isinstance(item.get("url"), str) and item["url"].strip()
+        for item in artifacts
+    )
 
 
 def _split_models(value: str) -> list[str]:
@@ -306,20 +384,38 @@ def main(argv: list[str] | None = None) -> int:
                 "account_id_present": False,
                 "available_units": None,
                 "reserved_units": None,
+                "required_units": None,
+                "budget_sufficient": False,
                 "passed": False,
                 "blockers": ["HAVNAI_DRILL_ACCOUNT_TOKEN is not configured; funded private account token required."],
             }, indent=2, sort_keys=True))
             return 2
         client = CoordinatorClient(args.base_url, node_token=args.node_token, submit_retry_seconds=args.submit_retry_seconds,
                                    account_token=account_token)
-        preflight = client.account_preflight()
+        try:
+            preflight = client.account_preflight(plan)
+        except (ValueError, RuntimeError, error.URLError):
+            # Do not print coordinator error bodies or bearer-token details.
+            print(json.dumps({
+                "schema": "havn-47-mixed-model-worker-drill-preflight.v1",
+                "generated_at": _utc_now(),
+                "base_url": _clean_base_url(args.base_url),
+                "account_token_present": True,
+                "required_units": None,
+                "budget_sufficient": False,
+                "passed": False,
+                "blockers": ["Private account or full-plan price verification failed; no jobs submitted."],
+            }, indent=2, sort_keys=True))
+            return 2
         result = {
             "schema": "havn-47-mixed-model-worker-drill-preflight.v1",
             "generated_at": _utc_now(),
             "base_url": _clean_base_url(args.base_url),
             "account_token_present": True,
             **preflight,
-            "passed": bool(preflight.get("account_id_present")) and int(preflight.get("available_units") or 0) > 0,
+            "passed": bool(preflight.get("account_id_present")) and bool(preflight.get("budget_sufficient")),
+            "blockers": ([] if preflight.get("account_id_present") else ["Private account identity is missing."])
+                        + ([] if preflight.get("budget_sufficient") else ["Available credits do not cover the quoted full drill plan."]),
         }
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0 if result["passed"] else 2

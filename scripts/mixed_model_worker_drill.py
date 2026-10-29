@@ -3,8 +3,15 @@
 The drill queues a fixed mix of image, video, and music jobs through the same
 coordinator routes used by production workers, then polls until each job reaches
 a terminal state. By default it prints a dry-run plan and performs no network
-writes. Use --execute only from an operator shell with a funded test wallet and
-the required coordinator tokens in the environment.
+writes. Use --execute only from an operator shell with a funded test account
+and the required coordinator tokens in the environment.
+
+Each invocation creates a fresh run UUID, recorded before submission and in the
+summary. A new run creates new billable jobs. After interruption, recover the
+same account-owned requests with --run-id <recorded UUID> and identical plan
+arguments. The server rejects changed payloads for an existing key. Recovery
+may replay completed jobs: never count it as a fresh worker acceptance run.
+Run IDs are not credentials. Keep the account token in the private environment.
 """
 
 from __future__ import annotations
@@ -18,6 +25,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 from urllib import error, parse, request
+from uuid import UUID, uuid4
 
 
 DEFAULT_JOB_COUNT = 30
@@ -256,6 +264,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--submit-retry-seconds", type=float, default=DEFAULT_SUBMIT_RETRY_SECONDS)
     parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--execute", action="store_true", help="Queue jobs and poll live coordinator results")
+    parser.add_argument("--run-id", type=UUID, default=None,
+                        help="UUID for this drill; reuse only to recover the same run, not for fresh acceptance")
     parser.add_argument("--preflight", action="store_true", help="Validate private account token and credits without submitting jobs")
     parser.add_argument("--account-token", default=os.environ.get("HAVNAI_DRILL_ACCOUNT_TOKEN", ""),
                         help="bearer token for private account-owned drill jobs; preferred for live acceptance")
@@ -266,6 +276,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
+    run_id = str(args.run_id or uuid4())
     plan = build_plan(
         count=args.count,
         image_models=_split_models(args.image_models),
@@ -275,13 +286,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(json.dumps({
         "schema": "havn-47-mixed-model-worker-drill-plan.v1",
+        "run_id": run_id,
+        "explicit_run_id": args.run_id is not None,
         "generated_at": _utc_now(),
         "base_url": _clean_base_url(args.base_url),
         "execute": bool(args.execute),
         "job_count": len(plan),
         "private_account_jobs": bool(args.account_token.strip()),
         "mix": [{"index": job.index, "task_type": job.task_type, "account_type": job.account_type, "model": job.model} for job in plan],
-    }, indent=2, sort_keys=True))
+    }, indent=2, sort_keys=True), flush=True)
     if args.preflight:
         account_token = args.account_token.strip()
         if not account_token:
@@ -321,11 +334,11 @@ def main(argv: list[str] | None = None) -> int:
     job_ids: dict[int, str] = {}
     for job in plan:
         if account_token:
-            job_id = client.submit_account(job.account_payload, idempotency_key=f"havn-47-{job.index}-{job.model}")
+            job_id = client.submit_account(job.account_payload, idempotency_key=f"havn-47-{run_id}-{job.index}")
         else:
             job_id = client.submit(job.payload)
         job_ids[job.index] = job_id
-        print(json.dumps({"event": "submitted", "index": job.index, "task_type": job.task_type, "model": job.model, "job_id": job_id}), flush=True)
+        print(json.dumps({"event": "submitted", "run_id": run_id, "index": job.index, "task_type": job.task_type, "model": job.model, "job_id": job_id}), flush=True)
 
     deadline = time.monotonic() + args.timeout_seconds
     statuses: dict[str, dict[str, Any]] = {}
@@ -345,6 +358,8 @@ def main(argv: list[str] | None = None) -> int:
         time.sleep(args.poll_seconds)
 
     summary = summarize_results(plan, job_ids, statuses)
+    summary["run_id"] = run_id
+    summary["explicit_run_id"] = args.run_id is not None
     metrics = client.metrics_text()
     if metrics is not None:
         summary["metrics_observed"] = {

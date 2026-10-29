@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from uuid import UUID
 from pathlib import Path
 
 
@@ -10,6 +11,62 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import mixed_model_worker_drill as drill  # type: ignore
+
+
+def test_account_execution_keys_are_unique_per_run_and_recoverable(monkeypatch, capsys):
+    keys = []
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def submit_account(self, payload, *, idempotency_key):
+            keys.append(idempotency_key)
+            return idempotency_key
+
+        def account_result(self, job_id):
+            return {"status": "succeeded"}
+
+        def metrics_text(self):
+            return None
+
+    monkeypatch.setattr(drill, "CoordinatorClient", Client)
+    args = ["--count", "3", "--execute", "--account-token", "secret-token"]
+    reports = []
+    for _ in range(2):
+        assert drill.main(args) == 0
+        output = capsys.readouterr().out
+        assert "secret-token" not in output
+        decoder = json.JSONDecoder()
+        items = []
+        while output.strip():
+            item, end = decoder.raw_decode(output.lstrip())
+            items.append(item)
+            output = output.lstrip()[end:]
+        reports.append(items)
+    first_id = reports[0][0]["run_id"]
+    assert str(UUID(first_id)) == first_id
+    assert first_id != reports[1][0]["run_id"]
+    assert len(set(keys)) == 6
+    assert all(len(key) <= 128 for key in keys)
+    for items in reports:
+        assert items[-1]["run_id"] == items[0]["run_id"]
+        assert items[0]["explicit_run_id"] is False
+        assert all(item["run_id"] == items[0]["run_id"] for item in items[1:-1])
+    assert drill.main(args + ["--run-id", first_id]) == 0
+    assert keys[6:] == keys[:3]
+
+
+def test_invalid_run_id_fails_before_client_creation(monkeypatch):
+    import pytest
+
+    def unexpected_client(*args, **kwargs):
+        raise AssertionError("invalid run ID reached network client")
+
+    monkeypatch.setattr(drill, "CoordinatorClient", unexpected_client)
+    with pytest.raises(SystemExit) as exc:
+        drill.main(["--execute", "--run-id", "not-a-uuid"])
+    assert exc.value.code == 2
 
 
 def test_build_plan_balances_30_job_mixed_model_sequence() -> None:

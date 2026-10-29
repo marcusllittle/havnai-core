@@ -19,6 +19,61 @@ def sample_plan(count=30):
                             music_models=["music_a"], wallet="test-wallet")
 
 
+def eligible_catalog():
+    return {"models": [
+        {"name": "IMAGE_A", "available": True, "task_type": "IMAGE_GEN"},
+        {"name": "video_a", "available": True, "task_type": "LTX_VIDEO_GEN", "capabilities": ["text_to_video"]},
+        {"name": "music_a", "available": True, "task_type": "MUSIC_GEN", "capabilities": ["text_to_music"]},
+    ]}
+
+
+@pytest.mark.parametrize("change,code", [
+    ("missing", "model_not_found"), ("offline", "model_unavailable"),
+    ("image_only_video", "model_capability_missing"), ("wrong_task", "model_task_mismatch"),
+])
+def test_model_catalog_blocks_invalid_plan_independent_of_prices(change, code):
+    catalog = eligible_catalog()
+    video = catalog["models"][1]
+    if change == "missing":
+        catalog["models"].remove(video)
+    elif change == "offline":
+        video["available"] = False
+    elif change == "image_only_video":
+        video["capabilities"] = ["image_to_video"]
+    else:
+        video["task_type"] = "IMAGE_GEN"
+    result = drill.validate_model_eligibility(sample_plan(), catalog)
+    assert result == {"passed": False, "blockers": [{"model": "video_a", "type": "text_to_video", "code": code}]}
+
+
+def test_catalog_supports_case_insensitive_image_and_explicit_video_music_modes():
+    assert drill.validate_model_eligibility(sample_plan(), eligible_catalog())["passed"] is True
+    catalog = eligible_catalog()
+    catalog["models"][2]["capabilities"] = []
+    assert drill.validate_model_eligibility(sample_plan(), catalog)["blockers"][0]["code"] == "model_capability_missing"
+
+
+def test_default_video_is_explicit_text_to_video_model():
+    assert drill.parse_args([]).video_models == "ltx_video_distilled"
+
+
+@pytest.mark.parametrize("mode", ["--execute", "--preflight"])
+def test_invalid_catalog_stops_before_account_prices_or_job_submission(monkeypatch, capsys, mode):
+    calls = []
+
+    def fake_json(self, method, path, **kwargs):
+        calls.append((method, path))
+        assert path == "/models/list"
+        return {"models": []}
+
+    monkeypatch.setattr(drill.CoordinatorClient, "_json", fake_json)
+    assert drill.main([mode, "--account-token", "secret-token"]) == 2
+    assert calls == [("GET", "/models/list")]
+    output = capsys.readouterr().out
+    assert "model_not_found" in output
+    assert "secret-token" not in output
+
+
 def test_music_plan_pins_one_take_instead_of_inheriting_manifest_batch_default():
     music = [job for job in sample_plan() if job.task_type == "MUSIC_GEN"]
     assert len(music) == 10
@@ -142,6 +197,9 @@ def test_account_execution_keys_are_unique_per_run_and_recoverable(monkeypatch, 
     keys = []
 
     class Client:
+        def model_eligibility(self, plan):
+            return {"passed": True, "blockers": []}
+
         def __init__(self, *args, **kwargs):
             pass
 
@@ -381,6 +439,9 @@ def test_preflight_requires_account_token() -> None:
 
 def test_preflight_reports_funded_account_without_printing_token(monkeypatch, capsys) -> None:
     class Client:
+        def model_eligibility(self, plan):
+            return {"passed": True, "blockers": []}
+
         def __init__(self, *args, **kwargs):
             assert kwargs["account_token"] == "secret-token"
 
@@ -419,6 +480,9 @@ def test_preflight_reports_funded_account_without_printing_token(monkeypatch, ca
 
 def test_preflight_cli_rejects_positive_balance_below_plan_budget(monkeypatch, capsys):
     class Client:
+        def model_eligibility(self, plan):
+            return {"passed": True, "blockers": []}
+
         def __init__(self, *args, **kwargs):
             pass
 
@@ -435,6 +499,9 @@ def test_preflight_cli_rejects_positive_balance_below_plan_budget(monkeypatch, c
 
 def test_preflight_cli_returns_redacted_blocker_on_quote_or_auth_failure(monkeypatch, capsys):
     class Client:
+        def model_eligibility(self, plan):
+            return {"passed": True, "blockers": []}
+
         def __init__(self, *args, **kwargs):
             pass
 

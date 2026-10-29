@@ -81,24 +81,81 @@ class SessionTests(AstraTestCase):
 class RunTokenTests(AstraTestCase):
     def test_token_can_only_be_consumed_once(self) -> None:
         token = self._open_run()
-        started_at, error = astra.consume_run_token(WALLET, token)
+        started_at, error = astra.consume_run_token(WALLET, token, map_id="nebula-runway")
         self.assertIsNone(error)
         self.assertIsNotNone(started_at)
 
-        _, second_error = astra.consume_run_token(WALLET, token)
+        _, second_error = astra.consume_run_token(WALLET, token, map_id="nebula-runway")
         self.assertEqual(second_error, "run_token_used")
 
     def test_token_is_bound_to_issuing_wallet(self) -> None:
         token = self._open_run()
-        _, error = astra.consume_run_token(OTHER_WALLET, token)
+        _, error = astra.consume_run_token(OTHER_WALLET, token, map_id="nebula-runway")
         self.assertEqual(error, "run_token_wallet_mismatch")
 
     def test_unknown_token_rejected(self) -> None:
-        _, error = astra.consume_run_token(WALLET, "fabricated")
+        _, error = astra.consume_run_token(WALLET, "fabricated", map_id="nebula-runway")
         self.assertEqual(error, "unknown_run_token")
 
 
 class RewardTests(AstraTestCase):
+    def test_map_mismatch_cannot_create_reward_or_consume_correct_run(self):
+        token = self._open_run(age_seconds=300)
+        result = astra.submit_reward(
+            wallet=WALLET, score=100_000, grade="S", duration_s=999,
+            map_id="different-map", deposit_fn=self._deposit_fn,
+            ledger_fn=self._ledger_fn, run_token=token,
+        )
+        self.assertEqual(result["reason"], "run_token_map_mismatch")
+        self.assertEqual(result["reward"], 0)
+        self.assertEqual(self.deposited, [])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM astra_runs").fetchone()[0], 0)
+        accepted = self._submit(score=100_000, run_token=token)
+        self.assertTrue(accepted["ok"])
+        replay = self._submit(score=100_000, run_token=token)
+        self.assertEqual(replay["reason"], "duplicate_run")
+        self.assertEqual(len(self.deposited), 1)
+
+    def test_rewarded_replay_does_not_deposit_or_persist_twice(self):
+        token = self._open_run(age_seconds=300)
+        self.assertTrue(self._submit(score=100_000, run_token=token)["ok"])
+        replay = self._submit(score=100_000, run_token=token)
+        self.assertEqual(replay["reason"], "duplicate_run")
+        self.assertEqual(replay["reward"], 0)
+        self.assertEqual(len(self.deposited), 1)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM astra_runs").fetchone()[0], 1)
+
+    def test_rewarded_token_wrong_identity_cannot_probe_settlement(self):
+        token = self._open_run(age_seconds=300)
+        self.assertTrue(self._submit(score=100_000, run_token=token)["ok"])
+        for wallet, map_id, reason in [
+            (OTHER_WALLET, "nebula-runway", "run_token_wallet_mismatch"),
+            (WALLET, "other-map", "run_token_map_mismatch"),
+        ]:
+            result = astra.submit_reward(wallet=wallet, score=100_000, grade="S", duration_s=999,
+                map_id=map_id, deposit_fn=self._deposit_fn, ledger_fn=self._ledger_fn, run_token=token)
+            self.assertEqual(result["reason"], reason)
+        self.assertEqual(len(self.deposited), 1)
+
+    def test_tampered_high_score_cannot_exceed_server_reward_ceiling(self):
+        result = self._submit(score=10**12, run_token=self._open_run(age_seconds=300))
+        self.assertTrue(result["ok"])
+        self.assertLessEqual(result["reward"], astra.MAX_CREDITS_PER_RUN)
+
+    def test_cooldown_blocks_second_distinct_run(self):
+        self.assertTrue(self._submit(score=100_000, run_token=self._open_run(age_seconds=300))["ok"])
+        second = self._submit(score=100_000, run_token=self._open_run(age_seconds=300))
+        self.assertEqual(second["reason"], "cooldown")
+        self.assertEqual(len(self.deposited), 1)
+
+    def test_daily_cap_blocks_reward_after_cooldown(self):
+        self.assertTrue(self._submit(score=100_000, run_token=self._open_run(age_seconds=300))["ok"])
+        self.conn.execute("UPDATE astra_runs SET reward=?, created_at=?", (astra.DAILY_EARN_CAP, time.time() - 120))
+        self.conn.commit()
+        result = self._submit(score=100_000, run_token=self._open_run(age_seconds=300))
+        self.assertEqual(result["reason"], "daily_cap_reached")
+        self.assertEqual(len(self.deposited), 1)
+
     def setUp(self) -> None:
         super().setUp()
         self.deposited: list[float] = []

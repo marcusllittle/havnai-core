@@ -331,6 +331,12 @@ def process_spend(
             (wallet, idempotency_key),
         ).fetchone()
         if prior is not None:
+            if prior["action"] != action:
+                return {"ok": False, "reason": "idempotency_conflict", "cost": cost}
+            if prior["status"] not in {"completed", "failed"}:
+                # An intent is not proof of a charge. A retry must not grant
+                # a purchase while settlement is pending or indeterminate.
+                return {"ok": False, "reason": "duplicate_request", "cost": cost}
             if prior["status"] == "failed":
                 return {"ok": False, "reason": "insufficient_credits", "cost": cost}
             return {

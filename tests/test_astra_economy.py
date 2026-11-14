@@ -241,6 +241,17 @@ class SpendTests(AstraTestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(self.balance, 500.0 - astra.SPEND_COSTS["gacha_1"])
 
+    def test_pending_spend_is_not_replayed_as_success(self) -> None:
+        self.conn.execute(
+            "INSERT INTO astra_spends(wallet,action,amount,created_at,idempotency_key,status) VALUES (?,?,?,?,?,'pending')",
+            (WALLET, 'gacha_1', astra.SPEND_COSTS['gacha_1'], time.time(), 'pending-key'),
+        )
+        self.conn.commit()
+        retry = self._spend(idempotency_key='pending-key')
+        self.assertFalse(retry['ok'])
+        self.assertEqual(retry['reason'], 'duplicate_request')
+        self.assertEqual(self.balance, 500.0)
+
     def test_retry_with_same_key_does_not_double_charge(self) -> None:
         self._spend(idempotency_key="key-1")
         balance_after_first = self.balance

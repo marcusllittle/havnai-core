@@ -66,7 +66,7 @@ def test_account_refresh_reload_reward_and_spend_journey(platform, keys, monkeyp
 
 
 @pytest.mark.parametrize('after_deduction', [False, True])
-def test_pending_account_spend_never_reports_purchase_success(platform, after_deduction):
+def test_pending_account_spend_requires_durable_debit_for_success(platform, after_deduction):
     harness, headers, account_id = platform
     with app.app.app_context():
         conn = app.get_db()
@@ -80,12 +80,15 @@ def test_pending_account_spend_never_reports_purchase_success(platform, after_de
         conn.commit()
     retry = harness.client.post('/v2/account/astra/spend', headers=headers,
         json={'action': 'gacha_1', 'idempotency_key': 'interrupted-purchase'})
-    assert retry.status_code == 422
-    assert retry.json['error']['code'] == 'duplicate_request'
+    if after_deduction:
+        assert retry.status_code == 200 and retry.json['replayed']
+    else:
+        assert retry.status_code == 422
+        assert retry.json['error']['code'] == 'duplicate_request'
     with app.app.app_context():
         conn = app.get_db()
         assert account_ledger.balance(conn, account_id)['settled_units'] == (90000 if after_deduction else 100000)
-        assert conn.execute("SELECT status FROM astra_spends WHERE idempotency_key='interrupted-purchase'").fetchone()[0] == 'pending'
+        assert conn.execute("SELECT status FROM astra_spends WHERE idempotency_key='interrupted-purchase'").fetchone()[0] == ('completed' if after_deduction else 'pending')
 
 
 def test_linked_legacy_import_restores_balance_and_generation_history(inventory, monkeypatch):

@@ -307,6 +307,7 @@ def process_spend(
     ledger_fn: Callable[..., None],
     idempotency_key: Optional[str] = None,
     balance_fn: Optional[Callable[[str], float]] = None,
+    recover_pending_fn: Optional[Callable[[], bool]] = None,
 ) -> Dict[str, Any]:
     """
     Deduct shared credits for a gacha action.
@@ -334,9 +335,12 @@ def process_spend(
             if prior["action"] != action:
                 return {"ok": False, "reason": "idempotency_conflict", "cost": cost}
             if prior["status"] not in {"completed", "failed"}:
-                # An intent is not proof of a charge. A retry must not grant
-                # a purchase while settlement is pending or indeterminate.
-                return {"ok": False, "reason": "duplicate_request", "cost": cost}
+                # Only the account caller can prove a committed debit from its
+                # immutable idempotent ledger. Legacy/unknown states stay shut.
+                recovered = (prior["status"] == "pending" and prior["amount"] == cost
+                             and recover_pending_fn is not None and recover_pending_fn())
+                if not recovered:
+                    return {"ok": False, "reason": "duplicate_request", "cost": cost}
             if prior["status"] == "failed":
                 return {"ok": False, "reason": "insufficient_credits", "cost": cost}
             return {

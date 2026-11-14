@@ -8222,6 +8222,37 @@ def account_astra_spend() -> Any:
         balance = account_ledger.balance(get_db(), g.account_id)
         return True, balance["available_units"] / account_ledger.SCALE
 
+    def recover_account_spend() -> bool:
+        conn = get_db()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            with conn:
+                # Absence proves nothing about an interrupted request. Never
+                # call the debit function unless its durable entry exists.
+                entry = conn.execute(
+                    "SELECT 1 FROM account_credit_ledger WHERE account_id=? AND operation_key=?",
+                    (g.account_id, f"astra_spend:{idempotency_key}"),
+                ).fetchone()
+                if not entry:
+                    return False
+                replay = account_ledger.astra_spend_in_transaction(
+                    conn, g.account_id, _astra_credit_units(astra_rewards.SPEND_COSTS[action]),
+                    action=action, idempotency_key=idempotency_key,
+                )
+                # The ledger validates the exact payload hash before replay;
+                # balance and ledger remain untouched by this confirmation.
+                if not replay["replayed"]:
+                    raise account_ledger.LedgerError("idempotency_conflict")
+                changed = conn.execute(
+                    "UPDATE astra_spends SET status='completed' WHERE wallet=? "
+                    "AND idempotency_key=? AND action=? AND amount=? AND status='pending'",
+                    (_astra_account_principal(g.account_id), idempotency_key, action,
+                     astra_rewards.SPEND_COSTS[action]),
+                )
+                return changed.rowcount == 1
+        except account_ledger.LedgerError:
+            return False
+
     result = astra_rewards.process_spend(
         wallet=_astra_account_principal(g.account_id),
         action=action,
@@ -8229,6 +8260,7 @@ def account_astra_spend() -> Any:
         ledger_fn=lambda *args, **kwargs: None,
         idempotency_key=idempotency_key,
         balance_fn=lambda _principal: account_ledger.balance(get_db(), g.account_id)["available_units"] / account_ledger.SCALE,
+        recover_pending_fn=recover_account_spend,
     )
     status_code = 200 if result.get("ok") else 422
     return _account_astra_result(result, status_code)

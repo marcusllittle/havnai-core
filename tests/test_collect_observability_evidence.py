@@ -78,6 +78,38 @@ def test_collect_observability_reports_webhook_gap_as_blocker():
     assert all(check["ok"] for check in report["checks"])
 
 
+def test_smtp_acceptance_is_not_inbox_delivery_evidence():
+    report = collect_observability(
+        api_base="https://api.example", admin_token="admin-token", timeout=1,
+        join_token_present=True,
+        json_fetcher=_json_fetcher(delivery={
+            "mode": "email", "configured": True, "sent": True,
+            "receipt_scope": "smtp_accepted",
+        }),
+        text_fetcher=_text_fetcher(),
+    )
+    assert report["passed"] is False
+    assert report["blockers"] == [
+        "SMTP accepted the alert; recipient inbox receipt must still be verified."
+    ]
+
+
+def test_collect_observability_reports_missing_email_as_blocker():
+    report = collect_observability(
+        api_base="https://api.example", admin_token="admin-token", timeout=1,
+        join_token_present=True,
+        json_fetcher=_json_fetcher(delivery={
+            "mode": "email", "configured": False, "sent": False,
+            "reason": "alert_email_not_configured",
+        }),
+        text_fetcher=_text_fetcher(),
+    )
+    assert report["passed"] is False
+    assert report["blockers"] == [
+        "Email alert transport is not configured; external alert delivery receipt still required or waived."
+    ]
+
+
 def test_collect_observability_accepts_dated_alert_waiver(tmp_path):
     waiver = tmp_path / "alert-waiver.json"
     waiver.write_text(json.dumps({

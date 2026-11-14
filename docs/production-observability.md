@@ -24,6 +24,27 @@ The production component and ownership map lives in
 | Alert dry-run route | `GET /v1/network/alerts/dry-run` with admin token | Dry-run payload reports matched alerts without sending external notifications |
 | Alert delivery route | `POST /v1/network/alerts/send` with admin token | Sends matched alerts to `HAVNAI_ALERT_WEBHOOK` when configured; never echoes the secret URL |
 
+## Email Alert Transport
+
+Set `HAVNAI_ALERT_TRANSPORT=email` in the coordinator's private environment to
+use SMTP instead of the default webhook transport. Configure `SMTP_HOST`,
+`SMTP_USER`, `SMTP_PASSWORD`, `HAVNAI_ALERT_FROM` (a provider-authorized sender),
+and `HAVNAI_ALERT_TO=team@joinhavn.io`. Never commit credentials.
+`SMTP_SECURITY=starttls` and `SMTP_PORT=587` are defaults; for implicit TLS set
+`SMTP_SECURITY=ssl` and the provider's TLS port (usually 465). Unencrypted SMTP
+is not supported. Both modes verify server certificates.
+
+The existing admin-protected send endpoint and evidence collector use the
+selected transport. Missing email configuration remains a launch blocker.
+Emails contain matched rule codes and severity, not full worker snapshots.
+`sent=true` with `receipt_scope=smtp_accepted` means the SMTP server accepted
+the message, not that it reached the inbox. Record a received test message
+before accepting external delivery. Running the collector sends synthetic
+alerts when configured; the dry-run endpoint does not.
+
+This transport does not install a scheduled monitor or an independent outage
+watchdog. Those and actual inbox receipt remain separate acceptance checks.
+
 ## Metrics Coverage
 
 The production `/metrics` endpoint exports:

@@ -324,6 +324,37 @@ class BackendReliabilityTests(unittest.TestCase):
             {item["code"] for item in body["alerts"]}
         ))
 
+    def test_network_alert_email_dispatch_preserves_admin_gate(self):
+        api.ADMIN_API_TOKEN = "test-admin-token"
+        with patch.dict(api.os.environ, {"HAVNAI_ALERT_TRANSPORT": "email"}, clear=True):
+            with patch.object(api.alert_email, "send_alert", return_value={
+                "mode": "email", "sent": True, "configured": True,
+                "receipt_scope": "smtp_accepted",
+            }) as send:
+                unauthorized = self.client.post("/v1/network/alerts/send", json={})
+                self.assertEqual(unauthorized.status_code, 401)
+                send.assert_not_called()
+                response = self.client.post(
+                    "/v1/network/alerts/send",
+                    headers={"X-HavnAI-Token": "test-admin-token"},
+                    json={"inject": ["model_load_failures"]},
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertTrue(response.get_json()["delivery"]["sent"])
+                send.assert_called_once()
+
+    def test_network_alert_email_missing_configuration_is_blocked(self):
+        api.ADMIN_API_TOKEN = "test-admin-token"
+        with patch.dict(api.os.environ, {"HAVNAI_ALERT_TRANSPORT": "email"}, clear=True):
+            response = self.client.post(
+                "/v1/network/alerts/send",
+                headers={"X-HavnAI-Token": "test-admin-token"},
+                json={"inject": ["model_load_failures"]},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.get_json()["delivery"]["sent"])
+        self.assertEqual(response.get_json()["delivery"]["reason"], "alert_email_not_configured")
+
     def test_account_readiness_is_admin_gated_and_redacted(self):
         api.ADMIN_API_TOKEN = "test-admin-token"
 

@@ -78,6 +78,7 @@ import account_video
 import account_video_chains
 import account_video_stitch
 import adult_content
+import alert_email
 
 try:
     from eth_account import Account  # type: ignore
@@ -10146,6 +10147,11 @@ def _network_alert_snapshot(inject: Optional[Set[str]] = None) -> Dict[str, Any]
 
 
 def _send_network_alert(payload: Dict[str, Any]) -> Dict[str, Any]:
+    transport = os.getenv("HAVNAI_ALERT_TRANSPORT", "webhook").strip().lower()
+    if transport == "email":
+        return alert_email.send_alert(payload)
+    if transport != "webhook":
+        return {"mode": "unknown", "sent": False, "configured": False, "reason": "invalid_alert_transport"}
     webhook = os.getenv("HAVNAI_ALERT_WEBHOOK", "").strip()
     if not webhook:
         return {"mode": "webhook", "sent": False, "configured": False, "reason": "alert_webhook_not_configured"}
@@ -10208,7 +10214,7 @@ def network_alerts_send() -> Any:
     delivery = _send_network_alert(payload)
     response = jsonify({**payload, "schema_version": "network-alert-send.v1", "delivery": delivery})
     response.headers["Cache-Control"] = "no-store"
-    success = delivery.get("sent") or delivery.get("reason") in {"no_matched_alerts", "alert_webhook_not_configured"}
+    success = delivery.get("sent") or delivery.get("reason") in {"no_matched_alerts", "alert_webhook_not_configured", "alert_email_not_configured"}
     return response, 200 if success else 502
 
 

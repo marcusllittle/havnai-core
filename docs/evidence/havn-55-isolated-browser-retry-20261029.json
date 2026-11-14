@@ -1,0 +1,45 @@
+{
+  "schema": "havn-55-isolated-browser-retry.v1",
+  "date": "2026-10-29",
+  "scope": "isolated browser integration; not production acceptance",
+  "astra_source_commit": "4adb689bd7a8e670077c92c338668199aba56846",
+  "astra_source_verification": "125 frontend source files matched GitHub blob hashes; presentation assets not hydrated",
+  "core_local_commit": "e73d4ad",
+  "core_remote_equivalent": "a36c5b4f8401c7b36a3522b896631271ef075725",
+  "core_tree": "d21919266df256351d56ae733a6e43a852aa9376",
+  "environment": {
+    "frontend": "127.0.0.1:3107",
+    "coordinator": "127.0.0.1:5107",
+    "database": "fresh disposable SQLite",
+    "identity": "ephemeral synthetic Ethereum key, real nonce/signature/session handshake",
+    "ui": "actual ShmupResultsScreen and havnApi/rewardClaim sources; synthetic wallet/game React context",
+    "dependencies": "task-local npm packages after existing dependency tree lacked Windows Rollup binary"
+  },
+  "cases": [
+    {
+      "name": "failure_before_settlement",
+      "fault": "first reward request receives truncated JSON before reward route executes",
+      "initial_ui": "HavnAI coordinator unavailable; Retry claim visible",
+      "action": "clicked actual Retry claim button",
+      "final_ui": "Fixture balance: 15; +15 HavnAI Credits; Retry claim absent",
+      "final_server": {"balance": 15, "claims": 2, "runs": 1, "ledger": 1}
+    },
+    {
+      "name": "response_lost_after_settlement",
+      "fault": "successful reward response replaced with truncated JSON after real route settlement",
+      "initial_ui": "HavnAI coordinator unavailable; Retry claim visible; fixture display balance 0",
+      "before_retry_server": {"balance": 15, "claims": 1, "runs": 1, "ledger": 1},
+      "action": "clicked actual Retry claim button with original run state",
+      "final_ui": "Run already settled; Fixture balance: 15; Retry claim absent",
+      "final_server": {"balance": 15, "claims": 2, "runs": 1, "ledger": 1}
+    }
+  ],
+  "limitations": [
+    "Fault injection corrupts response JSON; it does not reset a TCP connection or test fetchWithRetry transport backoff.",
+    "Wallet/game React contexts are synthetic; real wallet extension interaction and full gameplay navigation were not tested.",
+    "Server clock was backdated only in the disposable fixture to avoid waiting for minimum run duration.",
+    "No production deployment, real wallet funds, purchased credits or external financial activity occurred.",
+    "Jira HAVN-55 explicitly requests live wallet/coordinator acceptance; isolated evidence does not silently waive that requirement."
+  ],
+  "result": "passed_isolated_browser_integration"
+}

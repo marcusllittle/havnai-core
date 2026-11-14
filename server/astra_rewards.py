@@ -213,8 +213,17 @@ def submit_reward(
     # Anchor to a run the server opened. Claiming the token here (before the
     # cheaper checks) means a rejected submission still burns it, so a client
     # cannot probe thresholds by resubmitting the same run with new scores.
-    started_at, token_error = consume_run_token(wallet, run_token or "")
+    started_at, token_error = consume_run_token(wallet, run_token or "", map_id=map_id)
     if token_error:
+        if token_error == "run_token_used":
+            # A consumed token may also represent a rejected claim. Only an
+            # actual reward row proves the lost-response retry was settled.
+            rewarded = db.execute(
+                "SELECT 1 FROM astra_runs WHERE wallet=? AND run_hash=? AND map_id=?",
+                (wallet, _run_hash(wallet, run_token or ""), map_id),
+            ).fetchone()
+            if rewarded:
+                return {"ok": False, "reason": "duplicate_run", "reward": 0}
         return {"ok": False, "reason": token_error, "reward": 0}
 
     # The client's duration_s is advisory; the server's own clock decides.
@@ -427,7 +436,7 @@ def start_run(wallet: str, map_id: str) -> Dict[str, Any]:
     return {"run_token": token, "started_at": now}
 
 
-def consume_run_token(wallet: str, token: str) -> Tuple[Optional[float], Optional[str]]:
+def consume_run_token(wallet: str, token: str, *, map_id: str) -> Tuple[Optional[float], Optional[str]]:
     """
     Claim a run token exactly once.
 
@@ -439,7 +448,7 @@ def consume_run_token(wallet: str, token: str) -> Tuple[Optional[float], Optiona
     db = get_db()
     token_hash = _hash_token(token)
     row = db.execute(
-        "SELECT wallet, started_at, expires_at, consumed_at FROM astra_run_tokens WHERE token_hash = ?",
+        "SELECT wallet, map_id, started_at, expires_at, consumed_at FROM astra_run_tokens WHERE token_hash = ?",
         (token_hash,),
     ).fetchone()
 
@@ -447,6 +456,8 @@ def consume_run_token(wallet: str, token: str) -> Tuple[Optional[float], Optiona
         return None, "unknown_run_token"
     if str(row["wallet"]) != wallet:
         return None, "run_token_wallet_mismatch"
+    if row["map_id"] != map_id:
+        return None, "run_token_map_mismatch"
     if row["consumed_at"] is not None:
         return None, "run_token_used"
     if float(row["expires_at"]) < time.time():

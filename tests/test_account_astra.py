@@ -81,7 +81,62 @@ def test_account_astra_reward_uses_server_run_and_account_ledger(platform):
         "run_token": token_value,
     })
     assert replay.status_code == 422
-    assert replay.json["error"]["code"] == "run_token_used"
+    assert replay.json["error"]["code"] == "duplicate_run"
+    with app.app.app_context():
+        conn = app.get_db()
+        assert account_ledger.balance(conn, account_id)["settled_units"] == 115000
+        assert conn.execute(
+            "SELECT COUNT(*) FROM account_credit_ledger WHERE account_id=? AND operation='reward'",
+            (account_id,),
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM astra_runs WHERE wallet=?",
+            (app._astra_account_principal(account_id),),
+        ).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("settled", [False, True])
+@pytest.mark.parametrize("mismatch", ["map", "account"])
+def test_account_reward_binding_before_and_after_settlement(platform, keys, settled, mismatch):
+    harness, headers, account_id = platform
+    start = harness.client.post("/v2/account/astra/run/start", headers=headers,
+                                json={"map_id": "nebula-runway"})
+    assert start.status_code == 200
+    run_token = start.json["run_token"]
+    with app.app.app_context():
+        conn = app.get_db()
+        conn.execute("UPDATE astra_run_tokens SET started_at=? WHERE token_hash=?",
+                     (app.astra_rewards.time.time() - 300, app.astra_rewards._hash_token(run_token)))
+        conn.commit()
+    payload = {"score": 100000, "grade": "S", "duration_s": 9999,
+               "map_id": "nebula-runway", "run_token": run_token}
+    if settled:
+        assert harness.client.post("/v2/account/astra/reward", headers=headers,
+                                   json=payload).status_code == 200
+    wrong_headers, wrong_payload = headers, dict(payload)
+    if mismatch == "map":
+        wrong_payload["map_id"] = "different-map"
+        expected = "run_token_map_mismatch"
+    else:
+        wrong_headers = {"Authorization": token(keys, sub="user_bob", sid="sess_bob")}
+        other_account = harness.client.get("/v2/account", headers=wrong_headers).json["id"]
+        assert other_account != account_id
+        expected = "run_token_wallet_mismatch"
+    denied = harness.client.post("/v2/account/astra/reward", headers=wrong_headers,
+                                  json=wrong_payload)
+    assert denied.status_code == 422
+    assert denied.json["error"]["code"] == expected
+    # Invalid identity/map claims cannot consume a valid run or reveal settlement.
+    if not settled:
+        assert harness.client.post("/v2/account/astra/reward", headers=headers,
+                                   json=payload).status_code == 200
+    with app.app.app_context():
+        conn = app.get_db()
+        assert account_ledger.balance(conn, account_id)["settled_units"] == 115000
+        assert conn.execute("SELECT COUNT(*) FROM astra_runs").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM account_credit_ledger WHERE operation='reward'").fetchone()[0] == 1
+        if mismatch == "account":
+            assert account_ledger.balance(conn, other_account)["settled_units"] == 0
 
 
 def test_account_astra_rejects_client_faked_duration(platform):
@@ -96,6 +151,12 @@ def test_account_astra_rejects_client_faked_duration(platform):
     })
     assert reward.status_code == 422, reward.json
     assert reward.json["error"]["code"] == "run_too_short"
+    replay = harness.client.post("/v2/account/astra/reward", headers=headers, json={
+        "score": 100000, "grade": "S", "duration_s": 9999,
+        "map_id": "nebula-runway", "run_token": start.json["run_token"],
+    })
+    assert replay.status_code == 422
+    assert replay.json["error"]["code"] == "run_token_used"
     with app.app.app_context():
         assert account_ledger.balance(app.get_db(), account_id)["settled_units"] == 100000
 

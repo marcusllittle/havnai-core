@@ -3,8 +3,8 @@
 The drill submits one account-owned generation through ``/v2/jobs``, executes an
 operator-provided restart command while the job is accepted, polls the private
 account job route to a terminal state, and requires read-only SQLite evidence
-for full acceptance. Dry-run/preflight and legacy-schema evidence cannot accept
-the restart drill.
+for settlement evidence. Independent restart and recovered-artifact verification
+are not supported, so full acceptance always remains pending.
 
 By default this script prints a dry-run plan and performs no network writes.
 Live execution requires an account bearer token and an explicit restart command.
@@ -41,6 +41,10 @@ DEFAULT_PROMPT = (
     "HAVN-45 private restart recovery drill: polished commercial-quality HavnAI "
     "operations scene, coherent lighting, premium product-ready composition"
 )
+MISSING_ACCEPTANCE_EVIDENCE = [
+    "independent service/worker restart verification (an exit-zero command is insufficient)",
+    "recovered artifact ownership and authenticated owner-access verification",
+]
 
 
 def utc_now() -> str:
@@ -292,6 +296,8 @@ def summarize(args: argparse.Namespace, payload: dict[str, Any]) -> dict[str, An
         "base_url": clean_base_url(args.base_url),
         "execute": bool(args.execute),
         "acceptance_passed": False,
+        "settlement_evidence_passed": False,
+        "missing_acceptance_evidence": MISSING_ACCEPTANCE_EVIDENCE,
         "job_type": args.job_type,
         "model": args.model,
         "idempotency_key": args.idempotency_key,
@@ -356,6 +362,8 @@ def main(argv: list[str] | None = None) -> int:
                 "restart_command_configured": bool(args.restart_command.strip()),
                 "passed": False,
                 "acceptance_passed": False,
+                "settlement_evidence_passed": False,
+                "missing_acceptance_evidence": MISSING_ACCEPTANCE_EVIDENCE,
                 "blockers": ["HAVNAI_DRILL_ACCOUNT_TOKEN is not configured; funded private account token required."],
             }, indent=2, sort_keys=True), flush=True)
             return 2
@@ -378,6 +386,8 @@ def main(argv: list[str] | None = None) -> int:
             "restart_command_configured": bool(args.restart_command.strip()),
             "passed": bool(account_id) and available_units > 0,
             "acceptance_passed": False,
+            "settlement_evidence_passed": False,
+            "missing_acceptance_evidence": MISSING_ACCEPTANCE_EVIDENCE,
         }
         print(json.dumps(result, indent=2, sort_keys=True), flush=True)
         return 0 if result["passed"] else 2
@@ -405,7 +415,10 @@ def main(argv: list[str] | None = None) -> int:
     print(json.dumps({"event": "accepted_state", "job_id": job_id, "status": result_status(first_state),
                       "observed_at": utc_now(), "db_checks": before, "errors": errors}), flush=True)
     if errors:
-        print(json.dumps({"passed": False, "acceptance_passed": False, "errors": errors}), flush=True)
+        print(json.dumps({"passed": False, "acceptance_passed": False,
+                          "settlement_evidence_passed": False,
+                          "missing_acceptance_evidence": MISSING_ACCEPTANCE_EVIDENCE,
+                          "errors": errors}), flush=True)
         return 2
 
     print(json.dumps({"event": "restart_marker", "job_id": job_id, "observed_at": utc_now()}), flush=True)
@@ -441,8 +454,11 @@ def main(argv: list[str] | None = None) -> int:
         "job_id": job_id,
         "terminal_status": status,
         "terminal": status in TERMINAL_STATUSES,
-        "passed": not errors,
-        "acceptance_passed": not errors,
+        # No independent restart/artifact verifier exists in this harness.
+        "passed": False,
+        "acceptance_passed": False,
+        "settlement_evidence_passed": not errors,
+        "missing_acceptance_evidence": MISSING_ACCEPTANCE_EVIDENCE,
         "errors": errors,
         "db_checks": db_checks,
     }

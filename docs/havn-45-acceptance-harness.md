@@ -5,7 +5,7 @@ preflight can pass its own identity/balance check, but both outputs explicitly
 set `acceptance_passed=false`. They do not prove recovery. Historical legacy
 SQL evidence returned by `readonly_db_checks` is likewise non-accepting.
 
-Full `--execute` requires a usable `--db-path` before job submission. Connections
+Settlement rehearsal via `--execute` requires a usable `--db-path` before job submission. Connections
 use SQLite `mode=ro`; each evidence read uses one consistent transaction. The
 drill never migrates or repairs the evidence database.
 
@@ -36,8 +36,26 @@ Current-main contracts used by the acceptance checks:
   `job_settlement` row is therefore not mandatory for account-job acceptance.
 
 Missing required tables/columns, missing jobs, inconsistent ownership, duplicate
-counts, or unsettled reservations fail closed. The script accepts only terminal
-success; failed/cancelled jobs remain non-accepting even when safely released.
+counts, or unsettled reservations fail closed. Only terminal success can pass
+the narrow `settlement_evidence_passed` check; failed/cancelled jobs do not pass
+that check even when safely released.
+
+Full `passed` and `acceptance_passed` always remain false, with exit code 2 even
+when settlement evidence passes. An exit-zero operator command is not proof
+that the intended service/worker actually restarted. The harness currently has
+no independent restart or recovered-artifact verifier and accepts no manual
+attestation flags. Its `missing_acceptance_evidence` lists both prerequisites:
+
+1. Independently verified identity/instance transition and recovery of the
+   intended service/worker during this job's restart window, correlated to its
+   restart marker and job ID.
+2. A recovered output correlated to this job, still owned by the same account,
+   whose bytes the authenticated owner can actually retrieve after recovery.
+
+An operator must collect and review those proofs under the production runbook;
+this script cannot presently claim full acceptance from them. Supporting an
+independent verifier is separate work. Plan and preflight outputs likewise
+cannot claim full acceptance, even when account preflight itself succeeds.
 
 Synthetic tests exercise the real drill orchestration with a fake account client,
 a fake restart callback, and disposable SQLite databases. They prove harness

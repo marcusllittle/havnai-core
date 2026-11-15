@@ -359,13 +359,20 @@ def test_disposable_execute_only_restarts_nonterminal_job(monkeypatch, capsys, t
                        "--db-path", str(path), "--poll-seconds", "0"])
     output = capsys.readouterr().out
     if initial_status == "running" and not mutation:
-        assert code == 0 and '"acceptance_passed": true' in output
+        assert code == 2
+        assert '"settlement_evidence_passed": true' in output
+        assert '"acceptance_passed": true' not in output
+        assert '"passed": true' not in output
+        assert "independent service/worker restart verification" in output
+        assert "authenticated owner-access verification" in output
         assert output.index('"event": "accepted_state"') < output.index('"event": "restart_marker"')
     elif initial_status == "running":
         assert code == 2 and '"acceptance_passed": false' in output
+        assert '"settlement_evidence_passed": true' not in output
         assert "restart" in events
     else:
         assert code == 2 and "restart" not in events
+        assert '"settlement_evidence_passed": true' not in output
         assert '"event": "restart_marker"' not in output
 
 

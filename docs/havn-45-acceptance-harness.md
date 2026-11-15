@@ -63,3 +63,45 @@ behavior, not GPU restart recovery or production settlement atomicity. Productio
 acceptance still requires the funded private account, approved bounded restart,
 actual service/worker recovery evidence, and artifact ownership/access checks
 specified by `production-operations-runbook.md`.
+
+## Session expiry and observation-only resume
+
+Execution emits flushed `resume_evidence` records after verifying the reserved
+job in the read-only database, before the restart command, and after its return.
+Capture stdout and retain the latest record's `evidence` object as a private
+JSON file. It contains only the original job ID, idempotency key, owner hash,
+first-party API origin, schema and restart phase. It never contains a bearer
+token, prompt, raw account ID, operator command or artifact URL. Records are
+not independent proof of restart. `restart_started` is an uncertain phase and
+must never be interpreted as permission to repeat the command. If identity
+evidence was never obtained or stdout was not retained, do not invent a record.
+
+Use `--resume EVIDENCE_JSON` with a freshly supplied session for the already
+provisioned original test account, via the existing designated environment
+variable. Never store that session in the evidence file or shell arguments.
+This path performs one authenticated GET of the original job's dedicated
+`/v2/jobs/<job_id>/observation` route, verifies its ID and owner hash, and emits
+only sanitized observation status. IDs must be `job-` followed by exactly 32
+lowercase hexadecimal digits; non-string statuses fail closed. It uses no account
+provisioning/preflight route, POST, submission retry or restart command, and
+rejects redirects. `--execute` and `--preflight` conflict with resume. Repeat
+observation explicitly if needed; there is no automatic token refresh or retry.
+
+Resume always exits 2 with full acceptance and settlement evidence false, even
+when `observation_passed=true`. It does not read the ledger, retrieve artifact
+bytes, verify a real service restart, or reconstruct lost pre-restart evidence.
+HTTP 401 requires another fresh same-account session; it never triggers a new
+job or another restart. Rerunning the full execution command is not resume.
+
+The dedicated server route uses normal bearer verification and the deliberately
+exposed `account_identity.lookup_existing_account` read-only lookup. It opens
+its own SQLite `mode=ro` connection and read snapshot, without the normal
+WAL/setup, provisioning, migration, lease recovery, settlement or job serializer
+paths. A single owner-scoped query excludes un-restored soft-deleted jobs and
+projects only ID, canonical status and owner hash. Unknown identities are not
+created. Missing, empty or unrecognized raw job states return a sanitized 503
+without a status projection; only recognized canonical/legacy states are mapped.
+Revoked/suspended identities are denied. The existing user-facing job
+route is unchanged and is not a safe substitute for this observation route.
+Responses, including handled errors, remain private/no-store and vary on
+Authorization. This route still does not verify restart or retrieve artifacts.

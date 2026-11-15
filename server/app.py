@@ -70,6 +70,7 @@ import account_ledger
 import account_lifecycle
 import account_payments
 import account_routes
+import account_observation
 import account_auth
 import account_jobs
 import artifact_lifecycle
@@ -1309,6 +1310,7 @@ astra_receipts.init_receipt_tables(get_db())
 merkle_batches.init_merkle_tables(get_db())
 payout_claims.init_payout_claim_tables(get_db())
 app.register_blueprint(account_routes.create_blueprint(get_db, rate_limit, outputs_dir=lambda: OUTPUTS_DIR))
+app.register_blueprint(account_observation.create_blueprint(lambda: DB_PATH, rate_limit))
 
 # Optional: clear database and in-memory state on startup for a fresh dashboard
 if RESET_ON_STARTUP:

@@ -16,6 +16,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -45,6 +46,109 @@ MISSING_ACCEPTANCE_EVIDENCE = [
     "independent service/worker restart verification (an exit-zero command is insufficient)",
     "recovered artifact ownership and authenticated owner-access verification",
 ]
+RESUME_SCHEMA = "havn-45-resume-observation.v1"
+RESUME_FIELDS = {"schema", "base_url", "job_id", "owner_account_hash", "idempotency_key", "restart_phase"}
+RESTART_PHASES = {"not_restarted", "restart_started", "restart_returned", "restart_failed"}
+
+
+class ObservationError(RuntimeError):
+    """Fixed diagnostic codes only; never include remote bodies or credentials."""
+
+
+class NoCredentialRedirects(request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise ObservationError("redirect_rejected")
+
+
+class JobObserver:
+    """Deliberately no submit, generic request, or restart capability."""
+
+    def __init__(self, token: str) -> None:
+        self.token = token
+
+    def observe(self, job_id: str) -> dict[str, Any]:
+        req = request.Request("https://api.joinhavn.io/v2/jobs/" + parse.quote(job_id, safe="") + "/observation",
+                              method="GET", headers={"Authorization": f"Bearer {self.token}"})
+        try:
+            with request.build_opener(NoCredentialRedirects()).open(req, timeout=30) as response:
+                if response.geturl() != req.full_url:
+                    raise ObservationError("redirect_rejected")
+                if not 200 <= response.status < 300:
+                    raise ObservationError("invalid_http_status")
+                result = json.loads(response.read(1024 * 1024))
+                if not isinstance(result, dict):
+                    raise ObservationError("invalid_job_response")
+                return result
+        except error.HTTPError as exc:
+            code = "authentication_expired_or_invalid" if exc.code == 401 else (
+                "redirect_rejected" if 300 <= exc.code < 400 else f"http_{exc.code}")
+            raise ObservationError(code) from None
+        except (error.URLError, TimeoutError):
+            raise ObservationError("transport_error") from None
+        except (ValueError, UnicodeError):
+            raise ObservationError("invalid_job_response") from None
+
+
+def validate_resume_evidence(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict) or set(value) != RESUME_FIELDS or not all(isinstance(v, str) for v in value.values()):
+        raise ObservationError("invalid_resume_evidence")
+    if (value["schema"] != RESUME_SCHEMA or value["base_url"] != "https://api.joinhavn.io"
+            or not re.fullmatch(r"job-[0-9a-f]{32}", value["job_id"])
+            or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", value["idempotency_key"])
+            or not re.fullmatch(r"[0-9a-f]{12}", value["owner_account_hash"])
+            or value["restart_phase"] not in RESTART_PHASES):
+        raise ObservationError("invalid_resume_evidence")
+    return value
+
+
+def emit_resume_evidence(args: argparse.Namespace, job_id: str, owner_hash: str, phase: str) -> None:
+    evidence = {"schema": RESUME_SCHEMA, "base_url": clean_base_url(args.base_url), "job_id": job_id,
+                "owner_account_hash": owner_hash, "idempotency_key": args.idempotency_key, "restart_phase": phase}
+    # Only emit a strict allowlist of non-secret identifiers. No request/response,
+    # prompt, bearer token, account ID, output URL, or operator command is saved.
+    try:
+        validate_resume_evidence(evidence)
+        if args.account_token.strip() in {job_id, args.idempotency_key}:
+            raise ObservationError("invalid_resume_evidence")
+    except ObservationError:
+        print(json.dumps({"event": "resume_evidence_unavailable"}), flush=True)
+        return
+    print(json.dumps({"event": "resume_evidence", "evidence": evidence}), flush=True)
+
+
+def resume_observation(args: argparse.Namespace) -> int:
+    report: dict[str, Any] = {"schema": "havn-45-resumed-observation.v1", "passed": False,
+                              "acceptance_passed": False, "settlement_evidence_passed": False,
+                              "observation_passed": False, "missing_acceptance_evidence": [
+                                  *MISSING_ACCEPTANCE_EVIDENCE, "current ledger evidence not collected by resume"]}
+    try:
+        if args.execute or args.preflight:
+            raise ObservationError("resume_conflicts_with_execution_or_preflight")
+        if not args.account_token.strip():
+            raise ObservationError("fresh_account_session_required")
+        with Path(args.resume).open("rb") as stream:
+            data = stream.read(16385)
+            if len(data) > 16384:
+                raise ObservationError("invalid_resume_evidence")
+            evidence = validate_resume_evidence(json.loads(data))
+        if args.account_token.strip() in {evidence["job_id"], evidence["idempotency_key"]}:
+            raise ObservationError("invalid_resume_evidence")
+        report["original_evidence"] = evidence
+        result = JobObserver(args.account_token.strip()).observe(evidence["job_id"])
+        if (set(result) != {"id", "status", "owner_account_hash"}
+                or result.get("id") != evidence["job_id"]
+                or result.get("owner_account_hash") != evidence["owner_account_hash"]):
+            raise ObservationError("job_identity_or_owner_mismatch")
+        status = result.get("status")
+        if not isinstance(status, str) or status not in ACCEPTED_STATUSES | TERMINAL_STATUSES | {"cancelling"}:
+            raise ObservationError("invalid_job_state")
+        report.update(observation_passed=True, status=status, terminal=status in TERMINAL_STATUSES)
+    except ObservationError as exc:
+        report["error"] = str(exc)
+    except (OSError, ValueError, UnicodeError):
+        report["error"] = "invalid_resume_evidence"
+    print(json.dumps(report, sort_keys=True), flush=True)
+    return 2  # observation is never full drill acceptance
 
 
 def utc_now() -> str:
@@ -103,8 +207,7 @@ class AccountClient:
             with request.urlopen(req, timeout=30) as response:
                 data = response.read().decode("utf-8")
         except error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")
-            raise RuntimeError(f"{method} {path} failed with HTTP {exc.code}: {detail[:500]}") from exc
+            raise RuntimeError(f"account_request_http_{exc.code}") from None
         return json.loads(data or "{}")
 
     def submit(self, payload: dict[str, Any], *, idempotency_key: str) -> str:
@@ -340,11 +443,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--preflight", action="store_true",
                         help="check private account identity and credit balance without submitting a job")
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--resume", metavar="EVIDENCE_JSON",
+                        help="observe one previously accepted job by GET only; never submit or restart")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
+    if args.resume:
+        return resume_observation(args)
     payload = build_payload(args)
     print(json.dumps(summarize(args, payload), indent=2, sort_keys=True), flush=True)
     if args.preflight:
@@ -410,6 +517,8 @@ def main(argv: list[str] | None = None) -> int:
 
     before = readonly_db_checks(db_path, job_id)
     errors = evidence_errors(before, job_id, completed=False)
+    if not errors:
+        emit_resume_evidence(args, job_id, before["job"]["owner_account_hash"], "not_restarted")
     first_state = client.job(job_id)  # last external observation before restart marker
     errors += accepted_state_errors(first_state, job_id, (before.get("job") or {}).get("owner_account_hash"))
     print(json.dumps({"event": "accepted_state", "job_id": job_id, "status": result_status(first_state),
@@ -422,7 +531,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     print(json.dumps({"event": "restart_marker", "job_id": job_id, "observed_at": utc_now()}), flush=True)
+    emit_resume_evidence(args, job_id, before["job"]["owner_account_hash"], "restart_started")
     restart = run_restart(args.restart_command, args.restart_timeout_seconds)
+    emit_resume_evidence(args, job_id, before["job"]["owner_account_hash"],
+                         "restart_returned" if restart["returncode"] == 0 else "restart_failed")
     print(json.dumps({"event": "restart", "job_id": job_id, **restart}), flush=True)
     if restart["returncode"] != 0:
         raise SystemExit(3)

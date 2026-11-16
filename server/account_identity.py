@@ -106,6 +106,11 @@ def _account(conn: sqlite3.Connection, principal: VerifiedPrincipal) -> str:
     return str(row[0])
 
 
+def lookup_existing_account(conn: sqlite3.Connection, principal: VerifiedPrincipal) -> str:
+    """Read-only identity/status lookup; never provision or start a write transaction."""
+    return _account(conn, principal)
+
+
 def ensure_account(conn: sqlite3.Connection, principal: VerifiedPrincipal) -> str:
     """Map a verified issuer/subject to an immutable account, including races."""
     _session_hash(principal)

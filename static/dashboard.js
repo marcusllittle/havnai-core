@@ -185,6 +185,24 @@ function renderLogs(logs) {
   logList.innerHTML = items;
 }
 
+function attachApprovedPreview(card, path) {
+  // Only the existing publication-checked, reduced thumbnail endpoint qualifies.
+  // Never retry an original, an external URL, or an unclassified legacy output.
+  if (typeof path !== "string" || !/^\/v2\/marketplace\/listings\/[1-9]\d*\/preview$/.test(path)) return;
+  const img = document.createElement("img");
+  img.alt = "Public listing preview";
+  img.width = 96;
+  img.height = 96;
+  img.hidden = true;
+  img.addEventListener("load", () => {
+    card.replaceChildren(img);
+    img.hidden = false;
+  }, { once: true });
+  img.addEventListener("error", () => img.remove(), { once: true });
+  card.append(img);
+  img.src = resolveAssetUrl(path);
+}
+
 function renderJobFeed(feed) {
   if (!Array.isArray(feed) || feed.length === 0) {
     jobFeedBody.innerHTML = `
@@ -208,10 +226,7 @@ function renderJobFeed(feed) {
     };
     const statusClass = status.toLowerCase();
     const statusLabel = statusMap[status] || status;
-    const previewUrl = resolveAssetUrl(item.image_url);
-    const preview = previewUrl
-      ? `<div class="job-card"><img src="${previewUrl}" alt="${item.job_id} preview" width="96" height="96" loading="lazy" /></div>`
-      : "—";
+    const preview = '<div class="job-card"><span>No public preview</span></div>';
     const rowClass = "job-type-creator";
     return `
       <tr class="${rowClass}">
@@ -226,6 +241,9 @@ function renderJobFeed(feed) {
   }).join("");
 
   jobFeedBody.innerHTML = rows;
+  jobFeedBody.querySelectorAll(".job-card").forEach((card, index) => {
+    attachApprovedPreview(card, feed[index].preview_url);
+  });
 }
 
 function renderModelCatalog(models) {

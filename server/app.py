@@ -1920,15 +1920,9 @@ def get_job_summary(limit: int = 50, offset: int = 0) -> Dict[str, Any]:
             if completed_at
             else None
         )
-        image_filename = f"{row['id']}.png"
-        image_path = OUTPUTS_DIR / image_filename
-        has_image = image_path.exists()
-        image_url = f"/static/outputs/{image_filename}" if has_image else None
-        output_path = str(image_path) if has_image else None
-        videos_dir = OUTPUTS_DIR / "videos"
-        video_path = videos_dir / f"{row['id']}.mp4"
-        has_video = video_path.exists()
-        video_url = f"/static/outputs/videos/{row['id']}.mp4" if has_video else None
+        # Legacy feed membership is not publication approval. File existence or
+        # successful generation cannot authorize exposing originals. These rows
+        # have no account-owned, explicitly published marketplace thumbnail.
         timestamp_value = row["timestamp"]
         submitted_iso = (
             datetime.fromtimestamp(timestamp_value, timezone.utc).isoformat().replace("+00:00", "Z")
@@ -1948,9 +1942,10 @@ def get_job_summary(limit: int = 50, offset: int = 0) -> Dict[str, Any]:
                 "reward_hai": round(reward_value, 6),
                 "completed_at": completed_iso,
                 "submitted_at": submitted_iso,
-                "image_url": image_url,
-                "video_url": video_url,
-                "output_path": output_path,
+                "preview_url": None,
+                "image_url": None,
+                "video_url": None,
+                "output_path": None,
             }
         )
     return {

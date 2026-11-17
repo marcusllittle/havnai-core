@@ -286,10 +286,30 @@
     .status-badge.queued { color: #ff0; }
     .status-badge.failed { color: #ff5a5a; }
 
+    .job-card {
+      width: 96px;
+      height: 96px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--text-muted);
+      border-radius: 6px;
+      color: var(--text-muted);
+      font-size: 0.75rem;
+      text-align: center;
+      overflow: hidden;
+    }
+
+    .job-card span {
+      padding: 0.5rem;
+      white-space: normal;
+      line-height: 1.3;
+    }
+
     .job-card img {
       border: 1px solid #0ff;
       border-radius: 6px;
       max-width: 96px;
+      object-fit: contain;
     }
 
     .models-panel {

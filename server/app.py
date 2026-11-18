@@ -2182,16 +2182,43 @@ def build_models_catalog() -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
+def _release_node_claims(node_id: str, *, forget_wallet: bool = False) -> None:
+    conn = get_db()
+    with conn:
+        conn.execute(
+            """UPDATE jobs SET status='queued', node_id=NULL, attempt_id=NULL, assigned_at=NULL,
+                      lease_expires_at=NULL, progress=0, stage='queued', updated_at=?,
+                      retry_count=COALESCE(retry_count, 0)+1
+               WHERE node_id=? AND status IN ('leased','running','uploading')""",
+            (unix_now(), node_id),
+        )
+        if forget_wallet:
+            conn.execute("DELETE FROM node_wallets WHERE node_id=?", (node_id,))
+    for task_id, task in list(TASKS.items()):
+        if task.get("assigned_to") == node_id:
+            TASKS.pop(task_id)
+
+
 def pending_tasks_for_node(node_id: str) -> List[Dict[str, Any]]:
     relevant_status = {"pending", "assigned"}
     tasks = []
-    for task in TASKS.values():
+    now = unix_now()
+    for task_id, task in list(TASKS.items()):
         if task.get("assigned_to") != node_id:
             continue
         if task.get("status") not in relevant_status:
             continue
         task_type = (task.get("task_type") or CREATOR_TASK_TYPE).upper()
         if task_type not in {CREATOR_TASK_TYPE, "VIDEO_GEN", "ANIMATEDIFF", "FACE_SWAP", "LTX_VIDEO_GEN", "MUSIC_GEN"}:
+            continue
+        # Another request or coordinator process can release the durable lease
+        # while this process still holds the payload that was originally sent.
+        if task.get("attempt_id") and not get_db().execute(
+            """SELECT 1 FROM jobs WHERE id=? AND node_id=? AND attempt_id=?
+               AND status IN ('leased','running','uploading') AND lease_expires_at >= ?""",
+            (task_id, node_id, task["attempt_id"], now),
+        ).fetchone():
+            TASKS.pop(task_id)
             continue
         tasks.append(task)
     return tasks
@@ -3958,6 +3985,18 @@ def register() -> Any:
         node = NODES.get(node_id)
         incoming_gpu = _extract_gpu_payload(data.get("gpu"), data.get("gpu_stats"))
         incoming_supports = _normalize_supports(data.get("supports", []))
+        reported_start = data.get("start_time")
+        if type(reported_start) not in (int, float) or not math.isfinite(reported_start) or reported_start <= 0:
+            reported_start = None
+        previous_start = node.get("registered_start_time") if node else None
+        if node and previous_start is None and node.get("version"):
+            previous_start = node.get("start_time")
+        if reported_start is not None and type(previous_start) in (int, float):
+            if reported_start < previous_start:
+                return jsonify({"status": "superseded", "node": node_id}), 200
+            if reported_start > previous_start:
+                _release_node_claims(node_id)
+                node["current_task"] = None
         if not node:
             node = {
                 "os": data.get("os", "unknown"),
@@ -3970,7 +4009,7 @@ def register() -> Any:
                 "last_result": {},
                 "reward_history": [],
                 "last_reward": 0.0,
-                "start_time": data.get("start_time", unix_now()),
+                "start_time": reported_start or unix_now(),
                 "role": data.get("role", "worker"),
                 "node_name": data.get("node_name") or node_id,
                 "operator_display_name": data.get("operator_display_name") or data.get("node_name") or node_id,
@@ -3979,6 +4018,10 @@ def register() -> Any:
             NODES[node_id] = node
             log_event("Node registered", node_id=node_id, role=node["role"], version=data.get("version"))
 
+        if reported_start is not None:
+            node["registered_start_time"] = reported_start
+            node["start_time"] = reported_start
+            node["session_disconnect"] = data.get("session_disconnect") is True
         node["os"] = data.get("os", node.get("os", "unknown"))
         node["gpu"] = incoming_gpu or node.get("gpu", {})
         node["role"] = data.get("role", node.get("role", "worker"))
@@ -4428,10 +4471,6 @@ def submit_results() -> Any:
                 "prompt": job.get("data"),
             }
 
-        task["status"] = status
-        task["completed_at"] = unix_now()
-        task["result"] = metrics
-
         node = NODES.get(node_id)
         reward = 0.0
         wallet = task.get("wallet")
@@ -4460,7 +4499,6 @@ def submit_results() -> Any:
                     job_id=task_id,
                     node_id=node_id,
                 )
-                TASKS.pop(task_id, None)
                 return jsonify({"error": "conflict"}), 409
 
         if node:
@@ -4741,23 +4779,18 @@ def disconnect_node() -> Any:
         return jsonify({"error": "missing node_id"}), 400
 
     with LOCK:
-        # Remove from in-memory registry
-        existed = node_id in NODES
-        if existed:
-            NODES.pop(node_id, None)
-            save_nodes()
+        node = NODES.get(node_id)
+        existed = node is not None
+        reported_start = data.get("start_time")
+        if node and ((reported_start is not None and node.get("start_time") != reported_start)
+                     or (reported_start is None and node.get("session_disconnect"))):
+            # A delayed shutdown notification from the previous worker process.
+            return jsonify({"status": "superseded", "node": node_id}), 200
 
-        # Clean DB state for this node
-        conn = get_db()
-        try:
-            # Release any running jobs back to queue
-            conn.execute("UPDATE jobs SET status='queued', node_id=NULL, assigned_at=NULL WHERE node_id=? AND status='running'", (node_id,))
-            # Remove node-specific metadata
-            conn.execute("DELETE FROM node_wallets WHERE node_id=?", (node_id,))
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
+        _release_node_claims(node_id, forget_wallet=True)
+        if existed:
+            NODES.pop(node_id)
+            save_nodes()
         try:
             _mark_node_operator_status(node_id, "disconnected")
         except Exception:
@@ -5618,6 +5651,10 @@ def _static_artifact_not_found() -> Response:
 
 @app.before_request
 def protect_account_content_from_legacy_routes() -> Optional[Any]:
+    if request.endpoint in {"static", "installer_assets"}:
+        filename = str((request.view_args or {}).get("filename", ""))
+        if filename.rstrip(" .").lower().endswith(".part"):
+            return _static_artifact_not_found()
     # Legacy public job/result/receipt handlers must not become account-data bypasses.
     job_id = (request.view_args or {}).get("job_id")
     if job_id and not request.path.startswith(("/v2/", "/v1/node/")):
@@ -6616,11 +6653,8 @@ def v1_node_artifact(job_id: str) -> Any:
         destination = OUTPUTS_DIR / "audio" / f"{job_id}{take_suffix}{extension}"
     else:
         destination = OUTPUTS_DIR / "artifacts" / job_id / platform_v1.safe_filename(uploaded.filename, f"artifact{extension}")
-    try:
-        size_bytes, sha256 = platform_v1.atomic_stream_write(uploaded.stream, destination, ARTIFACT_MAX_BYTES)
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 413
     artifact_id = platform_v1.new_artifact_id()
+    staged = destination.with_name(f".{artifact_id}.part")
     conn = get_db()
     job = conn.execute("SELECT adult_content,adult_policy_reason,model,task_type,data,resolved_spec FROM jobs WHERE id=?", (job_id,)).fetchone()
     artifact_reason = adult_content.classify(
@@ -6635,20 +6669,32 @@ def v1_node_artifact(job_id: str) -> Any:
     )
     inherited_adult = bool(job and job["adult_content"])
     stored_reason = (artifact_reason or (job["adult_policy_reason"] if inherited_adult and job else "")) or ""
-    conn.execute(
-        """
-        INSERT INTO artifacts (
-            id, job_id, attempt_id, kind, filename, content_type, path,
-            size_bytes, sha256, metadata, created_at, adult_content, adult_policy_reason
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            artifact_id, job_id, attempt_id, kind, destination.name, content_type,
-            str(destination), size_bytes, sha256, json.dumps(metadata), unix_now(),
-            1 if inherited_adult or artifact_reason else 0, stored_reason,
-        ),
-    )
-    conn.commit()
+    try:
+        size_bytes, sha256 = platform_v1.atomic_stream_write(uploaded.stream, staged, ARTIFACT_MAX_BYTES)
+        # The worker may have disconnected or been reassigned while bytes arrived.
+        # Serialize only the final lease check, manifest insert and atomic rename.
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if job_helpers.control_state(job_id, node_id, attempt_id) not in {"leased", "running", "uploading"}:
+                return jsonify({"error": "lease_conflict"}), 409
+            conn.execute(
+                """
+                INSERT INTO artifacts (
+                    id, job_id, attempt_id, kind, filename, content_type, path,
+                    size_bytes, sha256, metadata, created_at, adult_content, adult_policy_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    artifact_id, job_id, attempt_id, kind, destination.name, content_type,
+                    str(destination), size_bytes, sha256, json.dumps(metadata), unix_now(),
+                    1 if inherited_adult or artifact_reason else 0, stored_reason,
+                ),
+            )
+            staged.replace(destination)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 413
+    finally:
+        staged.unlink(missing_ok=True)
     job_helpers.update_job_progress(job_id, node_id, attempt_id, progress=99, stage="uploading")
     return jsonify({
         "id": artifact_id,

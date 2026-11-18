@@ -132,6 +132,7 @@ def migrate(conn: sqlite3.Connection) -> None:
     additions = {
         "attempt_id": "TEXT",
         "lease_expires_at": "REAL",
+        "retry_count": "INTEGER NOT NULL DEFAULT 0",
         "progress": "REAL NOT NULL DEFAULT 0",
         "stage": "TEXT NOT NULL DEFAULT 'queued'",
         "resolved_spec": "TEXT",
@@ -198,7 +199,8 @@ def migrate(conn: sqlite3.Connection) -> None:
         """
         UPDATE jobs
            SET status='queued', node_id=NULL, attempt_id=NULL, assigned_at=NULL,
-               lease_expires_at=NULL, progress=0, stage='queued', updated_at=?
+               lease_expires_at=NULL, progress=0, stage='queued', updated_at=?,
+               retry_count=COALESCE(retry_count, 0)+1
          WHERE status IN ('leased', 'running', 'uploading')
            AND (attempt_id IS NULL OR lease_expires_at IS NULL OR lease_expires_at < ?)
         """,

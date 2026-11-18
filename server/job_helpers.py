@@ -142,7 +142,8 @@ def recover_expired_leases(*, conn: Optional[sqlite3.Connection] = None) -> int:
             """
             UPDATE jobs
                SET status='queued', node_id=NULL, attempt_id=NULL, assigned_at=NULL,
-                   lease_expires_at=NULL, progress=0, stage='queued', updated_at=?
+                   lease_expires_at=NULL, progress=0, stage='queued', updated_at=?,
+                   retry_count=COALESCE(retry_count, 0)+1
              WHERE status IN ('leased', 'running', 'uploading')
                AND lease_expires_at IS NOT NULL
                AND lease_expires_at < ?
@@ -228,7 +229,7 @@ def complete_job(
     try:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
-            "SELECT status, node_id, attempt_id FROM jobs WHERE id=?",
+            "SELECT status, node_id, attempt_id, retry_count FROM jobs WHERE id=?",
             (job_id,),
         ).fetchone()
         current_status = (row["status"] or "").lower() if row else ""
@@ -243,6 +244,7 @@ def complete_job(
             or current_status not in allowed_current
             or (owner and owner != node_id)
             or (attempt_id and active_attempt != attempt_id)
+            or (active_attempt and not attempt_id and row["retry_count"])
         ):
             conn.rollback()
             return False
@@ -283,7 +285,7 @@ def complete_job_if_queued(job_id: str, node_id: str, status: str) -> bool:
     try:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
-            "SELECT status, node_id, assigned_at, completed_at FROM jobs WHERE id=?",
+            "SELECT status, node_id, assigned_at, completed_at, retry_count FROM jobs WHERE id=?",
             (job_id,),
         ).fetchone()
         if not row:
@@ -293,7 +295,7 @@ def complete_job_if_queued(job_id: str, node_id: str, status: str) -> bool:
         owner = row["node_id"]
         assigned_at = row["assigned_at"]
         completed_at = row["completed_at"]
-        if current_status != "queued" or completed_at is not None:
+        if current_status != "queued" or completed_at is not None or row["retry_count"]:
             conn.rollback()
             return False
         if owner and owner != node_id:

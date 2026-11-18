@@ -319,6 +319,10 @@ def record_claim(job_id: str, node_id: str) -> int:
     ).fetchone()
     attempt_num = row["attempt_count"] if row else 1
 
+    # A new durable claim supersedes an abandoned attempt, even on the
+    # same worker. Its eventual success belongs only to the new claim.
+    conn.execute("""UPDATE job_attempts SET finish_time=?, status='superseded', updated_at=?
+                    WHERE job_id=? AND finish_time IS NULL""", (now, now, job_id))
     conn.execute(
         """INSERT INTO job_attempts
            (job_id, node_id, attempt_number, claim_time, status, created_at, updated_at)
@@ -343,7 +347,8 @@ def complete_attempt(
         """UPDATE job_attempts
            SET finish_time = ?, status = ?, error_message = ?,
                execution_metadata = ?, updated_at = ?
-           WHERE job_id = ? AND node_id = ? AND finish_time IS NULL""",
+           WHERE id = (SELECT id FROM job_attempts WHERE job_id=? AND node_id=? AND finish_time IS NULL
+                       ORDER BY attempt_number DESC, id DESC LIMIT 1)""",
         (
             now, status, error_message,
             json.dumps(execution_metadata) if execution_metadata else None,

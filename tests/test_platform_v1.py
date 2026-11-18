@@ -540,6 +540,146 @@ class PlatformApiContractTests(unittest.TestCase):
         self.assertEqual(detail.get_json()["resolved_spec"]["parameters"]["steps"], 28)
         self.assertEqual(detail.get_json()["artifacts"][0]["sha256"], artifact.get_json()["sha256"])
 
+    def test_disconnect_releases_claim_and_first_poll_gets_a_new_attempt(self) -> None:
+        for stage in ("leased", "running", "uploading"):
+            with self.subTest(stage=stage):
+                job_id = self._create_image_job()
+                with app_module.app.app_context():
+                    app_module.settlement.init_settlement_tables(app_module.get_db())
+                    app_module.settlement.create_job_ticket(job_id, WALLET, "IMAGE_GEN", IMAGE_MODEL, 0)
+                old = self._claim(job_id)["attempt_id"]
+                with app_module.app.app_context():
+                    conn = app_module.get_db()
+                    conn.execute("UPDATE jobs SET status=?, stage=?, progress=50 WHERE id=?", (stage, stage, job_id))
+                    conn.commit()
+                # Existing clients send an untagged disconnect, sometimes twice.
+                for _ in range(2):
+                    response = self.client.post("/disconnect", json={"node_id": "node-test"})
+                    self.assertEqual(response.status_code, 200)
+                self.assertNotIn(job_id, app_module.TASKS)
+                with app_module.app.app_context():
+                    row = app_module.get_db().execute(
+                        "SELECT status, node_id, attempt_id, lease_expires_at, progress, retry_count FROM jobs WHERE id=?",
+                        (job_id,),
+                    ).fetchone()
+                    self.assertEqual(tuple(row), ("queued", None, None, None, 0, 1))
+                    # Older recovery code could leave an assignment timestamp behind.
+                    conn = app_module.get_db()
+                    conn.execute("UPDATE jobs SET assigned_at=1 WHERE id=?", (job_id,))
+                    conn.commit()
+                result = {"node_id": "node-test", "task_id": job_id, "status": "success"}
+                late = self.client.post("/results", json=result, headers=self.node_headers)
+                self.assertEqual(late.status_code, 409)
+
+                new = self._claim(job_id)["attempt_id"]
+                self.assertNotEqual(old, new)
+                for token in (old, None):
+                    rejected = self.client.post("/results", json={**result, "attempt_id": token}, headers=self.node_headers)
+                    self.assertEqual(rejected.status_code, 409)
+                    pending = self.client.get("/tasks/creator?node_id=node-test", headers=self.node_headers)
+                    self.assertEqual([task["attempt_id"] for task in pending.get_json()["tasks"]], [new])
+                accepted = self.client.post("/results", json={**result, "attempt_id": new}, headers=self.node_headers)
+                self.assertEqual(accepted.status_code, 200, accepted.get_json())
+                duplicate = self.client.post("/results", json={**result, "attempt_id": old}, headers=self.node_headers)
+                self.assertEqual(duplicate.status_code, 409)
+                with app_module.app.app_context():
+                    history = app_module.get_db().execute(
+                        "SELECT status FROM job_attempts WHERE job_id=? ORDER BY attempt_number", (job_id,),
+                    ).fetchall()
+                    self.assertEqual([row["status"] for row in history], ["superseded", "success"])
+
+    def test_superseded_upload_cannot_overwrite_an_accepted_artifact(self) -> None:
+        job_id = self._create_image_job()
+        old = self._claim(job_id)["attempt_id"]
+        url = f"/v1/node/jobs/{job_id}/artifacts"
+        original_write = app_module.platform_v1.atomic_stream_write
+
+        def upload(token, content):
+            return self.client.post(url, headers=self.node_headers, data={
+                "node_id": "node-test", "attempt_id": token, "kind": "image",
+                "file": (io.BytesIO(content), "result.png"),
+            })
+
+        def replace_worker_during_upload(stream, destination, max_bytes):
+            staged = original_write(stream, destination, max_bytes)
+            self.assertEqual(self.client.post("/disconnect", json={"node_id": "node-test"}).status_code, 200)
+            current = self._claim(job_id)["attempt_id"]
+            with patch.object(app_module.platform_v1, "atomic_stream_write", original_write):
+                self.assertEqual(upload(current, b"accepted-image").status_code, 201)
+            result = {"node_id": "node-test", "task_id": job_id, "attempt_id": current, "status": "success"}
+            self.assertEqual(self.client.post("/results", headers=self.node_headers, json=result).status_code, 200)
+            return staged
+
+        with patch.object(app_module.platform_v1, "atomic_stream_write", replace_worker_during_upload):
+            self.assertEqual(upload(old, b"superseded-image").status_code, 409)
+        self.assertEqual((app_module.OUTPUTS_DIR / f"{job_id}.png").read_bytes(), b"accepted-image")
+        self.assertFalse(list(app_module.OUTPUTS_DIR.glob("*.part")))
+        with app_module.app.app_context():
+            rows = app_module.get_db().execute("SELECT sha256 FROM artifacts WHERE job_id=?", (job_id,)).fetchall()
+            self.assertEqual([row["sha256"] for row in rows], [hashlib.sha256(b"accepted-image").hexdigest()])
+
+    def test_partial_upload_files_cannot_be_served(self) -> None:
+        with app_module.app.app_context():
+            app_module.music_discover.init_music_discover_tables(app_module.get_db())
+        with patch.object(app_module.app, "_static_folder", str(app_module.STATIC_DIR)), patch.object(
+            app_module, "LEGACY_STATIC_DIR", app_module.STATIC_DIR
+        ):
+            public = app_module.OUTPUTS_DIR / "published.txt"
+            public.write_bytes(b"published")
+            for prefix in ("/static", "/installers"):
+                with self.client.get(f"{prefix}/outputs/{public.name}") as response:
+                    self.assertEqual(response.status_code, 200)
+            for filename in (".artifact-test.part", "..artifact-test.part.stream-test.part"):
+                (app_module.OUTPUTS_DIR / filename).write_bytes(b"upload in progress")
+                for prefix in ("/static", "/installers"):
+                    response = self.client.get(f"{prefix}/outputs/{filename}")
+                    self.assertEqual(response.status_code, 404)
+                    self.assertEqual(response.headers["Cache-Control"], "private, no-store")
+
+    def test_unretried_legacy_result_without_token_is_accepted_once(self) -> None:
+        job_id = self._create_image_job()
+        self._claim(job_id)
+        result = {"node_id": "node-test", "task_id": job_id, "status": "success"}
+        accepted = self.client.post("/results", json=result, headers=self.node_headers)
+        self.assertEqual(accepted.status_code, 200, accepted.get_json())
+        self.assertNotIn(job_id, app_module.TASKS)
+        duplicate = self.client.post("/results", json=result, headers=self.node_headers)
+        self.assertEqual(duplicate.status_code, 409)
+
+    def test_expired_cached_claim_is_never_reissued(self) -> None:
+        job_id = self._create_image_job()
+        old = self._claim(job_id)["attempt_id"]
+        with app_module.app.app_context():
+            conn = app_module.get_db()
+            conn.execute("UPDATE jobs SET lease_expires_at=0 WHERE id=?", (job_id,))
+            conn.commit()
+        poll = self.client.get("/tasks/creator?node_id=node-test", headers=self.node_headers)
+        new_task = poll.get_json()["tasks"][0]
+        self.assertEqual(new_task["task_id"], job_id)
+        self.assertNotEqual(new_task["attempt_id"], old)
+
+    def test_replacement_worker_ignores_delayed_shutdown_and_heartbeat(self) -> None:
+        job_id = self._create_image_job()
+        reg = {"node_id": "node-test", "role": "creator", "supports": ["image"], "start_time": 100}
+        self.assertEqual(self.client.post("/register", json=reg).status_code, 200)
+        poll_url = "/tasks/creator?node_id=node-test"
+        old = self.client.get(poll_url, headers=self.node_headers).get_json()["tasks"][0]["attempt_id"]
+        replacement = {**reg, "start_time": 200, "session_disconnect": True}
+        self.assertEqual(self.client.post("/register", json=replacement).status_code, 200)
+        current = self.client.get(poll_url, headers=self.node_headers).get_json()["tasks"][0]
+        self.assertEqual(current["task_id"], job_id)
+        self.assertNotEqual(current["attempt_id"], old)
+        for endpoint, payload in (
+            ("/disconnect", {"node_id": "node-test"}),
+            ("/disconnect", {"node_id": "node-test", "start_time": 100}),
+            ("/register", reg),
+        ):
+            self.assertEqual(self.client.post(endpoint, json=payload).get_json()["status"], "superseded")
+        next_poll = self.client.get(poll_url, headers=self.node_headers).get_json()["tasks"]
+        self.assertEqual([task["attempt_id"] for task in next_poll], [current["attempt_id"]])
+        self.assertEqual(self.client.post("/disconnect", json=replacement).get_json()["status"], "disconnected")
+        self.assertNotIn(job_id, app_module.TASKS)
+
     def test_cancel_signals_active_attempt(self) -> None:
         job_id = self._create_image_job()
         task = self._claim(job_id)

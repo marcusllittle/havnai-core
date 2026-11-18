@@ -11,7 +11,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -121,12 +121,17 @@ class ImagePipelineCacheTests(unittest.TestCase):
         entry_b = SimpleNamespace(name="m2")
         pipe_a = _FakePipe()
         pipe_b = _FakePipe()
+        resident = set()
 
         def _build(entry, *_args):
-            return (pipe_a if entry.name == "m1" else pipe_b), 10
+            if resident:
+                raise MemoryError("GPU has room for one pipeline")
+            pipe = pipe_a if entry.name == "m1" else pipe_b
+            resident.add(pipe)
+            return pipe, 10
 
         with patch.object(client_module, "_construct_base_image_pipeline", side_effect=_build), patch.object(
-            client_module, "_release_image_pipeline"
+            client_module, "_release_image_pipeline", side_effect=resident.remove
         ) as release:
             acquired_a, hit_a, _ = client_module._acquire_base_image_pipeline(
                 entry_a, Path("/tmp/model-a.safetensors"), "sdxl", "float16", True, "cpu"
@@ -143,18 +148,75 @@ class ImagePipelineCacheTests(unittest.TestCase):
         self.assertIsNone(client_module._model_unhealthy_reason("IMAGE_GEN", "m1"))
         self.assertIsNone(client_module._model_unhealthy_reason("IMAGE_GEN", "m2"))
 
+    def test_failed_switch_leaves_other_lru_entries_warm_and_evicted_model_can_reload(self) -> None:
+        entry = SimpleNamespace(name="model")
+        client_module.IMAGE_PIPELINE_CACHE_SIZE = 2
+        pipe_a, pipe_b, reloaded_b = _FakePipe(), _FakePipe(), _FakePipe()
+
+        def acquire(name):
+            return client_module._acquire_base_image_pipeline(entry, Path(name), "sdxl", "float16", True, "cpu")
+
+        with patch.object(client_module, "_construct_base_image_pipeline", side_effect=[
+            (pipe_a, 1), (pipe_b, 1), RuntimeError("bad checkpoint"), (reloaded_b, 1)
+        ]), patch.object(client_module, "_release_image_pipeline") as release:
+            acquire("a")
+            acquire("b")
+            self.assertEqual(acquire("a"), (pipe_a, True, 0))
+            with self.assertRaisesRegex(RuntimeError, "bad checkpoint"):
+                acquire("c")
+            release.assert_called_once_with(pipe_b)
+            self.assertEqual(acquire("a"), (pipe_a, True, 0))
+            self.assertEqual(acquire("b"), (reloaded_b, False, 1))
+            release.assert_called_once_with(pipe_b)
+
+    def test_reference_model_releases_before_switch_and_recovers_from_load_error(self) -> None:
+        old_pipe, new_pipe = Mock(), Mock()
+        entry = SimpleNamespace(name="reference")
+        resident = {old_pipe}
+
+        def build(_entry, path, *_args):
+            if resident:
+                raise MemoryError("GPU has room for one reference pipeline")
+            if path.name == "broken":
+                raise RuntimeError("bad reference checkpoint")
+            resident.add(new_pipe)
+            return new_pipe, 1
+
+        with patch.object(client_module, "_REFERENCE_FACE_PIPE", old_pipe), patch.object(
+            client_module, "_REFERENCE_FACE_PIPE_MODEL", "old"
+        ), patch.object(client_module, "_resolve_instantid_adapter_path", return_value=Path("adapter")), patch.object(
+            client_module, "_resolve_instantid_controlnet_ref", return_value="control"
+        ), patch.object(client_module, "_construct_reference_face_pipeline", side_effect=build), patch.object(
+            client_module, "_release_image_pipeline", side_effect=resident.remove
+        ) as release:
+            with self.assertRaisesRegex(RuntimeError, "bad reference checkpoint"):
+                client_module._acquire_reference_face_pipeline(entry, Path("broken"), "float16", "cpu")
+            self.assertIsNone(client_module._REFERENCE_FACE_PIPE)
+            self.assertEqual(client_module._REFERENCE_FACE_PIPE_MODEL, "")
+            args = (entry, Path("working"), "float16", "cpu")
+            self.assertEqual(client_module._acquire_reference_face_pipeline(*args), (new_pipe, False, 1))
+            self.assertEqual(client_module._acquire_reference_face_pipeline(*args), (new_pipe, True, 0))
+            release.assert_called_once_with(old_pipe)
+
     def test_lora_run_uses_transient_pipeline_and_does_not_use_cache_path(self) -> None:
         entry = SimpleNamespace(name="m2", pipeline="sd15")
         model_path = Path("/tmp/model-b.safetensors")
         fake_pipe = _FakePipe()
+        warm_pipe = _FakePipe()
+        client_module._IMAGE_PIPELINE_CACHE["warm"] = warm_pipe
         lora_entries = [(Path("/tmp/test.safetensors"), 0.55, "lora_style_test")]
+
+        def construct(*_args):
+            release_mock.assert_called_once_with(warm_pipe)
+            self.assertFalse(client_module._IMAGE_PIPELINE_CACHE)
+            return fake_pipe, 15
 
         with patch.object(client_module, "read_gpu_stats", return_value={"utilization": 0}), patch.object(
             client_module, "_resolve_image_runtime", return_value=("cpu", "float32", False, "sd15")
         ), patch.object(
             client_module, "_collect_explicit_loras", return_value=lora_entries
         ), patch.object(
-            client_module, "_construct_base_image_pipeline", return_value=(fake_pipe, 15)
+            client_module, "_construct_base_image_pipeline", side_effect=construct
         ) as construct_mock, patch.object(
             client_module, "_acquire_base_image_pipeline", side_effect=RuntimeError("cache path should not be used")
         ) as acquire_mock, patch.object(
@@ -179,7 +241,96 @@ class ImagePipelineCacheTests(unittest.TestCase):
         self.assertGreaterEqual(metrics["generation_ms"], 0)
         construct_mock.assert_called_once()
         acquire_mock.assert_not_called()
-        release_mock.assert_called_once_with(fake_pipe)
+        self.assertEqual(release_mock.call_args_list, [call(warm_pipe), call(fake_pipe)])
+
+    def test_base_and_reference_pipelines_release_before_cross_family_allocations(self) -> None:
+        entry = SimpleNamespace(name="sdxl")
+        plain, face = Mock(), Mock()
+        resident = set()
+
+        def load(pipe):
+            self.assertFalse(resident, "competing model weights still resident")
+            resident.add(pipe)
+            return pipe, 1
+
+        with patch.object(client_module, "_REFERENCE_FACE_PIPE", None), patch.object(
+            client_module, "_REFERENCE_FACE_PIPE_MODEL", ""
+        ), patch.object(client_module, "_FACE_ANALYSIS", None), patch.object(
+            client_module, "_resolve_instantid_adapter_path", return_value=Path("adapter")
+        ), patch.object(client_module, "_resolve_instantid_controlnet_ref", return_value="control"), patch.object(
+            client_module, "_construct_reference_face_pipeline", side_effect=lambda *_: load(face)
+        ), patch.object(client_module, "_construct_base_image_pipeline", side_effect=lambda *_: load(plain)), patch.object(
+            client_module, "_release_image_pipeline", side_effect=resident.remove
+        ):
+            base_args = (entry, Path("model"), "sdxl", "float16", True, "cpu")
+            ref_args = (entry, Path("model"), "float16", "cpu")
+            self.assertEqual(client_module._acquire_base_image_pipeline(*base_args), (plain, False, 1))
+            self.assertEqual(client_module._acquire_reference_face_pipeline(*ref_args), (face, False, 1))
+            client_module._FACE_ANALYSIS = detector = object()
+            self.assertEqual(client_module._acquire_reference_face_pipeline(*ref_args), (face, True, 0))
+            self.assertIs(client_module._FACE_ANALYSIS, detector)
+            self.assertEqual(client_module._acquire_base_image_pipeline(*base_args), (plain, False, 1))
+            self.assertIsNone(client_module._FACE_ANALYSIS)
+            self.assertEqual(resident, {plain})
+
+    def test_isolated_video_drops_parent_gpu_caches_before_spawn(self) -> None:
+        warm_base, warm_swap = object(), object()
+        client_module._IMAGE_PIPELINE_CACHE["warm"] = warm_base
+        old_video = Mock()
+        child = Mock(returncode=0)
+        child.poll.return_value = 0
+
+        def start_child(*args, **kwargs):
+            self.assertCountEqual([invocation.args[0] for invocation in release.call_args_list], [warm_base, warm_swap])
+            old_video.unload_pipeline.assert_called_once_with()
+            self.assertFalse(client_module._IMAGE_PIPELINE_CACHE)
+            self.assertIsNone(client_module._FACE_ANALYSIS)
+            self.assertIsNone(client_module._FACE_SWAP_PIPE)
+            return child
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(client_module, "HAVNAI_HOME", Path(tmp)), patch.object(
+            client_module, "_FACE_SWAP_PIPE", warm_swap
+        ), patch.object(client_module, "_FACE_SWAP_PIPE_MODEL", "swap"), patch.object(
+            client_module, "_FACE_ANALYSIS", object()
+        ), patch.object(client_module, "_ACTIVE_VIDEO_CACHE", "ANIMATEDIFF"), patch.dict(
+            sys.modules, {"engines.animatediff.animatediff_generator": old_video}
+        ), patch.object(client_module, "_release_image_pipeline") as release, patch.object(
+            client_module.subprocess, "Popen", side_effect=start_child
+        ) as spawn:
+            client_module.execute_video_task_isolated({"task_id": "switch", "timeout": 60})
+            spawn.assert_called_once()
+
+    def test_inline_video_reuses_engine_and_releases_before_wangp_and_music(self) -> None:
+        warm_base = object()
+        client_module._IMAGE_PIPELINE_CACHE["warm"] = warm_base
+        events = []
+        video_engine = SimpleNamespace(unload_pipelines=lambda: events.append("unload legacy"))
+        task = {"task_id": "legacy-cache-switch", "type": "LTX_VIDEO_GEN", "model_name": "legacy"}
+
+        def video(_task_id, entry, *_args):
+            events.append(entry.name)
+            return {"status": "success"}, 0, None
+
+        def music(*_args):
+            events.append("music")
+            return {"status": "success"}, 0
+
+        with patch.object(client_module, "ROLE", "creator"), patch.object(
+            client_module, "_is_model_allowed", return_value=True
+        ), patch.object(client_module, "_ACTIVE_VIDEO_CACHE", None), patch.dict(
+            sys.modules, {"engines.ltx_video.generator": video_engine}
+        ), patch.object(
+            client_module, "ensure_model_entry", side_effect=lambda name: SimpleNamespace(name=name, model_family=name)
+        ), patch.object(client_module, "_release_image_pipeline", side_effect=lambda pipe: events.append(pipe)), patch.object(
+            client_module, "_run_ltx_video_task", side_effect=video
+        ), patch.object(client_module, "_run_music_task", side_effect=music), patch.object(
+            client_module, "_task_output_path", return_value=None
+        ), patch.object(client_module.SESSION, "post") as post:
+            post.return_value.json.return_value = {"reward": 0}
+            for model in ("legacy", "legacy", "ltx23_wangp", "legacy"):
+                client_module.execute_task({**task, "model_name": model})
+            client_module.execute_task({**task, "model_name": "music", "type": "MUSIC_GEN"})
+        self.assertEqual(events, [warm_base, "legacy", "legacy", "unload legacy", "ltx23_wangp", "legacy", "unload legacy", "music"])
 
     def test_refinement_and_masks_reach_the_correct_pipeline_without_cache_mutation(self) -> None:
         for masked in (False, True):
@@ -252,6 +403,17 @@ class ImagePipelineCacheTests(unittest.TestCase):
             self.assertIsNone(output)
             construct.assert_not_called()
             cache.assert_not_called()
+
+    def test_rejected_attempt_stops_before_model_load_or_result(self) -> None:
+        task = {"task_id": "superseded", "type": "IMAGE_GEN", "model_name": "sdxl", "attempt_id": "old"}
+        with patch.object(client_module, "ROLE", "creator"), patch.object(client_module, "_is_model_allowed", return_value=True), patch.object(
+            client_module, "ensure_model_entry"
+        ) as load, patch.object(client_module.SESSION, "post") as post:
+            post.return_value.status_code = 409
+            client_module.execute_task(task)
+        load.assert_not_called()
+        self.assertEqual(post.call_count, 1)
+        self.assertTrue(post.call_args.args[0].endswith("/progress"))
 
     def test_model_load_failures_trip_unhealthy_gate_and_success_clears_it(self) -> None:
         entry = SimpleNamespace(name="sdxl", pipeline="sdxl")

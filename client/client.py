@@ -101,6 +101,12 @@ _REFERENCE_FACE_PIPE = None
 _REFERENCE_FACE_PIPE_MODEL = ""
 _IMAGE_PIPELINE_CACHE: "OrderedDict[str, Any]" = OrderedDict()
 _IMAGE_PIPELINE_CACHE_LOCK = threading.Lock()
+_VIDEO_CACHE_UNLOADERS = {
+    "VIDEO_GEN": ("engines.ltx2.ltx2_generator", "unload_pipeline"),
+    "LTX_VIDEO_GEN": ("engines.ltx_video.generator", "unload_pipelines"),
+    "ANIMATEDIFF": ("engines.animatediff.animatediff_generator", "unload_pipeline"),
+}
+_ACTIVE_VIDEO_CACHE: Optional[str] = None
 MODEL_FAILURE_THRESHOLD = int(os.environ.get("HAVNAI_MODEL_FAILURE_THRESHOLD", "2"))
 MODEL_FAILURE_COOLDOWN_SECONDS = float(os.environ.get("HAVNAI_MODEL_FAILURE_COOLDOWN_SECONDS", "900"))
 _MODEL_FAILURE_LOCK = threading.Lock()
@@ -596,11 +602,12 @@ def _node_auth_headers() -> Dict[str, str]:
     return {"X-Join-Token": JOIN_TOKEN} if JOIN_TOKEN else {}
 
 
-def _report_task_progress(task: Dict[str, Any], progress: float, stage: str) -> bool:
+def _report_task_progress(task: Dict[str, Any], progress: float, stage: str) -> Optional[bool]:
+    """Return False for a rejected lease, None when its state is unknown."""
     attempt_id = str(task.get("attempt_id") or "")
     task_id = str(task.get("task_id") or "")
     if not attempt_id or not task_id:
-        return False
+        return None
     try:
         response = SESSION.post(
             endpoint(f"/v1/node/jobs/{task_id}/progress"),
@@ -612,11 +619,14 @@ def _report_task_progress(task: Dict[str, Any], progress: float, stage: str) -> 
             }),
             timeout=HTTP_TIMEOUT_REGISTER,
         )
+        if response.status_code == 409:
+            log(f"Coordinator rejected the attempt for {task_id[:8]} at {stage}", prefix="⚠️")
+            return False
         response.raise_for_status()
         return True
     except Exception as exc:
         log(f"Progress update failed for {task_id[:8]}: {exc}", prefix="⚠️")
-        return False
+        return None
 
 
 def _lease_monitor(task: Dict[str, Any], stop_event: threading.Event, cancel_event: threading.Event) -> None:
@@ -1234,7 +1244,7 @@ def run_command(cmd: List[str]) -> Optional[str]:
 
 def disconnect() -> None:
     try:
-        resp = SESSION.post(endpoint("/disconnect"), data=json.dumps({"node_id": NODE_NAME}), timeout=HTTP_TIMEOUT_DISCONNECT)
+        resp = SESSION.post(endpoint("/disconnect"), data=json.dumps({"node_id": NODE_NAME, "start_time": START_TIME}), timeout=HTTP_TIMEOUT_DISCONNECT)
         if resp.status_code == 200:
             log("Disconnected from coordinator.", prefix="�o.")
     except Exception as exc:
@@ -2108,6 +2118,13 @@ def _run_ltx2_task(
     return metrics, util_int, video_b64
 
 
+def _is_wangp_entry(entry: ModelEntry) -> bool:
+    return any(
+        str(getattr(entry, field, "") or "").strip().lower() == "ltx23_wangp"
+        for field in ("pipeline", "model_family")
+    )
+
+
 def _run_ltx_video_task(
     task_id: str,
     entry: ModelEntry,
@@ -2116,9 +2133,7 @@ def _run_ltx_video_task(
 ) -> Tuple[Dict[str, Any], int, Optional[str]]:
     """Execute a verified LTX video runtime without changing legacy behavior."""
     global utilization_hint
-    pipeline = str(getattr(entry, "pipeline", "") or "").strip().lower()
-    model_family = str(getattr(entry, "model_family", "") or "").strip().lower()
-    if pipeline == "ltx23_wangp" or model_family == "ltx23_wangp":
+    if _is_wangp_entry(entry):
         log(
             f"LTX-2.3 WanGP task received: model={entry.name}",
             prefix="🎬",
@@ -2375,6 +2390,10 @@ def _run_faceswap_task(
         if source_image is None:
             raise RuntimeError(f"Failed to load face source: {source_error or 'unknown error'}")
 
+        adapter_path = _resolve_instantid_adapter_path()
+        controlnet_ref = _resolve_instantid_controlnet_ref()
+        pipeline_cache_key = f"{model_path}|{controlnet_ref}|{adapter_path}"
+        _retire_image_pipelines("face_swap" if _FACE_SWAP_PIPE_MODEL == pipeline_cache_key else "face_analysis")
         face_app = get_face_analysis()
         base_faces = face_app.get(cv2.cvtColor(np.array(base_image), cv2.COLOR_RGB2BGR))
         source_faces = face_app.get(cv2.cvtColor(np.array(source_image), cv2.COLOR_RGB2BGR))
@@ -2385,11 +2404,8 @@ def _run_faceswap_task(
         if source_face is None:
             raise RuntimeError("No face detected in face source image")
 
-        adapter_path = _resolve_instantid_adapter_path()
-        controlnet_ref = _resolve_instantid_controlnet_ref()
         dtype = torch.float16 if torch.cuda.is_available() else torch.float32
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        pipeline_cache_key = f"{model_path}|{controlnet_ref}|{adapter_path}"
         if _FACE_SWAP_PIPE is None or _FACE_SWAP_PIPE_MODEL != pipeline_cache_key:
             controlnet = _load_instantid_controlnet(dtype)
             pipe = StableDiffusionXLInstantIDInpaintPipeline.from_single_file(
@@ -2741,7 +2757,8 @@ def execute_task(task: Dict[str, Any]) -> None:
     cancel_event = threading.Event()
     lease_thread: Optional[threading.Thread] = None
     if task.get("attempt_id"):
-        _report_task_progress(task, 1, "loading")
+        if _report_task_progress(task, 1, "loading") is False:
+            return
         lease_thread = threading.Thread(
             target=_lease_monitor,
             args=(task, lease_stop, cancel_event),
@@ -2784,6 +2801,15 @@ def execute_task(task: Dict[str, Any]) -> None:
         entry = ensure_model_entry(model_name)
         if task_type in {"IMAGE_GEN", "ANIMATEDIFF", "FACE_SWAP"}:
             model_path = ensure_model_path(entry)
+        if task_type in _VIDEO_CACHE_UNLOADERS:
+            _retire_image_pipelines()
+            external_video = task_type == "LTX_VIDEO_GEN" and _is_wangp_entry(entry)
+            _switch_video_cache(None if external_video else task_type)
+        elif task_type == "MUSIC_GEN":
+            _retire_image_pipelines()
+            _switch_video_cache(None)
+        elif task_type in {"IMAGE_GEN", "FACE_SWAP"}:
+            _switch_video_cache(None)
     except TaskCancelled as exc:
         metrics = {
             "status": "cancelled",
@@ -3018,14 +3044,9 @@ def execute_task(task: Dict[str, Any]) -> None:
         except Exception as exc:
             submit_error = exc
             status_code = getattr(getattr(exc, "response", None), "status_code", None)
-            # Non-fatal: coordinator already moved state past this task.
+            # A superseded attempt can also receive 409. Only an accepted
+            # submission can acknowledge successful completion and reward.
             if status_code == 409:
-                submit_error = None
-                reward = reward if reward is not None else 0.0
-                log(
-                    f"Result submit returned 409 for {task_id[:8]}; treating as already settled",
-                    prefix="ℹ️",
-                )
                 break
 
             transient = (
@@ -3109,6 +3130,9 @@ def _submit_isolated_terminal(task: Dict[str, Any], status: str, error: str) -> 
 def execute_video_task_isolated(task: Dict[str, Any]) -> None:
     """Run a v1 video job in a killable process while this agent stays online."""
     task_id = str(task.get("task_id") or "unknown")
+    # The child cannot release GPU weights retained by the polling parent.
+    _retire_image_pipelines()
+    _switch_video_cache(None)
     task_dir = HAVNAI_HOME / "tasks"
     task_dir.mkdir(parents=True, exist_ok=True)
     task_path = task_dir / f"{task_id}.json"
@@ -3376,12 +3400,56 @@ def _release_image_pipeline(pipe: Any) -> None:
                     pass
             except Exception:
                 pass
+
+
+def _collect_released_gpu_memory() -> None:
+    # Called after dropping the last pipeline reference, including cyclic hooks,
+    # so reserved VRAM is available to an executor in another process.
     gc.collect()
     if torch is not None and torch.cuda.is_available():
         try:
             torch.cuda.empty_cache()
         except Exception:
             pass
+
+
+def _switch_video_cache(next_engine: Optional[str]) -> None:
+    """Hand off VRAM held by an in-process video runner when the workload changes."""
+    global _ACTIVE_VIDEO_CACHE
+    if _ACTIVE_VIDEO_CACHE == next_engine:
+        return
+    if _ACTIVE_VIDEO_CACHE is not None:
+        module_name, unload = _VIDEO_CACHE_UNLOADERS[_ACTIVE_VIDEO_CACHE]
+        module = sys.modules.get(module_name)
+        if module is not None:
+            getattr(module, unload)()
+            _collect_released_gpu_memory()
+    _ACTIVE_VIDEO_CACHE = next_engine
+
+
+def _retire_image_pipelines(keep: str = "") -> None:
+    """Keep only the image pipeline family needed by the next allocation."""
+    global _FACE_ANALYSIS, _REFERENCE_FACE_PIPE, _REFERENCE_FACE_PIPE_MODEL, _FACE_SWAP_PIPE, _FACE_SWAP_PIPE_MODEL
+    retired = []
+    drop_detector = keep not in {"reference", "face_swap", "face_analysis"} and _FACE_ANALYSIS is not None
+    if drop_detector:
+        _FACE_ANALYSIS = None
+    if keep != "reference" and _REFERENCE_FACE_PIPE is not None:
+        retired.append(_REFERENCE_FACE_PIPE)
+        _REFERENCE_FACE_PIPE = None
+        _REFERENCE_FACE_PIPE_MODEL = ""
+    if keep != "face_swap" and _FACE_SWAP_PIPE is not None:
+        retired.append(_FACE_SWAP_PIPE)
+        _FACE_SWAP_PIPE = None
+        _FACE_SWAP_PIPE_MODEL = ""
+    if keep != "base":
+        with _IMAGE_PIPELINE_CACHE_LOCK:
+            retired.extend(_IMAGE_PIPELINE_CACHE.values())
+            _IMAGE_PIPELINE_CACHE.clear()
+    if retired or drop_detector:
+        while retired:
+            _release_image_pipeline(retired.pop())
+        _collect_released_gpu_memory()
 
 
 def _configure_image_pipeline(pipe: Any, entry: ModelEntry, is_xl: bool, device: str) -> Any:
@@ -3463,6 +3531,7 @@ def _acquire_base_image_pipeline(
     is_xl: bool,
     device: str,
 ) -> Tuple[Any, bool, int]:
+    _retire_image_pipelines("base" if IMAGE_PIPELINE_CACHE_SIZE > 0 else "")
     if IMAGE_PIPELINE_CACHE_SIZE <= 0:
         pipe, load_ms = _construct_base_image_pipeline(entry, model_path, pipeline_name, dtype, is_xl, device)
         return pipe, False, load_ms
@@ -3474,15 +3543,15 @@ def _acquire_base_image_pipeline(
             _IMAGE_PIPELINE_CACHE[cache_key] = cached_pipe
             return cached_pipe, True, 0
 
-    pipe, load_ms = _construct_base_image_pipeline(entry, model_path, pipeline_name, dtype, is_xl, device)
-    evicted: List[Any] = []
-    with _IMAGE_PIPELINE_CACHE_LOCK:
-        _IMAGE_PIPELINE_CACHE[cache_key] = pipe
-        while len(_IMAGE_PIPELINE_CACHE) > IMAGE_PIPELINE_CACHE_SIZE:
+        # Construction moves the new weights to the GPU. Free the LRU slot
+        # first so a switch never needs space for an extra resident model.
+        while len(_IMAGE_PIPELINE_CACHE) >= IMAGE_PIPELINE_CACHE_SIZE:
             _, old_pipe = _IMAGE_PIPELINE_CACHE.popitem(last=False)
-            evicted.append(old_pipe)
-    for old_pipe in evicted:
-        _release_image_pipeline(old_pipe)
+            _release_image_pipeline(old_pipe)
+            del old_pipe
+            _collect_released_gpu_memory()
+        pipe, load_ms = _construct_base_image_pipeline(entry, model_path, pipeline_name, dtype, is_xl, device)
+        _IMAGE_PIPELINE_CACHE[cache_key] = pipe
     return pipe, False, load_ms
 
 
@@ -3604,7 +3673,8 @@ def _acquire_reference_face_pipeline(
         device,
         dtype,
     )
-    if _REFERENCE_FACE_PIPE is not None and _REFERENCE_FACE_PIPE_MODEL == cache_key:
+    _retire_image_pipelines("reference" if _REFERENCE_FACE_PIPE_MODEL == cache_key else "face_analysis")
+    if _REFERENCE_FACE_PIPE is not None:
         pipe = _REFERENCE_FACE_PIPE
         pipe.set_ip_adapter_scale(0.8)
         pipe.to(device)
@@ -3612,7 +3682,6 @@ def _acquire_reference_face_pipeline(
             pipe.image_proj_model.to(device=device, dtype=dtype)
         return pipe, True, 0
 
-    old_pipe = _REFERENCE_FACE_PIPE
     pipe, load_ms = _construct_reference_face_pipeline(
         entry,
         model_path,
@@ -3622,8 +3691,6 @@ def _acquire_reference_face_pipeline(
     )
     _REFERENCE_FACE_PIPE = pipe
     _REFERENCE_FACE_PIPE_MODEL = cache_key
-    if old_pipe is not None and old_pipe is not pipe:
-        _release_image_pipeline(old_pipe)
     return pipe, False, load_ms
 
 
@@ -3826,6 +3893,7 @@ def run_image_generation(
                 try:
                     if transient_pipeline:
                         adapter_path = _resolve_instantid_adapter_path()
+                        _retire_image_pipelines("face_analysis")
                         pipe, pipeline_load_ms = _construct_reference_face_pipeline(
                             entry,
                             model_path,
@@ -3892,6 +3960,8 @@ def run_image_generation(
                 finally:
                     if transient_pipeline and pipe is not None:
                         _release_image_pipeline(pipe)
+                        pipe = None
+                        _collect_released_gpu_memory()
             else:
                 init_pil = None
                 mask_pil = None
@@ -3930,6 +4000,7 @@ def run_image_generation(
                 pipe: Optional[Any] = None
                 try:
                     if transient_pipeline:
+                        _retire_image_pipelines()
                         pipe, pipeline_load_ms = _construct_base_image_pipeline(
                             entry, model_path, pipeline_name, dtype, is_xl, device
                         )
@@ -3979,6 +4050,8 @@ def run_image_generation(
                 finally:
                     if transient_pipeline and pipe is not None:
                         _release_image_pipeline(pipe)
+                        pipe = None
+                        _collect_released_gpu_memory()
         elif Image is not None:
             log("Using fast preview placeholder (no SD detected or FAST_PREVIEW enabled)", prefix="ℹ️")
             w = h = 512
@@ -4122,6 +4195,7 @@ def heartbeat_loop() -> None:
             "gpu": gpu_stats.get("gpu_name", "Simulated"),
             "gpu_stats": gpu_stats,
             "start_time": START_TIME,
+            "session_disconnect": True,
             "uptime": time.time() - START_TIME,
             "role": ROLE,
             "version": CLIENT_VERSION,

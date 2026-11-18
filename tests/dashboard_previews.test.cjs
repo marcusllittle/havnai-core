@@ -19,9 +19,9 @@ function fixture(base = '/api') {
     window: {}, document: { getElementById: () => new Element(), createElement: () => new Element() },
     console, setInterval: () => {},
   });
-  const source = fs.readFileSync(path.join(__dirname, '../static/dashboard.js'), 'utf8');
-  // Suppress only boot-time telemetry. Exercise the production preview functions.
-  vm.runInContext(source.replace(/^fetchTelemetry\(\);$/m, ''), context);
+  const source = fs.readFileSync(path.join(__dirname, '../static/grid-feed.js'), 'utf8');
+  // Suppress only dashboard startup. Exercise the production preview functions.
+  vm.runInContext(source.replace(/^startDashboard\(\);$/m, ''), context);
   vm.runInContext(`preferredApiBase = ${JSON.stringify(base)}`, context);
   const card = new Element();
   const placeholder = new Element();

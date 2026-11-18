@@ -1,0 +1,16 @@
+# Extra packages for tools/bench/zimage_turbo_bench.py.
+# Torch is intentionally not pinned. A plain torch pin can replace the
+# node's CUDA wheel with a CPU wheel. Install a CUDA torch first; see README.md.
+# Versions were checked against PyPI on 2026-11-18.
+#
+# diffusers 0.43.0 is the current release. It loads a Z-Image GGUF through
+# ZImageTransformer2DModel.from_single_file plus GGUFQuantizationConfig.
+# The pipeline text encoder is Qwen3, which is why transformers is pinned too.
+diffusers==0.43.0
+transformers==5.23.0
+accelerate==1.16.0
+gguf==0.19.0
+huggingface-hub==2.4.0
+safetensors==0.8.0
+pillow==13.0.0
+psutil==7.2.2

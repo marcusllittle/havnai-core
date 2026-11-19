@@ -1,9 +1,11 @@
 """Q5_K_M Z-Image-Turbo for the HavnAI image worker.
 
-The transformer stays on the GPU. Each job moves the Qwen3 text encoder to
-the GPU for one encode, then back to the CPU before denoising. Guidance is
-always 0 and the negative prompt is not used. The worker only advertises
-this model when ``HAI_ZIMAGE_TURBO`` is on, so SDXL nodes stay as they are.
+The GGUF transformer and the VAE stay on the GPU across jobs. The Qwen3 text
+encoder is about 8 GB, so it must not sit on the GPU at the same time. The
+default ``HAI_ZIMAGE_ENCODER_MODE=cpu`` encodes in bf16 on the CPU. ``swap``
+moves the transformer and VAE off, encodes on the GPU, then moves them back.
+Guidance is always 0 and the negative prompt is not used. The worker only
+advertises this model when ``HAI_ZIMAGE_TURBO`` is on.
 
 The old ``zimage`` branch loaded base ``Tongyi-MAI/Z-Image`` in bf16 with no
 offload. This module does not do that.
@@ -12,8 +14,13 @@ offload. This module does not do that.
 from __future__ import annotations
 
 import gc
+import logging
 import os
+import sys
+import time
 from typing import Any, Dict, List, Optional
+
+LOGGER = logging.getLogger(__name__)
 
 ZIMAGE_REPO = "Tongyi-MAI/Z-Image-Turbo"
 GGUF_REPO = "unsloth/Z-Image-Turbo-GGUF"
@@ -74,6 +81,16 @@ def cap_resolution(width: int, height: int) -> tuple:
     return width, height
 
 
+def encoder_mode() -> str:
+    """``cpu`` (default) or ``swap``. Anything else is a configuration error."""
+    raw = os.environ.get("HAI_ZIMAGE_ENCODER_MODE", "cpu").strip().lower()
+    if raw in {"", "cpu"}:
+        return "cpu"
+    if raw == "swap":
+        return "swap"
+    raise ValueError("HAI_ZIMAGE_ENCODER_MODE must be 'cpu' or 'swap'")
+
+
 def enabled() -> bool:
     raw = os.environ.get("HAI_ZIMAGE_TURBO", "")
     return raw.strip().lower() in {"1", "true", "yes", "on"}
@@ -108,6 +125,7 @@ class Runtime:
 
     def __init__(self) -> None:
         self.pipe: Any = None
+        self.last_stats: Dict[str, Any] = {}
 
     def unload(self, torch_module: Any = None) -> None:
         pipe = self.pipe
@@ -217,19 +235,39 @@ class Runtime:
         if not torch_mod.cuda.is_available():
             raise RuntimeError("Z-Image-Turbo needs a CUDA GPU")
         device = torch_mod.device("cuda", gpu_index)
-        pipe.text_encoder.to(device)
-        embeds, _negative = pipe.encode_prompt(
-            prompt=prompt,
-            device=device,
-            do_classifier_free_guidance=False,
-        )
-        pipe.text_encoder.to("cpu")
-        gc.collect()
-        torch_mod.cuda.empty_cache()
-        pipe.transformer.to(device)
-        pipe.vae.to(device)
+        mode = encoder_mode()
+        _reset_peak(torch_mod)
+        encode_started = time.perf_counter()
+        if mode == "cpu":
+            _move_module(pipe.text_encoder, "cpu", getattr(torch_mod, "bfloat16", None))
+            _refuse_encoder_overlap(pipe)
+            embeds, _negative = pipe.encode_prompt(
+                prompt=prompt,
+                device="cpu",
+                do_classifier_free_guidance=False,
+            )
+        else:
+            _move_module(pipe.transformer, "cpu")
+            _move_module(pipe.vae, "cpu")
+            gc.collect()
+            _empty_cache(torch_mod)
+            _move_module(pipe.text_encoder, device, getattr(torch_mod, "bfloat16", None))
+            _refuse_encoder_overlap(pipe)
+            embeds, _negative = pipe.encode_prompt(
+                prompt=prompt,
+                device=device,
+                do_classifier_free_guidance=False,
+            )
+            _move_module(pipe.text_encoder, "cpu")
+            gc.collect()
+            _empty_cache(torch_mod)
+            _refuse_encoder_overlap(pipe)
+            _move_module(pipe.transformer, device)
+            _move_module(pipe.vae, device)
+        encode_seconds = time.perf_counter() - encode_started
         prompt_embeds = [_move_embed(item, device) for item in embeds]
         generator = torch_mod.Generator(device=device).manual_seed(int(seed))
+        denoise_started = time.perf_counter()
         result = pipe(
             prompt=None,
             prompt_embeds=prompt_embeds,
@@ -239,6 +277,15 @@ class Runtime:
             width=int(width),
             generator=generator,
         )
+        denoise_seconds = time.perf_counter() - denoise_started
+        peak_mib, warning = _vram_guard(torch_mod, mode)
+        self.last_stats = {
+            "encoder_mode": mode,
+            "encode_seconds": round(encode_seconds, 3),
+            "denoise_seconds": round(denoise_seconds, 3),
+            "peak_allocated_mib": peak_mib,
+            "vram_warning": warning,
+        }
         return result.images[0]
 
 
@@ -255,6 +302,91 @@ def load(**kwargs: Any) -> Any:
 
 def generate_job(prompt: str, **kwargs: Any) -> Any:
     return RUNTIME.generate(prompt, **kwargs)
+
+
+def _module_device(module: Any) -> str:
+    if module is None:
+        return "cpu"
+    direct = getattr(module, "device", None)
+    if isinstance(direct, str):
+        return direct
+    parameters = getattr(module, "parameters", None)
+    if callable(parameters):
+        try:
+            return str(next(parameters()).device)
+        except (StopIteration, Exception):
+            pass
+    if direct is not None and not callable(direct):
+        return str(direct)
+    return "cpu"
+
+
+def _on_cuda(module: Any) -> bool:
+    return _module_device(module).startswith("cuda")
+
+
+def _refuse_encoder_overlap(pipe: Any) -> None:
+    if _on_cuda(getattr(pipe, "text_encoder", None)) and _on_cuda(getattr(pipe, "transformer", None)):
+        raise RuntimeError("refusing to run while the text encoder and transformer are both on CUDA")
+
+
+def _move_module(module: Any, device: Any, dtype: Any = None) -> None:
+    if module is None or not hasattr(module, "to"):
+        return
+    if dtype is not None:
+        try:
+            module.to(device=device, dtype=dtype)
+            return
+        except TypeError:
+            pass
+    module.to(device)
+
+
+def _empty_cache(torch_mod: Any) -> None:
+    cuda = getattr(torch_mod, "cuda", None)
+    empty = getattr(cuda, "empty_cache", None)
+    if callable(empty):
+        try:
+            empty()
+        except Exception:
+            pass
+
+
+def _reset_peak(torch_mod: Any) -> None:
+    cuda = getattr(torch_mod, "cuda", None)
+    reset = getattr(cuda, "reset_peak_memory_stats", None)
+    if callable(reset):
+        try:
+            reset()
+        except Exception:
+            pass
+
+
+def _vram_guard(torch_mod: Any, mode: str) -> tuple:
+    """Warn when this job's peak allocation exceeds 95% of total VRAM."""
+    cuda = getattr(torch_mod, "cuda", None)
+    if cuda is None or not getattr(cuda, "is_available", lambda: False)():
+        return None, False
+    max_allocated = getattr(cuda, "max_memory_allocated", None)
+    props_of = getattr(cuda, "get_device_properties", None)
+    if not callable(max_allocated) or not callable(props_of):
+        return None, False
+    try:
+        peak = int(max_allocated())
+        total = int(props_of(0).total_memory)
+    except Exception:
+        return None, False
+    peak_mib = round(peak / (1024.0 * 1024.0), 1)
+    if total <= 0 or peak <= 0.95 * total:
+        return peak_mib, False
+    total_mib = total / (1024.0 * 1024.0)
+    message = (
+        f"Z-Image encoder mode {mode} peak allocated {peak_mib:.0f} MiB, "
+        f"above 95% of {total_mib:.0f} MiB VRAM"
+    )
+    LOGGER.warning(message)
+    print(message, file=sys.stderr, flush=True)
+    return peak_mib, True
 
 
 def _move_embed(item: Any, device: Any) -> Any:

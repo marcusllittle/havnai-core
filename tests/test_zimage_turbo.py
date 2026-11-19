@@ -78,6 +78,7 @@ class FakePipe:
                 str(device),
                 do_classifier_free_guidance,
                 self.text_encoder.device,
+                self.transformer.device,
             )
         )
         return [FakeTensor(str(device))], []
@@ -254,36 +255,128 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(pipe.vae.device, "cuda:0")
         self.assertEqual(pipe.text_encoder.device, "cpu")
 
-    def test_generate_encodes_then_frees_encoder_before_denoise(self) -> None:
-        events: list = []
+    def _resident_pipe(self, events: list) -> FakePipe:
         pipe = FakePipe(events)
-        runtime = zimage_turbo.Runtime()
-        runtime.pipe = pipe
-        torch = FakeTorch(events)
-        image = runtime.generate(
-            "a hangar sign that reads ASTRA",
-            seed=7,
-            width=1280,
-            height=1280,
-            steps=30,
-            torch_module=torch,
-        )
-        self.assertEqual(image, "image")
-        encode = next(item for item in events if item[0] == "encode")
-        self.assertEqual(encode[3], False)
-        self.assertTrue(encode[4].startswith("cuda"))
-        empty_at = events.index(("empty_cache",))
-        denoise_at = next(index for index, item in enumerate(events) if item[0] == "denoise")
-        self.assertLess(empty_at, denoise_at)
-        denoise = events[denoise_at]
-        self.assertEqual(denoise[1], 0.0)
-        self.assertEqual(denoise[2], 1024)
-        self.assertEqual(denoise[3], 1024)
-        self.assertEqual(denoise[4], 9)
-        self.assertFalse(denoise[5])
-        self.assertIsNone(denoise[6])
-        self.assertEqual(denoise[7], "cpu")
-        self.assertTrue(str(denoise[8]).startswith("cuda"))
+        pipe.transformer.device = "cuda:0"
+        pipe.vae.device = "cuda:0"
+        pipe.text_encoder.device = "cpu"
+        return pipe
+
+    def test_cpu_mode_encodes_on_cpu_while_transformer_stays(self) -> None:
+        previous = os.environ.pop("HAI_ZIMAGE_ENCODER_MODE", None)
+        try:
+            events: list = []
+            pipe = self._resident_pipe(events)
+            runtime = zimage_turbo.Runtime()
+            runtime.pipe = pipe
+            image = runtime.generate(
+                "a hangar sign that reads ASTRA",
+                seed=7,
+                width=1280,
+                height=1280,
+                steps=30,
+                torch_module=FakeTorch(events),
+            )
+            self.assertEqual(image, "image")
+            encode = next(item for item in events if item[0] == "encode")
+            self.assertEqual(encode[2], "cpu")
+            self.assertFalse(encode[3])
+            self.assertFalse(str(encode[4]).startswith("cuda"))
+            self.assertTrue(str(encode[5]).startswith("cuda"))
+            self.assertFalse(_encoder_overlapped_transformer(events, pipe))
+            denoise = next(item for item in events if item[0] == "denoise")
+            self.assertEqual(denoise[1], 0.0)
+            self.assertEqual(denoise[2], 1024)
+            self.assertEqual(denoise[4], 9)
+            self.assertFalse(denoise[5])
+            self.assertEqual(runtime.last_stats["encoder_mode"], "cpu")
+        finally:
+            if previous is None:
+                os.environ.pop("HAI_ZIMAGE_ENCODER_MODE", None)
+            else:
+                os.environ["HAI_ZIMAGE_ENCODER_MODE"] = previous
+
+    def test_swap_mode_moves_transformer_off_before_the_encoder(self) -> None:
+        previous = os.environ.get("HAI_ZIMAGE_ENCODER_MODE")
+        os.environ["HAI_ZIMAGE_ENCODER_MODE"] = "swap"
+        try:
+            events: list = []
+            pipe = self._resident_pipe(events)
+            runtime = zimage_turbo.Runtime()
+            runtime.pipe = pipe
+            runtime.generate("second prompt", seed=3, torch_module=FakeTorch(events))
+            encode_at = next(index for index, item in enumerate(events) if item[0] == "encode")
+            encode = events[encode_at]
+            self.assertTrue(str(encode[4]).startswith("cuda"))
+            self.assertFalse(str(encode[5]).startswith("cuda"))
+            transformer_off = next(
+                index
+                for index, item in enumerate(events)
+                if item[:3] == ("transformer", "to", "cpu")
+            )
+            encoder_on = next(
+                index
+                for index, item in enumerate(events)
+                if item[0] == "text_encoder" and item[1] == "to" and str(item[2]).startswith("cuda")
+            )
+            encoder_off = next(
+                index
+                for index, item in enumerate(events)
+                if item[:3] == ("text_encoder", "to", "cpu") and index > encoder_on
+            )
+            transformer_back = next(
+                index
+                for index, item in enumerate(events)
+                if item[0] == "transformer" and item[1] == "to" and str(item[2]).startswith("cuda")
+            )
+            self.assertLess(transformer_off, encoder_on)
+            self.assertLess(encoder_on, encode_at)
+            self.assertLess(encode_at, encoder_off)
+            self.assertLess(encoder_off, transformer_back)
+            self.assertFalse(_encoder_overlapped_transformer(events, pipe))
+            self.assertEqual(pipe.text_encoder.device, "cpu")
+            self.assertTrue(pipe.transformer.device.startswith("cuda"))
+            self.assertEqual(runtime.last_stats["encoder_mode"], "swap")
+        finally:
+            if previous is None:
+                os.environ.pop("HAI_ZIMAGE_ENCODER_MODE", None)
+            else:
+                os.environ["HAI_ZIMAGE_ENCODER_MODE"] = previous
+
+    def test_vram_guard_names_the_mode(self) -> None:
+        events: list = []
+        pipe = self._resident_pipe(events)
+
+        total = 12 * 1024 * 1024 * 1024
+        peak = int(total * 0.96)
+
+        class HotCuda(FakeCuda):
+            def max_memory_allocated(self) -> int:
+                return peak
+
+            def get_device_properties(self, index: int) -> object:
+                return type("Props", (), {"total_memory": total})()
+
+        class HotTorch(FakeTorch):
+            def __init__(self) -> None:
+                super().__init__(events)
+                self.cuda = HotCuda(events)
+
+        previous = os.environ.pop("HAI_ZIMAGE_ENCODER_MODE", None)
+        try:
+            runtime = zimage_turbo.Runtime()
+            runtime.pipe = pipe
+            with self.assertLogs("zimage_turbo", level="WARNING") as caught:
+                runtime.generate("prompt", torch_module=HotTorch())
+            self.assertTrue(runtime.last_stats["vram_warning"])
+            self.assertEqual(runtime.last_stats["encoder_mode"], "cpu")
+            self.assertIn("encoder mode cpu", caught.output[0])
+            self.assertAlmostEqual(runtime.last_stats["peak_allocated_mib"], round(peak / (1024.0 * 1024.0), 1))
+        finally:
+            if previous is None:
+                os.environ.pop("HAI_ZIMAGE_ENCODER_MODE", None)
+            else:
+                os.environ["HAI_ZIMAGE_ENCODER_MODE"] = previous
 
     def test_unload_drops_hooks_and_moves_modules_to_cpu(self) -> None:
         events: list = []
@@ -298,6 +391,27 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(pipe.text_encoder.device, "cpu")
         self.assertEqual(pipe.vae.device, "cpu")
         self.assertIn(("empty_cache",), events)
+
+
+def _encoder_overlapped_transformer(events: list, pipe: FakePipe) -> bool:
+    """Replay moves and the encode snapshot. True if both were on CUDA together."""
+    encoder = pipe.text_encoder.device
+    transformer = pipe.transformer.device
+    # The pipe's devices are the final state. Replay from a known resident start.
+    encoder = "cpu"
+    transformer = "cuda:0"
+    overlapped = False
+    for item in events:
+        if item[0] == "text_encoder" and item[1] == "to":
+            encoder = str(item[2])
+        elif item[0] == "transformer" and item[1] == "to":
+            transformer = str(item[2])
+        elif item[0] == "encode":
+            encoder = str(item[4])
+            transformer = str(item[5])
+        if encoder.startswith("cuda") and transformer.startswith("cuda"):
+            overlapped = True
+    return overlapped
 
 
 class RoutingTests(unittest.TestCase):

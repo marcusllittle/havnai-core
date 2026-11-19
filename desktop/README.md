@@ -119,3 +119,48 @@ git tag desktop-v0.2.0 && git push havnai-core desktop-v0.2.0
 `.github/workflows/desktop-release.yml` builds every platform and publishes the
 installers to a GitHub release. The website's download panel picks the newest
 `desktop-v*` release that has installers attached.
+
+### macOS release gate
+
+Public releases require a paid Apple Developer Program team with a valid
+[Developer ID Application certificate](https://developer.apple.com/developer-id/)
+and access to Apple's notary service. Use the repository's GitHub Actions secrets
+UI; never commit or paste a certificate, private key or password in a ticket,
+chat, command history or build log.
+
+| GitHub Actions secret | Expected value |
+| --- | --- |
+| `APPLE_CERTIFICATE` | Base64-encoded, password-protected PKCS#12 export containing the Developer ID Application certificate and its private key |
+| `APPLE_CERTIFICATE_PASSWORD` | Password used to export that PKCS#12 |
+| `APPLE_SIGNING_IDENTITY` | Full matching Keychain identity, `Developer ID Application: … (TEAMID)` |
+| `APPLE_ID` | Apple Account email allowed to submit for the team |
+| `APPLE_PASSWORD` | Apple Account [app-specific password](https://support.apple.com/en-us/102654), not the account password |
+| `APPLE_TEAM_ID` | The ten-character Apple Developer team ID for the certificate |
+
+The Mac runners use Tauri CLI 2.12.5. It signs the app and DMG but only
+offers automatic notarization for the inner app. The build step gets the
+signing identity, notary credentials are passed only to the preflight and
+DMG verification steps, and CI
+[notarizes only the outer DMG](https://developer.apple.com/documentation/xcode/packaging-mac-software-for-distribution).
+Check the operator's Apple team and expiry of the existing certificate
+before requesting new credentials.
+
+1. Run **Desktop app release** from Actions against the agreed ref with
+   **notarize_macos** enabled. This uploads test artifacts only, even when
+   a tag was selected. A run without that option may produce unsigned
+   internal test artifacts; never share those as public installers.
+2. Check both Mac jobs for verification of the Developer ID signature, the
+   embedded app architecture, Apple `Accepted`, stapler validation, and
+   Gatekeeper disk image assessment. If Apple declines, retrieve the notary
+   log by the recorded submission ID with `xcrun notarytool log` on a
+   trusted Mac. Never copy credential flags into logs.
+3. On a clean Apple Silicon Mac and a clean Intel Mac (or matching clean
+   VMs), download the matching artifact in a browser, open the DMG, drag
+   HavnAI Node to Applications and open normally with Gatekeeper enabled.
+   Do not strip quarantine or bypass Gatekeeper. Record the macOS version,
+   architecture, filename and result. An Intel cross-build on an ARM runner
+   does not count as an Intel launch test.
+4. Once approved, use a **new** version and matching tag for the public
+   release. Both notarized DMGs are required before assets and checksums
+   are published. Repeat the normal download/open check against the published
+   **Run a Node** links; validate the links select the matching architecture.

@@ -20,6 +20,8 @@ Low-VRAM route, checked against the diffusers 0.43.0 source:
   the GPU for prompt encoding and is moved off before the transformer runs.
   The first denoising step records each module's device so a real run can
   confirm that.
+- `from_single_file` must be given the snapshot directory and
+  `subfolder="transformer"`. The Turbo repo has no `config.json` at its root.
 
 Default Turbo schedule is `num_inference_steps=9`. The model card says that
 schedule performs 8 DiT forwards. The script counts the forwards it actually
@@ -63,6 +65,36 @@ HUB_FILE_GB = {
 
 # client.py treats a card at or under this as the 3060 low-VRAM profile.
 WORKER_LOW_VRAM_GB = 12.5
+
+# systemd user units on WSL often omit /usr/lib/wsl/lib from PATH.
+NVIDIA_SMI_FALLBACKS = ("/usr/lib/wsl/lib/nvidia-smi",)
+
+# First real run on the HavnAI RTX 3060. Warm mean is 10 repeats at 1024px.
+# Both GGUF peaks are the same, so that peak is not the transformer file size.
+MEASURED_3060 = {
+    "machine": "RTX 3060, WSL Ubuntu 24.04, diffusers 0.43.0",
+    "resolution": "1024x1024",
+    "warm_runs": 10,
+    "q8_0": {
+        "warm_seconds_per_image": 37.8,
+        "first_image_seconds": 132.9,
+        "cold_load_seconds": 175.7,
+        "peak_allocated_mib": 7933,
+        "peak_nvidia_smi_mib": 8726,
+    },
+    "q5_k_m": {
+        "warm_seconds_per_image": 38.4,
+        "first_image_seconds": 41.1,
+        "cold_load_seconds": 54.1,
+        "peak_allocated_mib": 7933,
+        "peak_nvidia_smi_mib": 8556,
+    },
+    "juggernautxl": {
+        "warm_seconds_per_image": 42.2,
+        "peak_nvidia_smi_mib": 12028,
+        "steps": 30,
+    },
+}
 
 ROUTE = {
     "choice": "gguf_transformer_plus_model_cpu_offload",
@@ -202,6 +234,48 @@ VARIANTS: Dict[str, Dict[str, Any]] = {
         "repo": "",
         "filename": "",
         "hub_file_gb": None,
+        "placement": "worker_cuda",
+    },
+    # Opt-in. Defaults stay q8_0, q5_k_m, juggernautxl.
+    "q5_k_m_resident": {
+        "kind": "zimage_gguf",
+        "quant": "Q5_K_M",
+        "repo": GGUF_REPO,
+        "filename": "z-image-turbo-Q5_K_M.gguf",
+        "hub_file_gb": HUB_FILE_GB["q5_k_m"],
+        "placement": "encode_once",
+        "text_encoder": "bf16",
+        "note": "Encode every prompt once, drop the text encoder, keep the Q5 transformer on the GPU.",
+    },
+    "q8_0_resident": {
+        "kind": "zimage_gguf",
+        "quant": "Q8_0",
+        "repo": GGUF_REPO,
+        "filename": "z-image-turbo-Q8_0.gguf",
+        "hub_file_gb": HUB_FILE_GB["q8_0"],
+        "placement": "encode_once",
+        "text_encoder": "bf16",
+        "note": "Encode every prompt once, drop the text encoder, keep the Q8 transformer on the GPU.",
+    },
+    "q5_k_m_bnb4": {
+        "kind": "zimage_gguf",
+        "quant": "Q5_K_M",
+        "repo": GGUF_REPO,
+        "filename": "z-image-turbo-Q5_K_M.gguf",
+        "hub_file_gb": HUB_FILE_GB["q5_k_m"],
+        "placement": "resident_both",
+        "text_encoder": "bnb4",
+        "note": "NF4 Qwen3 text encoder plus the Q5 transformer, both left on the GPU. Needs bitsandbytes.",
+    },
+    "q8_0_bnb4": {
+        "kind": "zimage_gguf",
+        "quant": "Q8_0",
+        "repo": GGUF_REPO,
+        "filename": "z-image-turbo-Q8_0.gguf",
+        "hub_file_gb": HUB_FILE_GB["q8_0"],
+        "placement": "resident_both",
+        "text_encoder": "bnb4",
+        "note": "NF4 Qwen3 text encoder plus the Q8 transformer, both left on the GPU. Needs bitsandbytes. May OOM on 12 GB.",
     },
 }
 
@@ -390,6 +464,17 @@ def build_plan(args: argparse.Namespace) -> Dict[str, Any]:
                 registry_entry["negative_prompt_default"]
             ).lower(),
         },
+        "known_variants": [
+            {
+                "id": name,
+                "default": name in DEFAULT_VARIANTS,
+                "placement": spec.get("placement", "cpu_offload"),
+                "text_encoder": spec.get("text_encoder", ""),
+                "note": spec.get("note", ""),
+            }
+            for name, spec in VARIANTS.items()
+        ],
+        "measured_3060": MEASURED_3060,
         "variants": selected_variants(args.variants),
         "prompts": prompts,
         "output_dir": args.output,
@@ -404,7 +489,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--variants",
         default=",".join(DEFAULT_VARIANTS),
-        help="Comma-separated variants. Known: q8_0, q5_k_m, bf16, juggernautxl. Default: %(default)s",
+        help=(
+            "Comma-separated variant ids. "
+            "Default: %(default)s. "
+            "Opt-in: q5_k_m_resident, q8_0_resident, q5_k_m_bnb4, q8_0_bnb4, bf16."
+        ),
     )
     parser.add_argument("--width", type=int, default=1024)
     parser.add_argument("--height", type=int, default=1024)
@@ -459,9 +548,37 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     return args
 
 
+_NVIDIA_SMI_PATH: Optional[str] = None
+_NVIDIA_SMI_RESOLVED = False
+
+
+def resolve_nvidia_smi() -> Optional[str]:
+    """Find nvidia-smi on PATH, then the WSL lib directory a systemd unit misses."""
+    global _NVIDIA_SMI_PATH, _NVIDIA_SMI_RESOLVED
+    if _NVIDIA_SMI_RESOLVED:
+        return _NVIDIA_SMI_PATH
+    _NVIDIA_SMI_RESOLVED = True
+    import shutil
+
+    found = shutil.which("nvidia-smi")
+    if found:
+        _NVIDIA_SMI_PATH = found
+        return found
+    for candidate in NVIDIA_SMI_FALLBACKS:
+        path = Path(candidate)
+        if path.is_file() and os.access(path, os.X_OK):
+            _NVIDIA_SMI_PATH = str(path)
+            log(f"nvidia-smi is not on PATH; using {_NVIDIA_SMI_PATH}")
+            return _NVIDIA_SMI_PATH
+    return None
+
+
 def query_nvidia_smi(gpu_index: int) -> Optional[Dict[str, Any]]:
+    binary = resolve_nvidia_smi()
+    if not binary:
+        return None
     command = [
-        "nvidia-smi",
+        binary,
         f"--id={gpu_index}",
         "--query-gpu=name,memory.total,memory.used,utilization.gpu",
         "--format=csv,noheader,nounits",
@@ -482,6 +599,7 @@ def query_nvidia_smi(gpu_index: int) -> Optional[Dict[str, Any]]:
             "memory_total_mib": int(float(parts[1])),
             "memory_used_mib": int(float(parts[2])),
             "utilization_gpu": int(float(parts[3])),
+            "nvidia_smi_path": binary,
         }
     except ValueError:
         return None
@@ -664,7 +782,8 @@ def component_report(pipe: Any) -> Dict[str, Any]:
     report["cuda_reserved_mib"] = memory["reserved_mib"]
     text_device = (report.get("text_encoder") or {}).get("device") or ""
     transformer_device = (report.get("transformer") or {}).get("device") or ""
-    report["text_encoder_off_gpu"] = text_device.startswith("cpu")
+    # A dropped encoder is off the GPU. That is the encode-once placement.
+    report["text_encoder_off_gpu"] = "text_encoder" not in report or str(text_device).startswith("cpu")
     report["transformer_on_gpu"] = transformer_device.startswith("cuda")
     return report
 
@@ -689,20 +808,25 @@ def render_markdown(payload: Dict[str, Any]) -> str:
         f"- Planning assumption: {payload.get('gpu_planning_assumption_gb', 12)} GB, exact card size comes from this run",
         f"- Measured on GPU: {payload.get('measured_on_gpu')}",
         "",
-        "| variant | status | oom | cold load s | first image s | warm s/img | warm n | peak allocated MiB | peak nvidia-smi MiB | peak RSS MiB | residual allocated MiB | residual nvidia-smi MiB |",
-        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| variant | status | oom | cold load s | first image s | warm s/img | warm encode s | warm denoise s | warm vae s | warm n | peak allocated MiB | image-loop peak MiB | peak nvidia-smi MiB | peak RSS MiB | residual allocated MiB | residual nvidia-smi MiB |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in payload.get("variants") or []:
+        stages = row.get("warm_stage_means") or {}
         lines.append(
-            "| {id} | {status} | {oom} | {cold} | {first} | {warm} | {warm_n} | {alloc} | {smi} | {rss} | {residual} | {residual_smi} |".format(
+            "| {id} | {status} | {oom} | {cold} | {first} | {warm} | {encode} | {denoise} | {vae} | {warm_n} | {alloc} | {loop_peak} | {smi} | {rss} | {residual} | {residual_smi} |".format(
                 id=_cell(row.get("id")),
                 status=_cell(row.get("status")),
                 oom="yes" if row.get("oom") else "no",
                 cold=_num(row.get("cold_load_seconds")),
                 first=_num(row.get("first_image_seconds")),
                 warm=_num(row.get("warm_seconds_per_image")),
+                encode=_num(stages.get("text_encode_seconds")),
+                denoise=_num(stages.get("denoise_seconds")),
+                vae=_num(stages.get("vae_decode_seconds")),
                 warm_n=_cell(row.get("warm_runs_completed")),
                 alloc=_num((row.get("peak_vram") or {}).get("max_allocated_mib")),
+                loop_peak=_num(row.get("image_loop_peak_allocated_mib")),
                 smi=_num((row.get("peak_host") or {}).get("peak_nvidia_smi_used_mib")),
                 rss=_num((row.get("peak_host") or {}).get("peak_process_rss_mib")),
                 residual=_num((row.get("after_unload") or {}).get("allocated_mib")),
@@ -783,6 +907,83 @@ def build_contact_sheet(
     return destination
 
 
+class StageTimer:
+    """Time encode_prompt, the denoiser forward, and vae.decode on one pipeline."""
+
+    def __init__(self) -> None:
+        self.text_encode = 0.0
+        self.denoise = 0.0
+        self.vae_decode = 0.0
+        self._patched: List[tuple] = []
+
+    def install(self, pipe: Any) -> None:
+        if hasattr(pipe, "encode_prompt"):
+            self._wrap(pipe, "encode_prompt", "text_encode")
+        denoiser = getattr(pipe, "transformer", None) or getattr(pipe, "unet", None)
+        if denoiser is not None and hasattr(denoiser, "forward"):
+            self._wrap(denoiser, "forward", "denoise")
+        vae = getattr(pipe, "vae", None)
+        if vae is not None and hasattr(vae, "decode"):
+            self._wrap(vae, "decode", "vae_decode")
+
+    def _wrap(self, obj: Any, name: str, bucket: str) -> None:
+        original = getattr(obj, name)
+
+        def wrapped(*args: Any, **kwargs: Any) -> Any:
+            started = time.perf_counter()
+            try:
+                return original(*args, **kwargs)
+            finally:
+                setattr(self, bucket, getattr(self, bucket) + (time.perf_counter() - started))
+
+        setattr(obj, name, wrapped)
+        self._patched.append((obj, name, original))
+
+    def reset(self) -> None:
+        self.text_encode = 0.0
+        self.denoise = 0.0
+        self.vae_decode = 0.0
+
+    def snapshot(self) -> Dict[str, float]:
+        return {
+            "text_encode_seconds": round(self.text_encode, 3),
+            "denoise_seconds": round(self.denoise, 3),
+            "vae_decode_seconds": round(self.vae_decode, 3),
+        }
+
+    def restore(self) -> None:
+        for obj, name, original in reversed(self._patched):
+            setattr(obj, name, original)
+        self._patched.clear()
+
+
+def mean_stages(rows: List[Dict[str, Any]]) -> Dict[str, Optional[float]]:
+    keys = ("text_encode_seconds", "denoise_seconds", "vae_decode_seconds")
+    means: Dict[str, Optional[float]] = {}
+    for key in keys:
+        values = []
+        for row in rows:
+            if row.get("error"):
+                continue
+            stages = row.get("stages") or {}
+            if stages.get(key) is not None:
+                values.append(float(stages[key]))
+        means[key] = round(sum(values) / len(values), 3) if values else None
+    return means
+
+
+def gguf_transformer_kwargs(snapshot: Optional[str]) -> Dict[str, Any]:
+    """Load the transformer config from transformer/config.json, not the repo root.
+
+    Tongyi-MAI/Z-Image-Turbo has no config.json at the repository root.     A 3060
+    run failed in from_single_file until the snapshot directory and
+    subfolder="transformer" were passed together.
+    """
+    if not snapshot:
+        raise RuntimeError("Z-Image snapshot is missing, so the transformer config cannot be read.")
+    return {"config": snapshot, "subfolder": "transformer"}
+
+
 def run_variant(
     spec: Dict[str, Any],
     prompts: List[Dict[str, Any]],
@@ -812,6 +1013,10 @@ def run_variant(
         "peak_host": {},
         "before_load": {},
         "after_unload": {},
+        "warm_stage_means": {},
+        "image_loop_peak_allocated_mib": None,
+        "prompt_encode_once_seconds": None,
+        "batch_prepare": {},
     }
     monitor = PeakMonitor(gpu_index)
     pipe = None
@@ -829,6 +1034,15 @@ def run_variant(
         record["cold_load_seconds"] = round_seconds(time.perf_counter() - started)
         record["after_load"] = component_report(pipe)
         record["scheduler"] = backend.scheduler_name(pipe)
+        if hasattr(backend, "prepare_batch"):
+            record["batch_prepare"] = backend.prepare_batch(pipe, prompts, settings) or {}
+            record["prompt_encode_once_seconds"] = record["batch_prepare"].get("seconds")
+        if getattr(backend, "split_peak_before_images", False):
+            # The encode-once path has already dropped the text encoder. Reset the
+            # CUDA peak so the image loop reports the transformer, not the encoder.
+            record["peak_before_images"] = cuda_memory()
+            record["after_encoder_freed"] = component_report(pipe)
+            reset_cuda_peak()
 
         sheet_times: List[Dict[str, Any]] = []
         for index, prompt in enumerate(prompts):
@@ -861,8 +1075,15 @@ def run_variant(
                 continue
             if image_record.get("seconds") is not None and not image_record.get("error"):
                 warm_times.append(float(image_record["seconds"]))
-            record["warm_seconds"].append({"seconds": image_record.get("seconds"), "error": image_record.get("error", "")})
+            record["warm_seconds"].append(
+                {
+                    "seconds": image_record.get("seconds"),
+                    "error": image_record.get("error", ""),
+                    "stages": image_record.get("stages"),
+                }
+            )
         record["warm_runs_completed"] = len(warm_times)
+        record["warm_stage_means"] = mean_stages(record["warm_seconds"])
         if warm_times:
             record["warm_seconds_per_image"] = round_seconds(sum(warm_times) / len(warm_times))
         if record["oom"] and any(item.get("path") for item in sheet_times):
@@ -883,6 +1104,14 @@ def run_variant(
         monitor.stop()
         record["peak_host"] = monitor.as_dict()
         record["peak_vram"] = cuda_memory()
+        if record.get("peak_before_images"):
+            record["image_loop_peak_allocated_mib"] = record["peak_vram"].get("max_allocated_mib")
+            before = (record["peak_before_images"] or {}).get("max_allocated_mib")
+            after = record["image_loop_peak_allocated_mib"]
+            if before is not None and after is not None:
+                record["peak_vram"]["max_allocated_mib"] = max(before, after)
+            elif before is not None:
+                record["peak_vram"]["max_allocated_mib"] = before
         try:
             backend.release(pipe)
         except Exception as exc:
@@ -925,6 +1154,7 @@ def generate_timed(
     try:
         image = backend.generate(pipe, spec, prompt, settings)
         result["seconds"] = round_seconds(time.perf_counter() - started)
+        result["stages"] = getattr(backend, "last_stages", None)
         if save:
             destination_dir = image_dir / spec["id"]
             destination_dir.mkdir(parents=True, exist_ok=True)
@@ -934,6 +1164,7 @@ def generate_timed(
             result["width"], result["height"] = image.size
     except Exception as exc:
         result["seconds"] = round_seconds(time.perf_counter() - started)
+        result["stages"] = getattr(backend, "last_stages", None)
         result["oom"] = is_oom(exc)
         result["error"] = f"{type(exc).__name__}: {exc}"
         log(f"[{spec['id']}] {result['label']} failed: {result['error']}")
@@ -948,6 +1179,7 @@ class FakeBackend:
         self.fail = fail
         self.last_probe: Optional[Dict[str, Any]] = None
         self.last_iterations: Optional[int] = None
+        self.last_stages: Optional[Dict[str, float]] = None
 
     def prepare(self, spec: Dict[str, Any], settings: Dict[str, Any]) -> Dict[str, Any]:
         return {"downloaded": False, "smoke": True}
@@ -967,6 +1199,11 @@ class FakeBackend:
             raise RuntimeError("CUDA out of memory. Tried to allocate 20.00 GiB")
         time.sleep(0.01)
         self.last_iterations = 1
+        self.last_stages = {
+            "text_encode_seconds": 0.003,
+            "denoise_seconds": 0.004,
+            "vae_decode_seconds": 0.002,
+        }
         self.last_probe = {
             "measured": False,
             "text_encoder": {"device": "cpu"},
@@ -1000,12 +1237,48 @@ def call_with_dtype(fn: Callable[..., Any], dtype: Any, kwargs: Dict[str, Any]) 
         return fn(dtype=dtype, **kwargs)
 
 
+def load_bnb4_text_encoder(snapshot: str, dtype: Any, gpu_index: int) -> Any:
+    """Quantize the Z-Image Qwen3 encoder in NF4. A base Qwen3 GGUF is the wrong weights."""
+    import torch
+    from transformers import BitsAndBytesConfig, Qwen3Model
+
+    try:
+        import bitsandbytes  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError(
+            "bnb4 variants need bitsandbytes. Install it in this CUDA environment: pip install bitsandbytes"
+        ) from exc
+    if not torch.cuda.is_available():
+        raise RuntimeError("bnb4 text-encoder quantization needs a CUDA GPU")
+    quant = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=dtype,
+        bnb_4bit_use_double_quant=True,
+    )
+    return call_with_dtype(
+        lambda **kwargs: Qwen3Model.from_pretrained(snapshot, **kwargs),
+        dtype,
+        {
+            "subfolder": "text_encoder",
+            "quantization_config": quant,
+            "device_map": {"": gpu_index},
+            "local_files_only": True,
+        },
+    )
+
+
 class ZImageBackend:
     def __init__(self) -> None:
         self.last_probe: Optional[Dict[str, Any]] = None
         self.last_iterations: Optional[int] = None
+        self.last_stages: Optional[Dict[str, float]] = None
+        self.timer = StageTimer()
         self._snapshot: Optional[str] = None
         self._gguf_path: Optional[str] = None
+        self.placement = "cpu_offload"
+        self._embed_cache: Optional[Dict[str, List[Any]]] = None
+        self.split_peak_before_images = False
 
     def prepare(self, spec: Dict[str, Any], settings: Dict[str, Any]) -> Dict[str, Any]:
         from huggingface_hub import hf_hub_download, snapshot_download
@@ -1030,7 +1303,6 @@ class ZImageBackend:
         return info
 
     def load(self, spec: Dict[str, Any], settings: Dict[str, Any]) -> Any:
-        import torch
         from diffusers import ZImagePipeline
 
         dtype = torch_dtype(settings["dtype"])
@@ -1050,22 +1322,89 @@ class ZImageBackend:
                 {
                     "quantization_config": GGUFQuantizationConfig(compute_dtype=dtype),
                     "local_files_only": True,
+                    **gguf_transformer_kwargs(self._snapshot),
                 },
             )
             kwargs["transformer"] = transformer
+        self.placement = spec.get("placement") or "cpu_offload"
+        if spec.get("text_encoder") == "bnb4":
+            if not self._snapshot:
+                raise RuntimeError("Z-Image snapshot is missing, so the text encoder cannot be quantized")
+            kwargs["text_encoder"] = load_bnb4_text_encoder(self._snapshot, dtype, settings["gpu_index"])
         source = self._snapshot or ZIMAGE_REPO
         pipe = call_with_dtype(
             lambda **load_kwargs: ZImagePipeline.from_pretrained(source, **load_kwargs),
             dtype,
             kwargs,
         )
-        if not hasattr(pipe, "enable_model_cpu_offload"):
-            raise RuntimeError("This diffusers build has no enable_model_cpu_offload")
-        # Parks every module on CPU and streams one of text_encoder, transformer, vae to the GPU.
-        pipe.enable_model_cpu_offload(gpu_id=settings["gpu_index"])
         if hasattr(pipe, "set_progress_bar_config"):
             pipe.set_progress_bar_config(disable=True)
+        self._place_pipeline(pipe, settings)
+        # Wrap after offload hooks, so the denoise timer includes the shuttle.
+        self.timer.install(pipe)
         return pipe
+
+    def _place_pipeline(self, pipe: Any, settings: Dict[str, Any]) -> None:
+        import torch
+
+        if self.placement == "cpu_offload":
+            if not hasattr(pipe, "enable_model_cpu_offload"):
+                raise RuntimeError("This diffusers build has no enable_model_cpu_offload")
+            # One of text_encoder, transformer, vae is on the GPU at a time.
+            pipe.enable_model_cpu_offload(gpu_id=settings["gpu_index"])
+            return
+        if not torch.cuda.is_available():
+            raise RuntimeError(f"{self.placement} needs a CUDA GPU")
+        device = torch.device("cuda", settings["gpu_index"])
+        if self.placement == "resident_both":
+            # The NF4 encoder is already on the GPU. Moving it again breaks the bitsandbytes weights.
+            pipe.transformer.to(device)
+            pipe.vae.to(device)
+            return
+        if self.placement == "encode_once":
+            # Stay on CPU until prepare_batch encodes prompts and then parks the transformer.
+            return
+        raise RuntimeError(f"Unknown Z-Image placement: {self.placement}")
+
+    def prepare_batch(self, pipe: Any, prompts: List[Dict[str, Any]], settings: Dict[str, Any]) -> Dict[str, Any]:
+        if self.placement != "encode_once":
+            return {}
+        import torch
+
+        device = torch.device("cuda", settings["gpu_index"])
+        pipe.text_encoder.to(device)
+        cache: Dict[str, List[Any]] = {}
+        self.timer.reset()
+        started = time.perf_counter()
+        with torch.inference_mode():
+            for prompt in prompts:
+                if prompt["id"] in cache:
+                    continue
+                embeds, _negative = pipe.encode_prompt(
+                    prompt=prompt["text"],
+                    device=device,
+                    do_classifier_free_guidance=False,
+                )
+                cache[prompt["id"]] = [tensor.detach().to("cpu") for tensor in embeds]
+        seconds = round_seconds(time.perf_counter() - started)
+        encode_stages = self.timer.snapshot()
+        self.timer.reset()
+        encoder = pipe.text_encoder
+        pipe.text_encoder = None
+        del encoder
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        pipe.transformer.to(device)
+        pipe.vae.to(device)
+        self._embed_cache = cache
+        self.split_peak_before_images = True
+        return {
+            "placement": "encode_once",
+            "prompts_encoded": len(cache),
+            "seconds": seconds,
+            "stages": encode_stages,
+        }
 
     def scheduler_name(self, pipe: Any) -> str:
         scheduler = getattr(pipe, "scheduler", None)
@@ -1076,6 +1415,7 @@ class ZImageBackend:
 
         self.last_probe = None
         self.last_iterations = 0
+        self.timer.reset()
 
         def on_step(pipeline: Any, step: int, timestep: Any, callback_kwargs: Dict[str, Any]) -> Dict[str, Any]:
             self.last_iterations = (self.last_iterations or 0) + 1
@@ -1091,25 +1431,36 @@ class ZImageBackend:
         if execution is not None:
             device = str(execution)
         generator = torch.Generator(device=device).manual_seed(int(prompt["seed"]))
-        call = dict(
-            prompt=prompt["text"],
+        call: Dict[str, Any] = dict(
             height=settings["height"],
             width=settings["width"],
             num_inference_steps=settings["turbo_steps"],
             guidance_scale=settings["turbo_guidance"],
             generator=generator,
         )
-        if settings["turbo_guidance"] > 0 and settings.get("negative_prompt"):
-            call["negative_prompt"] = settings["negative_prompt"]
+        if self._embed_cache is not None:
+            cached = self._embed_cache.get(prompt["id"])
+            if not cached:
+                raise RuntimeError(f"No cached embedding for {prompt['id']}")
+            call["prompt"] = None
+            call["prompt_embeds"] = [tensor.to(device) for tensor in cached]
+        else:
+            call["prompt"] = prompt["text"]
+            if settings["turbo_guidance"] > 0 and settings.get("negative_prompt"):
+                call["negative_prompt"] = settings["negative_prompt"]
         try:
-            result = pipe(callback_on_step_end=on_step, **call)
-        except TypeError as exc:
-            if "callback_on_step_end" not in str(exc):
-                raise
-            result = pipe(**call)
-        return result.images[0]
+            try:
+                result = pipe(callback_on_step_end=on_step, **call)
+            except TypeError as exc:
+                if "callback_on_step_end" not in str(exc):
+                    raise
+                result = pipe(**call)
+            return result.images[0]
+        finally:
+            self.last_stages = self.timer.snapshot()
 
     def release(self, pipe: Any) -> None:
+        self.timer.restore()
         release_pipeline(pipe)
 
 
@@ -1119,7 +1470,9 @@ class SdxlBackend:
     def __init__(self) -> None:
         self.last_probe: Optional[Dict[str, Any]] = None
         self.last_iterations: Optional[int] = None
+        self.last_stages: Optional[Dict[str, float]] = None
         self.scheduler_config: Dict[str, Any] = {}
+        self.timer = StageTimer()
 
     def prepare(self, spec: Dict[str, Any], settings: Dict[str, Any]) -> Dict[str, Any]:
         path = Path(settings["sdxl_checkpoint"])
@@ -1158,6 +1511,7 @@ class SdxlBackend:
             pipe.set_progress_bar_config(disable=True)
         device = "cuda" if torch.cuda.is_available() else "cpu"
         pipe = pipe.to(device)
+        self.timer.install(pipe)
         return pipe
 
     def scheduler_name(self, pipe: Any) -> str:
@@ -1171,6 +1525,7 @@ class SdxlBackend:
         import torch
 
         self.last_iterations = settings["sdxl_steps"]
+        self.timer.reset()
         device = "cuda" if torch.cuda.is_available() else "cpu"
         generator = torch.Generator(device=device).manual_seed(int(prompt["seed"]))
         # The worker clamps guidance into [1, 15] and steps into [5, 50].
@@ -1188,9 +1543,11 @@ class SdxlBackend:
         self.last_probe = component_report(pipe)
         self.last_probe["measured"] = torch.cuda.is_available()
         self.last_probe["note"] = "sampled after the SDXL call; the worker keeps the whole pipeline on one device"
+        self.last_stages = self.timer.snapshot()
         return result.images[0]
 
     def release(self, pipe: Any) -> None:
+        self.timer.restore()
         release_pipeline(pipe)
 
 
@@ -1308,6 +1665,9 @@ def run_bench(args: argparse.Namespace, plan: Dict[str, Any]) -> int:
         "Residual VRAM is measured after the worker-style unload: hooks off, modules to CPU, gc, empty_cache.",
         "SDXL uses the juggernautXL registry negative prompt on every image. That negative does not ban text.",
         "Turbo guidance stays at 0, so a negative prompt is not applied. sign_astra is still the on-image text check.",
+        "Each image records text_encode_seconds, denoise_seconds, and vae_decode_seconds. Warm means of those are in the table.",
+        "The 3060 offload run peaked at 7933 MiB for both Q8_0 and Q5_K_M, so that peak is not the GGUF file size. It matches one ~8 GB text encoder on the GPU.",
+        "q5_k_m_resident and q8_0_resident encode every prompt once, drop the encoder, and leave the transformer on the GPU. q5_k_m_bnb4 and q8_0_bnb4 keep an NF4 encoder resident with the transformer.",
         plan["route"]["why"],
     ]
     payload: Dict[str, Any] = {
@@ -1358,6 +1718,19 @@ def check_support() -> int:
     log(f"ZImageTransformer2DModel.from_single_file={has_loader}")
     log(f"GGUFQuantizationConfig={GGUFQuantizationConfig}")
     log(f"ZImagePipeline.model_cpu_offload_seq={sequence}")
+    try:
+        from transformers import BitsAndBytesConfig, Qwen3Model
+
+        log(f"Qwen3Model={Qwen3Model.__name__} BitsAndBytesConfig={BitsAndBytesConfig is not None}")
+    except Exception as exc:
+        eprint(f"Qwen3 text encoder import failed: {type(exc).__name__}: {exc}")
+        return 2
+    try:
+        import bitsandbytes
+
+        log(f"bitsandbytes {bitsandbytes.__version__} (required only for q5_k_m_bnb4 and q8_0_bnb4)")
+    except Exception as exc:
+        log(f"bitsandbytes not installed ({type(exc).__name__}). q5_k_m_bnb4 and q8_0_bnb4 will fail until pip install bitsandbytes")
     if has_loader and sequence == "text_encoder->transformer->vae":
         log("support ok: GGUF transformer load plus text-encoder offload sequence")
         return 0
@@ -1439,6 +1812,36 @@ def run_smoke(args: argparse.Namespace) -> int:
     # The OOM variant must not prevent the successful variant from staying in the report.
     if [row["id"] for row in payload["variants"]] != ["smoke_ok", "smoke_oom"]:
         problems.append("a failed variant aborted the run")
+    stages = (ok["images"].get("portrait_nova") or {}).get("stages") or {}
+    for key in ("text_encode_seconds", "denoise_seconds", "vae_decode_seconds"):
+        if stages.get(key) is None:
+            problems.append(f"per-image stage {key} missing")
+    if (ok.get("warm_stage_means") or {}).get("denoise_seconds") is None:
+        problems.append("warm stage means were not computed")
+    config_kwargs = gguf_transformer_kwargs("/tmp/zimage-snapshot")
+    if config_kwargs.get("subfolder") != "transformer" or config_kwargs.get("config") != "/tmp/zimage-snapshot":
+        problems.append(f"GGUF config kwargs are wrong: {config_kwargs}")
+    try:
+        timer_pipe = type("Pipe", (), {})()
+        timer_pipe.encode_prompt = lambda *args, **kwargs: "encoded"
+        timer_pipe.transformer = type("Denoiser", (), {"forward": lambda self, *args, **kwargs: "denoised"})()
+        timer_pipe.vae = type("Vae", (), {"decode": lambda self, *args, **kwargs: "decoded"})()
+        timer = StageTimer()
+        timer.install(timer_pipe)
+        timer_pipe.encode_prompt()
+        timer_pipe.transformer.forward()
+        timer_pipe.vae.decode()
+        snapped = timer.snapshot()
+        timer.restore()
+        if timer_pipe.encode_prompt() != "encoded":
+            problems.append("stage timer did not restore encode_prompt")
+        for key in ("text_encode_seconds", "denoise_seconds", "vae_decode_seconds"):
+            if snapped.get(key) is None:
+                problems.append(f"stage timer snapshot missing {key}")
+    except Exception as exc:
+        problems.append(f"stage timer failed: {type(exc).__name__}: {exc}")
+    if "/usr/lib/wsl/lib/nvidia-smi" not in NVIDIA_SMI_FALLBACKS:
+        problems.append("WSL nvidia-smi fallback path is missing")
     if problems:
         for problem in problems:
             eprint(f"smoke failed: {problem}")

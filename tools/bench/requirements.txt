@@ -14,3 +14,7 @@ huggingface-hub==2.4.0
 safetensors==0.8.0
 pillow==13.0.0
 psutil==7.2.2
+
+# Optional. Only the q5_k_m_bnb4 and q8_0_bnb4 variants import it.
+# Install it in the CUDA environment when you run those variants:
+#   pip install bitsandbytes

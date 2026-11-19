@@ -12,7 +12,11 @@ Default variants:
 - `q5_k_m` — `z-image-turbo-Q5_K_M.gguf` (Hub file about 4.6 GB)
 - `juggernautxl` — the `juggernautXL_ragnarokBy` checkpoint, 30 steps, guidance 6.0, registry negative prompt
 
-Optional: `--variants bf16,q8_0,q5_k_m,juggernautxl`. `bf16` loads the unquantized Turbo transformer. That file is about 12.3 GB in bf16, so a 12 GB card is expected to run out of memory. It is off by default.
+Optional, off by default:
+
+- `bf16` — unquantized Turbo transformer. About 12.3 GB in bf16, so a 12 GB card is expected to run out of memory.
+- `q5_k_m_resident` and `q8_0_resident` — encode every prompt once, drop the Qwen3 text encoder, keep that GGUF transformer on the GPU for the whole batch.
+- `q5_k_m_bnb4` and `q8_0_bnb4` — NF4 4-bit version of the same Z-Image text encoder, left on the GPU with the GGUF transformer. These need `pip install bitsandbytes`. A generic Qwen3 GGUF is the wrong checkpoint, so the encoder is quantized in place.
 
 Every variant draws the same 6 prompts at 1024×1024 with fixed seeds: Nova and Rex portraits, a nebula runway, an empty abyss cockpit, a hangar sign that reads `ASTRA`, and the generic HavnAI fallback prompt from `client.py`. Turbo uses `num_inference_steps=9` (the model card's schedule for 8 DiT forwards) and `guidance_scale=0`. The script counts the forwards it actually runs.
 
@@ -20,7 +24,7 @@ The SDXL baseline follows the live worker, not only the sampler name. `client.py
 
 ## Why this loader
 
-Diffusers 0.43.0 (the current release, 12 Nov 2026) does support Z-Image GGUF, with one limit: `ZImagePipeline.from_pretrained` cannot open a GGUF file. The working call is `ZImageTransformer2DModel.from_single_file` plus `GGUFQuantizationConfig`, and that module is passed into the pipeline. The same release keeps the GGUF compute-dtype fix in the timestep embedder. `ZImagePipeline.model_cpu_offload_seq` is `text_encoder->transformer->vae`.
+Diffusers 0.43.0 (the current release, 12 Nov 2026) does support Z-Image GGUF, with one limit: `ZImagePipeline.from_pretrained` cannot open a GGUF file. The working call is `ZImageTransformer2DModel.from_single_file` plus `GGUFQuantizationConfig`, and that module is passed into the pipeline. The same release keeps the GGUF compute-dtype fix in the timestep embedder. `from_single_file` also needs `config=<snapshot directory>` and `subfolder="transformer"`. The Turbo repo has no `config.json` at its root, and a 3060 run failed with `OSError: Tongyi-MAI/Z-Image-Turbo does not appear to have a file named config.json` until those two arguments were passed. `ZImagePipeline.model_cpu_offload_seq` is `text_encoder->transformer->vae`.
 
 That offload is required on 12 GB. Hub file sizes, not measured VRAM:
 
@@ -35,6 +39,22 @@ That offload is required on 12 GB. Hub file sizes, not measured VRAM:
 Text encoder plus Q8_0 is already about 15 GB of weights, so both cannot stay on the card. `enable_model_cpu_offload()` keeps the text encoder on the GPU only while the prompt is encoded, then moves it off before the transformer runs. The first denoising step records each module's device in `results.json` under `denoise_step0`. On a real GPU, `text_encoder_off_gpu` should be true and `transformer_on_gpu` should be true. That is the check for the offload guess.
 
 The pinned packages import together. A Linux CPU check with diffusers 0.43.0, transformers 5.23.0, and torch 2.15.0+cpu reported `ZImageTransformer2DModel.from_single_file` and `model_cpu_offload_seq=text_encoder->transformer->vae`. That check did not load weights or run a forward pass.
+
+## Measured on the RTX 3060
+
+WSL Ubuntu 24.04, diffusers 0.43.0, 1024×1024, 10 warm runs, the default offload variants:
+
+| variant | cold load s | first image s | warm s/img | peak allocated MiB | nvidia-smi peak MiB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| q8_0 | 175.7 | 132.9 | 37.8 | 7933 | 8726 |
+| q5_k_m | 54.1 | 41.1 | 38.4 | 7933 | 8556 |
+| juggernautxl (30 steps) |  |  | 42.2 |  | 12028 |
+
+Q8_0 and Q5_K_M allocated the same 7933 MiB. The GGUF files are 7.2 GB and 4.6 GB, so that peak is not the transformer weights. 7933 MiB is one copy of the ~8 GB Qwen3 text encoder, which is what `enable_model_cpu_offload` puts on the GPU by itself. The warm times are also within a second of each other, while the first image and the cold load are not. The steady-state seconds are therefore not explained by the quant either. The table does not yet say whether those seconds are the encode, the PCIe shuttle, or the denoiser. Every later run records `text_encode_seconds`, `denoise_seconds`, and `vae_decode_seconds` per image, plus the warm means.
+
+`q5_k_m_resident` / `q8_0_resident` remove the encoder before the image loop and leave the transformer resident. If the warm time stays near 38 s, the denoiser is the cost. If it falls and `denoise_seconds` is only a fraction of the old warm time, the encoder shuttle was the cost. `image-loop peak MiB` is the CUDA peak after the encoder is gone, so it can be compared with 7933.
+
+`q5_k_m_bnb4` / `q8_0_bnb4` keep a 4-bit encoder on the GPU with the transformer, so each image still encodes, but the 8 GB weights are not shuttled. Q8 plus the NF4 encoder may still run out of memory on 12 GB. That result is useful.
 
 The old `zimage` commit `98e0128` loaded base `Tongyi-MAI/Z-Image` in bf16 with `pipe.to(device)` and no offload. That is the wrong checkpoint and the wrong memory plan. This script does not use it.
 
@@ -68,7 +88,18 @@ If that new venv has no CUDA torch (`torch.cuda.is_available()` is false), insta
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 ```
 
-If the node environment already has a newer CUDA build, match that CUDA version instead of downgrading. `torch>=2.6` is what diffusers 0.43.0 asks for. Check the driver with `nvidia-smi` before the run.
+If the node environment already has a newer CUDA build, match that CUDA version instead of downgrading. `torch>=2.6` is what diffusers 0.43.0 asks for. Check the driver with `nvidia-smi` before the run. Under a WSL systemd user unit, `nvidia-smi` is often missing from `PATH` and lives at `/usr/lib/wsl/lib/nvidia-smi`. The bench tries that path when `PATH` does not have it.
+
+The 3060 run that produced the table above was WSL, so the follow-up variants are:
+
+```bash
+pip install bitsandbytes
+python tools/bench/zimage_turbo_bench.py --check-support
+python tools/bench/zimage_turbo_bench.py --variants q5_k_m_resident,q8_0_resident,q5_k_m_bnb4,q8_0_bnb4 --dry-run
+python tools/bench/zimage_turbo_bench.py --variants q5_k_m_resident,q8_0_resident,q5_k_m_bnb4,q8_0_bnb4 --output /mnt/d/havnai-bench/zimage-encoder
+```
+
+`bitsandbytes` is only required for the two `bnb4` variants. The resident variants use the bf16 encoder for the one-time encode, then drop it. Skip `bitsandbytes` and drop the `bnb4` names from `--variants` if that package is not installed. The juggernautXL path is still read from the registry (`/mnt/d/havnai-storage/...` on this WSL machine) when those variants are not selected.
 
 The registry path is `/mnt/d/havnai-storage/models/creator/juggernautXL_ragnarokBy.safetensors`. On native Windows the script also looks at `D:\havnai-storage\models\creator\juggernautXL_ragnarokBy.safetensors`. Pass `--sdxl-checkpoint` when the file lives somewhere else. A missing checkpoint is recorded for the SDXL column and the Turbo variants still run.
 

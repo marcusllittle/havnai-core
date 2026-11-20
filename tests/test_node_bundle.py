@@ -25,6 +25,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CAPABILITY_MODULES = [
     "client/client.py",
     "client/zimage_turbo.py",
+    "client/configs/wan22_i2v.json",
+    "engines/wan22_i2v/config.py",
+    "engines/wan22_i2v/generator.py",
+    "engines/wan22_i2v/runner.py",
     "client/artifact_cleanup.py",
     "client/registry.py",
     "client/pipeline_stable_diffusion_xl_instantid.py",

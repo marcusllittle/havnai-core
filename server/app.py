@@ -58,6 +58,7 @@ import receipt_anchors
 import payout_claims
 import payout_chain
 import node_bundle
+import image_routing
 import job_history
 import platform_v1
 import music_discover
@@ -417,6 +418,9 @@ def get_positive_suffix(model_cfg: Optional[Dict[str, Any]] = None, prompt: str 
         return POSITIVE_SUFFIX_SD15_REALISM if _prompt_has_human_subject(prompt) else POSITIVE_SUFFIX_STYLIZED
     tags = set(t.lower() for t in (model_cfg.get("tags") or []))
     pipeline = (model_cfg.get("pipeline") or "sd15").lower()
+    suffix_override = image_routing.positive_suffix_override(pipeline)
+    if suffix_override is not None:
+        return suffix_override
     if tags & _STYLIZED_TAGS:
         return POSITIVE_SUFFIX_STYLIZED
     if "sdxl" in pipeline or "xl" in pipeline:
@@ -503,6 +507,9 @@ GLOBAL_NEGATIVE_PROMPT = GLOBAL_NEGATIVE_SD15
 def get_pipeline_negative(pipeline: str) -> str:
     """Return the appropriate global negative prompt for a pipeline type."""
     pipeline = (pipeline or "sd15").lower()
+    negative_override = image_routing.negative_prompt_override(pipeline)
+    if negative_override is not None:
+        return negative_override
     if "sdxl" in pipeline or "xl" in pipeline:
         return GLOBAL_NEGATIVE_SDXL
     return GLOBAL_NEGATIVE_SD15
@@ -1384,6 +1391,10 @@ def load_manifest() -> None:
             # How nodes obtain the weights; see _public_model_source().
             "source": entry.get("source") if isinstance(entry.get("source"), dict) else {},
         }
+        if image_routing.is_zimage_pipeline(pipeline):
+            for field in ("steps", "guidance", "width", "height", "sampler", "negative_prompt_default"):
+                if entry.get(field) not in (None, ""):
+                    entry_data[field] = entry[field]
         MANIFEST_MODELS[key] = entry_data
         MODEL_STATS.setdefault(key, {"count": 0.0, "total_time": 0.0})
     stale_stats = set(MODEL_STATS.keys()) - set(MANIFEST_MODELS.keys())
@@ -2110,13 +2121,8 @@ def _node_can_run_task(
     if required_support not in _node_supports(node):
         return False
 
-    node_models = {m.lower() for m in node.get("models", []) if isinstance(m, str)}
-    if node_models and model_name.lower() not in node_models:
-        return False
-
     required_pipeline = str(model_cfg.get("pipeline") or "sd15").lower()
-    node_pipelines = {p.lower() for p in node.get("pipelines", []) if isinstance(p, str)}
-    if node_pipelines and required_pipeline not in node_pipelines:
+    if not image_routing.node_advertises_model(node, model_name, required_pipeline):
         return False
 
     return True
@@ -2763,9 +2769,13 @@ def resolve_image_defaults(
         env_candidates=("HAVNAI_IMAGE_SAMPLER",),
     )
 
+    guidance_value = image_routing.clamp_guidance(
+        str(model_cfg.get("pipeline") or ""),
+        float(guidance),
+    )
     resolved = {
         "steps": _clamp(int(steps), 5, 50),
-        "guidance": max(1.0, min(15.0, float(guidance))),
+        "guidance": guidance_value,
         "width": _clamp(int(width), 256, 1536),
         "height": _clamp(int(height), 256, 1536),
     }

@@ -937,6 +937,14 @@ def resolve_model_path_from_name(model_name: str) -> Optional[Path]:
     return None
 
 
+def _zimage():
+    try:
+        from . import zimage_turbo
+    except ImportError:
+        import zimage_turbo
+    return zimage_turbo
+
+
 def discover_capabilities() -> Dict[str, Any]:
     pipelines: set[str] = set()
     models: List[str] = []
@@ -999,6 +1007,24 @@ def discover_capabilities() -> Dict[str, Any]:
             if model_ready:
                 pipelines.add(pipeline)
                 models.append(name)
+            continue
+        if _zimage().is_zimage_pipeline(pipeline):
+            # Opt-in. An off flag must not advertise the model or change SDXL routing.
+            if _zimage().enabled():
+                pipelines.add(pipeline)
+                models.append(name)
+                details[name] = {
+                    "pipeline": pipeline,
+                    "files_present": True,
+                    "source": "huggingface",
+                    "capabilities": list(getattr(entry, "capabilities", []) or []),
+                }
+            else:
+                details[name] = {
+                    "pipeline": pipeline,
+                    "files_present": False,
+                    "error": "HAI_ZIMAGE_TURBO is off",
+                }
             continue
         # LTX2 can be loaded from HF repo id; local path is optional.
         if pipeline == "ltx2":
@@ -2683,6 +2709,115 @@ def _run_music_task(
         }, utilization_hint
 
 
+def _run_zimage_image(
+    task_id: str,
+    entry: ModelEntry,
+    reward_weight: float,
+    prompt: str,
+    job_settings: Dict[str, Any],
+) -> Tuple[Dict[str, Any], int, Optional[str]]:
+    """One Turbo image. Guidance stays 0. The negative prompt is ignored."""
+    mod = _zimage()
+    if not mod.enabled():
+        return (
+            {
+                "status": "failed",
+                "model_name": entry.name,
+                "reward_weight": reward_weight,
+                "task_type": "image_gen",
+                "error": "HAI_ZIMAGE_TURBO is off",
+                "error_code": "zimage_disabled",
+            },
+            utilization_hint,
+            None,
+        )
+    _retire_image_pipelines("zimage")
+    already_resident = mod.RUNTIME.pipe is not None
+    started = time.time()
+    start_stats = read_gpu_stats()
+    output_path = OUTPUTS_DIR / f"{task_id}.png"
+    seed = job_settings.get("seed")
+    try:
+        seed = int(seed) if seed is not None and seed != "" else random.randint(0, 2**31 - 1)
+    except (TypeError, ValueError):
+        seed = random.randint(0, 2**31 - 1)
+    steps = job_settings.get("steps", getattr(entry, "steps", None) or mod.DEFAULT_STEPS)
+    width = job_settings.get("width", getattr(entry, "width", None) or mod.DEFAULT_WIDTH)
+    height = job_settings.get("height", getattr(entry, "height", None) or mod.DEFAULT_HEIGHT)
+    try:
+        # HAI_SDXL_CAP_* / HAI_SDXL_MAX_* stay on the SDXL path. Z-Image has its own cap.
+        width, height = mod.cap_resolution(int(width), int(height))
+        steps = min(max(1, int(steps)), mod.max_steps())
+    except (TypeError, ValueError) as exc:
+        return (
+            {
+                "status": "failed",
+                "model_name": entry.name,
+                "reward_weight": reward_weight,
+                "task_type": "image_gen",
+                "error": f"Invalid Z-Image settings: {exc}",
+                "error_code": "model_load_failed",
+            },
+            utilization_hint,
+            None,
+        )
+    try:
+        image = mod.generate_job(
+            prompt or "",
+            seed=seed,
+            width=width,
+            height=height,
+            steps=steps,
+        )
+        _save_output_image(image, output_path, task_id=task_id)
+        image_b64 = None
+        if job_settings.get("_return_b64", True):
+            with output_path.open("rb") as handle:
+                image_b64 = base64.b64encode(handle.read()).decode("utf-8")
+        duration_ms = int((time.time() - started) * 1000)
+        end_stats = read_gpu_stats()
+        util = max(start_stats.get("utilization", 0), end_stats.get("utilization", 0), utilization_hint)
+        return (
+            {
+                "status": "success",
+                "model_name": entry.name,
+                "reward_weight": reward_weight,
+                "task_type": "image_gen",
+                "inference_time_ms": duration_ms,
+                "generation_ms": duration_ms,
+                "pipeline_cache_hit": already_resident,
+                "seed": seed,
+                "steps": steps,
+                "guidance": 0.0,
+                "width": width,
+                "height": height,
+                "sampler": "flowmatch",
+                "resolved_prompt": prompt or "",
+                "resolved_negative_prompt": "",
+                "negative_prompt_ignored": True,
+                "encoder_mode": (mod.RUNTIME.last_stats or {}).get("encoder_mode"),
+                "encode_seconds": (mod.RUNTIME.last_stats or {}).get("encode_seconds"),
+                "denoise_seconds": (mod.RUNTIME.last_stats or {}).get("denoise_seconds"),
+                "peak_allocated_mib": (mod.RUNTIME.last_stats or {}).get("peak_allocated_mib"),
+            },
+            int(util),
+            image_b64,
+        )
+    except Exception as exc:
+        return (
+            {
+                "status": "failed",
+                "model_name": entry.name,
+                "reward_weight": reward_weight,
+                "task_type": "image_gen",
+                "error": f"Z-Image generation failed: {exc}",
+                "error_code": _classify_model_failure(exc),
+            },
+            utilization_hint,
+            None,
+        )
+
+
 def execute_task(task: Dict[str, Any]) -> None:
     global utilization_hint
 
@@ -2799,7 +2934,8 @@ def execute_task(task: Dict[str, Any]) -> None:
         if cancel_event.is_set():
             raise TaskCancelled("cancelled before model load")
         entry = ensure_model_entry(model_name)
-        if task_type in {"IMAGE_GEN", "ANIMATEDIFF", "FACE_SWAP"}:
+        zimage_job = _zimage().is_zimage_entry(entry)
+        if task_type in {"IMAGE_GEN", "ANIMATEDIFF", "FACE_SWAP"} and not zimage_job:
             model_path = ensure_model_path(entry)
         if task_type in _VIDEO_CACHE_UNLOADERS:
             _retire_image_pipelines()
@@ -2869,15 +3005,24 @@ def execute_task(task: Dict[str, Any]) -> None:
             job_settings["_cancel_event"] = cancel_event
             job_settings["_return_b64"] = not bool(task.get("attempt_id"))
 
-            metrics, util, image_b64 = run_image_generation(
-                task_id,
-                entry,
-                model_path,
-                reward_weight,
-                prompt,
-                negative_prompt,
-                job_settings,
-            )
+            if zimage_job:
+                metrics, util, image_b64 = _run_zimage_image(
+                    task_id,
+                    entry,
+                    reward_weight,
+                    prompt,
+                    job_settings,
+                )
+            else:
+                metrics, util, image_b64 = run_image_generation(
+                    task_id,
+                    entry,
+                    model_path,
+                    reward_weight,
+                    prompt,
+                    negative_prompt,
+                    job_settings,
+                )
         elif task_type == "VIDEO_GEN":
             metrics, util, video_b64 = _run_ltx2_task(task_id, entry, reward_weight, task)
         elif task_type == "LTX_VIDEO_GEN":
@@ -3428,8 +3573,16 @@ def _switch_video_cache(next_engine: Optional[str]) -> None:
 
 
 def _retire_image_pipelines(keep: str = "") -> None:
-    """Keep only the image pipeline family needed by the next allocation."""
+    """Keep only the image pipeline family needed by the next allocation.
+
+    HAI_IMAGE_PIPELINE_CACHE_SIZE is 1 on the 3060, so SDXL and Z-Image cannot
+    both stay resident. Entering Z-Image uses keep="zimage", which drops the
+    SDXL slot (keep != "base"). Entering SDXL uses keep="base" or "", which
+    drops Z-Image.
+    """
     global _FACE_ANALYSIS, _REFERENCE_FACE_PIPE, _REFERENCE_FACE_PIPE_MODEL, _FACE_SWAP_PIPE, _FACE_SWAP_PIPE_MODEL
+    if _zimage().should_release_on_switch(keep):
+        _zimage().unload()
     retired = []
     drop_detector = keep not in {"reference", "face_swap", "face_analysis"} and _FACE_ANALYSIS is not None
     if drop_detector:
@@ -4138,6 +4291,8 @@ def _select_preload_image_entry() -> Optional[ModelEntry]:
         else:
             task_type = str(getattr(candidate, "task_type", "IMAGE_GEN") or "IMAGE_GEN").upper()
             if task_type == "IMAGE_GEN":
+                if _zimage().is_zimage_entry(candidate):
+                    return candidate
                 try:
                     ensure_model_path(candidate)
                     return candidate
@@ -4165,6 +4320,16 @@ def preload_image_pipeline_on_startup() -> None:
     entry = _select_preload_image_entry()
     if entry is None:
         log("No local IMAGE_GEN model available for preload", prefix="⚠️")
+        return
+    if _zimage().is_zimage_entry(entry):
+        if not _zimage().enabled():
+            log("Skipping Z-Image preload because HAI_ZIMAGE_TURBO is off", prefix="ℹ️")
+            return
+        try:
+            _zimage().load()
+            log(f"Image preload complete for {entry.name}", prefix="✅")
+        except Exception as exc:
+            log(f"Image preload failed for {entry.name}: {exc}", prefix="⚠️")
         return
     try:
         model_path = ensure_model_path(entry)

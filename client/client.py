@@ -4310,12 +4310,23 @@ def _select_preload_image_entry() -> Optional[ModelEntry]:
 
 
 def preload_image_pipeline_on_startup() -> None:
-    if not PRELOAD_IMAGE_ON_STARTUP:
-        return
     if FAST_PREVIEW or torch is None or diffusers is None:
         return
     if IMAGE_PIPELINE_CACHE_SIZE <= 0:
         log("Skipping image preload because HAI_IMAGE_PIPELINE_CACHE_SIZE=0", prefix="ℹ️")
+        return
+    zimage = _zimage()
+    # Opt-in, and only when the model is advertised. The SDXL preload below
+    # stays the default. Cache size 1 cannot hold both, so this owns the slot.
+    if zimage.preload_enabled():
+        try:
+            _retire_image_pipelines("zimage")
+            zimage.load()
+            log("Z-Image preload complete (single image slot)", prefix="✅")
+        except Exception as exc:
+            log(f"Z-Image preload failed: {exc}", prefix="⚠️")
+        return
+    if not PRELOAD_IMAGE_ON_STARTUP:
         return
     entry = _select_preload_image_entry()
     if entry is None:
@@ -4326,6 +4337,7 @@ def preload_image_pipeline_on_startup() -> None:
             log("Skipping Z-Image preload because HAI_ZIMAGE_TURBO is off", prefix="ℹ️")
             return
         try:
+            _retire_image_pipelines("zimage")
             _zimage().load()
             log(f"Image preload complete for {entry.name}", prefix="✅")
         except Exception as exc:

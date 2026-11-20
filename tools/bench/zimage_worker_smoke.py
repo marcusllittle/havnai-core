@@ -18,6 +18,15 @@ bf16 when they move to the GPU. ``swap`` moves the transformer and VAE off
 the GPU before the encoder is moved on, and needs about 9 GB free.
 The SDXL caps are not read. Z-Image defaults to 1024x1024.
 
+Each line includes the load breakdown from the worker runtime. ``load_total``
+is the whole ``load()`` call. ``snapshot`` is the Hub snapshot, then the GGUF
+transformer, the text encoder read, the fp32 cast (zero when the encoder was
+loaded as fp32), the VAE, pipeline assembly, and the move of the transformer
+and VAE to CUDA. ``first_encode_seconds`` is the one-token CPU warmup in cpu
+mode, included in ``load_total`` and kept separate from later
+``encode_seconds``. ``HAI_ZIMAGE_PRELOAD=1`` runs this load at worker startup
+when ``HAI_ZIMAGE_TURBO=1``.
+
 Requires diffusers>=0.43.0, gguf>=0.10.0, and a transformers build with
 Qwen3Model, on top of the node's CUDA torch.
 """
@@ -89,12 +98,22 @@ def main() -> int:
         saved = _save(image, output, label)
         peak = stats.get("peak_allocated_mib")
         peak_text = "n/a" if peak is None else f"{peak:.1f}"
+        load = stats.get("load_seconds") or {}
         print(
             f"{label} seconds={elapsed:.3f} "
             f"encode_seconds={stats.get('encode_seconds')} "
             f"denoise_seconds={stats.get('denoise_seconds')} "
             f"peak_allocated_mib={peak_text} "
             f"mode={stats.get('encoder_mode')} "
+            f"load_total={load.get('total')} "
+            f"snapshot={load.get('snapshot')} "
+            f"gguf_transformer={load.get('gguf_transformer')} "
+            f"text_encoder={load.get('text_encoder')} "
+            f"fp32_cast={load.get('fp32_cast')} "
+            f"vae={load.get('vae')} "
+            f"assemble={load.get('assemble')} "
+            f"move_to_cuda={load.get('move_to_cuda')} "
+            f"first_encode_seconds={stats.get('first_encode_seconds')} "
             f"file={saved}",
             flush=True,
         )

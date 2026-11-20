@@ -239,25 +239,19 @@ class Runtime:
         _reset_peak(torch_mod)
         encode_started = time.perf_counter()
         if mode == "cpu":
-            _move_module(pipe.text_encoder, "cpu", getattr(torch_mod, "bfloat16", None))
+            # fp32 on the host. This CPU has no bf16 hardware, and bf16 here is an emulator.
+            _move_module(pipe.text_encoder, "cpu", getattr(torch_mod, "float32", None))
             _refuse_encoder_overlap(pipe)
-            embeds, _negative = pipe.encode_prompt(
-                prompt=prompt,
-                device="cpu",
-                do_classifier_free_guidance=False,
-            )
+            embeds = encode_prompt_unpadded(pipe, prompt, "cpu")
         else:
+            _warn_swap_needs_free_vram()
             _move_module(pipe.transformer, "cpu")
             _move_module(pipe.vae, "cpu")
             gc.collect()
             _empty_cache(torch_mod)
             _move_module(pipe.text_encoder, device, getattr(torch_mod, "bfloat16", None))
             _refuse_encoder_overlap(pipe)
-            embeds, _negative = pipe.encode_prompt(
-                prompt=prompt,
-                device=device,
-                do_classifier_free_guidance=False,
-            )
+            embeds = encode_prompt_unpadded(pipe, prompt, device)
             _move_module(pipe.text_encoder, "cpu")
             gc.collect()
             _empty_cache(torch_mod)
@@ -265,7 +259,9 @@ class Runtime:
             _move_module(pipe.transformer, device)
             _move_module(pipe.vae, device)
         encode_seconds = time.perf_counter() - encode_started
-        prompt_embeds = [_move_embed(item, device) for item in embeds]
+        prompt_embeds = [
+            _move_embed(item, device, getattr(torch_mod, "bfloat16", None)) for item in embeds
+        ]
         generator = torch_mod.Generator(device=device).manual_seed(int(seed))
         denoise_started = time.perf_counter()
         result = pipe(
@@ -302,6 +298,54 @@ def load(**kwargs: Any) -> Any:
 
 def generate_job(prompt: str, **kwargs: Any) -> Any:
     return RUNTIME.generate(prompt, **kwargs)
+
+
+def encode_prompt_unpadded(pipe: Any, prompt: str, device: Any) -> List[Any]:
+    """Match ZImagePipeline._encode_prompt without padding the prompt out to 512.
+
+    Diffusers 0.43 applies the Qwen chat template, runs the text encoder, and
+    keeps hidden_states[-2]. It then drops padding with the attention mask.
+    Qwen3 is causal and right-padded, so the real tokens match the unpadded
+    forward. Padding to 512 is what made a 43-token prompt take 42 s in bf16.
+    """
+    tokenizer = pipe.tokenizer
+    templated = tokenizer.apply_chat_template(
+        [{"role": "user", "content": prompt}],
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=True,
+    )
+    text_inputs = tokenizer(
+        templated,
+        padding=False,
+        truncation=True,
+        max_length=512,
+        return_tensors="pt",
+    )
+    input_ids = text_inputs.input_ids.to(device)
+    attention_mask = text_inputs.attention_mask.to(device).bool()
+    hidden_states = pipe.text_encoder(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        output_hidden_states=True,
+    ).hidden_states[-2]
+    return [hidden_states[index][attention_mask[index]] for index in range(len(hidden_states))]
+
+
+_SWAP_WARNED = False
+
+
+def _warn_swap_needs_free_vram() -> None:
+    global _SWAP_WARNED
+    if _SWAP_WARNED:
+        return
+    _SWAP_WARNED = True
+    message = (
+        "Z-Image encoder mode swap needs about 9 GB free VRAM. "
+        "It spills into shared memory when ACE-Step or another model is resident."
+    )
+    LOGGER.warning(message)
+    print(message, file=sys.stderr, flush=True)
 
 
 def _module_device(module: Any) -> str:
@@ -389,11 +433,22 @@ def _vram_guard(torch_mod: Any, mode: str) -> tuple:
     return peak_mib, True
 
 
-def _move_embed(item: Any, device: Any) -> Any:
+def _move_embed(item: Any, device: Any, dtype: Any = None) -> Any:
     move = getattr(item, "to", None)
-    if callable(move):
+    if not callable(move):
+        return item
+    if dtype is not None:
+        try:
+            return move(device=device, dtype=dtype)
+        except TypeError:
+            try:
+                return move(device, dtype)
+            except TypeError:
+                return move(device)
+    try:
         return move(device)
-    return item
+    except TypeError:
+        return move(device=device)
 
 
 def _call_with_dtype(fn: Any, dtype: Any, kwargs: Dict[str, Any]) -> Any:

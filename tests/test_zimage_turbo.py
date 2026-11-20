@@ -23,27 +23,92 @@ REGISTRY_PATH = ROOT / "server" / "manifests" / "registry.json"
 
 
 class FakeTensor:
-    def __init__(self, device: str = "cpu") -> None:
+    def __init__(self, device: str = "cpu", dtype: object = None) -> None:
         self.device = device
+        self.dtype = dtype
 
-    def to(self, device: object) -> "FakeTensor":
-        self.device = str(device)
+    def to(self, device: object = None, dtype: object = None, **kwargs: object) -> "FakeTensor":
+        if device is None:
+            device = kwargs.get("device")
+        if dtype is None:
+            dtype = kwargs.get("dtype")
+        if device is not None:
+            self.device = str(device)
+        if dtype is not None:
+            self.dtype = dtype
         return self
 
     def detach(self) -> "FakeTensor":
         return self
 
 
+class FakeIds:
+    def __init__(self, length: int, device: str = "cpu") -> None:
+        self.shape = (1, length)
+        self.device = device
+
+    def to(self, device: object = None, dtype: object = None, **kwargs: object) -> "FakeIds":
+        if device is None:
+            device = kwargs.get("device")
+        moved = FakeIds(self.shape[1], str(device) if device is not None else self.device)
+        return moved
+
+    def bool(self) -> "FakeIds":
+        return self
+
+    def __getitem__(self, index: object) -> "FakeIds":
+        return self
+
+
+class FakeTokenizer:
+    def __init__(self, events: list) -> None:
+        self.events = events
+
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True, enable_thinking=True):
+        self.events.append(("template", tokenize, add_generation_prompt, enable_thinking, messages[0]["role"]))
+        return "chat:" + messages[0]["content"]
+
+    def __call__(self, text, padding=None, truncation=None, max_length=None, return_tensors=None):
+        self.events.append(("tokenize", padding, truncation, max_length, return_tensors, len(text)))
+        length = min(len(text), max_length or len(text))
+        return type("Batch", (), {"input_ids": FakeIds(length), "attention_mask": FakeIds(length)})()
+
+
 class FakeModule:
     def __init__(self, name: str, events: list) -> None:
         self.name = name
         self.device = "cpu"
+        self.dtype = None
         self.events = events
 
-    def to(self, device: object) -> "FakeModule":
-        self.device = str(device)
-        self.events.append((self.name, "to", self.device))
+    def to(self, device: object = None, dtype: object = None, **kwargs: object) -> "FakeModule":
+        if device is None:
+            device = kwargs.get("device")
+        if dtype is None:
+            dtype = kwargs.get("dtype")
+        if device is not None:
+            self.device = str(device)
+        if dtype is not None:
+            self.dtype = dtype
+        self.events.append((self.name, "to", self.device, dtype))
         return self
+
+    def __call__(self, input_ids=None, attention_mask=None, output_hidden_states=False):
+        self.events.append(("encoder_forward", input_ids.shape, str(input_ids.device), self.device))
+
+        class _Row:
+            def __getitem__(self, mask: object) -> FakeTensor:
+                return FakeTensor(device="cpu", dtype="fp32")
+
+        class _Batch:
+            def __len__(self) -> int:
+                return 1
+
+            def __getitem__(self, index: object) -> _Row:
+                return _Row()
+
+        hidden = _Batch()
+        return type("Out", (), {"hidden_states": (hidden, hidden)})()
 
 
 class FakeGenerator:
@@ -61,6 +126,7 @@ class FakePipe:
         self.text_encoder = FakeModule("text_encoder", events)
         self.transformer = FakeModule("transformer", events)
         self.vae = FakeModule("vae", events)
+        self.tokenizer = FakeTokenizer(events)
         self.hooks_removed = False
 
     def set_progress_bar_config(self, disable: bool = False) -> None:
@@ -95,6 +161,7 @@ class FakePipe:
                 kwargs.get("prompt"),
                 self.text_encoder.device,
                 self.transformer.device,
+                getattr((kwargs.get("prompt_embeds") or [None])[0], "dtype", None),
             )
         )
         return type("Result", (), {"images": ["image"]})()
@@ -113,6 +180,7 @@ class FakeCuda:
 
 class FakeTorch:
     bfloat16 = "bf16"
+    float32 = "fp32"
 
     def __init__(self, events: list) -> None:
         self.cuda = FakeCuda(events)
@@ -278,17 +346,23 @@ class RuntimeTests(unittest.TestCase):
                 torch_module=FakeTorch(events),
             )
             self.assertEqual(image, "image")
-            encode = next(item for item in events if item[0] == "encode")
-            self.assertEqual(encode[2], "cpu")
-            self.assertFalse(encode[3])
-            self.assertFalse(str(encode[4]).startswith("cuda"))
-            self.assertTrue(str(encode[5]).startswith("cuda"))
-            self.assertFalse(_encoder_overlapped_transformer(events, pipe))
+            tokenize = next(item for item in events if item[0] == "tokenize")
+            self.assertFalse(tokenize[1])
+            self.assertNotEqual(tokenize[1], "max_length")
+            self.assertEqual(tokenize[3], 512)
+            forward = next(item for item in events if item[0] == "encoder_forward")
+            self.assertNotEqual(forward[1][1], 512)
+            self.assertFalse(str(forward[2]).startswith("cuda"))
+            self.assertEqual(pipe.text_encoder.dtype, "fp32")
+            self.assertFalse(str(pipe.text_encoder.device).startswith("cuda"))
+            self.assertTrue(str(pipe.transformer.device).startswith("cuda"))
+            self.assertFalse(_encoder_overlapped_transformer(events))
             denoise = next(item for item in events if item[0] == "denoise")
             self.assertEqual(denoise[1], 0.0)
             self.assertEqual(denoise[2], 1024)
             self.assertEqual(denoise[4], 9)
             self.assertFalse(denoise[5])
+            self.assertEqual(denoise[-1], "bf16")
             self.assertEqual(runtime.last_stats["encoder_mode"], "cpu")
         finally:
             if previous is None:
@@ -299,16 +373,19 @@ class RuntimeTests(unittest.TestCase):
     def test_swap_mode_moves_transformer_off_before_the_encoder(self) -> None:
         previous = os.environ.get("HAI_ZIMAGE_ENCODER_MODE")
         os.environ["HAI_ZIMAGE_ENCODER_MODE"] = "swap"
+        zimage_turbo._SWAP_WARNED = False
         try:
             events: list = []
             pipe = self._resident_pipe(events)
             runtime = zimage_turbo.Runtime()
             runtime.pipe = pipe
-            runtime.generate("second prompt", seed=3, torch_module=FakeTorch(events))
-            encode_at = next(index for index, item in enumerate(events) if item[0] == "encode")
-            encode = events[encode_at]
-            self.assertTrue(str(encode[4]).startswith("cuda"))
-            self.assertFalse(str(encode[5]).startswith("cuda"))
+            with self.assertLogs("zimage_turbo", level="WARNING") as caught:
+                runtime.generate("second prompt", seed=3, torch_module=FakeTorch(events))
+            self.assertIn("9 GB", caught.output[0])
+            encode_at = next(index for index, item in enumerate(events) if item[0] == "encoder_forward")
+            forward = events[encode_at]
+            self.assertTrue(str(forward[2]).startswith("cuda"))
+            self.assertTrue(str(forward[3]).startswith("cuda"))
             transformer_off = next(
                 index
                 for index, item in enumerate(events)
@@ -333,7 +410,7 @@ class RuntimeTests(unittest.TestCase):
             self.assertLess(encoder_on, encode_at)
             self.assertLess(encode_at, encoder_off)
             self.assertLess(encoder_off, transformer_back)
-            self.assertFalse(_encoder_overlapped_transformer(events, pipe))
+            self.assertFalse(_encoder_overlapped_transformer(events))
             self.assertEqual(pipe.text_encoder.device, "cpu")
             self.assertTrue(pipe.transformer.device.startswith("cuda"))
             self.assertEqual(runtime.last_stats["encoder_mode"], "swap")
@@ -393,11 +470,8 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn(("empty_cache",), events)
 
 
-def _encoder_overlapped_transformer(events: list, pipe: FakePipe) -> bool:
-    """Replay moves and the encode snapshot. True if both were on CUDA together."""
-    encoder = pipe.text_encoder.device
-    transformer = pipe.transformer.device
-    # The pipe's devices are the final state. Replay from a known resident start.
+def _encoder_overlapped_transformer(events: list) -> bool:
+    """Replay moves from the post-load state. True if both were on CUDA together."""
     encoder = "cpu"
     transformer = "cuda:0"
     overlapped = False
@@ -406,9 +480,8 @@ def _encoder_overlapped_transformer(events: list, pipe: FakePipe) -> bool:
             encoder = str(item[2])
         elif item[0] == "transformer" and item[1] == "to":
             transformer = str(item[2])
-        elif item[0] == "encode":
-            encoder = str(item[4])
-            transformer = str(item[5])
+        elif item[0] == "encoder_forward":
+            encoder = str(item[3])
         if encoder.startswith("cuda") and transformer.startswith("cuda"):
             overlapped = True
     return overlapped

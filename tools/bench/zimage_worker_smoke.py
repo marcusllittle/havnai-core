@@ -12,8 +12,10 @@ unloaded too; it was resident during the 456 s run.
         --encoder-mode cpu \\
         --output /mnt/d/havnai-bench/zimage-worker.png
 
-``--encoder-mode cpu`` (the default) encodes in bf16 on the CPU. ``swap``
-moves the transformer and VAE off the GPU before the encoder is moved on.
+``--encoder-mode cpu`` (the default) keeps the text encoder in float32 on the
+CPU and does not pad the prompt out to 512 tokens. Embeddings are cast to
+bf16 when they move to the GPU. ``swap`` moves the transformer and VAE off
+the GPU before the encoder is moved on, and needs about 9 GB free.
 The SDXL caps are not read. Z-Image defaults to 1024x1024.
 
 Requires diffusers>=0.43.0, gguf>=0.10.0, and a transformers build with

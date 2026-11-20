@@ -104,6 +104,7 @@ _IMAGE_PIPELINE_CACHE_LOCK = threading.Lock()
 _VIDEO_CACHE_UNLOADERS = {
     "VIDEO_GEN": ("engines.ltx2.ltx2_generator", "unload_pipeline"),
     "LTX_VIDEO_GEN": ("engines.ltx_video.generator", "unload_pipelines"),
+    "WAN22_I2V": ("engines.wan22_i2v.generator", "unload_pipelines"),
     "ANIMATEDIFF": ("engines.animatediff.animatediff_generator", "unload_pipeline"),
 }
 _ACTIVE_VIDEO_CACHE: Optional[str] = None
@@ -945,6 +946,15 @@ def _zimage():
     return zimage_turbo
 
 
+def _wan22():
+    """Diffusers Wan 2.2 I2V. Imported lazily so a missing extra does not break SDXL."""
+    try:
+        from engines.wan22_i2v import config as wan22_config
+    except ImportError:
+        from wan22_i2v import config as wan22_config  # type: ignore
+    return wan22_config
+
+
 def discover_capabilities() -> Dict[str, Any]:
     pipelines: set[str] = set()
     models: List[str] = []
@@ -1025,6 +1035,30 @@ def discover_capabilities() -> Dict[str, Any]:
                     "files_present": False,
                     "error": "HAI_ZIMAGE_TURBO is off",
                 }
+            continue
+        if _wan22().is_wan22_pipeline(pipeline):
+            # Same opt-in shape as Z-Image: an off flag must not change routing.
+            try:
+                wan_config = _wan22().load_config()
+                missing = wan_config.missing_assets()
+            except Exception as exc:
+                missing = [str(exc)]
+                wan_config = None
+            decision = _wan22().admission(_wan22().enabled(), missing)
+            preset_names = list(wan_config.preset_names()) if wan_config is not None else []
+            details[name] = {
+                "pipeline": pipeline,
+                "model_family": "wan22_i2v",
+                "files_present": decision["files_present"],
+                "capabilities": decision["capabilities"],
+                "motion_presets": preset_names,
+                "source": "local",
+            }
+            if decision["error"]:
+                details[name]["error"] = decision["error"]
+            if decision["advertise"]:
+                pipelines.add(pipeline)
+                models.append(name)
             continue
         # LTX2 can be loaded from HF repo id; local path is optional.
         if pipeline == "ltx2":
@@ -1160,6 +1194,11 @@ def discover_supports(capabilities: Dict[str, Any]) -> List[str]:
             wangp_ready = False
         if wangp_ready and _has_runner("engines.wangp.runner", "run_wangp_ltx23"):
             supports.append("ltx_video")
+
+    # Wan 2.2 jobs are queued as LTX_VIDEO_GEN. Model and pipeline matching
+    # still keeps them off nodes that did not advertise wan22-i2v-a14b.
+    if "wan22-i2v" in pipelines or "wan22_i2v" in pipelines:
+        supports.append("ltx_video")
 
     if (
         "animatediff" in pipelines
@@ -2151,6 +2190,80 @@ def _is_wangp_entry(entry: ModelEntry) -> bool:
     )
 
 
+def _run_wan22_task(
+    task_id: str,
+    entry: ModelEntry,
+    reward_weight: float,
+    task: Dict[str, Any],
+) -> Tuple[Dict[str, Any], int, Optional[str]]:
+    """Wan 2.2 I2V through diffusers. LTX 0.9.8 stays on its own runner."""
+    global utilization_hint
+    if not _wan22().enabled():
+        return (
+            {
+                "status": "failed",
+                "task_type": "video_gen",
+                "model_name": entry.name,
+                "model_family": "wan22_i2v",
+                "reward_weight": reward_weight,
+                "error": "HAI_WAN22_I2V is off",
+            },
+            utilization_hint,
+            None,
+        )
+    log(f"Wan 2.2 I2V task received: model={entry.name}", prefix="🎬", task_id=task_id)
+    try:
+        from engines.wan22_i2v.runner import run_wan22_i2v, video_to_b64 as wan_video_to_b64  # type: ignore
+    except Exception as exc:
+        return (
+            {
+                "status": "failed",
+                "task_type": "video_gen",
+                "model_name": entry.name,
+                "model_family": "wan22_i2v",
+                "reward_weight": reward_weight,
+                "error": f"Wan 2.2 runtime unavailable: {exc}",
+            },
+            utilization_hint,
+            None,
+        )
+
+    task_payload = dict(task)
+    task_payload["task_id"] = task_id
+    task_payload["model_name"] = entry.name
+    task_payload["reward_weight"] = reward_weight
+    task_payload.setdefault("seed", random.randint(0, 2**31 - 1))
+    try:
+        metrics, util, video_path = run_wan22_i2v(
+            task_payload,
+            log_fn=lambda message: log(message, prefix="🎬", task_id=task_id),
+            outputs_dir=OUTPUTS_DIR,
+            read_gpu_stats=read_gpu_stats,
+            utilization_hint=utilization_hint,
+        )
+    except Exception as exc:
+        return (
+            {
+                "status": "failed",
+                "task_type": "video_gen",
+                "model_name": entry.name,
+                "model_family": "wan22_i2v",
+                "reward_weight": reward_weight,
+                "error": f"Wan 2.2 execution failed: {exc}",
+            },
+            utilization_hint,
+            None,
+        )
+    metrics["reward_weight"] = reward_weight
+    stream_artifact = bool(task.get("attempt_id"))
+    video_b64 = wan_video_to_b64(video_path) if video_path and not stream_artifact else None
+    try:
+        util_int = int(util)
+    except (TypeError, ValueError):
+        util_int = utilization_hint
+    return metrics, util_int, video_b64
+
+
 def _run_ltx_video_task(
     task_id: str,
     entry: ModelEntry,
@@ -2937,10 +3050,14 @@ def execute_task(task: Dict[str, Any]) -> None:
         zimage_job = _zimage().is_zimage_entry(entry)
         if task_type in {"IMAGE_GEN", "ANIMATEDIFF", "FACE_SWAP"} and not zimage_job:
             model_path = ensure_model_path(entry)
-        if task_type in _VIDEO_CACHE_UNLOADERS:
+        wan22_job = _wan22().is_wan22_entry(entry)
+        if task_type in _VIDEO_CACHE_UNLOADERS or wan22_job:
             _retire_image_pipelines()
-            external_video = task_type == "LTX_VIDEO_GEN" and _is_wangp_entry(entry)
-            _switch_video_cache(None if external_video else task_type)
+            if wan22_job:
+                _switch_video_cache("WAN22_I2V")
+            else:
+                external_video = task_type == "LTX_VIDEO_GEN" and _is_wangp_entry(entry)
+                _switch_video_cache(None if external_video else task_type)
         elif task_type == "MUSIC_GEN":
             _retire_image_pipelines()
             _switch_video_cache(None)
@@ -3025,6 +3142,8 @@ def execute_task(task: Dict[str, Any]) -> None:
                 )
         elif task_type == "VIDEO_GEN":
             metrics, util, video_b64 = _run_ltx2_task(task_id, entry, reward_weight, task)
+        elif task_type == "LTX_VIDEO_GEN" and _wan22().is_wan22_entry(entry):
+            metrics, util, video_b64 = _run_wan22_task(task_id, entry, reward_weight, task)
         elif task_type == "LTX_VIDEO_GEN":
             metrics, util, video_b64 = _run_ltx_video_task(task_id, entry, reward_weight, task)
         elif task_type == "ANIMATEDIFF":

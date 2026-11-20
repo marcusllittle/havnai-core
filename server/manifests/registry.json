@@ -756,6 +756,61 @@
       }
     },
     {
+      "name": "wan22-i2v-a14b",
+      "pipeline": "wan22-i2v",
+      "path": "",
+      "type": "diffusers",
+      "tags": [
+        "video",
+        "wan22",
+        "image_to_video",
+        "gguf",
+        "distilled"
+      ],
+      "task_type": "LTX_VIDEO_GEN",
+      "weight": 1,
+      "reward_weight": 1,
+      "credit_cost": 5.0,
+      "model_family": "wan22_i2v",
+      "model_version": "2.2-i2v-a14b-q4",
+      "license_status": "apache-2.0",
+      "checkpoint_variant": "q4_k_m",
+      "default_pipeline_mode": "i2v_4step",
+      "timeout_seconds": 1800,
+      "video_defaults": {
+        "steps": 4,
+        "guidance": 1.0,
+        "width": 480,
+        "height": 832,
+        "frames": 81,
+        "fps": 16
+      },
+      "capabilities": [
+        "image_to_video"
+      ],
+      "available_modes": [
+        "i2v_4step"
+      ],
+      "motion_presets": [
+        {"id": "hair_breeze", "label": "Hair in a breeze"},
+        {"id": "slow_head_turn", "label": "Slow head turn"},
+        {"id": "weight_shift", "label": "Weight shift"},
+        {"id": "breathing_sway", "label": "Breathing and idle sway"},
+        {"id": "blink_smile", "label": "Slow blink and soft smile"},
+        {"id": "camera_push", "label": "Slow camera push-in"},
+        {"id": "fabric_movement", "label": "Fabric movement"}
+      ],
+      "strengths": "Wan 2.2 14B image-to-video at 4 steps through diffusers. Q4_K_M experts, LightX2V LoRAs, and the Wan 2.1 VAE, offloaded for a 12 GB GPU.",
+      "weaknesses": "Opt-in. A node serves it only when HAI_WAN22_I2V=1 and the local GGUF files are present. 480p is the 12 GB default. 720p is off unless the operator allows it.",
+      "source": {
+        "kind": "operator",
+        "repo_id": "QuantStack/Wan2.2-I2V-A14B-GGUF",
+        "filename": "Wan2.2-I2V-A14B-HighNoise-Q4_K_M.gguf",
+        "license": "apache-2.0",
+        "notes": "Operator-supplied Comfy-format files under HAI_WAN22_ROOT (default /mnt/d/models/wan22). High and low Q4_K_M GGUFs, LightX2V 4-step LoRAs, umT5, and the Wan 2.1 VAE. Loaded by diffusers. Wan2GP is not used."
+      }
+    },
+    {
       "name": "ace_step_1_5_turbo",
       "pipeline": "ace_step",
       "path": "",

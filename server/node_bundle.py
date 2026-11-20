@@ -31,6 +31,7 @@ from typing import Dict, List, Optional, Tuple
 BUNDLE_FILES: List[str] = [
     "client/client.py",
     "client/zimage_turbo.py",
+    "client/configs/wan22_i2v.json",
     "client/artifact_cleanup.py",
     "client/registry.py",
     "client/task_executor.py",

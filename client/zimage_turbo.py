@@ -1,11 +1,13 @@
 """Q5_K_M Z-Image-Turbo for the HavnAI image worker.
 
 The GGUF transformer and the VAE stay on the GPU across jobs. The Qwen3 text
-encoder is about 8 GB, so it must not sit on the GPU at the same time. The
-default ``HAI_ZIMAGE_ENCODER_MODE=cpu`` encodes in bf16 on the CPU. ``swap``
-moves the transformer and VAE off, encodes on the GPU, then moves them back.
-Guidance is always 0 and the negative prompt is not used. The worker only
-advertises this model when ``HAI_ZIMAGE_TURBO`` is on.
+encoder is about 8 GB in bf16 and about twice that in fp32, so it must not sit
+on the GPU at the same time. The default ``HAI_ZIMAGE_ENCODER_MODE=cpu`` loads
+that encoder in fp32 and encodes on the CPU. ``swap`` moves the transformer
+and VAE off, encodes on the GPU, then moves them back. Guidance is always 0
+and the negative prompt is not used. The worker only advertises this model
+when ``HAI_ZIMAGE_TURBO`` is on. ``HAI_ZIMAGE_PRELOAD=1`` loads it at startup,
+and only when the turbo flag is also on.
 
 The old ``zimage`` branch loaded base ``Tongyi-MAI/Z-Image`` in bf16 with no
 offload. This module does not do that.
@@ -30,6 +32,14 @@ DEFAULT_STEPS = 9
 DEFAULT_WIDTH = 1024
 DEFAULT_HEIGHT = 1024
 MODEL_NAME = "zimage-turbo"
+WARMUP_PROMPT = "a"
+LOAD_STAGE_NAMES = (
+    "gguf_transformer",
+    "text_encoder",
+    "fp32_cast",
+    "vae",
+    "move_to_cuda",
+)
 
 
 def _positive_int(name: str, default: int) -> int:
@@ -91,9 +101,23 @@ def encoder_mode() -> str:
     raise ValueError("HAI_ZIMAGE_ENCODER_MODE must be 'cpu' or 'swap'")
 
 
+def _env_on(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def enabled() -> bool:
-    raw = os.environ.get("HAI_ZIMAGE_TURBO", "")
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
+    return _env_on("HAI_ZIMAGE_TURBO")
+
+
+def preload_enabled() -> bool:
+    """Startup preload is opt-in and does nothing unless the model itself is on.
+
+    ``HAI_PRELOAD_IMAGE_ON_STARTUP`` remains the SDXL switch. This flag is
+    separate so the default worker still warms SDXL. The worker honors it
+    only when ``HAI_ZIMAGE_TURBO`` is also on, and the size-1 image cache
+    cannot hold SDXL beside this pipeline.
+    """
+    return enabled() and _env_on("HAI_ZIMAGE_PRELOAD")
 
 
 def is_zimage_pipeline(pipeline: str) -> bool:
@@ -126,6 +150,8 @@ class Runtime:
     def __init__(self) -> None:
         self.pipe: Any = None
         self.last_stats: Dict[str, Any] = {}
+        self.load_seconds: Optional[Dict[str, float]] = None
+        self.first_encode_seconds: Optional[float] = None
 
     def unload(self, torch_module: Any = None) -> None:
         pipe = self.pipe
@@ -147,6 +173,9 @@ class Runtime:
             except Exception:
                 pass
         del pipe
+        self.load_seconds = None
+        self.first_encode_seconds = None
+        self.last_stats = {}
         gc.collect()
         torch_mod = torch_module if torch_module is not None else _optional_torch()
         cuda = getattr(torch_mod, "cuda", None) if torch_mod is not None else None
@@ -173,39 +202,70 @@ class Runtime:
         diffusers_mod = diffusers_module or _require_diffusers()
         hub = hub_module or _require_hub()
         dtype = torch_mod.bfloat16
+        fp32 = getattr(torch_mod, "float32", None)
+        started = time.perf_counter()
+        stages = {name: 0.0 for name in LOAD_STAGE_NAMES}
+        snapshot_started = time.perf_counter()
         snapshot = hub.snapshot_download(
             repo_id=ZIMAGE_REPO,
             cache_dir=cache_dir,
             ignore_patterns=["transformer/*.safetensors", "transformer/*.bin"],
         )
-        gguf_path = hub.hf_hub_download(
-            repo_id=GGUF_REPO,
-            filename=GGUF_FILENAME,
-            cache_dir=cache_dir,
-        )
-        quant = diffusers_mod.GGUFQuantizationConfig(compute_dtype=dtype)
-        kwargs = transformer_load_kwargs(snapshot, dtype, quant)
-        transformer = _call_with_dtype(
-            lambda **load_kwargs: diffusers_mod.ZImageTransformer2DModel.from_single_file(gguf_path, **load_kwargs),
-            dtype,
-            {key: value for key, value in kwargs.items() if key != "torch_dtype"},
-        )
+        stages["snapshot"] = round(time.perf_counter() - snapshot_started, 3)
+        with _stage(stages, "gguf_transformer"):
+            gguf_path = hub.hf_hub_download(
+                repo_id=GGUF_REPO,
+                filename=GGUF_FILENAME,
+                cache_dir=cache_dir,
+            )
+            quant = diffusers_mod.GGUFQuantizationConfig(compute_dtype=dtype)
+            kwargs = transformer_load_kwargs(snapshot, dtype, quant)
+            transformer = _call_with_dtype(
+                lambda **load_kwargs: diffusers_mod.ZImageTransformer2DModel.from_single_file(
+                    gguf_path, **load_kwargs
+                ),
+                dtype,
+                {key: value for key, value in kwargs.items() if key != "torch_dtype"},
+            )
+        with _stage(stages, "text_encoder"):
+            # Read the encoder as fp32. A second cast after a bf16 load walks the
+            # weights again; fp32_cast below stays near zero when this dtype sticks.
+            text_encoder = _load_text_encoder(diffusers_mod, snapshot, fp32)
+        with _stage(stages, "fp32_cast"):
+            _ensure_encoder_fp32_cpu(text_encoder, fp32)
+        with _stage(stages, "vae"):
+            vae = _load_vae(diffusers_mod, snapshot, dtype)
+        assemble_started = time.perf_counter()
         pipe = _call_with_dtype(
             lambda **load_kwargs: diffusers_mod.ZImagePipeline.from_pretrained(snapshot, **load_kwargs),
             dtype,
             {
                 "transformer": transformer,
+                "text_encoder": text_encoder,
+                "vae": vae,
                 "low_cpu_mem_usage": True,
                 "local_files_only": True,
             },
         )
+        if getattr(pipe, "text_encoder", None) is not text_encoder:
+            pipe.text_encoder = text_encoder
+        if getattr(pipe, "vae", None) is not vae:
+            pipe.vae = vae
+        if hasattr(transformer, "to"):
+            pipe.transformer = transformer
         if hasattr(pipe, "set_progress_bar_config"):
             pipe.set_progress_bar_config(disable=True)
-        if torch_mod.cuda.is_available():
-            device = torch_mod.device("cuda", gpu_index)
-            pipe.transformer.to(device)
-            pipe.vae.to(device)
+        stages["assemble"] = round(time.perf_counter() - assemble_started, 3)
+        with _stage(stages, "move_to_cuda"):
+            if torch_mod.cuda.is_available():
+                device = torch_mod.device("cuda", gpu_index)
+                _move_module(pipe.transformer, device)
+                _move_module(pipe.vae, device)
         self.pipe = pipe
+        self._warmup_cpu_encoder(pipe)
+        stages["total"] = round(time.perf_counter() - started, 3)
+        self.load_seconds = stages
+        self._remember_load_stats()
         return pipe
 
     def generate(
@@ -240,9 +300,13 @@ class Runtime:
         encode_started = time.perf_counter()
         if mode == "cpu":
             # fp32 on the host. This CPU has no bf16 hardware, and bf16 here is an emulator.
-            _move_module(pipe.text_encoder, "cpu", getattr(torch_mod, "float32", None))
+            # Load already builds the encoder in fp32. Skip the cast when it is still there
+            # so a warm job does not walk the weights again.
+            fp32 = getattr(torch_mod, "float32", None)
+            if not _encoder_is_fp32_cpu(pipe.text_encoder, fp32):
+                _move_module(pipe.text_encoder, "cpu", fp32)
             _refuse_encoder_overlap(pipe)
-            embeds = encode_prompt_unpadded(pipe, prompt, "cpu")
+            embeds = self._encode_timed(pipe, prompt, "cpu")
         else:
             _warn_swap_needs_free_vram()
             _move_module(pipe.transformer, "cpu")
@@ -251,7 +315,7 @@ class Runtime:
             _empty_cache(torch_mod)
             _move_module(pipe.text_encoder, device, getattr(torch_mod, "bfloat16", None))
             _refuse_encoder_overlap(pipe)
-            embeds = encode_prompt_unpadded(pipe, prompt, device)
+            embeds = self._encode_timed(pipe, prompt, device)
             _move_module(pipe.text_encoder, "cpu")
             gc.collect()
             _empty_cache(torch_mod)
@@ -282,7 +346,40 @@ class Runtime:
             "peak_allocated_mib": peak_mib,
             "vram_warning": warning,
         }
+        self._remember_load_stats()
         return result.images[0]
+
+    def _encode_timed(self, pipe: Any, prompt: str, device: Any) -> List[Any]:
+        started = time.perf_counter()
+        embeds = encode_prompt_unpadded(pipe, prompt, device)
+        if self.first_encode_seconds is None:
+            self.first_encode_seconds = round(time.perf_counter() - started, 3)
+        return embeds
+
+    def _warmup_cpu_encoder(self, pipe: Any) -> None:
+        """One short CPU forward so the first real prompt is not the first forward.
+
+        Swap mode is left cold here. A GPU warmup would pull the encoder onto
+        the device while the transformer is resident.
+        """
+        if self.first_encode_seconds is not None:
+            return
+        try:
+            mode = encoder_mode()
+        except ValueError:
+            return
+        if mode != "cpu":
+            return
+        try:
+            self._encode_timed(pipe, WARMUP_PROMPT, "cpu")
+        except Exception:
+            LOGGER.warning("Z-Image warmup encode failed", exc_info=True)
+
+    def _remember_load_stats(self) -> None:
+        if self.load_seconds is not None:
+            self.last_stats["load_seconds"] = dict(self.load_seconds)
+        if self.first_encode_seconds is not None:
+            self.last_stats["first_encode_seconds"] = self.first_encode_seconds
 
 
 RUNTIME = Runtime()
@@ -372,6 +469,78 @@ def _on_cuda(module: Any) -> bool:
 def _refuse_encoder_overlap(pipe: Any) -> None:
     if _on_cuda(getattr(pipe, "text_encoder", None)) and _on_cuda(getattr(pipe, "transformer", None)):
         raise RuntimeError("refusing to run while the text encoder and transformer are both on CUDA")
+
+
+class _stage:
+    """Record one load stage. The timer survives a failure so the partial is kept."""
+
+    def __init__(self, stages: Dict[str, float], name: str) -> None:
+        self.stages = stages
+        self.name = name
+        self.started = 0.0
+
+    def __enter__(self) -> "_stage":
+        self.started = time.perf_counter()
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        self.stages[self.name] = round(time.perf_counter() - self.started, 3)
+        return False
+
+
+def _encoder_is_fp32_cpu(module: Any, fp32: Any) -> bool:
+    if module is None or fp32 is None:
+        return False
+    if _on_cuda(module):
+        return False
+    return getattr(module, "dtype", None) == fp32
+
+
+def _ensure_encoder_fp32_cpu(module: Any, fp32: Any) -> None:
+    """Cast only when the loader did not already return fp32 on CPU.
+
+    Loading with ``torch_dtype=float32`` does the conversion while the weights
+    are read. A second ``.to(float32)`` walks every parameter again, which is
+    the cast this skips when the dtype is already right.
+    """
+    if _encoder_is_fp32_cpu(module, fp32):
+        return
+    _move_module(module, "cpu", fp32)
+
+
+def _load_text_encoder(diffusers_mod: Any, snapshot: str, dtype: Any) -> Any:
+    loader = getattr(diffusers_mod, "load_zimage_text_encoder", None)
+    kwargs = {
+        "subfolder": "text_encoder",
+        "local_files_only": True,
+        "low_cpu_mem_usage": True,
+    }
+    if callable(loader):
+        return _call_with_dtype(lambda **load_kwargs: loader(snapshot, **load_kwargs), dtype, kwargs)
+    try:
+        from transformers import AutoModel
+    except ImportError as exc:
+        raise RuntimeError("Z-Image-Turbo needs transformers with Qwen3") from exc
+    return _call_with_dtype(
+        lambda **load_kwargs: AutoModel.from_pretrained(snapshot, **load_kwargs),
+        dtype,
+        kwargs,
+    )
+
+
+def _load_vae(diffusers_mod: Any, snapshot: str, dtype: Any) -> Any:
+    loader = getattr(diffusers_mod, "load_zimage_vae", None)
+    kwargs = {"subfolder": "vae", "local_files_only": True}
+    if callable(loader):
+        return _call_with_dtype(lambda **load_kwargs: loader(snapshot, **load_kwargs), dtype, kwargs)
+    vae_cls = getattr(diffusers_mod, "AutoencoderKL", None)
+    if vae_cls is None:
+        raise RuntimeError("Z-Image-Turbo needs diffusers.AutoencoderKL")
+    return _call_with_dtype(
+        lambda **load_kwargs: vae_cls.from_pretrained(snapshot, **load_kwargs),
+        dtype,
+        kwargs,
+    )
 
 
 def _move_module(module: Any, device: Any, dtype: Any = None) -> None:

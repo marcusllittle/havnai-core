@@ -200,6 +200,8 @@ class FakeQuant:
 
 class FakeDiffusers:
     calls = []
+    events: list = []
+    encoder_dtype_override = None
 
     class GGUFQuantizationConfig(FakeQuant):
         pass
@@ -215,6 +217,23 @@ class FakeDiffusers:
         def from_pretrained(snapshot: str, **kwargs: object) -> FakePipe:
             FakeDiffusers.calls.append(("from_pretrained", snapshot, kwargs))
             return FakeDiffusers.calls[-1][2]["pipe"]  # type: ignore[index]
+
+    @staticmethod
+    def load_zimage_text_encoder(snapshot: str, **kwargs: object) -> FakeModule:
+        module = FakeModule("text_encoder", FakeDiffusers.events)
+        dtype = FakeDiffusers.encoder_dtype_override
+        if dtype is None:
+            dtype = kwargs.get("torch_dtype", kwargs.get("dtype"))
+        module.dtype = dtype
+        FakeDiffusers.calls.append(("text_encoder", snapshot, dict(kwargs)))
+        return module
+
+    @staticmethod
+    def load_zimage_vae(snapshot: str, **kwargs: object) -> FakeModule:
+        module = FakeModule("vae", FakeDiffusers.events)
+        module.dtype = kwargs.get("torch_dtype", kwargs.get("dtype"))
+        FakeDiffusers.calls.append(("vae", snapshot, dict(kwargs)))
+        return module
 
 
 class FakeHub:
@@ -277,6 +296,27 @@ class RegistryAndCapTests(unittest.TestCase):
         self.assertTrue(zimage_turbo.should_release_on_switch("base"))
         self.assertTrue(zimage_turbo.should_release_on_switch(""))
 
+    def test_preload_requires_turbo_and_defaults_off(self) -> None:
+        previous = {key: os.environ.get(key) for key in ("HAI_ZIMAGE_TURBO", "HAI_ZIMAGE_PRELOAD")}
+        try:
+            os.environ.pop("HAI_ZIMAGE_TURBO", None)
+            os.environ.pop("HAI_ZIMAGE_PRELOAD", None)
+            self.assertFalse(zimage_turbo.preload_enabled())
+            os.environ["HAI_ZIMAGE_PRELOAD"] = "1"
+            self.assertFalse(zimage_turbo.preload_enabled())
+            os.environ["HAI_ZIMAGE_TURBO"] = "1"
+            self.assertTrue(zimage_turbo.preload_enabled())
+            os.environ["HAI_ZIMAGE_PRELOAD"] = "0"
+            self.assertFalse(zimage_turbo.preload_enabled())
+            os.environ["HAI_ZIMAGE_PRELOAD"] = "yes"
+            self.assertTrue(zimage_turbo.preload_enabled())
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
     def test_flag_defaults_off(self) -> None:
         previous = os.environ.pop("HAI_ZIMAGE_TURBO", None)
         try:
@@ -295,33 +335,179 @@ class RuntimeTests(unittest.TestCase):
         events: list = []
         pipe = FakePipe(events)
         FakeDiffusers.calls = []
+        FakeDiffusers.events = events
+        FakeDiffusers.encoder_dtype_override = None
+        previous = os.environ.pop("HAI_ZIMAGE_ENCODER_MODE", None)
 
         def from_pretrained(snapshot: str, **kwargs: object) -> FakePipe:
             FakeDiffusers.calls.append(("from_pretrained", snapshot, dict(kwargs)))
+            pipe.text_encoder = kwargs["text_encoder"]
+            pipe.vae = kwargs["vae"]
             return pipe
 
         FakeDiffusers.ZImagePipeline.from_pretrained = staticmethod(from_pretrained)
         hub = FakeHub()
         runtime = zimage_turbo.Runtime()
-        loaded = runtime.load(
-            torch_module=FakeTorch(events),
-            diffusers_module=FakeDiffusers,
-            hub_module=hub,
-            gpu_index=0,
-        )
+        try:
+            loaded = runtime.load(
+                torch_module=FakeTorch(events),
+                diffusers_module=FakeDiffusers,
+                hub_module=hub,
+                gpu_index=0,
+            )
+        finally:
+            if previous is None:
+                os.environ.pop("HAI_ZIMAGE_ENCODER_MODE", None)
+            else:
+                os.environ["HAI_ZIMAGE_ENCODER_MODE"] = previous
         self.assertIs(loaded, pipe)
-        single = FakeDiffusers.calls[0]
-        self.assertEqual(single[0], "from_single_file")
+        single = next(item for item in FakeDiffusers.calls if item[0] == "from_single_file")
         self.assertEqual(single[1], "/weights/z-image-turbo-Q5_K_M.gguf")
         self.assertEqual(single[2]["config"], "/snap/z-image-turbo")
         self.assertEqual(single[2]["subfolder"], "transformer")
         self.assertTrue(single[2]["local_files_only"])
         self.assertEqual(single[2]["quantization_config"].compute_dtype, "bf16")
+        encoder_call = next(item for item in FakeDiffusers.calls if item[0] == "text_encoder")
+        self.assertEqual(encoder_call[2]["torch_dtype"], "fp32")
+        self.assertEqual(encoder_call[2]["subfolder"], "text_encoder")
+        vae_call = next(item for item in FakeDiffusers.calls if item[0] == "vae")
+        self.assertEqual(vae_call[2]["torch_dtype"], "bf16")
         self.assertEqual(hub.gguf_kwargs["repo_id"], "unsloth/Z-Image-Turbo-GGUF")
         self.assertEqual(hub.snapshot_kwargs["repo_id"], "Tongyi-MAI/Z-Image-Turbo")
         self.assertEqual(pipe.transformer.device, "cuda:0")
         self.assertEqual(pipe.vae.device, "cuda:0")
         self.assertEqual(pipe.text_encoder.device, "cpu")
+        self.assertEqual(pipe.text_encoder.dtype, "fp32")
+        cast_moves = [
+            item
+            for item in events
+            if item[0] == "text_encoder" and item[1] == "to" and item[3] == "fp32"
+        ]
+        self.assertEqual(cast_moves, [])
+        self._assert_load_breakdown(runtime)
+        self.assertEqual(runtime.load_seconds["fp32_cast"], 0.0)
+        self.assertIsNotNone(runtime.first_encode_seconds)
+        warmup = next(item for item in events if item[0] == "encoder_forward")
+        self.assertNotEqual(warmup[1][1], 512)
+        self.assertFalse(str(warmup[2]).startswith("cuda"))
+
+    def _assert_load_breakdown(self, runtime: zimage_turbo.Runtime) -> None:
+        load = runtime.last_stats["load_seconds"]
+        for name in zimage_turbo.LOAD_STAGE_NAMES:
+            self.assertIn(name, load)
+            self.assertGreaterEqual(load[name], 0.0)
+        self.assertIn("snapshot", load)
+        self.assertIn("assemble", load)
+        accounted = sum(load[name] for name in zimage_turbo.LOAD_STAGE_NAMES)
+        self.assertGreaterEqual(load["total"], accounted)
+        self.assertEqual(runtime.last_stats["first_encode_seconds"], runtime.first_encode_seconds)
+        self.assertGreaterEqual(runtime.first_encode_seconds, 0.0)
+
+    def test_bf16_encoder_is_cast_once_and_timed(self) -> None:
+        events: list = []
+        pipe = FakePipe(events)
+        FakeDiffusers.calls = []
+        FakeDiffusers.events = events
+        FakeDiffusers.encoder_dtype_override = "bf16"
+        previous = os.environ.pop("HAI_ZIMAGE_ENCODER_MODE", None)
+
+        def from_pretrained(snapshot: str, **kwargs: object) -> FakePipe:
+            pipe.text_encoder = kwargs["text_encoder"]
+            pipe.vae = kwargs["vae"]
+            return pipe
+
+        FakeDiffusers.ZImagePipeline.from_pretrained = staticmethod(from_pretrained)
+        runtime = zimage_turbo.Runtime()
+        try:
+            runtime.load(torch_module=FakeTorch(events), diffusers_module=FakeDiffusers, hub_module=FakeHub())
+        finally:
+            FakeDiffusers.encoder_dtype_override = None
+            if previous is None:
+                os.environ.pop("HAI_ZIMAGE_ENCODER_MODE", None)
+            else:
+                os.environ["HAI_ZIMAGE_ENCODER_MODE"] = previous
+        self.assertEqual(pipe.text_encoder.dtype, "fp32")
+        self.assertFalse(str(pipe.text_encoder.device).startswith("cuda"))
+        cast_moves = [
+            item
+            for item in events
+            if item[:2] == ("text_encoder", "to") and item[3] == "fp32"
+        ]
+        self.assertEqual(len(cast_moves), 1)
+        self.assertGreaterEqual(runtime.load_seconds["fp32_cast"], 0.0)
+        self._assert_load_breakdown(runtime)
+
+    def test_warmup_is_the_first_encode_and_jobs_keep_the_breakdown(self) -> None:
+        events: list = []
+        pipe = FakePipe(events)
+        FakeDiffusers.calls = []
+        FakeDiffusers.events = events
+        FakeDiffusers.encoder_dtype_override = None
+        previous = os.environ.pop("HAI_ZIMAGE_ENCODER_MODE", None)
+
+        def from_pretrained(snapshot: str, **kwargs: object) -> FakePipe:
+            pipe.text_encoder = kwargs["text_encoder"]
+            pipe.vae = kwargs["vae"]
+            return pipe
+
+        FakeDiffusers.ZImagePipeline.from_pretrained = staticmethod(from_pretrained)
+        runtime = zimage_turbo.Runtime()
+        torch_mod = FakeTorch(events)
+        try:
+            runtime.load(torch_module=torch_mod, diffusers_module=FakeDiffusers, hub_module=FakeHub())
+            first = runtime.first_encode_seconds
+            load_seconds = dict(runtime.load_seconds)
+            forwards = [item for item in events if item[0] == "encoder_forward"]
+            self.assertEqual(len(forwards), 1)
+            runtime.generate("a hangar sign that reads ASTRA", torch_module=torch_mod)
+            self.assertEqual(runtime.first_encode_seconds, first)
+            self.assertEqual(runtime.last_stats["load_seconds"], load_seconds)
+            self.assertEqual(runtime.last_stats["encoder_mode"], "cpu")
+            self.assertIn("encode_seconds", runtime.last_stats)
+            forwards = [item for item in events if item[0] == "encoder_forward"]
+            self.assertEqual(len(forwards), 2)
+            recasts = [
+                item
+                for item in events
+                if item[:2] == ("text_encoder", "to") and item[3] == "fp32"
+            ]
+            self.assertEqual(recasts, [])
+            runtime.generate("second prompt", torch_module=torch_mod)
+            self.assertEqual(runtime.first_encode_seconds, first)
+            self.assertEqual(len([item for item in events if item[0] == "encoder_forward"]), 3)
+        finally:
+            if previous is None:
+                os.environ.pop("HAI_ZIMAGE_ENCODER_MODE", None)
+            else:
+                os.environ["HAI_ZIMAGE_ENCODER_MODE"] = previous
+
+    def test_swap_load_does_not_warm_the_encoder_on_gpu(self) -> None:
+        events: list = []
+        pipe = FakePipe(events)
+        FakeDiffusers.calls = []
+        FakeDiffusers.events = events
+        FakeDiffusers.encoder_dtype_override = None
+        previous = os.environ.get("HAI_ZIMAGE_ENCODER_MODE")
+        os.environ["HAI_ZIMAGE_ENCODER_MODE"] = "swap"
+
+        def from_pretrained(snapshot: str, **kwargs: object) -> FakePipe:
+            pipe.text_encoder = kwargs["text_encoder"]
+            pipe.vae = kwargs["vae"]
+            return pipe
+
+        FakeDiffusers.ZImagePipeline.from_pretrained = staticmethod(from_pretrained)
+        runtime = zimage_turbo.Runtime()
+        try:
+            runtime.load(torch_module=FakeTorch(events), diffusers_module=FakeDiffusers, hub_module=FakeHub())
+            self.assertIsNone(runtime.first_encode_seconds)
+            self.assertNotIn("first_encode_seconds", runtime.last_stats)
+            self.assertFalse(any(item[0] == "encoder_forward" for item in events))
+            self.assertIn("gguf_transformer", runtime.load_seconds)
+        finally:
+            if previous is None:
+                os.environ.pop("HAI_ZIMAGE_ENCODER_MODE", None)
+            else:
+                os.environ["HAI_ZIMAGE_ENCODER_MODE"] = previous
 
     def _resident_pipe(self, events: list) -> FakePipe:
         pipe = FakePipe(events)
@@ -514,6 +700,99 @@ class RoutingTests(unittest.TestCase):
         self.assertTrue(
             image_routing.node_advertises_model(sdxl_only, "juggernautXL_ragnarokBy", "sdxl")
         )
+
+
+def _import_client():
+    """Import the worker once. A wallet file keeps it from prompting."""
+    if "client" in sys.modules:
+        return sys.modules["client"]
+    import importlib.machinery
+    import tempfile
+    import types
+
+    home = Path(tempfile.mkdtemp())
+    os.environ["HAVNAI_HOME"] = str(home)
+    (home / ".env").write_text("WALLET=0x" + "1" * 40 + "\n", encoding="utf-8")
+    if "onnxruntime" not in sys.modules:
+        ort = types.ModuleType("onnxruntime")
+        ort.__spec__ = importlib.machinery.ModuleSpec("onnxruntime", loader=None)
+        sys.modules["onnxruntime"] = ort
+    import client as client_module
+
+    return client_module
+
+
+class WorkerPreloadTests(unittest.TestCase):
+    def _double(self, calls: list, preload: bool):
+        return type("ZImage", (), {
+            "preload_enabled": staticmethod(lambda: preload),
+            "should_release_on_switch": staticmethod(lambda keep: keep != "zimage"),
+            "unload": staticmethod(lambda: calls.append("unload")),
+            "load": staticmethod(lambda: calls.append("load")),
+            "enabled": staticmethod(lambda: True),
+            "is_zimage_entry": staticmethod(lambda entry: False),
+        })()
+
+    def test_preload_owns_the_slot_and_does_not_also_load_sdxl(self) -> None:
+        from unittest.mock import patch
+
+        client_module = _import_client()
+        calls: list = []
+        selected: list = []
+        previous_flag = client_module.PRELOAD_IMAGE_ON_STARTUP
+        previous_size = client_module.IMAGE_PIPELINE_CACHE_SIZE
+        client_module.PRELOAD_IMAGE_ON_STARTUP = True
+        client_module.IMAGE_PIPELINE_CACHE_SIZE = 1
+        client_module._IMAGE_PIPELINE_CACHE["sdxl"] = object()
+        try:
+            with patch.object(client_module, "_zimage", return_value=self._double(calls, True)), patch.object(
+                client_module, "_select_preload_image_entry", side_effect=lambda: selected.append("select")
+            ):
+                client_module.preload_image_pipeline_on_startup()
+        finally:
+            client_module.PRELOAD_IMAGE_ON_STARTUP = previous_flag
+            client_module.IMAGE_PIPELINE_CACHE_SIZE = previous_size
+            client_module._IMAGE_PIPELINE_CACHE.clear()
+        self.assertEqual(calls, ["load"])
+        self.assertEqual(selected, [])
+        self.assertFalse(client_module._IMAGE_PIPELINE_CACHE)
+
+    def test_preload_flag_off_keeps_the_sdxl_startup_path(self) -> None:
+        from unittest.mock import patch
+
+        client_module = _import_client()
+        calls: list = []
+        selected: list = []
+        previous_flag = client_module.PRELOAD_IMAGE_ON_STARTUP
+        previous_size = client_module.IMAGE_PIPELINE_CACHE_SIZE
+        client_module.PRELOAD_IMAGE_ON_STARTUP = True
+        client_module.IMAGE_PIPELINE_CACHE_SIZE = 1
+        try:
+            with patch.object(client_module, "_zimage", return_value=self._double(calls, False)), patch.object(
+                client_module, "_select_preload_image_entry", side_effect=lambda: selected.append("select") or None
+            ):
+                client_module.preload_image_pipeline_on_startup()
+        finally:
+            client_module.PRELOAD_IMAGE_ON_STARTUP = previous_flag
+            client_module.IMAGE_PIPELINE_CACHE_SIZE = previous_size
+        self.assertEqual(calls, [])
+        self.assertEqual(selected, ["select"])
+
+    def test_cache_size_zero_skips_zimage_preload(self) -> None:
+        from unittest.mock import patch
+
+        client_module = _import_client()
+        calls: list = []
+        previous_size = client_module.IMAGE_PIPELINE_CACHE_SIZE
+        client_module.IMAGE_PIPELINE_CACHE_SIZE = 0
+        try:
+            with patch.object(client_module, "_zimage", return_value=self._double(calls, True)), patch.object(
+                client_module, "_select_preload_image_entry", side_effect=AssertionError("select")
+            ):
+                client_module.preload_image_pipeline_on_startup()
+        finally:
+            client_module.IMAGE_PIPELINE_CACHE_SIZE = previous_size
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

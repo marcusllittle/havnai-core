@@ -28,6 +28,36 @@
       }
     },
     {
+      "name": "zimage-turbo",
+      "pipeline": "zimage-turbo",
+      "path": "",
+      "type": "diffusers",
+      "tags": [
+        "zimage",
+        "turbo",
+        "photoreal"
+      ],
+      "task_type": "IMAGE_GEN",
+      "weight": 1,
+      "reward_weight": 1,
+      "strengths": "8-step Turbo at 1024. Q5_K_M transformer stays on the GPU; the text encoder is only resident while the prompt is encoded.",
+      "weaknesses": "Opt-in. A node serves it only when HAI_ZIMAGE_TURBO=1. Guidance is 0, so negative prompts are ignored.",
+      "steps": 9,
+      "guidance": 0.0,
+      "width": 1024,
+      "height": 1024,
+      "negative_prompt_default": "",
+      "license_status": "apache-2.0",
+      "model_family": "zimage",
+      "source": {
+        "kind": "hf",
+        "repo_id": "unsloth/Z-Image-Turbo-GGUF",
+        "filename": "z-image-turbo-Q5_K_M.gguf",
+        "license": "apache-2.0",
+        "notes": "Q5_K_M transformer. Text encoder, VAE, and scheduler come from Tongyi-MAI/Z-Image-Turbo. Set HAI_ZIMAGE_TURBO=1 on the node."
+      }
+    },
+    {
       "name": "epicrealismXL_vxviiCrystalclear",
       "pipeline": "sdxl",
       "path": "/mnt/d/havnai-storage/models/creator/epicrealismXL_vxviiCrystalclear.safetensors",

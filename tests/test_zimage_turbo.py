@@ -125,7 +125,9 @@ class FakePipe:
         self.events = events
         self.text_encoder = FakeModule("text_encoder", events)
         self.transformer = FakeModule("transformer", events)
+        self.transformer.in_channels = 16
         self.vae = FakeModule("vae", events)
+        self.vae_scale_factor = 8
         self.tokenizer = FakeTokenizer(events)
         self.hooks_removed = False
 
@@ -164,6 +166,17 @@ class FakePipe:
                 getattr((kwargs.get("prompt_embeds") or [None])[0], "dtype", None),
             )
         )
+        latents = kwargs.get("latents")
+        self.events.append(
+            (
+                "latents",
+                getattr(latents, "shape", None),
+                str(getattr(latents, "device", None)),
+                getattr(latents, "dtype", None),
+                str(getattr(self, "_execution_device", None)),
+                str(getattr((kwargs.get("prompt_embeds") or [None])[0], "device", None)),
+            )
+        )
         return type("Result", (), {"images": ["image"]})()
 
 
@@ -191,6 +204,21 @@ class FakeTorch:
 
     def Generator(self, device: object) -> FakeGenerator:
         return FakeGenerator(device)
+
+    def randn(self, shape, generator=None, device=None, dtype=None, **kwargs):
+        self.events.append(
+            (
+                "randn",
+                tuple(shape),
+                str(device),
+                dtype,
+                getattr(generator, "seed", None),
+                str(getattr(generator, "device", None)),
+            )
+        )
+        tensor = FakeTensor(str(device) if device is not None else "cpu", dtype)
+        tensor.shape = tuple(shape)
+        return tensor
 
 
 class FakeQuant:
@@ -550,6 +578,52 @@ class RuntimeTests(unittest.TestCase):
             self.assertFalse(denoise[5])
             self.assertEqual(denoise[-1], "bf16")
             self.assertEqual(runtime.last_stats["encoder_mode"], "cpu")
+        finally:
+            if previous is None:
+                os.environ.pop("HAI_ZIMAGE_ENCODER_MODE", None)
+            else:
+                os.environ["HAI_ZIMAGE_ENCODER_MODE"] = previous
+
+    def test_cpu_execution_device_samples_latents_on_cuda(self) -> None:
+        """Diffusers 0.39 reports pipeline.device from the CPU text encoder."""
+        previous = os.environ.pop("HAI_ZIMAGE_ENCODER_MODE", None)
+
+        class SplitPipe(FakePipe):
+            @property
+            def _execution_device(self):
+                return "cpu"
+
+        try:
+            events: list = []
+            pipe = SplitPipe(events)
+            pipe.transformer.device = "cuda:0"
+            pipe.vae.device = "cuda:0"
+            pipe.text_encoder.device = "cpu"
+            pipe.text_encoder.dtype = "fp32"
+            runtime = zimage_turbo.Runtime()
+            runtime.pipe = pipe
+            runtime.generate(
+                "a hangar sign that reads ASTRA",
+                seed=7,
+                width=1024,
+                height=1024,
+                torch_module=FakeTorch(events),
+            )
+            self.assertTrue(str(pipe._execution_device).startswith("cuda"))
+            randn = next(item for item in events if item[0] == "randn")
+            self.assertEqual(randn[1], (1, 16, 128, 128))
+            self.assertEqual(randn[2], "cuda:0")
+            self.assertEqual(randn[3], "fp32")
+            self.assertEqual(randn[4], 7)
+            self.assertTrue(randn[5].startswith("cuda"))
+            latents = next(item for item in events if item[0] == "latents")
+            self.assertEqual(latents[1], (1, 16, 128, 128))
+            self.assertTrue(latents[2].startswith("cuda"))
+            self.assertEqual(latents[3], "fp32")
+            self.assertTrue(latents[4].startswith("cuda"))
+            self.assertTrue(latents[5].startswith("cuda"))
+            denoise = next(item for item in events if item[0] == "denoise")
+            self.assertEqual(denoise[-1], "bf16")
         finally:
             if previous is None:
                 os.environ.pop("HAI_ZIMAGE_ENCODER_MODE", None)

@@ -27,7 +27,7 @@ mode, included in ``load_total`` and kept separate from later
 ``encode_seconds``. ``HAI_ZIMAGE_PRELOAD=1`` runs this load at worker startup
 when ``HAI_ZIMAGE_TURBO=1``.
 
-Requires diffusers>=0.43.0, gguf>=0.10.0, and a transformers build with
+Requires diffusers>=0.39.0, gguf>=0.10.0, and a transformers build with
 Qwen3Model, on top of the node's CUDA torch.
 """
 

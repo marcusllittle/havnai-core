@@ -10,7 +10,7 @@ onnxruntime
 torch
 diffusers>=0.32.0
 transformers>=4.36.0
-# Z-Image-Turbo (HAI_ZIMAGE_TURBO=1) needs diffusers>=0.43.0, gguf>=0.10.0,
+# Z-Image-Turbo (HAI_ZIMAGE_TURBO=1) needs diffusers>=0.39.0, gguf>=0.10.0,
 # and a transformers build that provides Qwen3Model. SDXL nodes can leave
 # those unpinned; the flag stays off until they are installed.
 accelerate>=0.24.0

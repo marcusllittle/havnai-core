@@ -326,7 +326,14 @@ class Runtime:
         prompt_embeds = [
             _move_embed(item, device, getattr(torch_mod, "bfloat16", None)) for item in embeds
         ]
+        # 0.39's pipeline.device is the alphabetically first module, the CPU text
+        # encoder, and __call__ builds latents on that device. A CUDA generator
+        # then raises. Sample float32 latents on CUDA and point _execution_device
+        # at the same device so the denoise loop and VAE decode stay there.
+        # 0.43 already prefers the accelerator; pinning it keeps both versions aligned.
         generator = torch_mod.Generator(device=device).manual_seed(int(seed))
+        latents = sample_latents(torch_mod, pipe, height, width, len(prompt_embeds), generator, device)
+        pin_execution_device(pipe, device)
         denoise_started = time.perf_counter()
         result = pipe(
             prompt=None,
@@ -336,6 +343,7 @@ class Runtime:
             height=int(height),
             width=int(width),
             generator=generator,
+            latents=latents,
         )
         denoise_seconds = time.perf_counter() - denoise_started
         peak_mib, warning = _vram_guard(torch_mod, mode)
@@ -400,8 +408,8 @@ def generate_job(prompt: str, **kwargs: Any) -> Any:
 def encode_prompt_unpadded(pipe: Any, prompt: str, device: Any) -> List[Any]:
     """Match ZImagePipeline._encode_prompt without padding the prompt out to 512.
 
-    Diffusers 0.43 applies the Qwen chat template, runs the text encoder, and
-    keeps hidden_states[-2]. It then drops padding with the attention mask.
+    Diffusers 0.39 and 0.43 apply the Qwen chat template, run the text encoder,
+    and keep hidden_states[-2]. They then drop padding with the attention mask.
     Qwen3 is causal and right-padded, so the real tokens match the unpadded
     forward. Padding to 512 is what made a 43-token prompt take 42 s in bf16.
     """
@@ -543,6 +551,67 @@ def _load_vae(diffusers_mod: Any, snapshot: str, dtype: Any) -> Any:
     )
 
 
+def latent_shape(pipe: Any, height: int, width: int, batch_size: int = 1) -> tuple:
+    """Match ZImagePipeline.prepare_latents in diffusers 0.39 and 0.43.
+
+    The initial noise is not scaled. ``scaling_factor`` and ``shift_factor``
+    are applied later, when latents are decoded by the VAE. ``__call__`` asks
+    for float32 latents.
+    """
+    scale = int(getattr(pipe, "vae_scale_factor", 8) or 8)
+    divisor = scale * 2
+    latent_height = 2 * (int(height) // divisor)
+    latent_width = 2 * (int(width) // divisor)
+    transformer = getattr(pipe, "transformer", None)
+    channels = getattr(transformer, "in_channels", None)
+    if not channels:
+        raise RuntimeError("Z-Image transformer is missing in_channels")
+    return (int(batch_size), int(channels), latent_height, latent_width)
+
+
+def sample_latents(
+    torch_mod: Any,
+    pipe: Any,
+    height: int,
+    width: int,
+    batch_size: int,
+    generator: Any,
+    device: Any,
+) -> Any:
+    shape = latent_shape(pipe, height, width, batch_size)
+    return torch_mod.randn(
+        shape,
+        generator=generator,
+        device=device,
+        dtype=getattr(torch_mod, "float32", None),
+    )
+
+
+def _bound_execution_device(self: Any) -> Any:
+    return self._zimage_execution_device
+
+
+def pin_execution_device(pipe: Any, device: Any) -> None:
+    """Make ``__call__`` use ``device`` when the pipeline would otherwise report CPU.
+
+    ``_execution_device`` is a property on ``DiffusionPipeline``, so assigning
+    it on the instance does not stick. A one-off subclass overrides that
+    property for this pipe only and leaves the diffusers class alone.
+    """
+    pipe._zimage_execution_device = device
+    if getattr(pipe.__class__, "_zimage_device_pinned", False):
+        return
+    pinned = type(
+        "ZImageCudaExecution",
+        (pipe.__class__,),
+        {
+            "_execution_device": property(_bound_execution_device),
+            "_zimage_device_pinned": True,
+        },
+    )
+    pipe.__class__ = pinned
+
+
 def _move_module(module: Any, device: Any, dtype: Any = None) -> None:
     if module is None or not hasattr(module, "to"):
         return
@@ -649,7 +718,7 @@ def _require_diffusers() -> Any:
         import diffusers
     except ImportError as exc:
         raise RuntimeError(
-            "Z-Image-Turbo needs diffusers>=0.43.0 and gguf. "
+            "Z-Image-Turbo needs diffusers>=0.39.0 and gguf. "
             "Install them before setting HAI_ZIMAGE_TURBO=1."
         ) from exc
     return diffusers

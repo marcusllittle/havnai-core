@@ -23,7 +23,7 @@ import urllib.parse
 from pathlib import Path
 import atexit
 import signal
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import base64
 from collections import OrderedDict
 
@@ -2196,7 +2196,7 @@ def _run_wan22_task(
     reward_weight: float,
     task: Dict[str, Any],
 ) -> Tuple[Dict[str, Any], int, Optional[str]]:
-    """Wan 2.2 I2V through diffusers. LTX 0.9.8 stays on its own runner."""
+    """Wan 2.2 I2V. ComfyUI is the default; diffusers is HAI_WAN22_BACKEND=diffusers."""
     global utilization_hint
     if not _wan22().enabled():
         return (
@@ -2240,6 +2240,7 @@ def _run_wan22_task(
             outputs_dir=OUTPUTS_DIR,
             read_gpu_stats=read_gpu_stats,
             utilization_hint=utilization_hint,
+            progress_fn=lambda progress, stage: _report_task_progress(task, progress, stage),
         )
     except Exception as exc:
         return (
@@ -3143,7 +3144,15 @@ def execute_task(task: Dict[str, Any]) -> None:
         elif task_type == "VIDEO_GEN":
             metrics, util, video_b64 = _run_ltx2_task(task_id, entry, reward_weight, task)
         elif task_type == "LTX_VIDEO_GEN" and _wan22().is_wan22_entry(entry):
-            metrics, util, video_b64 = _run_wan22_task(task_id, entry, reward_weight, task)
+            metrics, util, video_b64 = _call_with_exclusive_gpu(
+                task, task_id, model_name, reward_weight,
+                lambda: _run_wan22_task(task_id, entry, reward_weight, task),
+            )
+        elif task_type == "LTX_VIDEO_GEN" and _is_wangp_entry(entry):
+            metrics, util, video_b64 = _call_with_exclusive_gpu(
+                task, task_id, model_name, reward_weight,
+                lambda: _run_ltx_video_task(task_id, entry, reward_weight, task),
+            )
         elif task_type == "LTX_VIDEO_GEN":
             metrics, util, video_b64 = _run_ltx_video_task(task_id, entry, reward_weight, task)
         elif task_type == "ANIMATEDIFF":
@@ -3391,10 +3400,60 @@ def _submit_isolated_terminal(task: Dict[str, Any], status: str, error: str) -> 
         log(f"Failed to settle isolated task {str(task.get('task_id'))[:8]}: {exc}", prefix="🚫")
 
 
+def _begin_exclusive_gpu(task: Dict[str, Any], task_id: str) -> Any:
+    """Drop Z-Image and ACE-Step unless the parent process already did."""
+    if task.get("_exclusive_gpu"):
+        return None
+    from engines.gpu_handoff import release_for_video
+
+    log(f"Freeing the GPU for {task_id[:8]}", prefix="🎮", task_id=task_id)
+    return release_for_video(log_fn=lambda message: log(message, prefix="🎮", task_id=task_id))
+
+
+def _end_exclusive_gpu(state: Any, task_id: str) -> None:
+    if state is None:
+        return
+    from engines.gpu_handoff import restore_after_video
+
+    restore_after_video(state, log_fn=lambda message: log(message, prefix="🎮", task_id=task_id))
+
+
+def _call_with_exclusive_gpu(task: Dict[str, Any], task_id: str, model_name: str, reward_weight: float, run: Callable[..., Any]) -> Any:
+    try:
+        state = _begin_exclusive_gpu(task, task_id)
+    except Exception as exc:
+        return (
+            {
+                "status": "failed",
+                "task_type": "video_gen",
+                "model_name": model_name,
+                "reward_weight": reward_weight,
+                "error": str(exc),
+                "error_code": "gpu_busy",
+            },
+            utilization_hint,
+            None,
+        )
+    try:
+        return run()
+    finally:
+        _end_exclusive_gpu(state, task_id)
+
+
 def execute_video_task_isolated(task: Dict[str, Any]) -> None:
     """Run a v1 video job in a killable process while this agent stays online."""
     task_id = str(task.get("task_id") or "unknown")
     # The child cannot release GPU weights retained by the polling parent.
+    # Wan peaks around 11 GB and LTX-2.3 around 4.7 GB, so Z-Image and
+    # ACE-Step have to leave the card before the child starts.
+    task = dict(task)
+    try:
+        handoff = _begin_exclusive_gpu(task, task_id)
+    except Exception as exc:
+        log(f"GPU handoff failed for {task_id[:8]}: {exc}", prefix="🚫", task_id=task_id)
+        _submit_isolated_terminal(task, "failed", str(exc))
+        return
+    task["_exclusive_gpu"] = True
     _retire_image_pipelines()
     _switch_video_cache(None)
     task_dir = HAVNAI_HOME / "tasks"
@@ -3405,16 +3464,16 @@ def execute_video_task_isolated(task: Dict[str, Any]) -> None:
     temporary.replace(task_path)
 
     python_bin = str(os.getenv("HAVNAI_LTX_VIDEO_PYTHON") or sys.executable)
-    process = subprocess.Popen(
-        [python_bin, "-m", "client.task_executor", str(task_path)],
-        cwd=str(REPO_ROOT),
-        start_new_session=True,
-    )
     timeout = min(VIDEO_TASK_TIMEOUT_MAX, max(1, int(task.get("timeout") or 600)))
     deadline = time.monotonic() + timeout
     terminal_status: Optional[str] = None
     terminal_error = ""
     try:
+        process = subprocess.Popen(
+            [python_bin, "-m", "client.task_executor", str(task_path)],
+            cwd=str(REPO_ROOT),
+            start_new_session=True,
+        )
         while process.poll() is None:
             if time.monotonic() >= deadline:
                 terminal_status = "failed"
@@ -3440,6 +3499,7 @@ def execute_video_task_isolated(task: Dict[str, Any]) -> None:
         elif process.returncode:
             _submit_isolated_terminal(task, "failed", f"executor_exit_{process.returncode}")
     finally:
+        _end_exclusive_gpu(handoff, task_id)
         task_path.unlink(missing_ok=True)
 
 

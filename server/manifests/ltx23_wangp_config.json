@@ -10,8 +10,8 @@
   "defaults": {
     "steps": 8,
     "guidance": 1.0,
-    "resolution": "1280x720",
-    "frames": 97,
+    "resolution": "448x832",
+    "frames": 217,
     "fps": 24,
     "timeout_seconds": 3600
   }

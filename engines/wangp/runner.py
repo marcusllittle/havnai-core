@@ -173,6 +173,32 @@ def _video_stream_info(path: Path) -> Dict[str, Any]:
     }
 
 
+def ltx23_sample(task: Dict[str, Any]) -> Dict[str, Any]:
+    """The measured 3060 clip, unless the job names a different count or size."""
+    fps = max(8, min(30, int(task.get("fps") or 24)))
+    requested_frames = max(9, min(257, int(task.get("frames") or 217)))
+    frames = max(9, ((requested_frames - 1) // 8) * 8 + 1)
+    width = max(256, int(task.get("width") or 448))
+    height = max(256, int(task.get("height") or 832))
+    if (width, height) == (1280, 704):
+        resolution = "1280x720"
+    elif (width, height) == (704, 1280):
+        resolution = "720x1280"
+    else:
+        resolution = f"{width}x{height}"
+    return {
+        "fps": fps,
+        "frames": frames,
+        "width": width,
+        "height": height,
+        "resolution": resolution,
+        "steps": max(1, min(16, int(task.get("steps") or 8))),
+        "guidance": max(0.0, min(10.0, float(task.get("guidance") or 1.0))),
+        "audio": task.get("audio") is not False,
+        "duration_seconds": round((frames - 1) / fps, 3),
+    }
+
+
 def run_wangp_ltx23(
     task: Dict[str, Any],
     *,
@@ -203,17 +229,12 @@ def run_wangp_ltx23(
         str(task.get("_server_base") or ""),
     )
 
-    fps = max(8, min(30, int(task.get("fps") or 24)))
-    requested_frames = max(9, min(257, int(task.get("frames") or 97)))
-    frames = max(9, ((requested_frames - 1) // 8) * 8 + 1)
-    width = max(256, int(task.get("width") or 1280))
-    height = max(256, int(task.get("height") or 704))
-    if (width, height) == (1280, 704):
-        resolution = "1280x720"
-    elif (width, height) == (704, 1280):
-        resolution = "720x1280"
-    else:
-        resolution = f"{width}x{height}"
+    sample = ltx23_sample(task)
+    fps = sample["fps"]
+    frames = sample["frames"]
+    width = sample["width"]
+    height = sample["height"]
+    resolution = sample["resolution"]
     timeout = max(60, min(7200, int(task.get("timeout") or 3600)))
     seed = int(task.get("seed") or 0)
     if seed < 0:
@@ -235,13 +256,16 @@ def run_wangp_ltx23(
         "negative_prompt": str(task.get("negative_prompt") or "").strip(),
         "source_image": str(source_path) if source_path else None,
         "resolution": resolution,
-        "steps": max(1, min(16, int(task.get("steps") or 8))),
-        "guidance": max(0.0, min(10.0, float(task.get("guidance") or 1.0))),
+        "steps": sample["steps"],
+        "guidance": sample["guidance"],
         "frames": frames,
         "fps": fps,
         "duration_seconds": round((frames - 1) / fps, 3),
         "source_strength": max(0.1, min(1.0, float(source_strength_raw))),
         "seed": seed,
+        # LTX-2.3 distilled writes the soundtrack into the same MP4.
+        # The worker leaves WanGP's audio settings on unless this is false.
+        "audio": task.get("audio") is not False,
     }
     work_dir.mkdir(parents=True, exist_ok=True)
     worker_output_dir.mkdir(parents=True, exist_ok=True)

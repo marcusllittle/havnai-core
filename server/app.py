@@ -262,6 +262,102 @@ def _is_ltx_video_config(config: Optional[Dict[str, Any]]) -> bool:
     family = str(config.get("model_family") or "").strip().lower()
     return pipeline in LTX_VIDEO_PIPELINES or family in LTX_VIDEO_PIPELINES
 
+
+WAN22_PIPELINES = {"wan22-i2v", "wan22_i2v"}
+_WAN22_JOB_KEYS = (
+    "flow_shift",
+    "boundary_ratio",
+    "high_noise_steps",
+    "guidance_2",
+    "lora_scale_high",
+    "lora_scale_low",
+    "offload",
+    "allow_720p",
+    "scheduler",
+)
+
+
+def _is_wan22_config(config: Optional[Dict[str, Any]]) -> bool:
+    """Wan 2.2 I2V rides the LTX_VIDEO_GEN assignment path and branches on the node."""
+    config = config or {}
+    pipeline = str(config.get("pipeline") or "").strip().lower()
+    family = str(config.get("model_family") or "").strip().lower()
+    return pipeline in WAN22_PIPELINES or family in {"wan22_i2v", "wan22-i2v"}
+
+
+def _wan_motion_preset_name(payload: Dict[str, Any]) -> str:
+    return str(payload.get("motion_preset") or payload.get("motionPreset") or "").strip()
+
+
+def _wan_preset_ids(config: Dict[str, Any]) -> List[str]:
+    names: List[str] = []
+    for item in config.get("motion_presets") or []:
+        if isinstance(item, dict) and item.get("id"):
+            names.append(str(item["id"]))
+        elif isinstance(item, str) and item.strip():
+            names.append(item.strip())
+    return names
+
+
+def _reject_unknown_wan_preset(config: Dict[str, Any], payload: Dict[str, Any]) -> Any:
+    name = _wan_motion_preset_name(payload)
+    if not name:
+        return None
+    known = _wan_preset_ids(config)
+    if name not in known:
+        return jsonify({
+            "error": "invalid_motion_preset",
+            "motion_preset": name,
+            "presets": known,
+        }), 400
+    return None
+
+
+def _fill_wan_video_payload(payload: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
+    """Copy missing Wan defaults. A preset or a duration the caller sent stays in charge."""
+    merged = dict(payload)
+    defaults = dict(config.get("video_defaults") or {})
+    for key in ("steps", "guidance", "fps"):
+        if merged.get(key) in (None, "") and defaults.get(key) not in (None, ""):
+            merged[key] = defaults[key]
+    has_frame = merged.get("width") not in (None, "") or merged.get("height") not in (None, "")
+    has_preset = any(merged.get(key) not in (None, "") for key in ("preset", "aspect_ratio", "aspect"))
+    if not has_frame and not has_preset:
+        for key in ("width", "height"):
+            if defaults.get(key) not in (None, ""):
+                merged[key] = defaults[key]
+    has_duration = any(merged.get(key) not in (None, "") for key in ("frames", "duration_seconds", "duration"))
+    if not has_duration and defaults.get("frames") not in (None, ""):
+        merged["frames"] = defaults["frames"]
+    return merged
+
+
+def _wan_timeout_seconds(config: Dict[str, Any], payload: Dict[str, Any]) -> int:
+    raw = payload.get("timeout")
+    if raw in (None, ""):
+        raw = config.get("timeout_seconds") or 1800
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = 1800
+    return min(7200, max(600, value))
+
+
+def _apply_wan_job_fields(settings: Dict[str, Any], config: Dict[str, Any], payload: Dict[str, Any]) -> None:
+    settings["timeout"] = _wan_timeout_seconds(config, payload)
+    settings["timeout_source"] = "wan22"
+    settings["model_family"] = "wan22_i2v"
+    preset_name = _wan_motion_preset_name(payload)
+    if preset_name:
+        settings["motion_preset"] = preset_name
+    for key in _WAN22_JOB_KEYS:
+        if payload.get(key) not in (None, ""):
+            settings[key] = payload.get(key)
+        elif key in {"flow_shift", "scheduler"}:
+            default_value = (config.get("video_defaults") or {}).get(key)
+            if default_value not in (None, ""):
+                settings[key] = default_value
+
 # ---------------------------------------------------------------------------
 # GPU profile presets – select via HAVNAI_GPU_PROFILE env var.
 # "fast_3060" is tuned for RTX 3060 (12 GB); "quality" restores the old
@@ -1391,6 +1487,8 @@ def load_manifest() -> None:
             # How nodes obtain the weights; see _public_model_source().
             "source": entry.get("source") if isinstance(entry.get("source"), dict) else {},
         }
+        if entry.get("motion_presets"):
+            entry_data["motion_presets"] = entry["motion_presets"]
         if image_routing.is_zimage_pipeline(pipeline):
             for field in ("steps", "guidance", "width", "height", "sampler", "negative_prompt_default"):
                 if entry.get(field) not in (None, ""):
@@ -3321,6 +3419,7 @@ def submit_job() -> Any:
         ), 400
     is_ltx2 = model_name == "ltx2" or pipeline_name == "ltx2"
     is_ltx_video = _is_ltx_video_config(cfg)
+    is_wan22 = _is_wan22_config(cfg)
 
     # Special-case AnimateDiff video jobs with rich structured payload
     is_animatediff = model_name == "animatediff" or pipeline_name == "animatediff"
@@ -3333,7 +3432,12 @@ def submit_job() -> Any:
         or pipeline_name in {"wan_i2v", "wan-i2v", "wan22_i2v", "wan2.2-i2v"}
     )
 
-    if is_ltx_video:
+    if is_wan22:
+        preset_error = _reject_unknown_wan_preset(cfg, payload)
+        if preset_error:
+            return preset_error
+
+    if is_ltx_video or is_wan22:
         # Reject controls that neither the legacy runtime nor the WanGP adapter consumes.
         unsupported = [
             key
@@ -3352,14 +3456,26 @@ def submit_job() -> Any:
             return jsonify({"error": "unsupported_video_controls", "fields": unsupported}), 400
         prompt_text = enhanced_prompt
         prompt_lower = prompt_text.lower()
-        if prompt_text and "best quality" not in prompt_lower and "masterpiece" not in prompt_lower:
+        # Wan 2.2 was measured with the user's prompt. The SDXL quality
+        # suffix changes the motion, so it stays off for that model.
+        if (
+            not is_wan22
+            and prompt_text
+            and "best quality" not in prompt_lower
+            and "masterpiece" not in prompt_lower
+        ):
             prompt_text = f"{prompt_text}, {get_video_positive_suffix(model_name)}"
-        negative_prompt = _merge_negative_prompts(
-            str(payload.get("negative_prompt") or "").strip(),
-            get_video_negative(model_name),
-            NO_WATERMARK_NEGATIVE,
-            SFW_NEGATIVE_PROMPT if sfw_mode else "",
-        )
+        if is_wan22:
+            negative_prompt = str(payload.get("negative_prompt") or "").strip()
+            if sfw_mode:
+                negative_prompt = _merge_negative_prompts(negative_prompt, SFW_NEGATIVE_PROMPT)
+        else:
+            negative_prompt = _merge_negative_prompts(
+                str(payload.get("negative_prompt") or "").strip(),
+                get_video_negative(model_name),
+                NO_WATERMARK_NEGATIVE,
+                SFW_NEGATIVE_PROMPT if sfw_mode else "",
+            )
         seed = payload.get("seed")
         try:
             seed = int(seed) if seed is not None else None
@@ -3416,6 +3532,8 @@ def submit_job() -> Any:
         }
         if init_image:
             settings["init_image"] = init_image
+        if is_wan22:
+            _apply_wan_job_fields(settings, cfg, payload)
         job_data = json.dumps(settings)
         task_type = "LTX_VIDEO_GEN"
     elif is_wan_i2v:
@@ -3771,10 +3889,16 @@ def generate_video_job() -> Any:
     if not cfg:
         return jsonify({"error": "unknown model"}), 400
     is_ltx_video = _is_ltx_video_config(cfg)
+    is_wan22 = _is_wan22_config(cfg)
+    if is_wan22:
+        preset_error = _reject_unknown_wan_preset(cfg, payload)
+        if preset_error:
+            return preset_error
+        payload = _fill_wan_video_payload(payload, cfg)
 
     # Append positive quality suffix if prompt doesn't have quality tokens
     raw_prompt_flag = str(payload.get("raw_prompt", "")).lower() in ("1", "true", "yes")
-    if not raw_prompt_flag:
+    if not raw_prompt_flag and not is_wan22:
         prompt_lower = prompt_text.lower()
         if "best quality" not in prompt_lower and "masterpiece" not in prompt_lower:
             prompt_text = f"{prompt_text}, {get_video_positive_suffix(model_name)}"
@@ -3795,12 +3919,13 @@ def generate_video_job() -> Any:
         cfg,
         payload,
         RUNTIME_PROFILE,
-        "VIDEO_GEN",
+        "LTX_VIDEO_GEN" if (is_ltx_video or is_wan22) else "VIDEO_GEN",
     )
     fps = int(resolved_video_defaults["fps"])
     frames = int(resolved_video_defaults["frames"])
     duration = payload.get("duration")
-    if payload.get("frames") is None and duration is not None:
+    is_ltx23 = str(cfg.get("pipeline") or "").lower() == "ltx23_wangp"
+    if not is_wan22 and not is_ltx23 and payload.get("frames") is None and duration is not None:
         try:
             frames = _clamp(int(float(duration) * fps), 1, 16)
         except (TypeError, ValueError):
@@ -3808,11 +3933,18 @@ def generate_video_job() -> Any:
 
     settings: Dict[str, Any] = {
         "prompt": prompt_text,
-        "negative_prompt": _merge_negative_prompts(
-            str(payload.get("negative_prompt") or "").strip(),
-            get_video_negative(model_name),
-            NO_WATERMARK_NEGATIVE,
-            SFW_NEGATIVE_PROMPT if _is_truthy(payload.get("sfw_mode")) else "",
+        "negative_prompt": (
+            _merge_negative_prompts(
+                str(payload.get("negative_prompt") or "").strip(),
+                SFW_NEGATIVE_PROMPT if _is_truthy(payload.get("sfw_mode")) else "",
+            )
+            if is_wan22
+            else _merge_negative_prompts(
+                str(payload.get("negative_prompt") or "").strip(),
+                get_video_negative(model_name),
+                NO_WATERMARK_NEGATIVE,
+                SFW_NEGATIVE_PROMPT if _is_truthy(payload.get("sfw_mode")) else "",
+            )
         ),
         "seed": seed,
         "steps": int(resolved_video_defaults["steps"]),
@@ -3824,7 +3956,12 @@ def generate_video_job() -> Any:
         "defaults_source": {"video": video_default_sources},
         "defaults_confidence": {"video": _resolve_confidence(video_default_sources)},
     }
-    if is_ltx_video:
+    if is_wan22:
+        _apply_wan_job_fields(settings, cfg, payload)
+        settings["model_version"] = str(cfg.get("model_version") or "2.2-i2v-a14b-q4")
+        settings["pipeline_mode"] = str(cfg.get("default_pipeline_mode") or "i2v_4step")
+        settings["checkpoint_variant"] = str(cfg.get("checkpoint_variant") or "q4_k_m")
+    elif is_ltx_video:
         default_pipeline_mode = str(
             cfg.get("default_pipeline_mode")
             or (cfg.get("available_modes", ["distilled_fast"])[0] if cfg.get("available_modes") else "distilled_fast")
@@ -3856,7 +3993,7 @@ def generate_video_job() -> Any:
 
     selected_model_name = str(cfg.get("name") or model_name).strip()
     selected_model_key = selected_model_name.lower()
-    capacity_task_type = "LTX_VIDEO_GEN" if is_ltx_video else "VIDEO_GEN"
+    capacity_task_type = "LTX_VIDEO_GEN" if (is_ltx_video or is_wan22) else "VIDEO_GEN"
     if _eligible_online_node_count(selected_model_key, capacity_task_type) <= 0:
         return _no_capacity_response(selected_model_key, capacity_task_type)
 
@@ -4367,6 +4504,20 @@ def get_creator_tasks() -> Any:
                         "delivery_width",
                         "delivery_height",
                         "motion_strength",
+                        "motion_preset",
+                        "flow_shift",
+                        "boundary_ratio",
+                        "high_noise_steps",
+                        "guidance_2",
+                        "lora_scale_high",
+                        "lora_scale_low",
+                        "offload",
+                        "allow_720p",
+                        "scheduler",
+                        "model_family",
+                        "audio",
+                        "model_type",
+                        "chain",
                     ):
                         if key in ltx_settings and ltx_settings[key] is not None:
                             task_payload[key] = ltx_settings[key]
@@ -6324,11 +6475,23 @@ def _create_studio_job(payload, account_id, request_key, chain=None) -> Any:
     elif job_type in {"image_to_video", "text_to_video"}:
         if account_id and any(payload.get(key) for key in ("init_image", "init_image_url", "reference_image", "reference_image_url", "audio_input")):
             return jsonify({"error": "owned_video_asset_required"}), 400
+        video_payload = payload
+        if _is_wan22_config(cfg):
+            if job_type != "image_to_video":
+                return jsonify({"error": "mode_unsupported_by_model", "model": selected_model, "type": job_type}), 400
+            preset_error = _reject_unknown_wan_preset(cfg, payload)
+            if preset_error:
+                return preset_error
+            video_payload = _fill_wan_video_payload(payload, cfg)
         try:
+            video_profile = None
+            if _is_wan22_config(cfg) or str(cfg.get("pipeline") or "").lower() == "ltx23_wangp":
+                video_profile = cfg.get("video_defaults") or {}
             resolved_spec = platform_v1.resolve_video_spec(
-                payload,
+                video_payload,
                 model=selected_model,
                 backend=str(payload.get("backend") or "auto"),
+                profile=video_profile,
             )
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
@@ -6346,6 +6509,14 @@ def _create_studio_job(payload, account_id, request_key, chain=None) -> Any:
             "duration_seconds": resolved_spec["duration_seconds"],
             "timeout": resolved_spec["timeout_seconds"],
         })
+        if _is_wan22_config(cfg):
+            _apply_wan_job_fields(settings, cfg, payload)
+            settings["pipeline_mode"] = str(cfg.get("default_pipeline_mode") or "i2v_4step")
+            settings["checkpoint_variant"] = str(cfg.get("checkpoint_variant") or "q4_k_m")
+            settings["chain"] = False
+        elif str(cfg.get("pipeline") or "").lower() == "ltx23_wangp":
+            settings["audio"] = payload.get("audio") is not False
+            settings["model_type"] = "ltx2_22B_distilled_1_1"
         resolved_spec["parameters"].update({"prompt": prompt, "negative_prompt": settings["negative_prompt"],
             "sfw_mode": settings["sfw_mode"], "source_asset_id": source_asset_id or None, "audio_asset_id": audio_asset_id or None})
         pipeline = str(cfg.get("pipeline") or "").lower()
@@ -6561,6 +6732,10 @@ def v1_capabilities() -> Any:
             "max_batch_size": cfg.get("max_batch_size") or 1,
             "declared_capabilities": cfg.get("capabilities", []),
             "license_status": cfg.get("license_status", "unreviewed"),
+            "video_defaults": cfg.get("video_defaults") or None,
+            "credit_cost": credits.resolve_credit_cost(model_id, str(cfg.get("task_type") or "")),
+            "timeout_seconds": cfg.get("timeout_seconds") or None,
+            **({"motion_presets": cfg["motion_presets"]} if cfg.get("motion_presets") else {}),
         })
     video_available = VIDEO_V2_ENABLED and any(
         model["available"] and "image_to_video" in model["capabilities"]
@@ -7451,6 +7626,7 @@ def models_list() -> Any:
                 # Delivery descriptor: tells a node how to obtain the weights.
                 # Never exposes our local filesystem paths.
                 "source": _public_model_source(model_data),
+                **({"motion_presets": model_data["motion_presets"]} if model_data.get("motion_presets") else {}),
             }
         )
 

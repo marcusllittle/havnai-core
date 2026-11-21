@@ -1,0 +1,85 @@
+{
+  "family": "wan22_i2v",
+  "version": "2.2-i2v-a14b-q4",
+  "license": "apache-2.0",
+  "weights_root": "/mnt/d/models/wan22",
+  "diffusers_repo": "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
+  "files": {
+    "transformer_high": "diffusion_models/Wan2.2-I2V-A14B-HighNoise-Q4_K_M.gguf",
+    "transformer_low": "diffusion_models/Wan2.2-I2V-A14B-LowNoise-Q4_K_M.gguf",
+    "text_encoder": "text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+    "vae": "vae/wan_2.1_vae.safetensors",
+    "lora_high": "loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors",
+    "lora_low": "loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors"
+  },
+  "text_encoder_fallback": {
+    "repo_id": "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
+    "subfolder": "text_encoder",
+    "tokenizer_subfolder": "tokenizer",
+    "notes": "The Comfy-Org fp8 umT5 single file is tried first. If diffusers cannot load it, the node uses the umT5 weights in the diffusers repo. That is an extra download of several gigabytes and must stay off the GPU while an expert is resident."
+  },
+  "defaults": {
+    "width": 480,
+    "height": 832,
+    "frames": 129,
+    "fps": 16,
+    "steps": 4,
+    "guidance": 1.0,
+    "guidance_2": 1.0,
+    "flow_shift": 5.0,
+    "scheduler": "euler",
+    "denoising_timesteps": [1000, 750, 500, 250],
+    "high_noise_steps": 2,
+    "boundary_ratio": 0.625,
+    "lora_scale_high": 1.0,
+    "lora_scale_low": 1.0,
+    "strength": 1.0,
+    "dtype": "bfloat16",
+    "offload": "model",
+    "vae_tiling": true,
+    "vae_slicing": true,
+    "cpu_offload_threshold_gb": 16,
+    "safe_width": 480,
+    "safe_height": 832,
+    "safe_frames": 129,
+    "max_width": 832,
+    "max_height": 1280,
+    "max_frames": 129,
+    "max_frames_720p": 49,
+    "timeout_seconds": 3600,
+    "backend": "comfy",
+    "sampler": "euler",
+    "high_noise_end_step": 2
+  },
+  "negative_prompt": "jitter, flicker, frame stutter, warping, morphing, face distortion, deformed eyes, deformed mouth, asymmetric eyes, extra limbs, extra fingers, fused fingers, identity drift, melting skin, rubbery skin, plastic skin, blurry face, temporal inconsistency, camera shake, watermark, text, logo, subtitles, low quality",
+  "motion_presets": {
+    "hair_breeze": {
+      "label": "Hair in a breeze",
+      "prompt": "subtle portrait animation, hair gently lifting and settling in a soft breeze, face and identity stay steady, natural light"
+    },
+    "slow_head_turn": {
+      "label": "Slow head turn",
+      "prompt": "subtle portrait animation, a slow gentle head turn, shoulders stay relaxed, face remains recognizable, natural light"
+    },
+    "weight_shift": {
+      "label": "Weight shift",
+      "prompt": "subtle portrait animation, a slow shift of weight from one side to the other, relaxed posture, face stays steady, natural light"
+    },
+    "breathing_sway": {
+      "label": "Breathing and idle sway",
+      "prompt": "subtle portrait animation, quiet breathing and a small idle sway, calm expression, face and identity stay steady, natural light"
+    },
+    "blink_smile": {
+      "label": "Slow blink and soft smile",
+      "prompt": "subtle portrait animation, a slow blink and a small soft smile, head almost still, face remains recognizable, natural light"
+    },
+    "camera_push": {
+      "label": "Slow camera push-in",
+      "prompt": "subtle portrait animation, a slow steady camera push-in, subject holds a calm pose, face stays recognizable, natural light"
+    },
+    "fabric_movement": {
+      "label": "Fabric movement",
+      "prompt": "subtle portrait animation, clothing and fabric moving gently as if in a light breeze, face and identity stay steady, natural light"
+    }
+  }
+}

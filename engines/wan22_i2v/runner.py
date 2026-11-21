@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import io
+import os
 import threading
 import time
 from pathlib import Path
@@ -162,6 +163,11 @@ def _cuda_cleanup() -> None:
         pass
 
 
+def _backend() -> str:
+    name = os.environ.get("HAI_WAN22_BACKEND", "comfy").strip().lower() or "comfy"
+    return name if name in {"comfy", "diffusers"} else "comfy"
+
+
 def run_wan22_i2v(
     job: Dict[str, Any],
     *,
@@ -172,11 +178,50 @@ def run_wan22_i2v(
     config: Optional[Wan22I2VConfig] = None,
     torch_module: Any = None,
     diffusers_module: Any = None,
+    progress_fn: Optional[Callable[[float, str], None]] = None,
 ) -> Tuple[Dict[str, Any], int, Optional[Path]]:
     """Execute one Wan 2.2 image-to-video job.
 
-    Returns ``(metrics, gpu_utilization, output_path_or_None)``.
+    The default backend is ComfyUI, which is the measured 3060 recipe.
+    ``HAI_WAN22_BACKEND=diffusers`` keeps the in-process loader.
     """
+    if _backend() != "diffusers":
+        from .comfy import run_comfy_i2v
+
+        return run_comfy_i2v(
+            job,
+            log_fn=log_fn or _default_logger,
+            outputs_dir=outputs_dir or Path.cwd() / "outputs",
+            read_gpu_stats=read_gpu_stats or (lambda: {}),
+            utilization_hint=utilization_hint,
+            config=config,
+            progress_fn=progress_fn,
+        )
+    return _run_diffusers_i2v(
+        job,
+        log_fn=log_fn,
+        outputs_dir=outputs_dir,
+        read_gpu_stats=read_gpu_stats,
+        utilization_hint=utilization_hint,
+        config=config,
+        torch_module=torch_module,
+        diffusers_module=diffusers_module,
+        progress_fn=progress_fn,
+    )
+
+
+def _run_diffusers_i2v(
+    job: Dict[str, Any],
+    *,
+    log_fn: Optional[LogFn] = None,
+    outputs_dir: Optional[Path] = None,
+    read_gpu_stats: Optional[Callable[[], Dict[str, Any]]] = None,
+    utilization_hint: int = 0,
+    config: Optional[Wan22I2VConfig] = None,
+    torch_module: Any = None,
+    diffusers_module: Any = None,
+    progress_fn: Optional[Callable[[float, str], None]] = None,
+) -> Tuple[Dict[str, Any], int, Optional[Path]]:
     log_fn = log_fn or _default_logger
     outputs_dir = outputs_dir or Path.cwd() / "outputs"
     read_gpu_stats = read_gpu_stats or (lambda: {})
@@ -249,6 +294,9 @@ def run_wan22_i2v(
             progress_started["start"] = now
         if timed_out.is_set() and step + 1 < int(settings["steps"]):
             raise _JobTimeout(f"Exceeded {timeout}s timeout at step {step + 1}")
+        if progress_fn is not None:
+            done = step + 1
+            progress_fn(min(90.0, 15.0 + (done / max(int(settings["steps"]), 1)) * 70.0), "sampling")
         return kwargs
 
     def _watchdog() -> None:

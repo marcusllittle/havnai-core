@@ -353,6 +353,10 @@ def _apply_wan_job_fields(settings: Dict[str, Any], config: Dict[str, Any], payl
     for key in _WAN22_JOB_KEYS:
         if payload.get(key) not in (None, ""):
             settings[key] = payload.get(key)
+        elif key in {"flow_shift", "scheduler"}:
+            default_value = (config.get("video_defaults") or {}).get(key)
+            if default_value not in (None, ""):
+                settings[key] = default_value
 
 # ---------------------------------------------------------------------------
 # GPU profile presets – select via HAVNAI_GPU_PROFILE env var.
@@ -3452,14 +3456,26 @@ def submit_job() -> Any:
             return jsonify({"error": "unsupported_video_controls", "fields": unsupported}), 400
         prompt_text = enhanced_prompt
         prompt_lower = prompt_text.lower()
-        if prompt_text and "best quality" not in prompt_lower and "masterpiece" not in prompt_lower:
+        # Wan 2.2 was measured with the user's prompt. The SDXL quality
+        # suffix changes the motion, so it stays off for that model.
+        if (
+            not is_wan22
+            and prompt_text
+            and "best quality" not in prompt_lower
+            and "masterpiece" not in prompt_lower
+        ):
             prompt_text = f"{prompt_text}, {get_video_positive_suffix(model_name)}"
-        negative_prompt = _merge_negative_prompts(
-            str(payload.get("negative_prompt") or "").strip(),
-            get_video_negative(model_name),
-            NO_WATERMARK_NEGATIVE,
-            SFW_NEGATIVE_PROMPT if sfw_mode else "",
-        )
+        if is_wan22:
+            negative_prompt = str(payload.get("negative_prompt") or "").strip()
+            if sfw_mode:
+                negative_prompt = _merge_negative_prompts(negative_prompt, SFW_NEGATIVE_PROMPT)
+        else:
+            negative_prompt = _merge_negative_prompts(
+                str(payload.get("negative_prompt") or "").strip(),
+                get_video_negative(model_name),
+                NO_WATERMARK_NEGATIVE,
+                SFW_NEGATIVE_PROMPT if sfw_mode else "",
+            )
         seed = payload.get("seed")
         try:
             seed = int(seed) if seed is not None else None
@@ -3882,7 +3898,7 @@ def generate_video_job() -> Any:
 
     # Append positive quality suffix if prompt doesn't have quality tokens
     raw_prompt_flag = str(payload.get("raw_prompt", "")).lower() in ("1", "true", "yes")
-    if not raw_prompt_flag:
+    if not raw_prompt_flag and not is_wan22:
         prompt_lower = prompt_text.lower()
         if "best quality" not in prompt_lower and "masterpiece" not in prompt_lower:
             prompt_text = f"{prompt_text}, {get_video_positive_suffix(model_name)}"
@@ -3908,7 +3924,8 @@ def generate_video_job() -> Any:
     fps = int(resolved_video_defaults["fps"])
     frames = int(resolved_video_defaults["frames"])
     duration = payload.get("duration")
-    if not is_wan22 and payload.get("frames") is None and duration is not None:
+    is_ltx23 = str(cfg.get("pipeline") or "").lower() == "ltx23_wangp"
+    if not is_wan22 and not is_ltx23 and payload.get("frames") is None and duration is not None:
         try:
             frames = _clamp(int(float(duration) * fps), 1, 16)
         except (TypeError, ValueError):
@@ -3916,11 +3933,18 @@ def generate_video_job() -> Any:
 
     settings: Dict[str, Any] = {
         "prompt": prompt_text,
-        "negative_prompt": _merge_negative_prompts(
-            str(payload.get("negative_prompt") or "").strip(),
-            get_video_negative(model_name),
-            NO_WATERMARK_NEGATIVE,
-            SFW_NEGATIVE_PROMPT if _is_truthy(payload.get("sfw_mode")) else "",
+        "negative_prompt": (
+            _merge_negative_prompts(
+                str(payload.get("negative_prompt") or "").strip(),
+                SFW_NEGATIVE_PROMPT if _is_truthy(payload.get("sfw_mode")) else "",
+            )
+            if is_wan22
+            else _merge_negative_prompts(
+                str(payload.get("negative_prompt") or "").strip(),
+                get_video_negative(model_name),
+                NO_WATERMARK_NEGATIVE,
+                SFW_NEGATIVE_PROMPT if _is_truthy(payload.get("sfw_mode")) else "",
+            )
         ),
         "seed": seed,
         "steps": int(resolved_video_defaults["steps"]),
@@ -4491,6 +4515,9 @@ def get_creator_tasks() -> Any:
                         "allow_720p",
                         "scheduler",
                         "model_family",
+                        "audio",
+                        "model_type",
+                        "chain",
                     ):
                         if key in ltx_settings and ltx_settings[key] is not None:
                             task_payload[key] = ltx_settings[key]
@@ -6457,10 +6484,14 @@ def _create_studio_job(payload, account_id, request_key, chain=None) -> Any:
                 return preset_error
             video_payload = _fill_wan_video_payload(payload, cfg)
         try:
+            video_profile = None
+            if _is_wan22_config(cfg) or str(cfg.get("pipeline") or "").lower() == "ltx23_wangp":
+                video_profile = cfg.get("video_defaults") or {}
             resolved_spec = platform_v1.resolve_video_spec(
                 video_payload,
                 model=selected_model,
                 backend=str(payload.get("backend") or "auto"),
+                profile=video_profile,
             )
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
@@ -6482,6 +6513,10 @@ def _create_studio_job(payload, account_id, request_key, chain=None) -> Any:
             _apply_wan_job_fields(settings, cfg, payload)
             settings["pipeline_mode"] = str(cfg.get("default_pipeline_mode") or "i2v_4step")
             settings["checkpoint_variant"] = str(cfg.get("checkpoint_variant") or "q4_k_m")
+            settings["chain"] = False
+        elif str(cfg.get("pipeline") or "").lower() == "ltx23_wangp":
+            settings["audio"] = payload.get("audio") is not False
+            settings["model_type"] = "ltx2_22B_distilled_1_1"
         resolved_spec["parameters"].update({"prompt": prompt, "negative_prompt": settings["negative_prompt"],
             "sfw_mode": settings["sfw_mode"], "source_asset_id": source_asset_id or None, "audio_asset_id": audio_asset_id or None})
         pipeline = str(cfg.get("pipeline") or "").lower()
@@ -6697,6 +6732,9 @@ def v1_capabilities() -> Any:
             "max_batch_size": cfg.get("max_batch_size") or 1,
             "declared_capabilities": cfg.get("capabilities", []),
             "license_status": cfg.get("license_status", "unreviewed"),
+            "video_defaults": cfg.get("video_defaults") or None,
+            "credit_cost": credits.resolve_credit_cost(model_id, str(cfg.get("task_type") or "")),
+            "timeout_seconds": cfg.get("timeout_seconds") or None,
             **({"motion_presets": cfg["motion_presets"]} if cfg.get("motion_presets") else {}),
         })
     video_available = VIDEO_V2_ENABLED and any(

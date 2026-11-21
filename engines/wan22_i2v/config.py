@@ -7,6 +7,7 @@ imports torch or diffusers, so the coordinator can read preset names.
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
@@ -295,6 +296,27 @@ def _snap_frames(frames: int, limit: int) -> int:
     return max(5, snapped)
 
 
+# Sizes measured on the 12 GB 3060. Portrait keeps the source aspect by
+# picking the nearer of 480x832 and 480x704. Landscape is the same pair swapped.
+MEASURED_SIZES = ((480, 832), (480, 704), (832, 480), (704, 480))
+
+
+def snap_wan_size(width: int, height: int) -> tuple:
+    """Pick the measured 480p frame whose aspect is closest to the request."""
+    width = max(1, int(width))
+    height = max(1, int(height))
+    exact = (width, height)
+    if exact in MEASURED_SIZES:
+        return exact
+    aspect = width / float(height)
+
+    def distance(pair: tuple) -> float:
+        other = pair[0] / float(pair[1])
+        return abs(math.log(aspect / other))
+
+    return min(MEASURED_SIZES, key=distance)
+
+
 def _fit_frame(width: int, height: int, max_edge: int, max_pixels: int) -> tuple:
     """Keep a 480p-class frame inside the 12 GB budget, portrait or landscape."""
     width = max(64, int(width))
@@ -347,19 +369,29 @@ def resolve_settings(job: Optional[Mapping[str, Any]] = None, config: Optional[W
     safe_w = int(defaults.get("safe_width") or 480)
     safe_h = int(defaults.get("safe_height") or 832)
     safe_pixels = safe_w * safe_h
+    source_w = _parse_int(job.get("source_width"))
+    source_h = _parse_int(job.get("source_height"))
+    if (
+        sources.get("width") == "config"
+        and sources.get("height") == "config"
+        and source_w
+        and source_h
+    ):
+        resolved["width"], resolved["height"] = source_w, source_h
+        sources["width"] = "source"
+        sources["height"] = "source"
     requested_size = (int(resolved["width"]), int(resolved["height"]))
-    if allow_720p(job):
+    over_safe = requested_size[0] * requested_size[1] > safe_pixels
+    if allow_720p(job) and over_safe:
         max_edge = max(int(defaults.get("max_width") or 832), int(defaults.get("max_height") or 1280))
         max_pixels = int(defaults.get("max_width") or 720) * int(defaults.get("max_height") or 1280)
-        over_safe = requested_size[0] * requested_size[1] > safe_pixels
-        frame_limit = int(defaults.get("max_frames_720p") or 49) if over_safe else int(defaults.get("max_frames") or 81)
+        resolved["width"], resolved["height"] = _fit_frame(
+            requested_size[0], requested_size[1], max_edge, max_pixels
+        )
+        frame_limit = int(defaults.get("max_frames_720p") or 49)
     else:
-        max_edge = max(safe_w, safe_h)
-        max_pixels = safe_pixels
-        frame_limit = int(defaults.get("safe_frames") or defaults.get("max_frames") or 81)
-    resolved["width"], resolved["height"] = _fit_frame(
-        requested_size[0], requested_size[1], max_edge, max_pixels
-    )
+        resolved["width"], resolved["height"] = snap_wan_size(requested_size[0], requested_size[1])
+        frame_limit = int(defaults.get("safe_frames") or defaults.get("max_frames") or 129)
     resolved["frames"] = _snap_frames(int(resolved["frames"]), frame_limit)
     resolved["steps"] = max(1, min(int(resolved["steps"]), 40))
     resolved["fps"] = max(8, min(int(resolved["fps"]), 30))
@@ -378,7 +410,9 @@ def resolve_settings(job: Optional[Mapping[str, Any]] = None, config: Optional[W
         )
         sources["boundary_ratio"] = "split"
     resolved["denoising_timesteps"] = timesteps
-    resolved["scheduler"] = str(resolved["scheduler"] or "flow_match_euler")
+    resolved["scheduler"] = str(resolved["scheduler"] or "euler")
+    backend = os.environ.get("HAI_WAN22_BACKEND", "comfy").strip().lower() or "comfy"
+    resolved["backend"] = backend if backend in {"comfy", "diffusers"} else "comfy"
     offload = str(resolved["offload"] or "model").strip().lower()
     if offload not in {"model", "sequential", "group"}:
         offload = "model"

@@ -33,6 +33,7 @@ ENV_KEYS = (
     "HAI_WAN22_ALLOW_720P",
     "HAI_WAN22_OFFLOAD",
     "HAI_WAN22_NO_OFFLOAD",
+    "HAI_WAN22_BACKEND",
 )
 
 
@@ -222,7 +223,10 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(entry["video_defaults"]["guidance"], 1.0)
         self.assertEqual(entry["video_defaults"]["width"], 480)
         self.assertEqual(entry["video_defaults"]["height"], 832)
-        self.assertEqual(entry["video_defaults"]["frames"], 81)
+        self.assertEqual(entry["video_defaults"]["frames"], 129)
+        self.assertEqual(entry["video_defaults"]["flow_shift"], 5.0)
+        self.assertEqual(entry["timeout_seconds"], 3600)
+        self.assertEqual(entry["credit_cost"], 12.0)
         self.assertEqual(entry["video_defaults"]["fps"], 16)
         self.assertEqual(entry["reward_weight"], 1)
         self.assertEqual(entry["license_status"], "apache-2.0")
@@ -280,9 +284,11 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings["guidance"], 1.0)
         self.assertEqual(settings["guidance_2"], 1.0)
         self.assertEqual((settings["width"], settings["height"]), (480, 832))
-        self.assertEqual(settings["frames"], 81)
+        self.assertEqual(settings["frames"], 129)
         self.assertEqual(settings["fps"], 16)
-        self.assertEqual(settings["flow_shift"], 1.0)
+        self.assertEqual(settings["flow_shift"], 5.0)
+        self.assertEqual(settings["scheduler"], "euler")
+        self.assertEqual(settings["backend"], "comfy")
         self.assertAlmostEqual(settings["boundary_ratio"], 0.625)
         self.assertEqual(settings["high_noise_steps"], 2)
         self.assertEqual(settings["lora_scale_high"], 1.0)
@@ -328,8 +334,15 @@ class SettingsTests(unittest.TestCase):
         landscape = wan22_config.resolve_settings({"prompt": "portrait", "width": 832, "height": 480})
         self.assertEqual((landscape["width"], landscape["height"]), (832, 480))
         clamped = wan22_config.resolve_settings({"prompt": "portrait", "width": 720, "height": 1280, "frames": 81})
-        self.assertLessEqual(clamped["width"] * clamped["height"], 480 * 832)
-        self.assertLess(clamped["height"], 1280)
+        self.assertEqual((clamped["width"], clamped["height"]), (480, 832))
+        wider = wan22_config.resolve_settings({
+            "prompt": "portrait",
+            "source_width": 480,
+            "source_height": 704,
+        })
+        self.assertEqual((wider["width"], wider["height"]), (480, 704))
+        kept = wan22_config.resolve_settings({"prompt": "portrait", "frames": 81})
+        self.assertEqual(kept["frames"], 81)
         os.environ["HAI_WAN22_ALLOW_720P"] = "1"
         allowed = wan22_config.resolve_settings({"prompt": "portrait", "width": 720, "height": 1280, "frames": 81})
         self.assertEqual((allowed["width"], allowed["height"]), (720, 1280))
@@ -416,7 +429,7 @@ class LoadTests(unittest.TestCase):
         self.assertEqual(frames, "frame-batch")
         pipe = wan22_generator._PIPES[next(iter(wan22_generator._PIPES))]
         self.assertEqual(pipe.call["image"], "source-image")
-        self.assertEqual(pipe.call["num_frames"], 81)
+        self.assertEqual(pipe.call["num_frames"], 129)
         self.assertEqual(pipe.call["num_inference_steps"], 4)
         self.assertEqual(pipe.call["guidance_scale"], 1.0)
         self.assertEqual(pipe.call["guidance_scale_2"], 1.0)
@@ -427,6 +440,7 @@ class LoadTests(unittest.TestCase):
 class RunnerTests(unittest.TestCase):
     def setUp(self) -> None:
         self._env = _silence_env()
+        os.environ["HAI_WAN22_BACKEND"] = "diffusers"
 
     def tearDown(self) -> None:
         _restore_env(self._env)

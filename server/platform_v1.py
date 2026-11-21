@@ -293,19 +293,55 @@ def _video_number(payload, key, default, low, high, *, integer=False, error=None
     return int(value) if integer else value
 
 
-def resolve_video_spec(payload: Mapping[str, Any], *, model: str, backend: str = "auto") -> Dict[str, Any]:
+def resolve_video_spec(
+    payload: Mapping[str, Any],
+    *,
+    model: str,
+    backend: str = "auto",
+    profile: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
     preset = str(payload.get("preset") or "fast_upscaled").strip().lower()
     aspect = str(payload.get("aspect_ratio") or payload.get("aspect") or "9:16").strip()
     if preset not in VIDEO_PRESETS:
         raise ValueError("invalid_preset")
     if aspect not in {"9:16", "16:9"}:
         raise ValueError("invalid_aspect_ratio")
-    duration = _video_number({"duration": payload.get("duration_seconds", payload.get("duration", 5))},
-                             "duration", 5, 3, 8, integer=True, error="invalid_duration")
-    if duration not in VIDEO_DURATIONS:
-        raise ValueError("invalid_duration")
+    profile = dict(profile or {})
+    native_frames = int(profile["frames"]) if profile.get("frames") not in (None, "") else 0
+    native_fps = int(profile["fps"]) if profile.get("fps") not in (None, "") else 0
+    native_duration = int(round((native_frames - 1) / native_fps)) if native_frames and native_fps else 0
+    allowed_durations = set(VIDEO_DURATIONS)
+    if native_duration:
+        allowed_durations.add(native_duration)
+    duration_sent = payload.get("duration_seconds", payload.get("duration")) not in (None, "")
+    if duration_sent:
+        duration = _video_number(
+            {"duration": payload.get("duration_seconds", payload.get("duration"))},
+            "duration", 5, 3, max(allowed_durations), integer=True, error="invalid_duration",
+        )
+        if duration not in allowed_durations:
+            raise ValueError("invalid_duration")
+    else:
+        duration = native_duration or 5
 
     dimensions = dict(VIDEO_PRESETS[preset][aspect])
+    if profile.get("width") and profile.get("height") and payload.get("width") is None and payload.get("height") is None:
+        portrait_w = min(int(profile["width"]), int(profile["height"]))
+        portrait_h = max(int(profile["width"]), int(profile["height"]))
+        if aspect == "16:9":
+            dimensions = {
+                "width": portrait_h,
+                "height": portrait_w,
+                "delivery_width": portrait_h,
+                "delivery_height": portrait_w,
+            }
+        else:
+            dimensions = {
+                "width": portrait_w,
+                "height": portrait_h,
+                "delivery_width": portrait_w,
+                "delivery_height": portrait_h,
+            }
     custom_dimensions = payload.get("width") is not None or payload.get("height") is not None
     if custom_dimensions:
         if payload.get("width") is None or payload.get("height") is None:
@@ -315,15 +351,24 @@ def resolve_video_spec(payload: Mapping[str, Any], *, model: str, backend: str =
             if dimensions[key] % 32:
                 raise ValueError("invalid_video_dimensions")
             dimensions[f"delivery_{key}"] = dimensions[key]
-    fps = _video_number(payload, "fps", 16, 8, 30, integer=True)
-    requested_frames = _video_number(payload, "frames", duration * fps + 1, 9, 257, integer=True)
-    # LTX/SANA video pipelines commonly require 8n+1 frame counts.
-    frames = max(9, ((requested_frames - 1) // 8) * 8 + 1)
+    fps_default = native_fps or 16
+    fps = _video_number(payload, "fps", fps_default, 8, 30, integer=True)
+    frames_sent = payload.get("frames") not in (None, "")
+    if frames_sent:
+        requested_frames = _video_number(payload, "frames", duration * fps + 1, 9, 257, integer=True)
+    elif profile and not duration_sent and native_frames:
+        requested_frames = native_frames
+    else:
+        requested_frames = duration * fps + 1
+    # LTX and Wan both accept 8n+1 counts. Wan's 4n+1 counts used here are too.
+    frames = max(9, ((int(requested_frames) - 1) // 8) * 8 + 1)
     seed = _video_number(payload, "seed", -1, -1, 2**32 - 1, integer=True, error="invalid_seed")
     if seed < 0:
         seed = secrets.randbelow(2**31)
-    steps = _video_number(payload, "steps", 8 if preset == "fast_upscaled" else 12, 1, 150, integer=True)
-    guidance = _video_number(payload, "guidance", 1.0 if "distilled" in model.lower() else 3.0, 0, 20)
+    steps_default = int(profile["steps"]) if profile.get("steps") not in (None, "") else (8 if preset == "fast_upscaled" else 12)
+    guidance_default = float(profile["guidance"]) if profile.get("guidance") not in (None, "") else (1.0 if "distilled" in model.lower() else 3.0)
+    steps = _video_number(payload, "steps", steps_default, 1, 150, integer=True)
+    guidance = _video_number(payload, "guidance", guidance_default, 0, 20)
     motion = _video_number(payload, "motion_strength", 0.65, 0, 1)
     strength = _video_number(payload, "strength", 1.0, 0, 1)
 

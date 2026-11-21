@@ -72,6 +72,10 @@ def main() -> int:
             "seed": int(request["seed"]),
         }
     )
+    if request.get("audio") is False:
+        for key in ("audio_guidance_scale", "enable_audio"):
+            if key in settings:
+                settings[key] = 0 if key.endswith("scale") else False
     source_image = str(request.get("source_image") or "").strip()
     if source_image:
         settings.update(

@@ -1,10 +1,15 @@
 # Wan 2.2 I2V on a 12 GB RTX 3060
 
-Recommended settings for the opt-in `wan22-i2v-a14b` worker: the QuantStack
-Q4_K_M GGUF pair, the LightX2V 4-step I2V LoRAs, and the Wan 2.1 VAE, loaded
-by diffusers. The numbers the node actually runs live in
-`client/configs/wan22_i2v.json`. A job field overrides an environment
-variable, which overrides that file.
+The user path runs ComfyUI, which is the recipe measured on the 3060 on
+November 20-21. QuantStack Q4_K_M GGUFs, umT5, the Wan 2.1 VAE, and the
+LightX2V 4-step LoRA. Euler, shift 5, 2 high-noise steps then 2 low-noise
+steps. Portrait is 480×832, or 480×704 when the source is wider. The default
+clip is 129 frames at 16 fps (about 8 seconds) in one pass. 81 frames is the
+shorter clip. Peak VRAM is 10.7 to 11.2 GB, so the worker unloads Z-Image
+and pauses ACE-Step for the job.
+
+`HAI_WAN22_BACKEND=diffusers` keeps the older in-process loader. That path
+is not the measured clip. The numbers live in `client/configs/wan22_i2v.json`.
 
 These VRAM and runtime figures are estimates for an RTX 3060 12 GB with model
 CPU offload. This repo does not measure them in CI. Treat them as planning
@@ -16,14 +21,14 @@ numbers, and watch the first real job.
 | --- | --- | --- |
 | Resolution | 480×832 portrait, or 832×480 landscape | Wan-AI's I2V example uses a 480×832 pixel budget. Both edges fit the Wan VAE multiple of 16. |
 | 720p (720×1280 or 1280×720) | Off by default | Activations for 81 frames at 720p exceed a comfortable 12 GB budget even when the expert is offloaded. Opt in with `HAI_WAN22_ALLOW_720P=1` or `"allow_720p": true` on the job, and keep the clip to 49 frames. |
-| Frames | 81 | Wan-AI's I2V sample is 81 frames (`4n+1`). The loader snaps other counts to `4n+1`. |
-| Frame rate | 16 fps | Wan-AI exports the sample at 16 fps. 81 frames is about 5.0 seconds. |
+| Frames | 129, or 81 | 129 frames at 16 fps is the measured 8 second clip. 81 frames is about 5 seconds and also fits. |
+| Frame rate | 16 fps | The measured export is 16 fps. |
 | Steps | 4 | LightX2V's 4-step I2V distill, and the ComfyUI template with the LoRA enabled. |
 | High / low split | 2 steps high, then 2 steps low | The same templates run the high-noise expert on steps 0–2 and the low-noise expert on steps 2–4. |
 | Boundary ratio | 0.625 | Diffusers switches experts at `boundary_ratio * num_train_timesteps`. For the LightX2V list `[1000, 750, 500, 250]` the midpoint between 750 and 500 is 625, so the ratio is 0.625. The stock Wan 2.2 training boundary (0.875 or 0.9) would leave only the first of those four steps on the high expert. |
 | Guidance | 1.0 on both experts | The distill is trained at CFG 1. The base 40-step model uses 3.5; that scale fights this LoRA. |
-| Flow shift | 1.0 with the explicit step list | LightX2V's own sigma list is the schedule. Their note on the Lightning repo is that shift 1.0 is expected once the sigmas are passed in. ComfyUI's step-index workflow uses shift 5 because its sampler does not use this list. |
-| Scheduler | FlowMatch Euler | Diffusers' Wan pipeline uses flow matching. The loader installs the four sigmas `[1.0, 0.75, 0.5, 0.25, 0.0]` so `set_timesteps(4)` keeps the distill schedule. |
+| Flow shift | 5 | ComfyUI's euler step-index workflow uses shift 5 through ModelSamplingSD3. The diffusers fallback still has an explicit sigma list and is not this recipe. |
+| Scheduler | euler | Two KSamplerAdvanced passes, steps 0–2 on the high-noise expert and steps 2–4 on the low-noise expert. |
 | LoRA strength | 1.0 high, 1.0 low | LightX2V's published config and the Comfy template. The LoRA is attached per expert and not fused. Fusing a LoRA into a GGUF expert fails in diffusers because the quantized weights are not the original shape. |
 | Denoise strength | 1.0, always | Wan I2V does not do SD-style img2img. The source image is encoded and concatenated into the latent for every step, so the clip is fully generated under that condition. A job `strength` below 1 is recorded and ignored. |
 | Offload | `enable_model_cpu_offload`, VAE slicing and tiling | Same placement rule as LTX-Video 0.9.8: offload when VRAM is under 16 GB. `sequential` and `group` are available via `HAI_WAN22_OFFLOAD` when the installed diffusers build has them. |

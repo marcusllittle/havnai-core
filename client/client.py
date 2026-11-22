@@ -2747,6 +2747,21 @@ def _run_music_task(
     }
     settings = {key: value for key, value in settings.items() if value is not None}
 
+    from engines.gpu_handoff import GpuBusy, finish_music, prepare_for_music
+
+    hold = None
+    try:
+        hold = prepare_for_music(log_fn=lambda message: log(message, prefix="🎮", task_id=task_id))
+    except GpuBusy as exc:
+        return {
+            "status": "failed",
+            "task_type": "music_gen",
+            "model_name": entry.name,
+            "reward_weight": reward_weight,
+            "error": str(exc),
+            "error_code": "gpu_busy",
+        }, utilization_hint
+
     try:
         provider = AceStepProvider()
         provider.validate(settings)
@@ -2821,6 +2836,8 @@ def _run_music_task(
             "error": str(exc),
             "error_code": "ace_step_unreachable" if isinstance(exc, requests.RequestException) else "ace_step_generation",
         }, utilization_hint
+    finally:
+        finish_music(hold)
 
 
 def _run_zimage_image(
@@ -3374,7 +3391,9 @@ def _stop_executor(process: subprocess.Popen) -> None:
         pass
 
 
-def _submit_isolated_terminal(task: Dict[str, Any], status: str, error: str) -> None:
+def _submit_isolated_terminal(task: Dict[str, Any], status: str, error: str, error_code: str = "") -> None:
+    if not error_code:
+        error_code = "cancelled" if status == "cancelled" else "timeout" if "timeout" in error else "executor"
     payload = {
         "node_id": NODE_NAME,
         "task_id": task.get("task_id"),
@@ -3385,7 +3404,7 @@ def _submit_isolated_terminal(task: Dict[str, Any], status: str, error: str) -> 
             "model_name": task.get("model_name"),
             "reward_weight": task.get("reward_weight", 1.0),
             "error": error,
-            "error_code": "cancelled" if status == "cancelled" else "timeout" if "timeout" in error else "executor",
+            "error_code": error_code,
         },
         "utilization": utilization_hint,
         "submitted_at": time.time(),
@@ -3451,7 +3470,8 @@ def execute_video_task_isolated(task: Dict[str, Any]) -> None:
         handoff = _begin_exclusive_gpu(task, task_id)
     except Exception as exc:
         log(f"GPU handoff failed for {task_id[:8]}: {exc}", prefix="🚫", task_id=task_id)
-        _submit_isolated_terminal(task, "failed", str(exc))
+        code = "gpu_busy" if exc.__class__.__name__ == "GpuBusy" else ""
+        _submit_isolated_terminal(task, "failed", str(exc), code)
         return
     task["_exclusive_gpu"] = True
     _retire_image_pipelines()

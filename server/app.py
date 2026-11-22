@@ -1487,6 +1487,8 @@ def load_manifest() -> None:
             # How nodes obtain the weights; see _public_model_source().
             "source": entry.get("source") if isinstance(entry.get("source"), dict) else {},
         }
+        if entry.get("credit_cost") is not None:
+            entry_data["credit_cost"] = entry["credit_cost"]
         if entry.get("motion_presets"):
             entry_data["motion_presets"] = entry["motion_presets"]
         if image_routing.is_zimage_pipeline(pipeline):

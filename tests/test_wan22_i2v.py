@@ -246,6 +246,32 @@ class RegistryTests(unittest.TestCase):
             config.preset_names(),
         )
 
+    def test_models_list_reports_the_registry_credit_cost(self) -> None:
+        # Wan is 12 in the registry. LTX-2.3 is explicitly 5. The list used to
+        # report 5 for Wan as well: load_manifest dropped credit_cost, and a
+        # model with task_type LTX_VIDEO_GEN then fell through to the
+        # ltx_video default of 5.
+        sys.path.insert(0, str(ROOT / "server"))
+        import app as app_module
+
+        app_module.load_manifest()
+        wan_cfg = app_module.get_model_config("wan22-i2v-a14b")
+        ltx_cfg = app_module.get_model_config("ltx23_wangp_distilled")
+        self.assertIsNotNone(wan_cfg)
+        self.assertIsNotNone(ltx_cfg)
+        self.assertEqual(wan_cfg["credit_cost"], 12.0)
+        self.assertEqual(ltx_cfg["credit_cost"], 5.0)
+        self.assertEqual(app_module.credits.DEFAULT_CREDIT_COSTS["ltx_video"], 5.0)
+        self.assertNotIn("wan22-i2v", app_module.credits.DEFAULT_CREDIT_COSTS)
+        self.assertEqual(app_module.credits.resolve_credit_cost("wan22-i2v-a14b", "LTX_VIDEO_GEN"), 12.0)
+        self.assertEqual(app_module.credits.resolve_credit_cost("ltx23_wangp_distilled", "LTX_VIDEO_GEN"), 5.0)
+
+        response = app_module.app.test_client().get("/models/list")
+        self.assertEqual(response.status_code, 200)
+        listed = {item["name"]: item["credit_cost"] for item in response.get_json()["models"]}
+        self.assertEqual(listed["wan22-i2v-a14b"], 12.0)
+        self.assertEqual(listed["ltx23_wangp_distilled"], 5.0)
+
     def test_sources_do_not_import_a_wrapper(self) -> None:
         for path in (ROOT / "engines" / "wan22_i2v").glob("*.py"):
             text = path.read_text(encoding="utf-8").lower()

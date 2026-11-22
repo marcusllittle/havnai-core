@@ -146,13 +146,16 @@ def enhance_prompt_for_positions(user_prompt: str) -> Tuple[str, Optional[str], 
         nudity_suffix = "nude, no clothes, fully naked"
         enhanced = f"{enhanced}, {nudity_suffix}" if enhanced else nudity_suffix
 
+    # HAVN-71: the adult and trademark checkpoints previously named here are
+    # disabled. Style matches stay, and they resolve to the studio image default.
+    cleared_style_model = "juggernautXL_ragnarokBy"
     style_rules = [
-        ("kizukiAnimeHentai_animeHentaiV4", [r"\banime\b", r"\bhentai\b", r"\bahegao\b", r"\b2d\b"]),
+        (cleared_style_model, [r"\banime\b", r"\bhentai\b", r"\bahegao\b", r"\b2d\b"]),
         (
-            "disneyPixarCartoon_v10",
+            cleared_style_model,
             [r"\bcartoon\b", r"\bpixar\b", r"\bdisney\b", r"\bcute eyes\b", r"\bbig eyes\b", r"\b3d animated\b"],
         ),
-        ("unstablePornhwa_beta", [r"\bmanhwa\b", r"\bwebtoon\b", r"\bkorean comic\b"]),
+        (cleared_style_model, [r"\bmanhwa\b", r"\bwebtoon\b", r"\bkorean comic\b"]),
     ]
 
     selected_model = None
@@ -162,7 +165,7 @@ def enhance_prompt_for_positions(user_prompt: str) -> Tuple[str, Optional[str], 
                 selected_model = model_name
                 break
         if selected_model is None:
-            selected_model = "uberRealisticPornMerge_v23Final"
+            selected_model = cleared_style_model
     else:
         selected_model = "lazymixRealAmateur_v40"
 

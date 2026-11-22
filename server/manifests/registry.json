@@ -239,6 +239,9 @@
     },
     {
       "name": "uberRealisticPornMerge_v23Final",
+      "enabled": false,
+      "disabled_reason": "HAVN-71: disabled pending license clearance. No provenance found; adult content.",
+      "license_status": "blocked_pending_clearance",
       "pipeline": "sd15",
       "path": "/mnt/d/havnai-storage/models/creator/uberRealisticPornMerge_v23Final.safetensors",
       "vae_path": "/mnt/d/havnai-storage/models/creator/clearvaeSD15_v23.safetensors",
@@ -296,6 +299,9 @@
     },
     {
       "name": "unstablePornhwa_beta",
+      "enabled": false,
+      "disabled_reason": "HAVN-71: disabled pending license clearance. No provenance found; adult content.",
+      "license_status": "blocked_pending_clearance",
       "pipeline": "sd15",
       "path": "/mnt/d/havnai-storage/models/creator/unstablePornhwa_beta.safetensors",
       "vae_path": "/mnt/d/havnai-storage/models/creator/vaeKlF8Anime2_klF8Anime2VAE.safetensors",
@@ -327,6 +333,9 @@
     },
     {
       "name": "disneyPixarCartoon_v10",
+      "enabled": false,
+      "disabled_reason": "HAVN-71: disabled pending license clearance. No verified source file; Disney/Pixar trademark and character-rights risk.",
+      "license_status": "blocked_pending_clearance",
       "pipeline": "sd15",
       "path": "/mnt/d/havnai-storage/models/creator/disneyPixarCartoon_v10.safetensors",
       "vae_path": "/mnt/d/havnai-storage/models/creator/vaeKlF8Anime2_klF8Anime2VAE.safetensors",
@@ -360,6 +369,9 @@
     },
     {
       "name": "kizukiAnimeHentai_animeHentaiV4",
+      "enabled": false,
+      "disabled_reason": "HAVN-71: disabled pending license clearance. Civitai 22364 has only RentCivit permission; adult content.",
+      "license_status": "blocked_pending_clearance",
       "pipeline": "sd15",
       "path": "/mnt/d/havnai-storage/models/creator/kizukiAnimeHentai_animeHentaiV4.safetensors",
       "vae_path": "/mnt/d/havnai-storage/models/creator/vaeKlF8Anime2_klF8Anime2VAE.safetensors",
@@ -570,6 +582,9 @@
     },
     {
       "name": "copaxTimeless_xplus2BNSFW1",
+      "enabled": false,
+      "disabled_reason": "HAVN-71: disabled pending license clearance. Civitai 118111 has no Rent permission; adult content.",
+      "license_status": "blocked_pending_clearance",
       "pipeline": "sdxl",
       "path": "/mnt/d/havnai-storage/models/creator/copaxTimeless_xplus2BNSFW1.safetensors",
       "vae_path": "/mnt/d/havnai-storage/models/creator/clearvaeSD15_v23.safetensors",

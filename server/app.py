@@ -146,7 +146,6 @@ from common.prompt_enhancers import (
 # Reward weights bootstrap – enriched at runtime via registration
 MODEL_WEIGHTS: Dict[str, float] = {
     "triomerge_v10": 12.0,
-    "unstablepornhwa_beta": 12.0,
 }
 
 MODEL_STATS: Dict[str, Dict[str, float]] = {}
@@ -1448,6 +1447,12 @@ def load_manifest() -> None:
         if not name:
             continue
         key = name.lower()
+        # ``enabled: false`` keeps the row in registry.json so it can be turned
+        # back on, but drops it from selection, routing, download, and catalogs.
+        # Omitted means enabled. Only a JSON false disables the entry.
+        if entry.get("enabled") is False:
+            MODEL_WEIGHTS.pop(key, None)
+            continue
         pipeline = str(entry.get("pipeline", "")).strip().lower()
         path_str = str(entry.get("path", "")).strip()
         artifact_type = str(entry.get("type", "")).strip() or "checkpoint"

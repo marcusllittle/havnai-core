@@ -129,6 +129,10 @@ class ModelRegistry:
             for model in models_data:
                 if not isinstance(model, dict):
                     continue
+                # Same rule as the coordinator: a JSON false keeps the row out
+                # of the node catalog. Missing or true stays available.
+                if model.get("enabled") is False:
+                    continue
                 filtered = {key: value for key, value in model.items() if key in allowed}
                 name = str(filtered.get("name") or model.get("model") or "").strip()
                 if not name:

@@ -127,6 +127,8 @@ def requirements_from_manifest(
     for entry in models:
         if not isinstance(entry, dict):
             continue
+        if entry.get("enabled") is False:
+            continue
         name = str(entry.get("name") or entry.get("model_key") or "").strip()
         if not name or name.lower() in seen:
             continue

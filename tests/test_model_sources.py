@@ -64,6 +64,14 @@ class RequirementPlanningTests(unittest.TestCase):
         )
         self.assertEqual([item.name for item in plan], ["image-model"])
 
+    def test_disabled_entries_are_left_out_of_the_download_plan(self) -> None:
+        manifest = [
+            {"name": "kept", "pipeline": "sdxl", "source": {"kind": "coordinator"}},
+            {"name": "copaxTimeless_xplus2BNSFW1", "pipeline": "sdxl", "enabled": False},
+        ]
+        plan = requirements_from_manifest(manifest, Path("/tmp/havnai-plan-test"))
+        self.assertEqual([item.name for item in plan], ["kept"])
+
     def test_duplicate_entries_are_collapsed(self) -> None:
         manifest = [
             {"name": "same", "pipeline": "sdxl"},

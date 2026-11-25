@@ -54,7 +54,8 @@ RENDER_SETTINGS: Dict[str, Any] = {
 PREFERRED_MODELS: List[str] = [
     "amixillustrious_amix",
     "perfectdeliberate_v60",
-    "copaxtimeless_xplus2bnsfw1",
+    # HAVN-71: copaxTimeless_xplus2BNSFW1 is disabled pending license clearance.
+    "juggernautxl_ragnarokby",
 ]
 
 NEGATIVE_PROMPT = (

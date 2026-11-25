@@ -4,11 +4,8 @@ name: Desktop app release
 # installers to a GitHub release, so a non-technical operator downloads a file
 # and double-clicks it instead of building from source.
 #
-# Push a tag to cut a release:
-#   git tag desktop-v0.1.0 && git push origin desktop-v0.1.0
-#
-# Or run it manually from the Actions tab to produce unattached build artifacts
-# for testing.
+# Push a desktop-v* tag to publish a release. Manual runs only upload
+# Actions artifacts, even when the ref selected for the run is a tag.
 
 on:
   push:
@@ -16,13 +13,13 @@ on:
       - "desktop-v*"
   workflow_dispatch:
     inputs:
-      dry_run:
-        description: "Build installers without creating a release"
+      notarize_macos:
+        description: "Sign and notarize the Mac test artifacts (does not publish)"
         type: boolean
-        default: true
+        default: false
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -34,13 +31,12 @@ jobs:
             label: linux
             # Built on 22.04 rather than latest so the AppImage's glibc floor
             # stays low enough for older operator machines.
-          - platform: macos-14
+          - platform: macos-15
             label: macos-arm64
             target: aarch64-apple-darwin
-          # Intel Macs are cross-compiled on the arm64 runner. GitHub retired
-          # the macos-13 Intel image, and a job pinned to it sat queued for
-          # 24 hours until it was cancelled, taking the whole release with it.
-          - platform: macos-14
+          # Cross-compile Intel on the ARM runner, as before. GitHub retired
+          # macos-14 on November 2, 2026.
+          - platform: macos-15
             label: macos-x86_64
             target: x86_64-apple-darwin
           - platform: windows-latest
@@ -49,6 +45,10 @@ jobs:
     runs-on: ${{ matrix.platform }}
     name: ${{ matrix.label }}
     timeout-minutes: 90
+    env:
+      # All tag-triggered Mac builds require signing; unsigned manual builds
+      # never reach the release job.
+      MACOS_RELEASE: ${{ matrix.target != '' && (github.event_name == 'push' || inputs.notarize_macos) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -80,7 +80,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             desktop/src-tauri/target
-          # Keyed by label, not runner: both Mac builds share macos-14.
+          # Keyed by label, not runner: both Mac builds share macos-15.
           key: ${{ matrix.label }}-cargo-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
           restore-keys: ${{ matrix.label }}-cargo-
 
@@ -90,46 +90,63 @@ jobs:
           cargo clippy --all-targets -- -D warnings
           cargo test
 
-      - name: Install Tauri CLI
+      - name: Install Tauri CLI (macOS)
+        if: runner.os == 'macOS'
+        run: cargo install tauri-cli --version 2.12.5 --locked
+
+      - name: Install Tauri CLI (Linux and Windows)
+        if: runner.os != 'macOS'
         run: cargo install tauri-cli --version "^2" --locked
 
-      # Signing is wired up but optional. With the secrets absent the build
-      # still succeeds and produces unsigned installers; add the secrets later
-      # and the same workflow starts signing with no further changes.
-      - name: Build installers
-        shell: bash
-        working-directory: desktop
+      - name: Unit-test macOS release checks
+        if: runner.os == 'macOS'
+        run: python3 -m unittest discover -s desktop/scripts -p test_macos_release.py
+
+      - name: Check macOS signing and notarization configuration
+        if: env.MACOS_RELEASE == 'true'
         env:
-          # macOS signing + notarization
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          # Windows signing
-          TAURI_WINDOWS_SIGNING_certificate: ${{ secrets.WINDOWS_CERTIFICATE }}
-          TAURI_WINDOWS_SIGNING_certificate_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: python3 desktop/scripts/macos_release.py preflight
+
+      - name: Build installers
+        shell: bash
+        working-directory: desktop
+        env:
+          # Tauri signs the app and DMG. Notarize the outer DMG once below.
+          APPLE_CERTIFICATE: ${{ env.MACOS_RELEASE == 'true' && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ env.MACOS_RELEASE == 'true' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ env.MACOS_RELEASE == 'true' && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          TAURI_WINDOWS_SIGNING_certificate: ${{ matrix.label == 'windows' && secrets.WINDOWS_CERTIFICATE || '' }}
+          TAURI_WINDOWS_SIGNING_certificate_PASSWORD: ${{ matrix.label == 'windows' && secrets.WINDOWS_CERTIFICATE_PASSWORD || '' }}
           TARGET: ${{ matrix.target }}
         run: |
-          # An absent GitHub secret arrives as an empty string, not as an unset
-          # variable, and Tauri treats a defined-but-empty signing variable as
-          # "signing requested" - then fails importing an empty certificate.
-          # Drop the empties so an unsigned build genuinely stays unsigned.
+          # Empty GitHub secrets must not request signing in local-test builds.
           for var in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
-                     APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID \
                      TAURI_WINDOWS_SIGNING_certificate \
                      TAURI_WINDOWS_SIGNING_certificate_PASSWORD; do
             if [ -z "${!var:-}" ]; then unset "$var"; fi
           done
-          # The cargo cache restores target/, including bundles from earlier
-          # versions. Clear them so only this build's installers get collected.
+          # The cargo cache can restore bundles from older builds.
           rm -rf src-tauri/target/release/bundle src-tauri/target/*/release/bundle
           if [ -n "$TARGET" ]; then
             cargo tauri build --target "$TARGET"
           else
             cargo tauri build
           fi
+
+      - name: Notarize, staple and verify the exact macOS installer
+        if: env.MACOS_RELEASE == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TARGET: ${{ matrix.target }}
+        run: python3 desktop/scripts/macos_release.py notarize "$TARGET"
 
       - name: Collect installers
         shell: bash
@@ -155,7 +172,9 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/desktop-v')
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -167,6 +186,14 @@ jobs:
       - name: Flatten and checksum
         run: |
           mkdir -p dist
+          shopt -s nullglob
+          arm=(artifacts/havnai-node-macos-arm64/*_aarch64.dmg)
+          intel=(artifacts/havnai-node-macos-x86_64/*_x64.dmg)
+          all_dmgs=(artifacts/*/*.dmg)
+          if (( ${#arm[@]} != 1 || ${#intel[@]} != 1 || ${#all_dmgs[@]} != 2 )); then
+            echo "Expected exactly one verified DMG for each Mac architecture" >&2
+            exit 1
+          fi
           find artifacts -type f -exec cp {} dist/ \;
           cd dist
           sha256sum * > SHA256SUMS.txt
@@ -195,13 +222,13 @@ jobs:
 
             Verify a download against `SHA256SUMS.txt` if you want to.
 
-            **First launch.** These builds are not yet signed with a paid
-            developer certificate, so your system will warn you the first time:
+            **macOS:** Open the matching DMG, drag HavnAI Node to Applications,
+            then open it normally. Both DMGs are Developer ID signed and
+            notarized. If macOS blocks the app, stop and report the filename
+            and error rather than changing macOS security settings.
 
-            - **macOS** — right-click the app and choose *Open*, then *Open*
-              again. Double-clicking will not work until you have done this once.
-            - **Windows** — SmartScreen shows "Windows protected your PC".
-              Click *More info*, then *Run anyway*.
+            **Windows:** Published builds may be unsigned; Windows SmartScreen
+            may warn. Confirm the download came from this release first.
 
             Prefer the terminal? See
             [docs/RUN_A_NODE.md](https://github.com/marcusllittle/havnai-core/blob/main/docs/RUN_A_NODE.md).

@@ -203,6 +203,10 @@ def test_account_execution_keys_are_unique_per_run_and_recoverable(monkeypatch, 
         def __init__(self, *args, **kwargs):
             pass
 
+        def account_preflight(self, plan):
+            return {"account_id_present": True, "budget_sufficient": True,
+                    "available_units": 70000, "required_units": 70000}
+
         def submit_account(self, payload, *, idempotency_key):
             keys.append(idempotency_key)
             return idempotency_key
@@ -433,8 +437,10 @@ def test_preflight_requires_account_token() -> None:
     assert preflight["account_token_present"] is False
     assert preflight["passed"] is False
     assert preflight["blockers"] == [
-        "HAVNAI_DRILL_ACCOUNT_TOKEN is not configured; funded private account token required."
+        "No account session source is configured. Pass --token-command, --token-file, "
+        "or a short-lived --account-token. /v2 accepts only a Clerk session JWT."
     ]
+    assert preflight["session_source"] == "absent"
 
 
 def test_preflight_reports_funded_account_without_printing_token(monkeypatch, capsys) -> None:
@@ -513,3 +519,161 @@ def test_preflight_cli_returns_redacted_blocker_on_quote_or_auth_failure(monkeyp
     output = capsys.readouterr().out
     assert "verification failed; no jobs submitted" in output
     assert "secret-token" not in output
+
+
+def test_prompts_file_overrides_image_and_video_and_leaves_music_pinned(tmp_path):
+    path = tmp_path / "prompts.json"
+    path.write_text(json.dumps([
+        {"prompt": "image one", "negative_prompt": "blur", "width": 768, "height": 768, "steps": 20, "model": "Image_B"},
+        {"index": 2, "type": "text_to_video", "prompt": "video one", "width": 512, "height": 768, "steps": 6},
+    ]), encoding="utf-8")
+    plan = drill.build_plan(
+        count=3, image_models=["image_a"], video_models=["video_a"], music_models=["music_a"],
+        wallet="test-wallet", sfw_mode=False, prompt_overrides=drill.load_prompt_overrides(str(path)),
+    )
+    image, video, music = plan
+    assert image.model == "image_b"
+    assert image.account_payload["prompt"] == "image one"
+    assert image.account_payload["negative_prompt"] == "blur"
+    assert image.account_payload["width"] == image.account_payload["height"] == 768
+    assert image.account_payload["steps"] == 20
+    assert image.account_payload["sfw_mode"] is False
+    assert video.account_payload["prompt"] == "video one"
+    assert video.account_payload["width"] == 512
+    assert video.account_payload["height"] == 768
+    assert video.account_payload["steps"] == 6
+    assert video.account_payload["sfw_mode"] is False
+    assert music.account_payload["batch_size"] == 1
+    assert music.account_payload["sfw_mode"] is False
+    assert "cinematic synthwave" in music.account_payload["style"]
+    assert "launch-quality" in music.prompt
+
+
+def test_prompts_file_rejects_a_short_list_and_bad_video_dimensions(tmp_path):
+    short = tmp_path / "short.json"
+    short.write_text(json.dumps([{"prompt": "only image"}]), encoding="utf-8")
+    with pytest.raises(ValueError, match="20 image and video"):
+        drill.build_plan(count=30, image_models=["image_a"], video_models=["video_a"], music_models=["music_a"],
+                         wallet="w", prompt_overrides=drill.load_prompt_overrides(str(short)))
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps([
+        {"prompt": "image"},
+        {"prompt": "video", "width": 500, "height": 832},
+    ]), encoding="utf-8")
+    with pytest.raises(ValueError, match="multiples of 32"):
+        drill.build_plan(count=3, image_models=["image_a"], video_models=["video_a"], music_models=["music_a"],
+                         wallet="w", prompt_overrides=drill.load_prompt_overrides(str(bad)))
+
+
+def test_dry_run_shows_prompts_and_does_not_mint_a_session(monkeypatch, tmp_path, capsys):
+    path = tmp_path / "prompts.json"
+    path.write_text(json.dumps([
+        {"prompt": "kept private"},
+        {"prompt": "camera move", "width": 480, "height": 832, "steps": 8},
+    ]), encoding="utf-8")
+
+    def boom(*args, **kwargs):
+        raise AssertionError("token command ran during dry-run")
+
+    monkeypatch.setattr(drill.subprocess, "run", boom)
+    code = drill.main([
+        "--count", "3", "--dry-run", "--no-sfw-mode", "--prompts-file", str(path),
+        "--token-command", "python3 scripts/clerk_session_token.py",
+    ])
+    output = capsys.readouterr().out
+    payload = json.loads(output)
+    assert code == 0
+    assert payload["dry_run"] is True
+    assert payload["execute"] is False
+    assert payload["session_source"] == "command"
+    assert payload["private_account_jobs"] is True
+    assert payload["sfw_mode"] is False
+    assert payload["mix"][0]["prompt"] == "kept private"
+    assert payload["mix"][0]["sfw_mode"] is False
+    assert payload["mix"][1]["width"] == 480
+    assert "TOKEN" not in output.upper()
+
+
+def test_token_sources_are_exclusive_and_command_failures_are_redacted(monkeypatch):
+    assert drill.main(["--account-token", "secret-token", "--token-file", "session.jwt"]) == 2
+    script = ROOT / "scripts" / "mixed_model_worker_drill.py"
+    completed = subprocess.run(
+        [sys.executable, str(script), "--help"], check=True, capture_output=True, text=True,
+    )
+    assert "--token-command" in completed.stdout
+    assert "--prompts-file" in completed.stdout
+    assert "--no-sfw-mode" in completed.stdout
+    assert "docs/havn-47-mixed-model-drill.md" in completed.stdout
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            argv, 1, stdout="eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.signature\n",
+            stderr="failed sk_test_secretvalue eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.signature",
+        )
+
+    monkeypatch.setattr(drill.subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="account session command failed") as exc:
+        drill.AccountTokenSource(command="python3 scripts/clerk_session_token.py").token()
+    assert "eyJ" not in str(exc.value)
+    assert "sk_test" not in str(exc.value)
+
+
+def test_token_file_is_reread_before_each_account_request(monkeypatch, tmp_path):
+    path = tmp_path / "session"
+    path.write_text("first-session\n", encoding="utf-8")
+    seen = []
+
+    def urlopen(req, timeout):
+        from io import BytesIO
+        header = req.get_header("Authorization")
+        route = drill.parse.urlsplit(req.full_url).path
+        seen.append((route, header))
+        if route == "/v2/account":
+            path.write_text("second-session\n", encoding="utf-8")
+            data = {"id": "account", "status": "active"}
+        elif route == "/v2/account/credits":
+            assert header == "Bearer second-session"
+            data = {"scale": 1000, "available_units": 70000, "reserved_units": 0}
+        else:
+            assert header is None
+            data = {"cost": 1}
+        return BytesIO(json.dumps(data).encode())
+
+    monkeypatch.setattr(drill.request, "urlopen", urlopen)
+    client = drill.CoordinatorClient(
+        "https://coordinator.example",
+        account_token_source=drill.AccountTokenSource(path=str(path)).token,
+    )
+    result = client.account_preflight(drill.build_plan(
+        count=3, image_models=["image_a"], video_models=["video_a"], music_models=["music_a"], wallet="w",
+    ))
+    assert result["budget_sufficient"] is True
+    assert seen[0] == ("/v2/account", "Bearer first-session")
+    assert seen[1][0] == "/v2/account/credits"
+    assert all(header is None for route, header in seen if route == "/credits/cost")
+
+
+def test_execute_stops_before_submit_when_credits_do_not_cover_the_plan(monkeypatch, capsys):
+    submitted = []
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            assert kwargs["account_token"] == "secret-token"
+
+        def model_eligibility(self, plan):
+            return {"passed": True, "blockers": []}
+
+        def account_preflight(self, plan):
+            return {"account_id_present": True, "available_units": 29000,
+                    "required_units": 70000, "budget_sufficient": False}
+
+        def submit_account(self, payload, *, idempotency_key):
+            submitted.append(idempotency_key)
+            raise AssertionError("short balance submitted a job")
+
+    monkeypatch.setattr(drill, "CoordinatorClient", Client)
+    assert drill.main(["--count", "30", "--execute", "--account-token", "secret-token"]) == 2
+    output = capsys.readouterr().out
+    assert submitted == []
+    assert "secret-token" not in output
+    assert "70000" in output
